@@ -513,6 +513,7 @@ async fn real_feed_maintains_index_without_consumers_and_without_nested_admissio
             &plans,
             &prepared,
             &crate::visibility_metrics::VisibilityMetrics::default(),
+            None,
         ),
     )
     .await

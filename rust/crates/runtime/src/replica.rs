@@ -362,6 +362,17 @@ impl Runtime {
         self.open_replica_with(session, request, false, false).await
     }
 
+    /// Counters and size of the shared principal resolutions
+    /// (`principal_cache`).
+    pub fn principal_cache_stats(&self) -> crate::principal_cache::PrincipalCacheStats {
+        self.inner.principal_cache.stats()
+    }
+
+    /// Turns principal sharing on or off (A/B benchmarks, oracles).
+    pub fn set_principal_cache_enabled(&self, enabled: bool) {
+        self.inner.principal_cache.set_enabled(enabled);
+    }
+
     /// Counters and size of the shared snapshot cache.
     pub fn snapshot_cache_stats(&self) -> crate::snapshot_cache::CacheStats {
         self.inner.snapshot_cache.stats()
@@ -1077,6 +1088,14 @@ impl Runtime {
                 &module.visibility,
                 &acl,
                 &self.inner.visibility_metrics,
+                Some((
+                    &self.inner.principal_cache,
+                    crate::principal_cache::Clock {
+                        epoch: &clock.epoch,
+                        revision: clock.revision,
+                        retained: clock.retained_revision,
+                    },
+                )),
             )
             .await?
         } else if definition.max_rows > 0 || definition.max_bytes > 0 {

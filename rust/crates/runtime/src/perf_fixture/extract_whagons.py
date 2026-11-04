@@ -25,6 +25,12 @@ REPLICAS = [
     "members.listMembers", "members.listMemberTeams", "taskResources.taskUsers",
     "taskResources.taskTags", "workspacePreferences.workspacePreferences",
     "tasks.recentWorkspaceTasks",
+    # The 11th cold-login collection and the 8 of a task detail window.
+    "notifications.listNotifications",
+    "tasks.get", "taskResources.listTaskNotes", "taskResources.listTaskLogs",
+    "taskResources.listTaskViewsByTaskId", "approvals.listTaskApprovals",
+    "taskFindings.listForTask", "taskResources.listTaskUsers",
+    "customFields.listTaskValues",
 ]
 REDUCERS = ["presence.beat", "presence.transition", "tasks.updateDescription", "tasks.update"]
 functions = {path: module["functions"][path] for path in REPLICAS + REDUCERS}

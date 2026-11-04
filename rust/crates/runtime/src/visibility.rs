@@ -57,6 +57,10 @@ pub(crate) struct PlanCaches {
     principal_tables: std::sync::OnceLock<BTreeSet<String>>,
     /// The compiled program (`visibility_class`), built on first use.
     pub(crate) compiled: std::sync::OnceLock<Arc<crate::visibility_class::CompiledPlan>>,
+    /// SHA-256 of the plan's version and set definitions: plans whose
+    /// principal SQL is identical (Whagons' task children all carry the same
+    /// grant sets) share one resolution (`principal_cache`).
+    pub(crate) sets_signature: std::sync::OnceLock<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1711,21 +1715,56 @@ pub fn resolve_with_parents<'a>(
     plans: &'a BTreeMap<String, VisibilityPlan>,
     acl: &'a PreparedParentAcl,
     metrics: &'a crate::visibility_metrics::VisibilityMetrics,
+    shared: Option<(
+        &'a crate::principal_cache::PrincipalCache,
+        crate::principal_cache::Clock<'a>,
+    )>,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<ResolvedVisibility, VisibilityError>> + Send + 'a>,
 > {
     Box::pin(async move {
-        let mut resolved = resolve_member(transaction, session, plan, revision, true).await?;
         if plan.version != Some(2) {
-            return Ok(resolved);
+            return resolve_member(transaction, session, plan, revision, true).await;
         }
+        // The SQL part (member row, principal, grant and derived sets) is
+        // shared per (plan, account) across opens while the change log shows
+        // none of its input tables changed (`principal_cache`).
+        let key = shared.and_then(|(cache, _)| cache.key(session, plan));
+        let mut resolved = match (shared, key) {
+            (Some((cache, clock)), Some(key)) => {
+                let _flight = cache.flight(&key).await;
+                match cache.lookup(&key, plan, transaction, clock).await? {
+                    crate::principal_cache::Lookup::Hit(shared) => {
+                        // As `resolve_member` does on every resolution.
+                        plan.validate()?;
+                        shared.resolved(revision)
+                    }
+                    crate::principal_cache::Lookup::Miss => {
+                        let resolved =
+                            resolve_member_sql(transaction, session, plan, revision, metrics)
+                                .await?;
+                        cache.store(key, plan, transaction, clock, &resolved).await?;
+                        resolved
+                    }
+                }
+            }
+            _ => resolve_member_sql(transaction, session, plan, revision, metrics).await?,
+        };
         for table in inherited_tables(plan) {
             let parent = plans.get(&table).ok_or_else(|| {
                 VisibilityError::Invalid(format!("unknown inherited parent {table:?}"))
             })?;
-            let parent_resolved =
-                resolve_with_parents(transaction, session, parent, revision, plans, acl, metrics)
-                    .await?;
+            let parent_resolved = resolve_with_parents(
+                transaction,
+                session,
+                parent,
+                revision,
+                plans,
+                acl,
+                metrics,
+                shared,
+            )
+            .await?;
             let index = acl.get(&parent.table, &parent.key)?;
             resolved.inherited.insert(
                 table,
@@ -1755,11 +1794,30 @@ pub fn resolve_with_parents<'a>(
             let index = acl.get(&set.table, &set.key)?;
             resolved.indexes.insert(name.clone(), index);
         }
-        for _ in 0..snapshot::resolve_derived(transaction, plan, &mut resolved).await? {
-            metrics.record_visibility_sql_statement();
-        }
         Ok(resolved)
     })
+}
+
+/// The SQL part of a version 2 resolution: the member row, its principal
+/// and grant sets, then its derived sets (which read only those sets, never
+/// the parent ACL indexes attached afterwards).
+async fn resolve_member_sql(
+    transaction: &mut TenantTransaction,
+    session: &TenantSession,
+    plan: &VisibilityPlan,
+    revision: u64,
+    metrics: &crate::visibility_metrics::VisibilityMetrics,
+) -> Result<ResolvedVisibility, VisibilityError> {
+    let mut resolved = resolve_member(transaction, session, plan, revision, true).await?;
+    for _ in 0..snapshot::resolve_derived(transaction, plan, &mut resolved).await? {
+        metrics.record_visibility_sql_statement();
+    }
+    Ok(resolved)
+}
+
+/// [`active_sets`] for other modules.
+pub(crate) fn active_set_names(plan: &VisibilityPlan, role: &str) -> Arc<BTreeSet<String>> {
+    active_sets(plan, role)
 }
 
 /// One `Arc` per identical parent resolution of a member: every collection
@@ -2814,7 +2872,7 @@ fn compile_literal_comparison(
     ))
 }
 
-fn visibility_fingerprint(
+pub(crate) fn visibility_fingerprint(
     plan: &VisibilityPlan,
     direct: &BTreeMap<String, String>,
     role: &str,

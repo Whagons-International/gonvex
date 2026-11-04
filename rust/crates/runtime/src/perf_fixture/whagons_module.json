@@ -1,5 +1,129 @@
 {
  "functions": {
+  "approvals.listTaskApprovals": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "approvals"
+    ]
+   },
+   "args": {
+    "fields": {
+     "taskId": {
+      "kind": "string"
+     }
+    },
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "List Task Approvals.",
+   "export": "listTaskApprovals",
+   "file": "gonvex/approvals.ts",
+   "handler": "listTaskApprovals",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "_creationTime",
+     "approvalId",
+     "approverName",
+     "approverUserId",
+     "createdAt",
+     "deletedAt",
+     "isRequired",
+     "notifiedAt",
+     "orderIndex",
+     "respondedAt",
+     "responseComment",
+     "signatureStorageId",
+     "sourceApproverId",
+     "status",
+     "taskId",
+     "updatedAt"
+    ],
+    "equalFilters": {
+     "taskId": "taskId"
+    },
+    "excludeWhenSet": [
+     "deletedAt"
+    ],
+    "key": "_id",
+    "maxBytes": 33554432,
+    "maxRows": 10000,
+    "mode": "eager",
+    "orderBy": "orderIndex",
+    "orderDirection": "asc",
+    "table": "taskApprovalInstances"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
+  "customFields.listTaskValues": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "customFields"
+    ]
+   },
+   "args": {
+    "fields": {
+     "taskId": {
+      "kind": "string"
+     }
+    },
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "List Task Values.",
+   "export": "listTaskValues",
+   "file": "gonvex/customFields.ts",
+   "handler": "listTaskValues",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "_creationTime",
+     "taskId",
+     "fieldId",
+     "name",
+     "type",
+     "value",
+     "valueNumeric",
+     "valueDate",
+     "valueJson"
+    ],
+    "equalFilters": {
+     "taskId": "taskId"
+    },
+    "key": "_id",
+    "maxBytes": 16777216,
+    "maxRows": 10000,
+    "mode": "eager",
+    "orderBy": "_creationTime",
+    "orderDirection": "asc",
+    "table": "taskCustomFieldValues"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
   "members.listMemberTeams": {
    "agent": {
     "confirmation": "none",
@@ -105,6 +229,60 @@
     "orderBy": "id",
     "orderDirection": "asc",
     "table": "members"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
+  "notifications.listNotifications": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "notifications"
+    ]
+   },
+   "args": {
+    "fields": {},
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "List Notifications.",
+   "export": "listNotifications",
+   "file": "gonvex/notifications.ts",
+   "handler": "listNotifications",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "_creationTime",
+     "userId",
+     "type",
+     "title",
+     "message",
+     "data",
+     "readAt",
+     "isRead",
+     "deletedAt",
+     "updatedAt"
+    ],
+    "excludeWhenSet": [
+     "deletedAt"
+    ],
+    "key": "_id",
+    "maxBytes": 33554432,
+    "maxRows": 10000,
+    "mode": "eager",
+    "orderBy": "_creationTime",
+    "orderDirection": "desc",
+    "table": "notifications"
    },
    "result": {
     "items": {
@@ -326,6 +504,301 @@
     "kind": "array"
    }
   },
+  "taskFindings.listForTask": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "taskFindings"
+    ]
+   },
+   "args": {
+    "fields": {
+     "taskId": {
+      "kind": "string"
+     }
+    },
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "List For Task.",
+   "export": "listForTask",
+   "file": "gonvex/taskFindings.ts",
+   "handler": "listForTask",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "_creationTime",
+     "taskId",
+     "text",
+     "findingCategory",
+     "resolved",
+     "priority",
+     "priorityId",
+     "assignedUserId",
+     "spotId",
+     "locationId",
+     "tagIds",
+     "dueDate",
+     "notes",
+     "evidenceFiles",
+     "linkedTaskId",
+     "sortOrder",
+     "values",
+     "createdBy",
+     "createdAt",
+     "updatedAt",
+     "deletedAt"
+    ],
+    "equalFilters": {
+     "taskId": "taskId"
+    },
+    "excludeWhenSet": [
+     "deletedAt"
+    ],
+    "key": "_id",
+    "maxBytes": 33554432,
+    "maxRows": 10000,
+    "mode": "eager",
+    "orderBy": "sortOrder",
+    "orderDirection": "asc",
+    "table": "taskFindings"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
+  "taskResources.listTaskLogs": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "taskResources"
+    ]
+   },
+   "args": {
+    "fields": {
+     "taskId": {
+      "kind": "string"
+     }
+    },
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "List Task Logs.",
+   "export": "listTaskLogs",
+   "file": "gonvex/taskResources/queries.ts",
+   "handler": "listTaskLogs",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "_creationTime",
+     "taskId",
+     "userId",
+     "action",
+     "timestamp",
+     "oldValues",
+     "newValues",
+     "uuid"
+    ],
+    "equalFilters": {
+     "taskId": "taskId"
+    },
+    "key": "_id",
+    "maxBytes": 33554432,
+    "maxRows": 10000,
+    "mode": "eager",
+    "orderBy": "timestamp",
+    "orderDirection": "desc",
+    "table": "taskLogs"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
+  "taskResources.listTaskNotes": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "taskResources"
+    ]
+   },
+   "args": {
+    "fields": {
+     "taskId": {
+      "kind": "string"
+     }
+    },
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "List Task Notes.",
+   "export": "listTaskNotes",
+   "file": "gonvex/taskResources/queries.ts",
+   "handler": "listTaskNotes",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "_creationTime",
+     "attachments",
+     "authorKind",
+     "authorName",
+     "note",
+     "source",
+     "taskId",
+     "userId",
+     "uuid"
+    ],
+    "equalFilters": {
+     "taskId": "taskId"
+    },
+    "key": "_id",
+    "maxBytes": 33554432,
+    "maxRows": 10000,
+    "mode": "eager",
+    "orderBy": "_creationTime",
+    "orderDirection": "asc",
+    "table": "taskNotes"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
+  "taskResources.listTaskUsers": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "taskResources"
+    ]
+   },
+   "args": {
+    "fields": {
+     "taskId": {
+      "kind": "string"
+     }
+    },
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "List Task Users.",
+   "export": "listTaskUsers",
+   "file": "gonvex/taskResources/queries.ts",
+   "handler": "listTaskUsers",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "taskId",
+     "userId",
+     "workspaceId",
+     "role",
+     "createdAt",
+     "updatedAt",
+     "deletedAt"
+    ],
+    "equalFilters": {
+     "taskId": "taskId"
+    },
+    "excludeWhenSet": [
+     "deletedAt"
+    ],
+    "key": "_id",
+    "maxBytes": 16777216,
+    "maxRows": 10000,
+    "mode": "eager",
+    "orderBy": "createdAt",
+    "orderDirection": "asc",
+    "table": "taskUsers"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
+  "taskResources.listTaskViewsByTaskId": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "taskResources"
+    ]
+   },
+   "args": {
+    "fields": {
+     "taskId": {
+      "kind": "string"
+     }
+    },
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "List Task Views By Task ID.",
+   "export": "listTaskViewsByTaskId",
+   "file": "gonvex/taskResources/queries.ts",
+   "handler": "listTaskViewsByTaskId",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "_creationTime",
+     "taskId",
+     "userId",
+     "viewedAt"
+    ],
+    "equalFilters": {
+     "taskId": "taskId"
+    },
+    "key": "_id",
+    "maxBytes": 16777216,
+    "maxRows": 10000,
+    "mode": "eager",
+    "orderBy": "viewedAt",
+    "orderDirection": "desc",
+    "table": "taskViews"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
   "taskResources.taskTags": {
    "agent": {
     "confirmation": "none",
@@ -411,6 +884,103 @@
     "orderBy": "createdAt",
     "orderDirection": "asc",
     "table": "taskUsers"
+   },
+   "result": {
+    "items": {
+     "kind": "record",
+     "values": {
+      "kind": "any"
+     }
+    },
+    "kind": "array"
+   }
+  },
+  "tasks.get": {
+   "agent": {
+    "confirmation": "none",
+    "tags": [
+     "tasks"
+    ]
+   },
+   "args": {
+    "fields": {
+     "id": {
+      "kind": "string"
+     }
+    },
+    "kind": "object"
+   },
+   "classification": "interactive",
+   "delivery": "replica",
+   "description": "Get.",
+   "export": "get",
+   "file": "gonvex/tasks/replicaQueries.ts",
+   "handler": "get",
+   "interactive": true,
+   "kind": "query",
+   "replica": {
+    "columns": [
+     "_id",
+     "_creationTime",
+     "id",
+     "name",
+     "description",
+     "workspaceId",
+     "statusId",
+     "priorityId",
+     "categoryId",
+     "spotId",
+     "teamId",
+     "templateId",
+     "createdBy",
+     "attributedCreatorId",
+     "createdVia",
+     "createdByWorkflowId",
+     "createdByWorkflowRunId",
+     "workflowTriggeredByUserId",
+     "approvalId",
+     "slaId",
+     "formId",
+     "formVersionId",
+     "requiresSignature",
+     "assetId",
+     "fleetVehicleId",
+     "fleetLeaderId",
+     "fleetCompanionId",
+     "requiresAcknowledgment",
+     "audienceRules",
+     "reportedByGuest",
+     "guestId",
+     "guestVip",
+     "guestReportSeenAt",
+     "reportedByTeamId",
+     "reportedByUserId",
+     "firstViewedAt",
+     "dueDate",
+     "startDate",
+     "latitude",
+     "longitude",
+     "completedAt",
+     "createdAt",
+     "updatedAt",
+     "flagColor",
+     "rowHash",
+     "recurrenceId",
+     "workplanId",
+     "workplanItemId",
+     "workplanInstanceId",
+     "occurrenceDate",
+     "deletedAt",
+     "deletedBy"
+    ],
+    "equalFilters": {
+     "_id": "id"
+    },
+    "key": "_id",
+    "maxBytes": 4194304,
+    "maxRows": 1,
+    "mode": "eager",
+    "table": "tasks"
    },
    "result": {
     "items": {
@@ -719,7 +1289,7 @@
    }
   }
  },
- "source": "whagons 55969f041b0d726dc0078e33b88d36df7072f22f gonvex/_generated/manifest.json",
+ "source": "whagons da5fb7b625963939027ccf771710aa4dc9520f11 gonvex/_generated/manifest.json",
  "visibility": {
   "memberTeams": {
    "key": "_id",
@@ -829,6 +1399,39 @@
     "operator": "or"
    }
   },
+  "notifications": {
+   "key": "_id",
+   "permissionTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "memberSpots",
+    "spots",
+    "members",
+    "globalSettings",
+    "workspaces",
+    "personalWorkspaceMembers",
+    "plugins",
+    "permissions",
+    "roles",
+    "rolePermissions",
+    "conversationParticipants",
+    "boardMembers",
+    "workspaceViewShares",
+    "workbenchShares",
+    "marketMembers",
+    "templates",
+    "categories",
+    "formPublicLinks"
+   ],
+   "sets": {},
+   "table": "notifications",
+   "version": 2,
+   "where": {
+    "column": "userId",
+    "context": "member.id",
+    "operator": "eqContext"
+   }
+  },
   "statuses": {
    "key": "_id",
    "permissionTables": [
@@ -889,6 +1492,4071 @@
    "version": 2,
    "where": {
     "operator": "public"
+   }
+  },
+  "taskApprovalInstances": {
+   "key": "_id",
+   "permissionTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "memberSpots",
+    "spots",
+    "members",
+    "globalSettings",
+    "workspaces",
+    "personalWorkspaceMembers",
+    "plugins",
+    "permissions",
+    "roles",
+    "rolePermissions",
+    "conversationParticipants",
+    "boardMembers",
+    "workspaceViewShares",
+    "workbenchShares",
+    "marketMembers",
+    "templates",
+    "categories",
+    "formPublicLinks"
+   ],
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "taskApprovalInstances",
+   "version": 2,
+   "where": {
+    "children": [
+     {
+      "column": "taskId",
+      "key": "_id",
+      "onMissing": {
+       "children": [
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextOwnerTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextMemberTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextTeamTasks"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            }
+           ],
+           "operator": "not"
+          },
+          {
+           "children": [
+            {
+             "operator": "permission",
+             "value": "tasks.viewAll"
+            },
+            {
+             "operator": "role",
+             "value": "system_admin"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "assignedTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "approvalTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextTeamTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedTeamTasks"
+            }
+           ],
+           "operator": "or"
+          }
+         ],
+         "operator": "and"
+        }
+       ],
+       "operator": "or"
+      },
+      "operator": "inherits",
+      "table": "tasks"
+     },
+     {
+      "children": [
+       {
+        "column": "taskId",
+        "operator": "eq",
+        "value": {
+         "literal": null
+        }
+       },
+       {
+        "children": [
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "children": [
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "not"
+           },
+           {
+            "children": [
+             {
+              "operator": "permission",
+              "value": "tasks.viewAll"
+             },
+             {
+              "operator": "role",
+              "value": "system_admin"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "or"
+           }
+          ],
+          "operator": "and"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "taskCustomFieldValues": {
+   "key": "_id",
+   "permissionTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "memberSpots",
+    "spots",
+    "members",
+    "globalSettings",
+    "workspaces",
+    "personalWorkspaceMembers",
+    "plugins",
+    "permissions",
+    "roles",
+    "rolePermissions",
+    "conversationParticipants",
+    "boardMembers",
+    "workspaceViewShares",
+    "workbenchShares",
+    "marketMembers",
+    "templates",
+    "categories",
+    "formPublicLinks"
+   ],
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "taskCustomFieldValues",
+   "version": 2,
+   "where": {
+    "children": [
+     {
+      "column": "taskId",
+      "key": "_id",
+      "onMissing": {
+       "children": [
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextOwnerTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextMemberTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextTeamTasks"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            }
+           ],
+           "operator": "not"
+          },
+          {
+           "children": [
+            {
+             "operator": "permission",
+             "value": "tasks.viewAll"
+            },
+            {
+             "operator": "role",
+             "value": "system_admin"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "assignedTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "approvalTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextTeamTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedTeamTasks"
+            }
+           ],
+           "operator": "or"
+          }
+         ],
+         "operator": "and"
+        }
+       ],
+       "operator": "or"
+      },
+      "operator": "inherits",
+      "table": "tasks"
+     },
+     {
+      "children": [
+       {
+        "column": "taskId",
+        "operator": "eq",
+        "value": {
+         "literal": null
+        }
+       },
+       {
+        "children": [
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "children": [
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "not"
+           },
+           {
+            "children": [
+             {
+              "operator": "permission",
+              "value": "tasks.viewAll"
+             },
+             {
+              "operator": "role",
+              "value": "system_admin"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "or"
+           }
+          ],
+          "operator": "and"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "taskFindings": {
+   "key": "_id",
+   "permissionTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "memberSpots",
+    "spots",
+    "members",
+    "globalSettings",
+    "workspaces",
+    "personalWorkspaceMembers",
+    "plugins",
+    "permissions",
+    "roles",
+    "rolePermissions",
+    "conversationParticipants",
+    "boardMembers",
+    "workspaceViewShares",
+    "workbenchShares",
+    "marketMembers",
+    "templates",
+    "categories",
+    "formPublicLinks"
+   ],
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "taskFindings",
+   "version": 2,
+   "where": {
+    "children": [
+     {
+      "column": "taskId",
+      "key": "_id",
+      "onMissing": {
+       "children": [
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextOwnerTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextMemberTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextTeamTasks"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            }
+           ],
+           "operator": "not"
+          },
+          {
+           "children": [
+            {
+             "operator": "permission",
+             "value": "tasks.viewAll"
+            },
+            {
+             "operator": "role",
+             "value": "system_admin"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "assignedTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "approvalTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextTeamTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedTeamTasks"
+            }
+           ],
+           "operator": "or"
+          }
+         ],
+         "operator": "and"
+        }
+       ],
+       "operator": "or"
+      },
+      "operator": "inherits",
+      "table": "tasks"
+     },
+     {
+      "children": [
+       {
+        "column": "taskId",
+        "operator": "eq",
+        "value": {
+         "literal": null
+        }
+       },
+       {
+        "children": [
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "children": [
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "not"
+           },
+           {
+            "children": [
+             {
+              "operator": "permission",
+              "value": "tasks.viewAll"
+             },
+             {
+              "operator": "role",
+              "value": "system_admin"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "or"
+           }
+          ],
+          "operator": "and"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "taskLogs": {
+   "key": "_id",
+   "permissionTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "memberSpots",
+    "spots",
+    "members",
+    "globalSettings",
+    "workspaces",
+    "personalWorkspaceMembers",
+    "plugins",
+    "permissions",
+    "roles",
+    "rolePermissions",
+    "conversationParticipants",
+    "boardMembers",
+    "workspaceViewShares",
+    "workbenchShares",
+    "marketMembers",
+    "templates",
+    "categories",
+    "formPublicLinks"
+   ],
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "taskLogs",
+   "version": 2,
+   "where": {
+    "children": [
+     {
+      "column": "taskId",
+      "key": "_id",
+      "onMissing": {
+       "children": [
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextOwnerTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextMemberTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextTeamTasks"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            }
+           ],
+           "operator": "not"
+          },
+          {
+           "children": [
+            {
+             "operator": "permission",
+             "value": "tasks.viewAll"
+            },
+            {
+             "operator": "role",
+             "value": "system_admin"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "assignedTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "approvalTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextTeamTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedTeamTasks"
+            }
+           ],
+           "operator": "or"
+          }
+         ],
+         "operator": "and"
+        }
+       ],
+       "operator": "or"
+      },
+      "operator": "inherits",
+      "table": "tasks"
+     },
+     {
+      "children": [
+       {
+        "column": "taskId",
+        "operator": "eq",
+        "value": {
+         "literal": null
+        }
+       },
+       {
+        "children": [
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "children": [
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "not"
+           },
+           {
+            "children": [
+             {
+              "operator": "permission",
+              "value": "tasks.viewAll"
+             },
+             {
+              "operator": "role",
+              "value": "system_admin"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "or"
+           }
+          ],
+          "operator": "and"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "taskNotes": {
+   "key": "_id",
+   "permissionTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "memberSpots",
+    "spots",
+    "members",
+    "globalSettings",
+    "workspaces",
+    "personalWorkspaceMembers",
+    "plugins",
+    "permissions",
+    "roles",
+    "rolePermissions",
+    "conversationParticipants",
+    "boardMembers",
+    "workspaceViewShares",
+    "workbenchShares",
+    "marketMembers",
+    "templates",
+    "categories",
+    "formPublicLinks"
+   ],
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "taskNotes",
+   "version": 2,
+   "where": {
+    "children": [
+     {
+      "column": "taskId",
+      "key": "_id",
+      "onMissing": {
+       "children": [
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextOwnerTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextMemberTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextTeamTasks"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            }
+           ],
+           "operator": "not"
+          },
+          {
+           "children": [
+            {
+             "operator": "permission",
+             "value": "tasks.viewAll"
+            },
+            {
+             "operator": "role",
+             "value": "system_admin"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "assignedTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "approvalTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextTeamTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedTeamTasks"
+            }
+           ],
+           "operator": "or"
+          }
+         ],
+         "operator": "and"
+        }
+       ],
+       "operator": "or"
+      },
+      "operator": "inherits",
+      "table": "tasks"
+     },
+     {
+      "children": [
+       {
+        "column": "taskId",
+        "operator": "eq",
+        "value": {
+         "literal": null
+        }
+       },
+       {
+        "children": [
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "children": [
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "not"
+           },
+           {
+            "children": [
+             {
+              "operator": "permission",
+              "value": "tasks.viewAll"
+             },
+             {
+              "operator": "role",
+              "value": "system_admin"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "or"
+           }
+          ],
+          "operator": "and"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
    }
   },
   "taskTags": {
@@ -2063,6 +6731,819 @@
     }
    },
    "table": "taskUsers",
+   "version": 2,
+   "where": {
+    "children": [
+     {
+      "column": "taskId",
+      "key": "_id",
+      "onMissing": {
+       "children": [
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextOwnerTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextMemberTasks"
+        },
+        {
+         "column": "taskId",
+         "operator": "inSet",
+         "set": "personalContextTeamTasks"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "operator": "public"
+          }
+         ],
+         "operator": "not"
+        },
+        {
+         "children": [
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            }
+           ],
+           "operator": "not"
+          },
+          {
+           "children": [
+            {
+             "operator": "permission",
+             "value": "tasks.viewAll"
+            },
+            {
+             "operator": "role",
+             "value": "system_admin"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "children": [
+              {
+               "operator": "public"
+              }
+             ],
+             "operator": "not"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "assignedTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "approvalTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "contextTeamTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedUserTasks"
+            },
+            {
+             "column": "taskId",
+             "operator": "inSet",
+             "set": "sharedTeamTasks"
+            }
+           ],
+           "operator": "or"
+          }
+         ],
+         "operator": "and"
+        }
+       ],
+       "operator": "or"
+      },
+      "operator": "inherits",
+      "table": "tasks"
+     },
+     {
+      "children": [
+       {
+        "column": "taskId",
+        "operator": "eq",
+        "value": {
+         "literal": null
+        }
+       },
+       {
+        "children": [
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "operator": "public"
+           }
+          ],
+          "operator": "not"
+         },
+         {
+          "children": [
+           {
+            "children": [
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "not"
+           },
+           {
+            "children": [
+             {
+              "operator": "permission",
+              "value": "tasks.viewAll"
+             },
+             {
+              "operator": "role",
+              "value": "system_admin"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             },
+             {
+              "children": [
+               {
+                "operator": "public"
+               }
+              ],
+              "operator": "not"
+             }
+            ],
+            "operator": "or"
+           }
+          ],
+          "operator": "and"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "taskViews": {
+   "key": "_id",
+   "permissionTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "memberSpots",
+    "spots",
+    "members",
+    "globalSettings",
+    "workspaces",
+    "personalWorkspaceMembers",
+    "plugins",
+    "permissions",
+    "roles",
+    "rolePermissions",
+    "conversationParticipants",
+    "boardMembers",
+    "workspaceViewShares",
+    "workbenchShares",
+    "marketMembers",
+    "templates",
+    "categories",
+    "formPublicLinks"
+   ],
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "kind": "grant",
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "taskViews",
    "version": 2,
    "where": {
     "children": [
