@@ -131,3 +131,11 @@ required-features = ["perf-fixture"]
 name = "call_watermark_latency"
 required-features = ["perf-fixture"]
 
+[[test]]
+name = "snapshot_cache_oracle"
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "snapshot_cache"
+harness = false
+required-features = ["perf-fixture"]

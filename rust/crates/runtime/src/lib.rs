@@ -46,6 +46,7 @@ mod scheduled_lane;
 pub mod scheduler;
 mod service_principal;
 mod snapshot_ack;
+pub mod snapshot_cache;
 mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
@@ -118,6 +119,7 @@ struct RuntimeInner {
     public_limiter: Arc<public_functions::PublicLimiter>,
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     parent_acl: visibility::ParentAclRegistry,
+    snapshot_cache: snapshot_cache::SnapshotCache,
     delivery: delivery::DeliveryHub,
     permissions: permission_bits::PermissionRegistry,
     /// Process-wide root-Action admission (`action_gate.rs`).
@@ -290,6 +292,7 @@ impl Runtime {
                 public_limiter: Arc::new(public_functions::PublicLimiter::default()),
                 visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
                 parent_acl: visibility::ParentAclRegistry::default(),
+                snapshot_cache: snapshot_cache::SnapshotCache::default(),
                 delivery: delivery::DeliveryHub::default(),
                 permissions: permission_bits::PermissionRegistry::default(),
                 action_gate: action_gate::ActionGate::from_env(),
