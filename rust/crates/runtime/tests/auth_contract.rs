@@ -741,3 +741,28 @@ async fn concurrent_signins_complete_with_two_sql_slots() {
     pools.close().await;
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn external_exchange_without_project_is_typed_unauthenticated() {
+    let (_data, database_url, _pools, _fixture) = sqlite_fixture("control").await;
+    let runtime = Runtime::new(test_config(database_url));
+    runtime.start().await.unwrap();
+    for project in ["", "missing-project"] {
+        let error = runtime
+            .execute_control_action(
+                &ControlConnection {
+                    project_id: project.into(),
+                    ..Default::default()
+                },
+                "control.auth.exchangeExternalToken",
+                &serde_json::json!({"provider":"firebase", "token":"not-a-real-token"}),
+                "missing-project-exchange",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ControlError::AuthenticationRequired),
+            "{error}"
+        );
+    }
+}
