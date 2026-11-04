@@ -1243,3 +1243,77 @@ so the merge is what fixes saves at 1k; it needs to stop costing sharing.
 
 Resume: fallbacks per reconnect stay low (`snapshotCache.fallbacks` 64 per 1,237 reconnects in
 bc-500-off); reconnect p50 47–60 ms, p99 ≤ 525 ms in every quiet run.
+
+## Step 15: milestone-gate round (conn-idle, delivery-coverage, burst-control r2, nice 10, presence-edge, wakeup-skip): gate not passed yet
+
+Merges on perf/integrate-5k: conn-idle 5f05f94d (813860f5; Cargo.toml bench list), delivery-coverage
+7750e394 (a0f3e3a2, clean), burst-control round 2 a12845ab (c834535b; feed-loop conflict:
+delivery-coverage's `fan_out_waiting` runs per event inside the by-reference batch loop), nice 10 code
+default (88c98b1f), absolute nice + no inheritance (8ec09dfc), presence-edge beb0f8d4 (f98ca1a8,
+clean), delivery-coverage 37d95866 wakeup-skip (f6463024; `wake_dirty` added to the round-2 feed arm).
+Tests on f6463024: workspace **671 / 0 / 8**, perf-fixture **423 / 0 / 9**; round-15 head c834535b
+664 / 0, 417 / 0. Lab: the new-lab compose passes `LOAD_FEED_LAG_MERGE`, `LOAD_FEED_TARGETED_WAKE`,
+`LOAD_FEED_WAKE_FLUSH_MS` (code defaults). Every case below held `LAB_RUN_ACTIVE`; host busy cores over
+the plateau from `/proc/stat` (last column, of 14; a run is clean at ≤ 3.5; other projects' agents on
+this host, e.g. a duckdb C++ build and a `gonvex codegen`, are outside the lock).
+
+**Per-thread nice, gate build at 1k (`ps -L -o tid,ni,comm`, g2-1k-prod-1):** gonvex-offload ×3 ni 10
+(none at 19), gonvex-scheduled ×3 ni 5, sqlx-sqlite-worker ×35 ni 10 (readers) and ×27 ni 0 (one
+writer per database), gonvex-module-isolate ×2 / watchdog ×2 / reaper ni 0, gonvex-sqlite-checkpoint
+ni 0, gonvex-spawner ni 0, tokio-rt-worker ×6 ni 0, V8 platform ×15 ni 0, main ni 0. Absolute nice: the
+offload pool and its blocking threads set base + 10 on start (a pool thread started by a pool thread
+no longer stacks to 19). Lowering a nice value needs CAP_SYS_NICE (lab and staging containers: CapEff
+0, RLIMIT_NICE 0), so base-priority threads are created by a base-priority spawner
+(`gonvex_profiler::thread_priority::spawn_at`: isolates, watchdogs, checkpoint, scheduled lane) and
+writer pools open on the network runtime; tests `profiler thread_priority` and
+`store tests/thread_priority.rs` (a database first opened from a niced runtime: writer worker at
+base, reader at base + reader nice).
+
+Oracle gate (round-15 build c834535b, old app, 100 users): batch on 23 checks / 0 mismatched / {} /
+0.10 % / PASS; batch off 23 / 0 / {} / 0.08 % but latency FAIL (heartbeat p95 1,053 ms, delivery p95
+2.7 s, 0.23 cores vs 0.08 before; permit wait p90 ≈ 1 s at 100 users). Not yet repeated on f6463024.
+
+Production mix (save, taskDelivery, presence, query = window open, reconnect: p50 / p95 / p99 ms;
+snapshot permit wait p90; delivery queue p99):
+
+| case | build | errors | mism. | save | taskDelivery | presence | query | reconnect | cores (thr.) | permit p90 | queue p99 | host busy |
+|---|---|---:|---:|---|---|---|---|---|---|---:|---:|---:|
+| ab-500-prod-prebc2 | a0f3e3a2 (ci + dc + bc r1) | 0.08 % | 0 | 53 / 146 / 394 | 113 / 199 / 447 | 566 / 1,011 / 1,229 | 52 / 106 / 362 | 55 / 116 / 182 | 0.26 (58) | 8 ms | 57 ms | 1.6 |
+| r15-500-prod-fp | c834535b fp | **31.1 %** | 0 | 36 / 21,791 / 46,903 | 99 / 22,523 / 42,625 | 588 / 1,098 / 2,841 | 52 / 21,337 / 27,541 | 61 / 292 / 1,408 | 0.52 (683) | 27.6 s | 536 ms | 2.0 |
+| g2-500-prod-smoke | f6463024 | 0.08 % | 0 | 65 / 548 / 1,458 | 139 / 609 / 888 | 53 / 285 / 617 | 52 / 615 / 1,579 | 60 / 174 / 257 | 0.35 (150) | 331 ms | 632 ms | 5.4 ✗ |
+| g2-1k-prod-1 | f6463024 | 0.05 % | 0 | 121 / 4,591 / 10,945 | 192 / 974 / 1,308 | 144 / 357 / 543 | 118 / 6,486 / 10,127 | 73 / 198 / 325 | 0.62 (558) | 4.07 s | 428 ms | 4.0 ✗ |
+| g2-1k-prod-default-b | f6463024 | 0.05 % | 0 | 61 / **540 / 1,133** | 139 / 550 / 858 | 121 / **304 / 378** | 53 / 378 / 1,315 | 77 / 202 / 289 | 0.54 (338) | 804 ms | 436 ms | 3.0 |
+| g2-1k-prod-flush1000-b | f6463024, flush 1 s | 0.05 % | 0 | 84 / 550 / 1,636 | 161 / 549 / 825 | 136 / 324 / 462 | 100 / 1,364 / 2,270 | 80 / 248 / 450 | 0.53 (365) | 1.89 s | 331 ms | 3.2 |
+| g2-1k-prod-fp | f6463024 fp | 0.04 % | 0 | 122 / 1,586 / 9,202 | 194 / 922 / 1,313 | 144 / 349 / 547 | 103 / 6,582 / 9,391 | 83 / 232 / 402 | 0.56 (448) | 3.90 s | 395 ms | 3.3 |
+| g2-1k-prod-nowake | f6463024, targeted wake 0 | **45.5 %** | **2** | 461 / 75,875 / 97,379 | 489 / 34,868 / 50,373 | 194 / 2,099 / 6,146 | 282 / 21,728 / 27,841 | 287 / 836 / 2,830 | 0.89 (1,419) | 25.7 s | 31.7 s | 3.7 |
+
+- **Presence is fixed**: p95 285–357 ms, p99 378–547 ms at 1k (was ≈ 1.0–1.3 s).
+- **Watermark lag of targeted wakeups does not inflate the metrics**: flush 1 s is no better than the
+  5 s default (save 550 / 1,636 vs 540 / 1,133; query worse), so the default stays.
+- **Without targeted wakeups the build spirals at 1k** (snapshot admission sheds 1,455 builds, delivery
+  queue 30–50 s, 2 visibility mismatches "missing" while opens time out): the overload spiral
+  delivery-coverage saw once at 500. With them, no spiral in 5 runs.
+- The best clean run misses the gate on save p95/p99 (540 / 1,133), taskDelivery p95 (550) and
+  query p99 (1,315); the others fail on window opens (p95 6.5 s) and saves behind them.
+
+**Binding constraint: snapshot admission grants slots to futures nobody polls.** Permit hold × rate
+gives slot utilization 16–30 % at 1k (default-b 16 %, fp 24 %, run 1 30 %; burst-control round 1
+qb-1k-on-2 30 %), yet permit wait p90 is 0.8–4 s, with CPU at 0.54–0.62 cores and 19–31 % of periods
+throttled. `SnapshotAdmission::release` hands a freed slot to the head waiter's oneshot and counts it
+as used at once; the waiter turns it into a build only when its future is polled. That future lives in
+the connection's `select!` loop (`replica_opens`), which does not poll it while the loop body awaits
+feed work (`fan_out_waiting` on another connection's shape claim, a 64-event by-reference batch
+apply, a socket send). `permit_hold` starts after the poll, so the granted-but-idle time shows only
+as everyone else's permit wait. Saves follow: a client does not accept a watermark while one of its
+collections opens (SDK rule), so save tails track open tails (fp run: query p99 9.4 s, save p99
+9.2 s). Fix direction: run admission + build in a spawned task (independent of the connection loop),
+or grant on poll (hand over only to a waiter that is being polled, else to the next one).
+
+Secondary costs (frame-pointer attribution, g2-1k-prod-fp, 0.56 cores; `cpu-attribution.py`):
+feed apply 18.2 % (shared fan-out path on the network threads 8.1 %), SQLite workers 17.1 % (statement
+execution 7.4 %, **statement prepare 4.3 %**; 10.3 % in the spiralling r15 run: reader connections
+close after 15 s idle and reopen with a cold statement cache), socket write 15.7 % (kernel send 9.6 %),
+V8 15.4 % (SQL host calls 9.5 %, JS 4.9 %), snapshot open 12.1 % (visibility/ACL 8.3 %), inbound
+8.6 %, commit/fsync 4.1 %, scheduler 3.2 %, presence 2.1 %; kernel 31 % overall. Reducer isolate wait
+p99 0.5–1.0 s: `pushNotifications.deliverScheduled` runs at 36/s against ≈ 8 user reducer calls/s on
+the module host.

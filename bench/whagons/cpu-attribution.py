@@ -23,7 +23,7 @@ CATEGORIES = [
         ('row encode / JSON', r'serde_json|write_stable|project_row|encode'),
     ]),
     ('delivery: feed apply', r'apply_feed_event|apply_feed_events|merge_waiting_feed|take_waiting_feed|collapse_changes|deliver_committed|fan_out|replica_fanout|feed_share', [
-        ('shared fan-out path (served from a shape outcome)', r'replica_fanout::.*fan_out|fan_out_waiting|FanOut'),
+        ('shared fan-out path (shape outcome, network thread)', r'::fan_out$|fan_out_inner|fan_out_waiting|replica::fanout::|FanOut'),
         ('copy merge', r'merge_waiting_feed|merge_transactions'),
         ('visibility decisions', r'principal_change_concerns|active_grant_sets|derived_change_concerns|visibility::'),
         ('row projection / encode / prewarm', r'project_row|write_stable|prewarm|serde_json|encode'),
