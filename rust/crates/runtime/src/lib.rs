@@ -1908,7 +1908,10 @@ async fn websocket(
                             // shared outcome for this event only appends it.
                             let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
                                 runtime.fan_out(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
-                            } else { replica::fanout::FanOut::Miss { record: false } };
+                            } else {
+                                replica::fanout::count(replica::fanout::Path::NotBatch);
+                                replica::fanout::FanOut::Miss { record: false }
+                            };
                             let applied = match shared {
                                 replica::fanout::FanOut::Served(Ok(())) => Ok(Vec::new()),
                                 replica::fanout::FanOut::Served(Err(_)) => return,

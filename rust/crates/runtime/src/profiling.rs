@@ -202,6 +202,7 @@ pub fn profile_json(runtime: &crate::Runtime) -> Value {
         "longPolls": {"total": gonvex_profiler::long_poll_total(), "recent": long_polls},
         "slowTraces": slow_traces_json(),
         "crons": crons_json(),
+        "deliveryCoverage": crate::replica::fanout::coverage_json(),
         "functions": functions_json(None),
         "v8Isolates": v8_isolates_json(),
         "actions": actions_json(runtime),

@@ -16,6 +16,7 @@ mod mask;
 #[path = "replica_fanout.rs"]
 pub(crate) mod fanout;
 pub use fanout::stats as fanout_stats;
+pub use fanout::{coverage_json as fanout_coverage, path_counts as fanout_path_counts, PATHS as FANOUT_PATHS};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -1193,6 +1194,10 @@ impl Runtime {
         event: FeedEvent,
         record: bool,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
+        let _timer = gonvex_profiler::ScopeTimer::new(
+            gonvex_profiler::Stage::DeliveryIndividual,
+            gonvex_profiler::Label::None,
+        );
         let FeedEvent::Transaction {
             database_epoch,
             revision,
@@ -1232,6 +1237,7 @@ impl Runtime {
         let mut shared_stats = crate::visibility_class::EvalStats::default();
         let mut recording = match (&share, record && fanout::enabled()) {
             (Some(share), true) => fanout::shape(subscriptions, share, &database_epoch, revision)
+                .ok()
                 .filter(|shape| !share.outcomes.lock().unwrap().contains_key(shape))
                 .map(|shape| (shape, fanout::Recorder::new())),
             _ => None,

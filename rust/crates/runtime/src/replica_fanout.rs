@@ -49,6 +49,72 @@ static HITS: AtomicU64 = AtomicU64::new(0);
 static RECORDED: AtomicU64 = AtomicU64::new(0);
 static DATA_HITS: AtomicU64 = AtomicU64::new(0);
 
+macro_rules! paths {
+    ($($variant:ident => $name:literal, $doc:literal;)*) => {
+        /// Delivery coverage: how one batch connection's feed step for one
+        /// transaction was decided (shared fan-out or its own full path, and
+        /// why). Counted once per connection per event in the connection
+        /// loop (`count`), exported in `/dev/profile` (`deliveryCoverage`).
+        #[repr(u8)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Path { $($variant),* }
+        /// (name, description) per path, indexed by `Path as usize`.
+        pub const PATHS: &[(&str, &str)] = &[$(($name, $doc)),*];
+    };
+}
+
+paths! {
+    SharedAdvance => "shared.advance", "Served from its shape: nothing to decide, cursors advance (no outcome needed)";
+    SharedData => "shared.data", "Served from its shape's recorded outcome (decided rows appended)";
+    Representative => "full.representative", "Has a shape but no outcome yet: the full path runs and records it";
+    ServeRejected => "full.serve_rejected", "Outcome exists but a bounded window would leave its budget, or a non-default stream token";
+    NotBatch => "full.not_batch", "Batching off, a snapshot still being delivered, or a non-transaction event";
+    NoShare => "full.no_share", "No tenant event share (sharing off, or the event left the share ring)";
+    Inherited => "full.inherited", "A reached subscription has an inherited plan the shape cannot follow (inheritsAny, nested inherits)";
+    Legacy => "full.legacy", "A reached subscription has a version 1 (SQL) plan";
+    DuplicateStream => "full.duplicate_stream", "Two subscriptions share one stream identity";
+    SlowTable => "full.slow_table", "A table changed that can move this member's principal, sets or grants (members, set or join tables, permission tables)";
+    ParentAcl => "full.parent_acl", "A parent row of an inherited plan changed visibility columns or was deleted (children may flip)";
+    ParentAndSource => "full.parent_and_source", "An inherited plan's parent and source rows changed in one transaction";
+    IndexWaiting => "full.index_waiting", "A bound shared index is not at the event's revision yet";
+    CursorEpoch => "full.cursor_epoch", "Cursor of another epoch, or a bound index already ahead of the event";
+    Truncated => "full.truncated", "A reached collection of a changed table has a truncated window";
+    NotCompiled => "full.not_compiled", "The member's visibility is not compiled (fallback evaluation)";
+    Hit => "full.hit", "A changed row hits a member atom (personal grant, assignment, own row): decided individually";
+    ManyRows => "full.many_rows", "More than 32 changed rows of one collection's table";
+}
+
+const PATH_COUNT: usize = PATHS.len();
+#[allow(clippy::declare_interior_mutable_const)]
+const ZERO: AtomicU64 = AtomicU64::new(0);
+static PATH_COUNTS: [AtomicU64; PATH_COUNT] = [ZERO; PATH_COUNT];
+
+/// Counts one connection's feed step (`Path`).
+pub fn count(path: Path) {
+    PATH_COUNTS[path as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Counts per path since start, indexed by `Path as usize`.
+pub fn path_counts() -> [u64; PATH_COUNT] {
+    std::array::from_fn(|index| PATH_COUNTS[index].load(Ordering::Relaxed))
+}
+
+/// `/dev/profile` `deliveryCoverage`: per path its count, plus the shared
+/// and individual (full path) per-connection time histograms.
+pub fn coverage_json() -> serde_json::Value {
+    let counts = path_counts();
+    let shared: u64 = counts[..2].iter().sum();
+    let total: u64 = counts.iter().sum();
+    serde_json::json!({
+        "total": total,
+        "shared": shared,
+        "sharedFraction": if total == 0 { 0.0 } else { shared as f64 / total as f64 },
+        "paths": PATHS.iter().zip(counts).map(|((name, doc), count)| serde_json::json!({
+            "path": name, "count": count, "doc": doc,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// (connections served without the full path, outcomes recorded, of the
 /// served connections those whose outcome decided rows), process totals
 /// (tests and benchmarks).
@@ -317,15 +383,15 @@ fn indexes_ready_now(resolved: &ResolvedVisibility, revision: u64, epoch: &str) 
             .all(|index| crate::visibility_index::ready_now(index, revision, epoch) == Some(true))
 }
 
-/// The connection's shape for this event, or None when some subscription
-/// needs its own decisions (see the module documentation). Does not change
-/// any subscription state except its cached keys.
+/// The connection's shape for this event, or why some subscription needs
+/// its own decisions (see the module documentation). Does not change any
+/// subscription state except its cached keys.
 pub(crate) fn shape(
     subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
     share: &EventShare,
     epoch: &str,
     revision: u64,
-) -> Option<Shape> {
+) -> Result<Shape, Path> {
     let layout = share.layout.get_or_init(|| layout(share.changes()));
     let changes = share.changes();
     // Cheap static checks first: a connection with a collection the fan-out
@@ -333,7 +399,7 @@ pub(crate) fn shape(
     // per-row work.
     for subscription in subscriptions.values_mut() {
         if revision > subscription.cursor.revision && !keys(subscription).shareable {
-            return None;
+            return Err(static_reason(&subscription.visibility));
         }
     }
     let mut shape: Shape = Vec::with_capacity(subscriptions.len());
@@ -341,19 +407,23 @@ pub(crate) fn shape(
     for subscription in subscriptions.values_mut() {
         let keys = keys(subscription);
         if shape.iter().any(|entry| entry.identity == keys.identity) {
-            return None;
+            return Err(Path::DuplicateStream);
         }
         let touched = layout.tables.contains(&subscription.definition.table);
         let state = if revision <= subscription.cursor.revision {
             State::Ahead
         } else {
-            if !keys.shareable
-                || layout.tables.iter().any(|table| keys.slow.contains(table))
-                || ((!subscription.resolved.indexes.is_empty()
-                    || !subscription.resolved.inherited.is_empty())
-                    && !indexes_ready_now(&subscription.resolved, revision, epoch))
+            if !keys.shareable {
+                return Err(static_reason(&subscription.visibility));
+            }
+            if layout.tables.iter().any(|table| keys.slow.contains(table)) {
+                return Err(Path::SlowTable);
+            }
+            if (!subscription.resolved.indexes.is_empty()
+                || !subscription.resolved.inherited.is_empty())
+                && !indexes_ready_now(&subscription.resolved, revision, epoch)
             {
-                return None;
+                return Err(Path::IndexWaiting);
             }
             if touched {
                 // Shared deltas carry the representative's cursor.
@@ -361,7 +431,7 @@ pub(crate) fn shape(
                     || (!subscription.resolved.indexes.is_empty()
                         && visibility::indexes_ahead(&subscription.resolved, revision))
                 {
-                    return None;
+                    return Err(Path::CursorEpoch);
                 }
                 State::Apply
             } else {
@@ -382,12 +452,12 @@ pub(crate) fn shape(
         // it holds the row (normalization); both read its class only when
         // its member is not hit and its window is complete.
         if subscription.window.truncated {
-            return None;
+            return Err(Path::Truncated);
         }
         let Some(crate::visibility_class::MemberHandle::Compiled(member)) =
             subscription.mask.peek()
         else {
-            return None;
+            return Err(Path::NotCompiled);
         };
         let memo = memo.get_or_insert_with(|| share.memo.lock().unwrap());
         let mut visible = 0u64;
@@ -397,13 +467,15 @@ pub(crate) fn shape(
                 continue;
             }
             if row == 32 {
-                return None;
+                return Err(Path::ManyRows);
             }
             let old = &changes[*first].old_value;
             let new = &changes[*last].new_value;
             // Not hit: the class default, evaluated once per class and row.
-            let old_visible = !old.is_null() && member.class_default_memo(memo, old)?;
-            let new_visible = !new.is_null() && member.class_default_memo(memo, new)?;
+            let old_visible =
+                !old.is_null() && member.class_default_memo(memo, old).ok_or(Path::Hit)?;
+            let new_visible =
+                !new.is_null() && member.class_default_memo(memo, new).ok_or(Path::Hit)?;
             visible |= (u64::from(old_visible) | u64::from(new_visible) << 1) << (2 * row);
             row += 1;
         }
@@ -415,7 +487,16 @@ pub(crate) fn shape(
             identity: keys.identity,
         });
     }
-    Some(shape)
+    Ok(shape)
+}
+
+/// Why a plan never takes the shared path (static).
+fn static_reason(plan: &VisibilityPlan) -> Path {
+    if plan.version == Some(2) {
+        Path::Inherited
+    } else {
+        Path::Legacy
+    }
 }
 
 /// Records what the full path did for one subscription of a shape.
@@ -534,12 +615,11 @@ impl Recorder {
 
 impl Runtime {
     /// Delivery v4: serves a batch connection from the shared outcome of its
-    /// shape, when one was recorded for this event. None: not served (the
+    /// shape, when one was recorded for this event. `Miss`: not served (the
     /// caller runs the full path, which may record the outcome). On
-    /// `Some(Ok)` the connection's frames for the event are in `batch`
-    /// (except its watermark, which the caller adds as before).
-    /// [`Self::fan_out_hit`], also saying on a miss whether the full path
-    /// should record an outcome (the connection has a shape).
+    /// `Served(Ok)` the connection's frames for the event are in `batch`
+    /// (except its watermark, which the caller adds as before). Counts the
+    /// decision (`Path`) once.
     pub(crate) fn fan_out(
         &self,
         session: &TenantSession,
@@ -549,21 +629,26 @@ impl Runtime {
         batch: &mut OutboundBatch,
         native: bool,
     ) -> FanOut {
-        let mut eligible = false;
-        match self.fan_out_inner(
-            session,
-            subscriptions,
-            event,
-            batcher,
-            batch,
-            native,
-            &mut eligible,
-        ) {
-            Some(result) => FanOut::Served(result),
-            None => FanOut::Miss { record: eligible },
+        let mut timer = gonvex_profiler::Timer::start();
+        match self.fan_out_inner(session, subscriptions, event, batcher, batch, native) {
+            Ok((path, result)) => {
+                timer.lap(
+                    gonvex_profiler::Stage::DeliveryShared,
+                    gonvex_profiler::Label::None,
+                );
+                count(path);
+                FanOut::Served(result)
+            }
+            Err(path) => {
+                count(path);
+                FanOut::Miss {
+                    record: path == Path::Representative,
+                }
+            }
         }
     }
 
+    /// [`Self::fan_out`] without counting; None on a miss.
     pub fn fan_out_hit(
         &self,
         session: &TenantSession,
@@ -573,18 +658,12 @@ impl Runtime {
         batch: &mut OutboundBatch,
         native: bool,
     ) -> Option<Result<(), DeliveryError>> {
-        let mut eligible = false;
-        self.fan_out_inner(
-            session,
-            subscriptions,
-            event,
-            batcher,
-            batch,
-            native,
-            &mut eligible,
-        )
+        self.fan_out_inner(session, subscriptions, event, batcher, batch, native)
+            .ok()
+            .map(|(_, result)| result)
     }
 
+    /// Served: (`SharedAdvance` / `SharedData`, result); else why not.
     #[allow(clippy::too_many_arguments)]
     fn fan_out_inner(
         &self,
@@ -594,25 +673,34 @@ impl Runtime {
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
         native: bool,
-        eligible: &mut bool,
-    ) -> Option<Result<(), DeliveryError>> {
+    ) -> Result<(Path, Result<(), DeliveryError>), Path> {
         let FeedEvent::Transaction {
             database_epoch,
             revision,
             changes,
         } = event
         else {
-            return None;
+            return Err(Path::NotBatch);
         };
         if !enabled() || !batcher.enabled() || subscriptions.is_empty() {
-            return None;
+            return Err(Path::NotBatch);
         }
         let tenant = self.inner.delivery.tenant(&session.route.tenant_id);
-        let share = tenant.events.share(database_epoch, *revision, changes)?;
+        let share = tenant
+            .events
+            .share(database_epoch, *revision, changes)
+            .ok_or(Path::NoShare)?;
         let shape = shape(subscriptions, &share, database_epoch, *revision)?;
-        *eligible = true;
         let outcome = if shape.iter().any(|entry| entry.state == State::Apply) {
-            Some(share.outcomes.lock().unwrap().get(&shape).cloned()?)
+            Some(
+                share
+                    .outcomes
+                    .lock()
+                    .unwrap()
+                    .get(&shape)
+                    .cloned()
+                    .ok_or(Path::Representative)?,
+            )
         } else {
             // Nothing decides a row: cursors advance, no frame (the full path
             // would produce none either).
@@ -625,7 +713,7 @@ impl Runtime {
                 if let SubOutcome::Delta(delta) = sub {
                     if !batcher.default_binding(id, crate::delivery::stream_identity(subscription))
                     {
-                        return None;
+                        return Err(Path::ServeRejected);
                     }
                     if subscription.bounded() {
                         let rows = subscription.window.rows as isize + delta.rows;
@@ -635,7 +723,7 @@ impl Runtime {
                             || (subscription.definition.max_bytes > 0
                                 && bytes > subscription.definition.max_bytes)
                         {
-                            return None;
+                            return Err(Path::ServeRejected);
                         }
                     }
                 }
@@ -648,11 +736,11 @@ impl Runtime {
                     subscription.cursor.revision = *revision;
                 }
             }
-            return Some(Ok(()));
+            return Ok((Path::SharedAdvance, Ok(())));
         };
         DATA_HITS.fetch_add(1, Ordering::Relaxed);
         let Some(texts) = outcome.texts(native) else {
-            return Some(Err(DeliveryError));
+            return Ok((Path::SharedData, Err(DeliveryError)));
         };
         let tenant_id = session.route.tenant_id.as_str();
         if let Some(text) = &texts.transaction {
@@ -707,7 +795,7 @@ impl Runtime {
                         Arc::clone(item),
                         tail,
                     ) {
-                        return Some(Err(DeliveryError));
+                        return Ok((Path::SharedData, Err(DeliveryError)));
                     }
                     let mut ready = Vec::with_capacity(prefix.len() + digest.len() + suffix.len());
                     ready.extend_from_slice(prefix);
@@ -715,12 +803,12 @@ impl Runtime {
                     ready.extend_from_slice(suffix);
                     if !batcher.push_ready(batch, tenant_id, subscriptions, id, Bytes::from(ready))
                     {
-                        return Some(Err(DeliveryError));
+                        return Ok((Path::SharedData, Err(DeliveryError)));
                     }
                 }
             }
         }
-        Some(Ok(()))
+        Ok((Path::SharedData, Ok(())))
     }
 }
 
