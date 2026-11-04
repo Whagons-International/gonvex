@@ -191,7 +191,27 @@ gonvex-admin export-sqlite \
 #   --sample-rows N               rows compared per table (default 200; 0 = off)
 #   --source-url-map FROM=TO      rewrite a source URL prefix (e.g. a Docker host)
 #   --report FILE                 also write the JSON report to FILE
+#   --preflight                   plan every database, copy nothing (below)
+#   --resume                      keep files an earlier run verified (below)
 ```
+
+**Preflight.** `--preflight` builds the SQLite schema in a throwaway
+directory, plans every database against its source snapshot and reports every
+mismatch at once (missing required columns, Postgres-only columns and tables
+with their row counts, what `--allow-drop-*` would skip), then exits. It copies
+nothing and does not touch `--data-dir`. Run it first on a production
+migration and settle every finding before the real export.
+
+**Resume.** A database file whose copy verified cleanly gets a `.export-ok`
+marker next to it. `--resume` keeps marked files (reported as `resumed`) and
+replaces only the others, so a run that failed halfway does not redo the
+databases it finished. Use it only while the source is still stopped; `--force`
+without `--resume` replaces every file and its marker.
+
+**Module manifests.** `gonvex_runtime_manifests` is not copied: a Postgres-era
+module artifact carries Postgres migrations the SQLite runtime would try to
+apply. Deploy the module again after the export; until then the runtime starts
+with no active module.
 
 Stop the Postgres runtime first. The tool reads each source database in one
 `REPEATABLE READ READ ONLY` snapshot, holds the data-directory lock while it
@@ -245,9 +265,12 @@ encoding.
 **Triggers.** Change-capture, reference-staging and membership-projection
 triggers are dropped for the copy (so copied rows create no change, staging or
 outbox rows) and restored verbatim in the same transaction. Application
-triggers stay active (FTS indexes fill as rows arrive); an application trigger
-that writes into another copied table makes that copy fail with a duplicate
-key. After the copy the store's installer runs again and must accept every
+triggers stay active (FTS indexes fill as rows arrive). A table that an
+application trigger on another copied table writes into (a projection such as
+`taskGridRows`) is copied after the tables whose triggers write it: its copy
+deletes what the triggers derived mid-copy and inserts the source rows, so it
+matches the source exactly. The report lists these moves under
+`copyOrderAdjustments`; tables in a trigger cycle keep their order. After the copy the store's installer runs again and must accept every
 file as current.
 
 **Reference ledger.** The catalog the SQLite migrations declared (or, if they
