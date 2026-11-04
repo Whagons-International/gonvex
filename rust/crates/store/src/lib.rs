@@ -41,9 +41,9 @@ pub mod rows;
 pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
-    database_path, database_url, sqlite_cache_budget_mib, sqlite_memory_used, AdmissionPermit,
-    DatabaseListener, Durability, KeyedLock, Notification, PoolLimits, PoolRegistry,
-    PoolRegistrySnapshot, WriterQueue, WriterStats,
+    database_path, database_url, sqlite_cache_budget_mib, sqlite_connection_heap,
+    sqlite_memory_used, AdmissionPermit, DatabaseListener, Durability, KeyedLock, Notification,
+    PoolLimits, PoolRegistry, PoolRegistrySnapshot, WriterQueue, WriterStats,
 };
 
 mod provision;
@@ -1298,7 +1298,7 @@ pub async fn begin_transaction(
     let database = pools.database(database_url).await?;
     let (transaction, statements, writer_held) = if read_only {
         let mut timer = Timer::start();
-        let transaction = database.reader.begin().await?;
+        let transaction = pools.begin_read(&database).await?;
         timer.lap(Stage::ReaderBegin, Label::None);
         (transaction, None, None)
     } else {

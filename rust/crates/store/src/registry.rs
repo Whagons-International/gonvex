@@ -20,6 +20,8 @@ const DEFAULT_MAX_TOTAL_CONNECTIONS: usize = 64;
 const MAX_TOTAL_CONNECTIONS: usize = 256;
 const DEFAULT_READERS_PER_DATABASE: u32 = 4;
 const NOTIFY_CAPACITY: usize = 4096;
+const DEFAULT_WARM_READER_MS: u64 = 10 * 60 * 1000;
+const DEFAULT_READER_PATIENCE_MS: u64 = 25;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PoolLimits {
@@ -28,7 +30,23 @@ pub struct PoolLimits {
     /// Read-only connections per database file. Writes always use one writer.
     pub max_connections_per_database: u32,
     pub max_idle_connections_per_database: u32,
+    /// A database's readers beyond the warm one close once none of them has
+    /// been used for this long.
     pub idle_timeout: Duration,
+    /// One reader stays open (warm) while the database had a read within this
+    /// window, so crons and page loads after a quiet spell do not pay a
+    /// connection open plus a full schema parse (2.9 MB, ~30 ms of CPU for
+    /// the Whagons tenant schema). `GONVEX_DB_WARM_READER_MS`, default 10
+    /// minutes; zero closes every reader after `idle_timeout`. Warm readers
+    /// count against `GONVEX_SQLITE_CACHE_BUDGET_MB` (see `sweep_readers`).
+    pub warm_reader_window: Duration,
+    /// A read transaction that finds every open reader busy waits up to this
+    /// long for one to be released before opening another
+    /// (`GONVEX_DB_READER_PATIENCE_MS`, default 25; zero opens at once). An
+    /// open parses the whole schema (~30 ms of CPU, seconds when a burst of
+    /// opens shares one vCPU), while most reads take well under a
+    /// millisecond, so a page load's burst of reads shares the warm reader.
+    pub reader_patience: Duration,
     pub acquire_timeout: Duration,
 }
 
@@ -39,6 +57,14 @@ impl Default for PoolLimits {
             max_connections_per_database: DEFAULT_READERS_PER_DATABASE,
             max_idle_connections_per_database: DEFAULT_READERS_PER_DATABASE,
             idle_timeout: Duration::from_secs(600),
+            warm_reader_window: Duration::from_millis(env_u64(
+                "GONVEX_DB_WARM_READER_MS",
+                DEFAULT_WARM_READER_MS,
+            )),
+            reader_patience: Duration::from_millis(env_u64(
+                "GONVEX_DB_READER_PATIENCE_MS",
+                DEFAULT_READER_PATIENCE_MS,
+            )),
             acquire_timeout: Duration::from_secs(30),
         }
     }
@@ -129,6 +155,110 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(default)
+}
+
+/// Milliseconds since this process first asked (monotonic).
+fn now_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let elapsed = EPOCH.get_or_init(std::time::Instant::now).elapsed();
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn sweep_interval(limits: &PoolLimits) -> Duration {
+    let shortest = if limits.warm_reader_window.is_zero() {
+        limits.idle_timeout
+    } else {
+        limits.idle_timeout.min(limits.warm_reader_window)
+    };
+    (shortest / 4).clamp(Duration::from_millis(50), Duration::from_secs(5))
+}
+
+/// SQLite heap that closing connections would free but page-cache eviction
+/// would not: parsed schemas and prepared statements (2.9 MB of schema per
+/// Whagons tenant connection). Page-cache bytes are excluded; past the soft
+/// heap limit SQLite recycles those by itself.
+pub fn sqlite_connection_heap() -> i64 {
+    let (mut cache, mut high) = (0i64, 0i64);
+    unsafe {
+        libsqlite3_sys::sqlite3_status64(
+            libsqlite3_sys::SQLITE_STATUS_PAGECACHE_OVERFLOW,
+            &mut cache,
+            &mut high,
+            0,
+        );
+    }
+    sqlite_memory_used().saturating_sub(cache)
+}
+
+/// Closes idle readers of `pool` until at most `keep` connections remain.
+async fn close_idle_readers(pool: &SqlitePool, keep: usize) {
+    while pool.num_idle() > 0 && pool.size() as usize > keep {
+        // Never opens a connection: `None` when none is idle.
+        let Some(connection) = pool.try_acquire() else {
+            return;
+        };
+        let _ = connection.close().await;
+    }
+}
+
+/// Reader retention, run every [`sweep_interval`]:
+///
+/// * read within `idle_timeout`: up to `max_idle_connections_per_database`;
+/// * read within `warm_reader_window`: one warm reader;
+/// * otherwise: none.
+///
+/// Warm readers count against the SQLite budget: while connection heap
+/// (schemas and statements) exceeds three quarters of
+/// `GONVEX_SQLITE_CACHE_BUDGET_MB`, the least recently read databases lose
+/// their warm reader first, then busy databases their idle extra readers.
+/// The remaining quarter is left to page caches.
+async fn sweep_readers(databases: &[Database], limits: &PoolLimits) {
+    let now = now_ms();
+    let busy_ms = u64::try_from(limits.idle_timeout.as_millis()).unwrap_or(u64::MAX);
+    let warm_ms = u64::try_from(limits.warm_reader_window.as_millis()).unwrap_or(u64::MAX);
+    let mut warm = Vec::new();
+    let mut busy = Vec::new();
+    for database in databases {
+        let used = database.reader_used.load(Ordering::Relaxed);
+        let idle_for = now.saturating_sub(used);
+        let keep = if idle_for < busy_ms {
+            limits.max_idle_connections_per_database as usize
+        } else if idle_for < warm_ms {
+            1
+        } else {
+            0
+        };
+        close_idle_readers(&database.reader, keep).await;
+        if database.reader.num_idle() > 0 {
+            if idle_for < busy_ms {
+                busy.push((used, database));
+            } else {
+                warm.push((used, database));
+            }
+        }
+    }
+    let budget = sqlite_cache_budget_mib().saturating_mul(1024 * 1024);
+    if budget == 0 || (warm.is_empty() && busy.is_empty()) {
+        return;
+    }
+    let allowance = i64::try_from(budget / 4 * 3).unwrap_or(i64::MAX);
+    if sqlite_connection_heap() <= allowance {
+        return;
+    }
+    warm.sort_by_key(|(used, _)| *used);
+    for (_, database) in warm {
+        close_idle_readers(&database.reader, 0).await;
+        if sqlite_connection_heap() <= allowance {
+            return;
+        }
+    }
+    busy.sort_by_key(|(used, _)| *used);
+    for (_, database) in busy {
+        close_idle_readers(&database.reader, 1).await;
+        if sqlite_connection_heap() <= allowance {
+            return;
+        }
+    }
 }
 
 /// A notification published on one database's in-process channel.
@@ -263,6 +393,8 @@ pub(crate) struct Database {
     pub(crate) writer: SqlitePool,
     pub(crate) writer_stats: Arc<WriterStats>,
     pub(crate) reader: SqlitePool,
+    /// When a reader connection was last released ([`now_ms`]).
+    reader_used: Arc<AtomicU64>,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Batched WAL syncs for `Durability::Full` (see `sync_barrier`).
@@ -284,6 +416,8 @@ pub struct PoolRegistry {
     // initializer, never across file I/O, so a slow or suspended open of one
     // file cannot block lookups of every other database.
     databases: Arc<std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::OnceCell<Database>>>>>,
+    /// Set once the reader sweeper task runs (started by the first open).
+    sweeper: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Guard for a keyed in-process lock (replaces `pg_advisory_lock`).
@@ -332,6 +466,7 @@ impl PoolRegistry {
             admission_wait_us: Arc::default(),
             admission_wait_max_us: Arc::default(),
             databases: Arc::default(),
+            sweeper: Arc::default(),
             durability,
             limits,
         }
@@ -349,12 +484,17 @@ impl PoolRegistry {
             // Serialized mode: direct sessions finalize their cached
             // statements on the writer from any thread (see `direct`).
             options = options.journal_mode(SqliteJournalMode::Wal).serialized(true);
-        }
-        let options = options
             // COMMIT never syncs while holding the single writer; Full
             // durability is provided by waiting on the database's batched
-            // WAL sync before a commit is acknowledged (`durable`).
-            .synchronous(SqliteSynchronous::Normal)
+            // WAL sync before a commit is acknowledged (`durable`). Readers
+            // never commit, so they skip it.
+            options = options.synchronous(SqliteSynchronous::Normal);
+        }
+        // sqlx sends every pragma below in one batch when a connection
+        // opens. The first one that needs the schema (any but
+        // `foreign_keys`) parses the whole schema of the file: that parse is
+        // nearly all of a connection's setup cost, hence warm readers.
+        let options = options
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5))
             // Private page cache per connection. Many tenants times several
@@ -424,26 +564,62 @@ impl PoolRegistry {
             })
             .connect_with(self.options(&path, false)?)
             .await?;
+        let reader_used = Arc::new(AtomicU64::new(now_ms()));
+        let released = reader_used.clone();
+        // Readers close through `sweep_readers`, which knows when the
+        // database as a whole was last read; sqlx's per-connection idle
+        // timer would close the warm reader too.
         let reader = SqlitePoolOptions::new()
             .max_connections(self.limits.max_connections_per_database)
             .min_connections(0)
-            .idle_timeout(Some(self.limits.idle_timeout))
+            .idle_timeout(None)
             .max_lifetime(None)
             .test_before_acquire(false)
             .acquire_timeout(self.limits.acquire_timeout)
+            .after_release(move |_, _| {
+                released.store(now_ms(), Ordering::Relaxed);
+                Box::pin(async { Ok(true) })
+            })
             .connect_lazy_with(self.options(&path, true)?);
+        self.start_sweeper();
         let (notify, _) = broadcast::channel(NOTIFY_CAPACITY);
         let database = Database {
             statements: crate::direct::WriterStatements::new(),
             writer,
             writer_stats: Arc::default(),
             reader,
+            reader_used,
             notify,
             locks: Arc::default(),
             sync: crate::sync_barrier::SyncBarrier::new(&path),
             wal,
         };
         Ok(database)
+    }
+
+    fn start_sweeper(&self) {
+        if self.sweeper.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let databases = Arc::downgrade(&self.databases);
+        let limits = self.limits.clone();
+        tokio::spawn(async move {
+            let interval = sweep_interval(&limits);
+            loop {
+                tokio::time::sleep(interval).await;
+                let Some(map) = databases.upgrade() else {
+                    return;
+                };
+                let open: Vec<Database> = map
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter_map(|cell| cell.get().cloned())
+                    .collect();
+                drop(map);
+                sweep_readers(&open, &limits).await;
+            }
+        });
     }
 
     fn open_databases(&self) -> Vec<Database> {
@@ -475,6 +651,32 @@ impl PoolRegistry {
         database_url: &str,
     ) -> Result<crate::direct::StatementStats, DatabaseError> {
         Ok(self.database(database_url).await?.statements.stats())
+    }
+
+    /// Opens a read transaction on `database`, preferring an open reader
+    /// released within [`PoolLimits::reader_patience`] over opening another.
+    pub(crate) async fn begin_read(
+        &self,
+        database: &Database,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, DatabaseError> {
+        let reader = &database.reader;
+        let patience = self.limits.reader_patience;
+        if !patience.is_zero() && reader.num_idle() == 0 && reader.size() > 0 {
+            let deadline = std::time::Instant::now() + patience;
+            loop {
+                // `try_acquire` never opens a connection.
+                if let Some(connection) = reader.try_acquire() {
+                    return Ok(sqlx::Transaction::begin(connection, None).await?);
+                }
+                if reader.size() == 0 || std::time::Instant::now() >= deadline {
+                    break;
+                }
+                // A released connection becomes idle after sqlx's release
+                // ping, a worker round trip; poll rather than chase it.
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        Ok(reader.begin().await?)
     }
 
     /// The read-only pool. Each transaction sees one WAL snapshot.
