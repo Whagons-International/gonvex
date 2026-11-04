@@ -1849,7 +1849,7 @@ pub enum RowDecision {
 /// `Value::Null` when absent) for a window. `before` is the principal the
 /// client's rows were authorized with (with `overlay` restoring the parents'
 /// before-images); `after` the principal after the event.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn decide_row(
     definition: &ReplicaCollectionDefinition,
     args: &Value,
@@ -1878,7 +1878,7 @@ pub fn decide_row(
 /// `decide_row` with a compiled visibility check: `compiled(row, is_old)`
 /// answers the row's visibility (collection filters are applied here), or
 /// None to use the interpreted evaluator.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn decide_row_with(
     definition: &ReplicaCollectionDefinition,
     args: &Value,
@@ -1968,6 +1968,7 @@ pub(crate) fn decide_row_with(
 /// One row's transition for one subscription. Returns false when the window
 /// cannot be maintained from the images alone.
 /// A subscription's compiled binding and the event's memo.
+#[allow(clippy::type_complexity)]
 struct Compiled<'a> {
     memo: &'a mut crate::visibility_class::EvalMemo,
     handle: &'a crate::visibility_class::MemberHandle,
@@ -2329,12 +2330,11 @@ pub(crate) async fn declared_columns<'a>(
     definition: &ReplicaCollectionDefinition,
     columns: impl Iterator<Item = &'a String>,
 ) -> Result<Vec<(String, gonvex_store::rows::JsonKind)>, ReplicaError> {
-    let declared =
-        gonvex_store::rows::table_columns(&mut **transaction.transaction(), &definition.table)
-            .await?
-            .into_iter()
-            .map(|column| (column.name.clone(), column.kind()))
-            .collect::<BTreeMap<_, _>>();
+    let declared = gonvex_store::rows::table_columns(transaction.transaction(), &definition.table)
+        .await?
+        .into_iter()
+        .map(|column| (column.name.clone(), column.kind()))
+        .collect::<BTreeMap<_, _>>();
     columns
         .map(|column| {
             quote(column)?;
@@ -2473,6 +2473,9 @@ impl<'d> WindowCollector<'d> {
         if boundary.is_some() {
             self.last = boundary;
         }
+        // Ends the attribution scope (a no-op type unless raw-site profiling
+        // is compiled in).
+        #[allow(clippy::drop_non_drop)]
         drop(_site);
         visit(ScannedRow { key, hash, row })?;
         Ok(true)
@@ -4026,7 +4029,11 @@ mod tests {
         // only the final membership is published.
         let mut definition = collection(serde_json::json!({"excludeWhenSet":["deletedAt"]}));
         definition.columns.push("deletedAt".into());
-        let mut subscription = holding(definition, serde_json::json!({}), &[row.clone()]);
+        let mut subscription = holding(
+            definition,
+            serde_json::json!({}),
+            std::slice::from_ref(&row),
+        );
         let mut client = BTreeMap::from([("1".to_owned(), row.clone())]);
         let mut edited = row.clone();
         edited["title"] = "edited".into();

@@ -64,13 +64,13 @@ fn main() {
     let bare_poll = per_op(N, || {
         for _ in 0..N {
             let mut future = std::pin::pin!(Ready);
-            black_box(future.as_mut().poll(&mut context));
+            let _ = black_box(future.as_mut().poll(&mut context));
         }
     });
     let instrumented_poll = per_op(N, || {
         for _ in 0..N {
             let mut future = std::pin::pin!(instrument(TaskKind::Other, Ready));
-            black_box(future.as_mut().poll(&mut context));
+            let _ = black_box(future.as_mut().poll(&mut context));
         }
     });
     let slot = gonvex_profiler::function::register("bench", "presence.beat");

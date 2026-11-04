@@ -423,7 +423,7 @@ async fn worker_loop(
         served += 1;
         let gc = isolate.gc.values();
         tally.update(&mut isolate.runtime, gc, served);
-        if heap_stats_enabled() && (served == 1 || served % 200 == 0) {
+        if heap_stats_enabled() && (served == 1 || served.is_multiple_of(200)) {
             log_heap_statistics(
                 &mut isolate.runtime,
                 &source.specifier,

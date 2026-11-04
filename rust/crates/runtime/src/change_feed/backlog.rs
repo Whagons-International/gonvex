@@ -169,6 +169,7 @@ pub(crate) fn change_bytes(change: &LogChange) -> usize {
         .sum::<usize>()
 }
 
+#[allow(clippy::type_complexity)]
 struct StoreState {
     /// (revision, images, estimated bytes, unread token of its signal).
     entries: VecDeque<(u64, Arc<Vec<LogChange>>, usize, Weak<()>)>,
@@ -199,6 +200,7 @@ pub(crate) struct FeedStore {
 /// first while the process-wide refill bytes exceed
 /// `GONVEX_FEED_REFILL_BYTES` (default 32 MiB).
 #[derive(Default)]
+#[allow(clippy::type_complexity)]
 struct Refilled {
     next: std::collections::HashMap<u64, (u64, Option<Arc<Vec<LogChange>>>)>,
     /// Insertion order: (cursor key, revision, bytes).

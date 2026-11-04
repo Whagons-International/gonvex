@@ -596,7 +596,7 @@ async fn reducer_write(pools: &PoolRegistry, url: &str, writer: usize, step: u64
         let session = tx.direct().await.unwrap();
         session
             .run(|conn| {
-                if step % 10 == 0 {
+                if step.is_multiple_of(10) {
                     let id = ((writer as i64 * 7919 + step as i64) % TASK_ROWS) + 1;
                     conn.query_i64(
                         "SELECT length(status) FROM tasks WHERE id = $1",
@@ -607,7 +607,11 @@ async fn reducer_write(pools: &PoolRegistry, url: &str, writer: usize, step: u64
                     conn.execute(
                         "UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3",
                         &[
-                            Bind::Text(if step % 20 == 0 { "doing" } else { "done" }),
+                            Bind::Text(if step.is_multiple_of(20) {
+                                "doing"
+                            } else {
+                                "done"
+                            }),
                             Bind::Integer(now),
                             Bind::Integer(id),
                         ],
@@ -635,7 +639,7 @@ async fn reducer_write(pools: &PoolRegistry, url: &str, writer: usize, step: u64
         tx.commit_with_revision().await.unwrap();
         return;
     }
-    if step % 10 == 0 {
+    if step.is_multiple_of(10) {
         let id = ((writer as i64 * 7919 + step as i64) % TASK_ROWS) + 1;
         sqlx::query("SELECT status FROM tasks WHERE id = $1")
             .bind(id)
@@ -643,7 +647,11 @@ async fn reducer_write(pools: &PoolRegistry, url: &str, writer: usize, step: u64
             .await
             .unwrap();
         sqlx::query("UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3")
-            .bind(if step % 20 == 0 { "doing" } else { "done" })
+            .bind(if step.is_multiple_of(20) {
+                "doing"
+            } else {
+                "done"
+            })
             .bind(now)
             .bind(id)
             .execute(&mut **tx.transaction())
@@ -982,7 +990,6 @@ async fn cache() {
         let mut tasks = Vec::new();
         for r in 0..readers {
             let (pools, url) = (pools.clone(), urls[0].clone());
-            let big = big;
             tasks.push(tokio::spawn(async move {
                 let pool = pools.reader(&url).await.unwrap();
                 let mut lat = Vec::new();

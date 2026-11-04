@@ -352,7 +352,9 @@ const HIST: Hist = Hist {
 };
 #[allow(clippy::declare_interior_mutable_const)]
 const HIST_SHARDS: [Hist; SHARDS] = [HIST; SHARDS];
-#[allow(clippy::declare_interior_mutable_const)]
+// Only used as the zero initializer of the static below (evaluated at
+// compile time into .bss), never copied at run time.
+#[allow(clippy::declare_interior_mutable_const, clippy::large_const_arrays)]
 const HIST_LABELS: [[Hist; SHARDS]; LABEL_COUNT] = [HIST_SHARDS; LABEL_COUNT];
 
 /// `[stage][label][shard]`, zero-initialised in .bss: pages that are never
@@ -881,7 +883,7 @@ pub fn long_polls() -> Vec<LongPoll> {
             },
         });
     }
-    out.sort_by(|a, b| b.seq.cmp(&a.seq));
+    out.sort_by_key(|entry| std::cmp::Reverse(entry.seq));
     out
 }
 
@@ -1110,7 +1112,7 @@ pub fn slow_traces() -> (Vec<SlowTrace>, u64) {
             });
         }
     }
-    out.sort_by(|a, b| b.seq.cmp(&a.seq));
+    out.sort_by_key(|entry| std::cmp::Reverse(entry.seq));
     (out, TRACE_SEQ.load(Relaxed))
 }
 

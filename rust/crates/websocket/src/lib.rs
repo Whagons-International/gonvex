@@ -9,7 +9,7 @@ pub use connection::{
 use connection::{Outbound, Shared, Watched, Writer};
 use frame_limits::FrameLimits;
 use futures_util::{SinkExt, StreamExt};
-use shared::{deflate_segment, COMPRESSION_LEVEL};
+use shared::deflate_segment;
 pub use shared::{BatchFrame, OutboundBatch, Segment, SharedText};
 use std::{
     future::Future,
@@ -443,7 +443,7 @@ pub fn perf_compress_text_fresh(
         return Ok(None);
     }
     let mut codec = flate2::Compress::new_with_window_bits(
-        flate2::Compression::new(COMPRESSION_LEVEL),
+        flate2::Compression::new(shared::COMPRESSION_LEVEL),
         false,
         window_bits,
     );

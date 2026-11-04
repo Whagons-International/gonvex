@@ -1879,6 +1879,7 @@ fn shared_parent_resolution(
     resolved: ResolvedVisibility,
 ) -> Arc<ResolvedVisibility> {
     type Key = (String, String, String, u64);
+    #[allow(clippy::type_complexity)]
     static SHARED: std::sync::OnceLock<
         std::sync::Mutex<(
             BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>,
@@ -3403,7 +3404,7 @@ mod tests {
             (Value::Null, own.clone()),
             (own.clone(), Value::Null),
             (own.clone(), other.clone()),
-            (other.clone(), own.clone()),
+            (other, own),
         ] {
             assert!(plan.change_concerns_member(&member, "taskUsers", &old, &new));
         }
@@ -4366,7 +4367,7 @@ mod mask_tests {
         let mut context = base.clone();
         context["where"] = json!([{"column": "createdBy", "context": "member.id"}]);
         with(context).validate().unwrap();
-        let mut joined = base.clone();
+        let mut joined = base;
         joined["where"] = json!([{"table": "other", "column": "x", "value": {"literal": 1}}]);
         assert!(
             with(joined).validate().is_err(),

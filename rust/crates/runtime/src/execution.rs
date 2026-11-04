@@ -1195,10 +1195,7 @@ impl Runtime {
         permit: crate::action_gate::ActionPermit,
     ) {
         let mut provenance =
-            match serde_json::from_value::<InvocationProvenance>(claimed.provenance.clone()) {
-                Ok(provenance) => Some(provenance),
-                Err(_) => None,
-            };
+            serde_json::from_value::<InvocationProvenance>(claimed.provenance.clone()).ok();
         if let Some(provenance) = provenance.as_mut() {
             if let Err(error) = provenance.durable_hop(max_durable_hops()) {
                 // A loop guard, not a transient failure: retrying would only
@@ -1971,9 +1968,11 @@ mod tests {
         let tracker = CommittedRevisionTracker::default();
         assert_eq!(tracker.maximum(), None);
         tracker.observe(Some(17));
-        tracker.clone().observe(Some(9));
-        tracker.clone().observe(None);
-        tracker.clone().observe(Some(23));
+        // Nested reducers observe through clones that share one maximum.
+        let nested = tracker.clone();
+        nested.observe(Some(9));
+        nested.observe(None);
+        nested.observe(Some(23));
         assert_eq!(tracker.maximum(), Some(23));
     }
 
@@ -2010,7 +2009,7 @@ mod tests {
             .as_deref()
             .is_some_and(|id| id.starts_with("agent_")));
 
-        let mut untrusted_parent = direct.clone();
+        let mut untrusted_parent = direct;
         untrusted_parent.actor_account_id = Some("forged-account".to_owned());
         untrusted_parent.actor_member_id = Some("forged-member".to_owned());
         untrusted_parent.channel = InvocationChannel::System;

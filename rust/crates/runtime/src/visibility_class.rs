@@ -1754,6 +1754,7 @@ pub struct ClassScope {
 static NEXT_CLASS: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
+#[allow(clippy::type_complexity)]
 struct ClassIndex {
     /// (class set slot, token) → classes holding the token in that set.
     by_token: FxMap<(u16, u32), Vec<(u64, Weak<VisibilityClass>)>>,

@@ -565,7 +565,7 @@ pub(crate) fn member_value(row: &str, checked: &Checked, key: &str) -> Option<Va
 
 /// (raw-path hash, `Value`-path hash, whether the fast path applied) of a
 /// row (tests and the perf fixture).
-#[cfg(any(test, feature = "perf-fixture"))]
+#[cfg(feature = "perf-fixture")]
 pub(crate) fn hashes(row: &str) -> Result<(String, String, bool), serde_json::Error> {
     use sha2::{Digest, Sha256};
     let hex = |text: &str| -> String {

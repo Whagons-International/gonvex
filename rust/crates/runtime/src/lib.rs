@@ -1088,7 +1088,7 @@ async fn create_tenant_shard(
         Ok(tenant) => (StatusCode::CREATED, Json(tenant)).into_response(),
         Err(error) => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error":error.to_string()})),
+            Json(serde_json::json!({ "error": error })),
         )
             .into_response(),
     }
@@ -1904,6 +1904,8 @@ async fn websocket(
                     wake_key = replica::fanout::wake_key(&replicas);
                     registry.enter(slot, std::sync::Arc::clone(wake_interest.as_ref().unwrap()));
                 } else if !slot.active() {
+                    // Some: the `is_none()` check above was false.
+                    #[allow(clippy::unnecessary_unwrap)]
                     registry.enter(slot, std::sync::Arc::clone(wake_interest.as_ref().unwrap()));
                 }
                 wake_dirty = false;
