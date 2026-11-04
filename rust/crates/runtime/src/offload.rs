@@ -699,6 +699,7 @@ pub struct SnapshotPermit {
     reserved_kib: usize,
     key: Box<str>,
     table: Box<str>,
+    admitted: Instant,
 }
 
 impl SnapshotAdmission {
@@ -769,6 +770,7 @@ impl SnapshotAdmission {
             reserved_kib,
             key: key.into(),
             table: table.into(),
+            admitted: Instant::now(),
         }
     }
 
@@ -814,6 +816,11 @@ impl SnapshotPermit {
 impl Drop for SnapshotPermit {
     fn drop(&mut self) {
         self.admission.reserved_kib.fetch_sub(self.reserved_kib, Relaxed);
+        gonvex_profiler::record_duration(
+            gonvex_profiler::Stage::SnapshotPermitHold,
+            gonvex_profiler::Label::None,
+            self.admitted.elapsed(),
+        );
     }
 }
 

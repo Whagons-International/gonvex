@@ -211,6 +211,7 @@ stages! {
     WsWrite => "ws.write", "transport", "Outbound socket write (includes compression and backpressure)";
     // Snapshot path.
     SnapshotPermitWait => "snapshot.permit_wait", "snapshot", "Wait for the process-wide snapshot semaphore";
+    SnapshotPermitHold => "snapshot.permit_hold", "snapshot", "Snapshot permit held (admitted .. released): the build's service time under admission";
     SnapshotAcl => "snapshot.acl", "snapshot", "Parent ACL index preparation";
     SnapshotBegin => "snapshot.begin", "snapshot", "Read transaction open + clock read";
     SnapshotVisibility => "snapshot.visibility", "snapshot", "Visibility resolution for the subscriber";
