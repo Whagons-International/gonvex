@@ -110,7 +110,7 @@ fn parse_options() -> Result<Option<Options>, String> {
         max_concurrent_calls: 32,
         drain_timeout: Duration::from_secs(30),
         shutdown_timeout: Duration::from_secs(15),
-        v8: V8Config::default(),
+        v8: V8Config::default().with_scheduling_env(),
     };
 
     if let Ok(value) = std::env::var("GONVEX_MODULE_HOST_ON_DEMAND_IDLE_MS") {
