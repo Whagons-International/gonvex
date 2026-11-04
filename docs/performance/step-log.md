@@ -658,3 +658,24 @@ V8 proper stays at 2.3 %. **Binding constraint at 500 (new app): CPU, now in SQL
 (sqlx worker threads; which statements is not attributed: call chains do not unwind) with the
 snapshot cache thrashing at 256 MiB, and memory at the 2 GiB limit, mostly Rust heap outside
 the cache/SQLite/V8.
+
+### Visibility plans in the lab apps: v2 throughout (no v1 runs)
+
+Checked 19:5x for the question "were the candidate runs on legacy v1 plans?": **no.** Both lab
+apps load 340 plans, all `version: 2` with `permissionTables` (the runtime counts a plan as
+legacy when `version != 2`, `modules.rs`), and neither runtime log contains "DEPRECATED legacy
+visibility manifest":
+
+| lab | app | plans | v2 | deprecation log |
+|---|---|---:|---:|---|
+| lab-5k (old app, Steps 0–6, candidate gates, ad-cron-200) | `whagons-sqlite-lab` 55969f041 | 340 | 340 | none |
+| lab-5k-new (new app, new-*/rw-*/rl-500) | `whagons-integrate-5k` f7faec3e5 (staging before the #1623 revert) | 340 | 340 | none |
+
+So every step so far ran v2 masks; the 3.7–9.4 s v1 delivery-visibility cost seen on Whagons
+staging is not in these numbers. Whagons perf/visibility-v2 f38c1dd28 merged into the local
+`whagons-integrate-5k` (lab-only commits: SDK pin, merge taking the staging-deploy line's
+package.json/lock/patch; generated files regenerated): plans unchanged (0 of 340 differ), one
+function signature changed (`workspaces.create`), artifact 8e7aa7b4d461 → 83669147bb63. Synced
+into the new-lab baseline (`POST /dev/sync`, generation 2, 1,982 functions; old baseline kept as
+`baseline-data-8e7aa7b4`), Mac `app-new` refreshed with it and SDK packages rebuilt from this
+branch. Lab runs after this point use 83669147bb63.
