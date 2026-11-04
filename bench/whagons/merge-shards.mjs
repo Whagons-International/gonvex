@@ -64,9 +64,9 @@ if (first.client?.thin) {
 }
 // Task-update expectations (run.ts teardown): sum the counters, concatenate the diagnostics.
 if (parts.some(p => p.taskExpectations)) {
-  const t = { undelivered: [] };
+  const t = { undelivered: [], legacyOnly: [] };
   for (const p of parts) for (const [k, v] of Object.entries(p.taskExpectations || {})) {
-    if (k === 'undelivered') t.undelivered.push(...v); else t[k] = (t[k] || 0) + v;
+    if (k === 'undelivered' || k === 'legacyOnly') t[k].push(...v); else t[k] = (t[k] || 0) + v;
   }
   result.taskExpectations = t;
 }
