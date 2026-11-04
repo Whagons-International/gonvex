@@ -588,6 +588,14 @@ impl Fixture {
         Ok((rows, with_nulls, mismatched, full, stripped, first))
     }
 
+    /// The `replica.snapshotPage` frames (JSON text) a paged JSON-row client
+    /// receives for `snapshot`, as the connection loop pages it.
+    pub fn snapshot_page_texts(snapshot: ServerMessage) -> Vec<String> {
+        crate::replica::SnapshotPages::new(snapshot)
+            .map(|page| serde_json::to_string(&page).expect("page encodes"))
+            .collect()
+    }
+
     /// Everything committed to `tenant` after `revision`, as one event.
     pub async fn feed_since(&self, tenant: usize, revision: u64) -> FixtureResult<FeedEvent> {
         let route = &self.tenants[tenant].route;

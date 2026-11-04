@@ -143,3 +143,8 @@ required-features = ["perf-fixture"]
 name = "snapshot_cache"
 harness = false
 required-features = ["perf-fixture"]
+
+[[bench]]
+name = "omit_nulls"
+harness = false
+required-features = ["perf-fixture"]

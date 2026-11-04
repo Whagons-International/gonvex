@@ -91,16 +91,13 @@ export const defaultPool = new RowPool();
 const changeCache = new ChangeCache();
 const keyOf = (path, args) => path + '\u0000' + JSON.stringify(args ?? {});
 
-/** `replicaOmitNulls`: same rule as `restoreOmittedNulls` in @gonvex/protocol. */
+/** `replicaOmitNulls`: same rule (and fast path) as `restoreOmittedNulls` in @gonvex/protocol. */
+const nullTemplates = new WeakMap();
 export function restoreOmittedNulls(row, columns) {
   if (row === null || typeof row !== 'object' || Array.isArray(row) || !columns) return row;
-  let missing = false;
-  for (const column of columns) if (!Object.prototype.hasOwnProperty.call(row, column)) { missing = true; break; }
-  if (!missing) return row;
-  const restored = {};
-  for (const column of columns) restored[column] = Object.prototype.hasOwnProperty.call(row, column) ? row[column] : null;
-  for (const key of Object.keys(row)) if (!Object.prototype.hasOwnProperty.call(restored, key)) restored[key] = row[key];
-  return restored;
+  let template = nullTemplates.get(columns);
+  if (!template) { template = JSON.parse(`{${columns.map((c) => `${JSON.stringify(c)}:null`).join(',')}}`); nullTemplates.set(columns, template); }
+  return { ...template, ...row };
 }
 
 class Subscription {

@@ -147,7 +147,12 @@ it("restores rows of paged snapshots (columns on the first page) and batch delta
 
 it("restoreOmittedNulls keeps complete rows, column order and extra members", () => {
   const row = { id: "a", value: 1 };
-  expect(restoreOmittedNulls(row, ["id", "value"])).toBe(row);
+  expect(restoreOmittedNulls(row, ["id", "value"])).toEqual(row);
+  // `__proto__` stays an own data member, never the prototype.
+  const proto = restoreOmittedNulls(JSON.parse('{"__proto__":{"polluted":true}}') as JsonValue, ["id", "__proto__"]) as Record<string, JsonValue>;
+  expect(Object.getPrototypeOf(proto)).toBe(Object.prototype);
+  expect(Object.keys(proto)).toEqual(["id", "__proto__"]);
+  expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   expect(restoreOmittedNulls({ value: 1, extra: true, id: "a" }, ["id", "n", "value"])).toEqual({ id: "a", n: null, value: 1, extra: true });
   expect(Object.keys(restoreOmittedNulls({ value: 1, extra: true, id: "a" }, ["id", "n", "value"]) as object)).toEqual(["id", "n", "value", "extra"]);
   expect(restoreOmittedNulls(null, ["id"])).toBe(null);

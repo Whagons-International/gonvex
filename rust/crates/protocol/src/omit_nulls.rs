@@ -45,7 +45,7 @@ pub fn strip_null_members(text: &str) -> Option<String> {
     at += 1;
     // Byte ranges (member start .. value end) of kept members, and whether any
     // member was dropped.
-    let mut kept: Vec<(usize, usize)> = Vec::new();
+    let mut kept: Vec<(usize, usize)> = Vec::with_capacity(64);
     let mut dropped = false;
     at = skip_ws(bytes, at);
     if bytes.get(at) == Some(&b'}') {
@@ -106,13 +106,22 @@ fn skip_ws(bytes: &[u8], mut at: usize) -> usize {
 /// `at` is an opening quote; returns the index after the closing quote.
 fn skip_string(bytes: &[u8], mut at: usize) -> Option<usize> {
     at += 1;
-    loop {
-        // memchr-free: rows are short and mostly ASCII.
-        match bytes.get(at)? {
+    // Most strings (keys, ids, timestamps) are short: a byte loop first; a
+    // long text column (descriptions) continues with SIMD search.
+    let short = (at + 32).min(bytes.len());
+    while at < short {
+        match bytes[at] {
             b'"' => return Some(at + 1),
             b'\\' => at += 2,
             _ => at += 1,
         }
+    }
+    loop {
+        at += memchr::memchr2(b'"', b'\\', bytes.get(at..)?)?;
+        if bytes[at] == b'"' {
+            return Some(at + 1);
+        }
+        at += 2;
     }
 }
 
@@ -294,7 +303,11 @@ mod tests {
             let stripped = strip_null_members(text).expect("has nulls");
             let mut expected = value.clone();
             strip_value(&mut expected);
-            assert_eq!(serde_json::from_str::<Value>(&stripped).unwrap(), expected, "{text}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&stripped).unwrap(),
+                expected,
+                "{text}"
+            );
             // Nested nulls stay.
             assert_eq!(
                 serde_json::to_string(&restore(&expected, &columns(&value))).unwrap(),
@@ -331,7 +344,10 @@ mod tests {
         .unwrap();
         omit_nulls(&mut message);
         let value = serde_json::to_value(&message).unwrap();
-        assert_eq!(value["changes"][0]["newValue"], json!({"id":"a","cleared":null,"v":1}));
+        assert_eq!(
+            value["changes"][0]["newValue"],
+            json!({"id":"a","cleared":null,"v":1})
+        );
         assert_eq!(value["changes"][1]["newValue"], json!({"id":"b","n":null}));
         assert_eq!(value["changes"][2]["newValue"], json!({"id":"c","n":null}));
     }
@@ -357,7 +373,7 @@ mod tests {
         );
         let mut delta: ServerMessage = serde_json::from_value(json!({
             "type":"replica.delta","id":"s","cursor":{"epoch":"e","revision":2},
-            "upserts":[row.clone()],"deleted":[]
+            "upserts":[row],"deleted":[]
         }))
         .unwrap();
         omit_nulls(&mut delta);
