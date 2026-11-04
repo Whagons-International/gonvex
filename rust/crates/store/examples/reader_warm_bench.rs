@@ -19,6 +19,16 @@
 //!   includes connection setup when a reader must be opened) p50/p99/max
 //!   per round, open readers and SQLite heap. `READERS` (default 2, the
 //!   runtime default on one vCPU) caps readers per database.
+//! * `burst`: the staging pattern of 2026-11-04 (a page load or reconnect
+//!   opening every subscribed collection at once). Every tenant's writer is
+//!   open (as in the runtime); `TARGETS` (default 2) tenants get `BURST`
+//!   (default 14) concurrent read transactions per round, each holding its
+//!   reader for one query plus `HOLD_MS` (default 5), after `GAP_S` (default
+//!   30) idle seconds. Prints read-transaction open (= `snapshot.begin`)
+//!   p50/p99/max, reader connections opened, opens over 2 s (sqlx's slow
+//!   acquire warning) and SQLite heap. Pool settings come from the
+//!   environment (`GONVEX_DB_WARM_READER_MS`, `GONVEX_DB_READER_PATIENCE_MS`,
+//!   `GONVEX_DB_READER_OPENS`, `IDLE_MS`, `READERS` default 4).
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -87,7 +97,11 @@ fn ms(duration: Duration) -> f64 {
 fn setup_breakdown(path: &Path) -> Vec<(&'static str, f64)> {
     use rusqlite::{Connection, OpenFlags};
     let mut steps = Vec::new();
+    let mmap = format!("PRAGMA mmap_size = {}", env_or("MMAP_BYTES", 268_435_456u64));
     let started = Instant::now();
+    // sqlx runs each connection on its own worker thread.
+    std::thread::spawn(|| ()).join().unwrap();
+    steps.push(("thread spawn+join", ms(started.elapsed())));
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -99,7 +113,7 @@ fn setup_breakdown(path: &Path) -> Vec<(&'static str, f64)> {
         ("synchronous = NORMAL", "PRAGMA synchronous = NORMAL"),
         ("busy_timeout = 5000", "PRAGMA busy_timeout = 5000"),
         ("cache_size = -8192", "PRAGMA cache_size = -8192"),
-        ("mmap_size = 256 MiB", "PRAGMA mmap_size = 268435456"),
+        ("mmap_size (MMAP_BYTES)", mmap.as_str()),
         ("temp_store = MEMORY", "PRAGMA temp_store = MEMORY"),
         ("first SELECT", "SELECT count(*) FROM tasks"),
     ] {
@@ -319,6 +333,95 @@ async fn mode_idle(files: &[PathBuf]) {
     pools.close().await;
 }
 
+async fn mode_burst(files: &[PathBuf]) {
+    let rounds: usize = env_or("ROUNDS", 4);
+    let gap = Duration::from_secs(env_or("GAP_S", 30));
+    let burst: usize = env_or("BURST", 14);
+    let targets: usize = env_or("TARGETS", 2);
+    let hold = Duration::from_millis(env_or("HOLD_MS", 5));
+    let readers: u32 = env_or("READERS", 4);
+    let limits = PoolLimits {
+        max_connections_per_database: readers,
+        max_idle_connections_per_database: readers,
+        idle_timeout: Duration::from_millis(env_or("IDLE_MS", 15_000)),
+        ..PoolLimits::default()
+    };
+    println!(
+        "== burst: {} tenants open, {targets} targets x {burst} reads, {rounds} rounds, {}s gaps | readers {readers}, idle {:?}, warm {:?} x{}, patience {:?}, opens {} ==",
+        files.len(),
+        gap.as_secs(),
+        limits.idle_timeout,
+        limits.warm_reader_window,
+        limits.warm_readers,
+        limits.reader_patience,
+        limits.reader_opens,
+    );
+    let pools = PoolRegistry::new(limits);
+    let urls = routes(files)
+        .into_iter()
+        .map(|route| route.database_url)
+        .collect::<Vec<_>>();
+    for url in &urls {
+        pools.pool(url).await.unwrap();
+    }
+    let targets = &urls[..targets.min(urls.len())];
+    let mut all = Vec::new();
+    let (mut all_opens, mut all_slow) = (0, 0);
+    for round in 0..rounds {
+        tokio::time::sleep(gap).await;
+        let opens_before = gonvex_store::sqlite_reader_opens();
+        let before = pools.snapshot().await.open_connections;
+        let begins = Arc::new(Mutex::new(Vec::new()));
+        let started = Instant::now();
+        let mut tasks = Vec::new();
+        for url in targets {
+            for _ in 0..burst {
+                let (pools, url, begins) = (pools.clone(), url.clone(), begins.clone());
+                tasks.push(tokio::spawn(async move {
+                    let step = Instant::now();
+                    let mut transaction = begin_transaction(&pools, &url, true).await.unwrap();
+                    begins.lock().unwrap().push(ms(step.elapsed()));
+                    let _: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks")
+                        .fetch_one(&mut **transaction.transaction())
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(hold).await;
+                }));
+            }
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let wall = ms(started.elapsed());
+        let opened = gonvex_store::sqlite_reader_opens() - opens_before;
+        let begins = begins.lock().unwrap().clone();
+        let slow = begins.iter().filter(|value| **value > 2_000.0).count();
+        println!(
+            "round {round}: connections before {before} | readers opened {opened} | begins > 2 s {slow} | burst wall {wall:.1} ms | heap {:.1} MiB",
+            gonvex_store::sqlite_memory_used() as f64 / 1048576.0
+        );
+        summary("  read open (snapshot.begin)", begins.clone());
+        all.extend(begins);
+        all_opens += opened;
+        all_slow += slow;
+    }
+    println!("== all rounds: readers opened {all_opens}, begins > 2 s {all_slow} ==");
+    summary("read open (snapshot.begin)", all);
+    for stage in gonvex_profiler::snapshot() {
+        let name = stage.stage.info().name;
+        if name.starts_with("db.reader") {
+            println!(
+                "profiler {name:<20} n={:<6} p50={:>8.3} ms p99={:>8.3} ms max={:>8.3} ms",
+                stage.count,
+                stage.quantile(0.5) as f64 / 1e6,
+                stage.quantile(0.99) as f64 / 1e6,
+                stage.max as f64 / 1e6
+            );
+        }
+    }
+    pools.close().await;
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     // `RUST_LOG=sqlx::query=debug` prints every statement with its time.
@@ -339,6 +442,7 @@ async fn main() {
     match std::env::var("MODE").unwrap_or_default().as_str() {
         "setup" => mode_setup(&files),
         "startup" => mode_startup(&data, &files).await,
+        "burst" => mode_burst(&files).await,
         _ => mode_idle(&files).await,
     }
 }

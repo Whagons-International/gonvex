@@ -298,10 +298,15 @@ impl Config {
                 lookup("GONVEX_DB_MAX_IDLE_CONNS"),
                 4,
             )? as u32,
+            // Readers beyond a database's warm reader(s) close after this
+            // long without a read. Each reopen parses the whole schema and
+            // re-prepares its statements (4-10 % of CPU at 1k users with
+            // 15 s); the SQLite budget sweep (`GONVEX_SQLITE_CACHE_BUDGET_MB`)
+            // still closes them earlier when connection heap runs over.
             database_idle_timeout: duration_ms(
                 "GONVEX_DB_IDLE_TIMEOUT_MS",
                 lookup("GONVEX_DB_IDLE_TIMEOUT_MS"),
-                15_000,
+                120_000,
             )?,
             module_host: ModuleHostConfig {
                 enabled: boolean(
@@ -984,7 +989,7 @@ mod tests {
     fn database_idle_timeout_is_configurable() {
         assert_eq!(
             config(&[]).unwrap().database_idle_timeout,
-            Duration::from_secs(15)
+            Duration::from_secs(120)
         );
         assert_eq!(
             config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1500")])
@@ -1080,7 +1085,7 @@ mod tests {
     #[test]
     fn parses_database_idle_timeout_without_changing_pool_defaults() {
         let defaults = config(&[]).expect("defaults");
-        assert_eq!(defaults.database_idle_timeout, Duration::from_secs(15));
+        assert_eq!(defaults.database_idle_timeout, Duration::from_secs(120));
         let tuned = config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1000")]).expect("timeout");
         assert_eq!(tuned.database_idle_timeout, Duration::from_secs(1));
         assert_eq!(
