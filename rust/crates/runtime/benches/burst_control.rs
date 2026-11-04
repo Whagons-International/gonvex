@@ -75,6 +75,40 @@ fn cpu_jiffies(cpu: usize) -> (u64, u64) {
     (total - idle, total)
 }
 
+/// CPU seconds (user + system) of this process's threads allowed only on
+/// `cpu` (the runtime's threads: they inherit the server pinning).
+fn server_threads_cpu_s(cpu: usize) -> f64 {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+    let wanted = cpu.to_string();
+    let mut total = 0u64;
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return 0.0;
+    };
+    for task in tasks.flatten() {
+        let path = task.path();
+        let Ok(status) = std::fs::read_to_string(path.join("status")) else {
+            continue;
+        };
+        let allowed = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .map(str::trim);
+        if allowed != Some(wanted.as_str()) {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(path.join("stat")) else {
+            continue;
+        };
+        // Fields after the parenthesised name: utime is 14th, stime 15th.
+        let after = stat.rsplit_once(')').map_or("", |(_, rest)| rest);
+        let fields: Vec<&str> = after.split_whitespace().collect();
+        let utime: u64 = fields.get(11).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let stime: u64 = fields.get(12).and_then(|v| v.parse().ok()).unwrap_or(0);
+        total += utime + stime;
+    }
+    total as f64 / ticks
+}
+
 fn pin_to(cpus: &[usize]) {
     // SAFETY: plain affinity syscall on the calling thread.
     unsafe {
@@ -611,6 +645,10 @@ fn main() {
         let signed_in_ms = clock.ms();
         let baseline: Vec<_> = gonvex_profiler::snapshot();
         let cpu_before = cpu_jiffies(server_cpu);
+        let threads_before = server_threads_cpu_s(server_cpu);
+        let shares_before = gonvex_runtime::feed_share::metrics();
+        let decisions_before = gonvex_runtime::feed_share::shared_decisions();
+        let batches_before = gonvex_runtime::delivery::lag_batches();
         let samples = Arc::new(Mutex::new(Samples::default()));
         let start = clock.ms();
         let end = start + seconds * 1000.0;
@@ -693,6 +731,13 @@ fn main() {
         }
         let finished = clock.ms();
         let cpu_after = cpu_jiffies(server_cpu);
+        let threads_cpu = server_threads_cpu_s(server_cpu) - threads_before;
+        let shares_after = gonvex_runtime::feed_share::metrics();
+        let shares_created = shares_after["created"].as_u64().unwrap_or(0) - shares_before["created"].as_u64().unwrap_or(0);
+        let shares_found = shares_after["found"].as_u64().unwrap_or(0) - shares_before["found"].as_u64().unwrap_or(0);
+        let decisions = gonvex_runtime::feed_share::shared_decisions() - decisions_before;
+        let batches = gonvex_runtime::delivery::lag_batches();
+        let (lag_batches, lag_batched) = (batches.0 - batches_before.0, batches.1 - batches_before.1);
         let server_cpu_busy = (cpu_after.0 - cpu_before.0) as f64 / (cpu_after.1 - cpu_before.1).max(1) as f64;
         // Let in-flight deliveries land before reading the marks.
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -744,6 +789,13 @@ fn main() {
             "reconnect": quantiles(&mut samples.reconnect), "reconnect_timeouts": samples.reconnect_timeouts,
             "resets": resets,
             "server_cpu_busy": (server_cpu_busy * 1000.0).round() / 1000.0,
+            // Runtime threads' CPU over the measured window, and per completed save.
+            "server_cpu_s": (threads_cpu * 100.0).round() / 100.0,
+            "cpu_ms_per_save": (threads_cpu * 1000.0 / samples.save.len().max(1) as f64 * 100.0).round() / 100.0,
+            "shares": {"created": shares_created, "found": shares_found,
+                       "found_per_created": ((shares_found as f64 / shares_created.max(1) as f64) * 10.0).round() / 10.0,
+                       "shared_decisions": decisions},
+            "lag_batches": {"batches": lag_batches, "events": lag_batched},
             "server": {
                 "snapshot.permit_wait": stage("snapshot.permit_wait"),
                 "snapshot.permit_hold": stage("snapshot.permit_hold"),

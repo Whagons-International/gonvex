@@ -247,7 +247,9 @@ pub(crate) fn encode_shared(
 
 fn encode_item(message: &ServerMessage, native: bool) -> Result<String, DeliveryError> {
     if native {
-        if let Some(encoded) = crate::replica::native_control_message(message).map_err(|_| DeliveryError)? {
+        if let Some(encoded) =
+            crate::replica::native_control_message(message).map_err(|_| DeliveryError)?
+        {
             return serde_json::to_string(&encoded).map_err(|_| DeliveryError);
         }
     }
@@ -352,37 +354,64 @@ pub fn feed_lagging(waiting: usize) -> bool {
 pub fn merge_waiting_feed(
     event: crate::change_feed::FeedEvent,
     receiver: &mut Option<crate::change_feed::FeedReceiver>,
-    pending: &mut Option<Result<crate::change_feed::FeedEvent, tokio::sync::broadcast::error::RecvError>>,
+    pending: &mut Option<
+        Result<crate::change_feed::FeedEvent, tokio::sync::broadcast::error::RecvError>,
+    >,
     replicas: &std::collections::BTreeMap<String, crate::replica::ReplicaSubscription>,
     allowed: bool,
 ) -> crate::change_feed::FeedEvent {
+    merge_waiting_feed_until(event, receiver, pending, replicas, allowed, &|| false)
+}
+
+/// [`merge_waiting_feed`] that takes no further event once `stop()` holds
+/// (checked before each take: a replica preparation of this socket started
+/// reading, so later events must wait for its installation).
+pub fn merge_waiting_feed_until(
+    event: crate::change_feed::FeedEvent,
+    receiver: &mut Option<crate::change_feed::FeedReceiver>,
+    pending: &mut Option<
+        Result<crate::change_feed::FeedEvent, tokio::sync::broadcast::error::RecvError>,
+    >,
+    replicas: &std::collections::BTreeMap<String, crate::replica::ReplicaSubscription>,
+    allowed: bool,
+    stop: &dyn Fn() -> bool,
+) -> crate::change_feed::FeedEvent {
     const MAX_MERGED: usize = 256;
-    let (Some(receiver), Some(first)) = (receiver.as_mut(), crate::change_feed::first_revision(&event)) else {
+    let (Some(receiver), Some(first)) = (
+        receiver.as_mut(),
+        crate::change_feed::first_revision(&event),
+    ) else {
         return event;
     };
     if !allowed
         || pending.is_some()
         || receiver.is_empty()
-        || replicas.values().any(|subscription| subscription.cursor.revision >= first)
+        || replicas
+            .values()
+            .any(|subscription| subscription.cursor.revision >= first)
     {
         return event;
     }
     let mut events = vec![event];
-    while events.len() < MAX_MERGED {
+    while events.len() < MAX_MERGED && !stop() {
         match receiver.try_recv() {
             Ok(next @ crate::change_feed::FeedEvent::Transaction { .. }) => {
-                events.push(next);
-                if crate::change_feed::merge_transactions(&events[events.len() - 2..]).is_none() {
-                    *pending = events.pop().map(Ok);
+                // Mergeable after the previous one: same epoch, a later
+                // revision (decided from the headers, no merged copy).
+                if !mergeable_after(events.last().expect("non-empty"), &next) {
+                    *pending = Some(Ok(next));
                     break;
                 }
+                events.push(next);
             }
             Ok(other) => {
                 *pending = Some(Ok(other));
                 break;
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                *pending = Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)));
+                *pending = Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(
+                    skipped,
+                )));
                 break;
             }
             Err(_) => break,
@@ -393,6 +422,98 @@ pub fn merge_waiting_feed(
     }
     // Pairwise checked above: one epoch, ascending revisions.
     crate::change_feed::merge_transactions(&events).expect("mergeable transactions")
+}
+
+/// Whether `next` may follow `previous` in one merged transaction.
+fn mergeable_after(
+    previous: &crate::change_feed::FeedEvent,
+    next: &crate::change_feed::FeedEvent,
+) -> bool {
+    use crate::change_feed::FeedEvent::Transaction;
+    match (previous, next) {
+        (
+            Transaction {
+                database_epoch: a,
+                revision: before,
+                ..
+            },
+            Transaction {
+                database_epoch: b,
+                revision: after,
+                ..
+            },
+        ) => a == b && after > before,
+        _ => false,
+    }
+}
+
+/// Burst control, by reference: `event` and the transactions already waiting
+/// in the receiver (at most `max`, none once `stop()` holds), unmerged and in
+/// commit order. Each keeps the broadcast's own change list, so applying them
+/// one after another reuses every other connection's shared decisions and
+/// encoded items for the same transactions (`feed_share`, the tenant's frame
+/// memo); the connection only saves the turns between them (one offload job,
+/// one batch frame). A waiting reset or lag is left in `pending`.
+static LAG_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAG_BATCHED_EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// By-reference batches taken by lagging connections and the events in them
+/// (process totals; tests and benchmarks).
+pub fn lag_batches() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (LAG_BATCHES.load(Relaxed), LAG_BATCHED_EVENTS.load(Relaxed))
+}
+
+pub fn take_waiting_feed(
+    event: crate::change_feed::FeedEvent,
+    receiver: &mut Option<crate::change_feed::FeedReceiver>,
+    pending: &mut Option<
+        Result<crate::change_feed::FeedEvent, tokio::sync::broadcast::error::RecvError>,
+    >,
+    max: usize,
+    stop: &dyn Fn() -> bool,
+) -> Vec<crate::change_feed::FeedEvent> {
+    let mut events = vec![event];
+    let Some(receiver) = receiver.as_mut() else {
+        return events;
+    };
+    if pending.is_some() || !matches!(events[0], crate::change_feed::FeedEvent::Transaction { .. })
+    {
+        return events;
+    }
+    while events.len() < max && !receiver.is_empty() && !stop() {
+        match receiver.try_recv() {
+            Ok(next @ crate::change_feed::FeedEvent::Transaction { .. }) => events.push(next),
+            Ok(other) => {
+                *pending = Some(Ok(other));
+                break;
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                *pending = Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(
+                    skipped,
+                )));
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    if events.len() > 1 {
+        use std::sync::atomic::Ordering::Relaxed;
+        LAG_BATCHES.fetch_add(1, Relaxed);
+        LAG_BATCHED_EVENTS.fetch_add(events.len() as u64, Relaxed);
+    }
+    events
+}
+
+/// `GONVEX_FEED_LAG_MERGE=copy`: lagging connections merge their waiting
+/// events into one copied transaction (5ca42585, the first burst-control
+/// round: costs the cross-connection sharing). Default `ref`: by reference
+/// ([`take_waiting_feed`]).
+pub fn lag_merge_by_copy() -> bool {
+    static COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *COPY.get_or_init(|| {
+        std::env::var("GONVEX_FEED_LAG_MERGE").is_ok_and(|value| value.trim() == "copy")
+    })
 }
 
 /// Stream token of a collection: path and arguments, never the socket.
