@@ -754,3 +754,18 @@ From here on every case records the Mac − arch3 clock offset before and after 
 (`bench/whagons/clock-offset.py`: one SSH session, 15 round trips, lowest-RTT sample, precision
 ≈ RTT/2; `<case>/clock-offset-{before,after}.json`, printed by step-report.py). First reading
 20:2x: Mac −23.8 ms vs arch3 (RTT 4.0 ms).
+
+## Step 9: perf/profiler-v2 a0e35f80 (merged at bfc31ae5's parent; clean)
+
+`cargo test --workspace --no-fail-fast` on bfc31ae5: 647 passed, 0 failed, 7 ignored. Binary
+`lab-5k/bin-profiler-v2`. Semantics: `/dev/metrics functions.<path>` `calls`/`errors`/
+`averageDurationMs`/`lastDurationMs` are now server-side counts since process start (`source:
+"server"`, plus `cancelled`, `maxDurationMs`, `totalDurationMs`); browser telemetry moved under
+`functions.<path>.client`. Readers: `bench/whagons/step-report.py` and `summarize.py` do not read
+these fields (unchanged); `apps/dashboard/src/App.tsx` reads them: type extended with the new
+optional fields, totals use the exact `totalDurationMs` when present, the per-function card says
+"Function Calls (server, since start)" for server counts (`tsc --noEmit` passes). Idle smoke test
+on the new-app baseline (no generator): `invoke.isolate_wait`, `module_host.isolate_waiting`,
+background stages (`sqlite.checkpoint`, `v8.gc_minor/major`, `v8.isolate_start/stop`,
+`mem.malloc_trim`), the v8 isolate table, function names in slow traces and the "functions by
+total time" table all appear in `top.py --file`. The next 500-user run reports them.
