@@ -489,3 +489,66 @@ CPU in snapshot builds** (sign-in burst plus detail windows); reducers are 70–
 `thin unsupported`: 155 × `replica.error: authenticate with an active tenant before opening a
 Replica Collection` (opens racing re-auth under the backlog). First try (ad-thin-500) lost one
 shard's tunnel to a Tailscale drop (17:12); tunnels now retry.
+
+---
+
+## Step-ups on the candidate, new-app lab
+
+Lab `lab-5k-new` (containers `gvnew-*`, project `gvperf-new`): Whagons worktree
+`whagons-integrate-5k` (perf/integrate-5k = staging f7faec3e5 + presence-v2 96e1f1f59 +
+bundle-split 51501c890; `module.split: true`, manifest artifact `8e7aa7b4d461`, local SDK
+`@gonvex/client 0.5.2-sqlite.0` built from this branch, package.json pin edited locally to it),
+`lab-setup.sh 5000` (26 tenants, 5,000 prepared users, staffed, verify passed), baseline in
+`lab-5k-new/baseline-data`. Generator: Mac `app-new` (same generated api/manifest + local SDK),
+`LOAD_PRESENCE_V2=1` (thin clients advertise `presence: 1`, transitions are `presence.set`, no
+heartbeat Reducers, presence delivery timed from `presence.patch`; the 8 SDK users use the v2
+SDK), batch frames on. Binary = candidate runtime (`bin-action-depth`). The old-app runtime is
+stopped during these runs.
+
+### new-500: 500 users — FAIL (CPU, then memory)
+
+| kind | samples | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|
+| save | 1,009 | 35,662 | 106,272 | 122,059 |
+| reducer | 1,020 | 35,003 | 106,226 | 122,058 |
+| taskDelivery | 8,893 | 12,932 | 63,384 | 89,225 |
+| delivery (presence) | 35,112 | 652 | 1,173 | 2,497 |
+| query | 65 | 17,418 | 27,296 | 28,904 |
+
+users 500/500, errors 29.6 % (265 task updates not delivered before teardown, 159 detail
+queries never current), oracle 8 checks: 1 mismatch = **0 leaked**, 696 missing after 15 s
+(16 s delivery backlog), 2 oracle snapshots never completed. Runtime: 1.00 core (1,757/1,757
+periods throttled, 407 s throttled in 176 s), cgroup at 2,048 MiB (RSS 1.71 GiB, anon 1.23 GiB).
+
+Profiler (plateau): `snapshot.build` p50 28.7 s / p99 72.8 s with `snapshot.permit_wait`
+p50 34.6 s (the build includes its permit wait); inside the permit `snapshot.visibility` p50
+7.5 ms, `snapshot.begin` 0.4 ms, `snapshot.acl` 0.24 ms; `delivery.queue_wait` p50 15.9 s,
+`delivery.visibility` p50 0.8 ms / p99 113 ms; `fn.total reducer` p50 893 ms / p99 5.3 s;
+`fn.total cron` p50 818 ms; `commit.fsync` p50 13 ms; `tokio.sched_lag` p99 93 ms;
+`ws.encode` p50 1 µs, `ws.compress` p50 103 µs.
+
+**Where the CPU goes** (on-CPU perf 30 s in the plateau, 199 Hz, self time; user frames
+resolved through a symfs that mirrors the container paths; call chains still do not unwind
+because perf recorded no build-id for `/binhost/gonvex-runtime`, so this is self time by
+thread and code category, not inclusive time per stage):
+
+| thread (≈ stage) | total | SQLite | JSON encode/decode | replica maps/hash | visibility | deflate | V8 | alloc/drop | libc copies | other runtime | kernel |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `gonvex-offload` (snapshot builds, batch item encode) | 46.4 | 5.8 | 9.6 | 9.0 | 1.4 | 0.0 | 0.0 | 2.3 | 5.3 | 4.7 | 8.3 |
+| `gonvex-module-isolate` (V8 + inline SQL) | 24.8 | 2.9 | 1.5 | 0.5 | 0.0 | 0.0 | 3.5 | 0.8 | 1.9 | 2.2 | 11.5 |
+| `tokio-rt-worker` (sockets, delivery) | 16.9 | 0.6 | 3.9 | 0.5 | 0.0 | 1.3 | 0.0 | 0.8 | 1.1 | 2.2 | 6.4 |
+| `sqlx-sqlite-worker` | 8.4 | 2.8 | 0 | 0 | 0 | 0 | 0 | 0.1 | 0.7 | 1.0 | 3.8 |
+| other | 4.0 | 0.5 | 0.4 | 0.1 | 0 | 0 | 0 | 0.3 | 0.2 | 0.6 | 1.9 |
+| **all** | 100 | 12.5 | 15.4 | 10.1 | 1.4 | 1.3 | 3.5 | 4.3 | 9.2 | 10.7 | 32.0 |
+
+Top self symbols: `sqlite3VdbeExec` 4.8 %, SipHash (`std` `HashMap` default hasher) 3.3 % +
+`RandomState::hash_one` 1.9 %, `replica::json_byte_len` 2.9 %, `serde_json format_escaped_str`
+2.7 %, `replica::collapse_changes` 1.6 %, `replica::write_stable_string` 1.1 %, indexmap
+insert/clone/drop ~2 %. Kernel is spread (syscall entry/exit, page zeroing, `pread` copies,
+some compaction, btrfs writes), not reclaim-dominated. Reading: snapshot builds are the CPU
+(≈ 46 % of samples), and inside them JSON row decode/encode plus per-row hashing/size
+bookkeeping cost about 3× the SQLite query; visibility is negligible (1.4 %). Delivery on
+the network worker is ~17 % (JSON + deflate), V8 proper ~3.5 % (the isolate thread's time is
+mostly syscalls and inline SQL). Targets: cached snapshots / log-only resume
+(perf/resume-lazy) and raw rows (perf/delivery-v4) address the offload-pool share; v1→v2
+visibility does not move CPU here.
