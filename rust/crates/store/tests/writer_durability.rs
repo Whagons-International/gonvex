@@ -63,6 +63,10 @@ async fn tenant(durability: Durability) -> (TestDir, PoolRegistry, String) {
     (dir, pools, url)
 }
 
+/// `WAL_SYNCS` is process-wide: the Full-durability tests take this lock so a
+/// parallel `cargo test` does not count another test's syncs.
+static FULL_SYNCS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn values(pools: &PoolRegistry, url: &str) -> Vec<(i64, String)> {
     sqlx::query_as("SELECT id, v FROM t ORDER BY id")
         .fetch_all(&pools.reader(url).await.unwrap())
@@ -72,6 +76,7 @@ async fn values(pools: &PoolRegistry, url: &str) -> Vec<(i64, String)> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
+    let _serial = FULL_SYNCS.lock().await;
     let (_dir, pools, url) = tenant(Durability::Full).await;
     let syncs = gonvex_store::WAL_SYNCS.load(Ordering::Relaxed);
     let mut tasks = Vec::new();
@@ -100,9 +105,14 @@ async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
         syncs >= 1,
         "Full durability syncs the WAL before acknowledging"
     );
+    // Sharing itself depends on how long a sync takes relative to a commit
+    // (on a fast CI disk every commit can finish its own sync before the next
+    // one commits), so this end-to-end test only bounds it: never more than
+    // one sync per acknowledged commit. The deterministic sharing law lives in
+    // `sync_barrier::tests::waiters_queued_behind_a_running_sync_share_one_sync`.
     assert!(
-        syncs < 60,
-        "concurrent commits shared WAL syncs ({syncs} for 60)"
+        syncs <= 60,
+        "at most one WAL sync per commit ({syncs} for 60)"
     );
     let reader = pools.reader(&url).await.unwrap();
     let per_revision: Vec<(i64, i64)> =
@@ -125,6 +135,7 @@ async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_or_cancelled_transaction_does_not_affect_concurrent_commits() {
+    let _serial = FULL_SYNCS.lock().await;
     let (_dir, pools, url) = tenant(Durability::Full).await;
     let mut tasks = Vec::new();
     for id in 0..30i64 {
