@@ -138,4 +138,41 @@ mod tests {
         assert!(!barrier.state.lock().unwrap().running);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Commits that arrive while a sync is running are all covered by the next
+    /// single sync. Deterministic: the in-flight sync is simulated by holding
+    /// `running`, so no waiter can start its own sync, and the test does not
+    /// depend on how fast the disk syncs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn waiters_queued_behind_a_running_sync_share_one_sync() {
+        let dir = std::env::temp_dir().join(format!("barrier-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("b.db");
+        std::fs::write(format!("{}-wal", db.display()), b"frames").unwrap();
+        let barrier = SyncBarrier::new(&db);
+        barrier.state.lock().unwrap().running = true;
+        let mut tasks = Vec::new();
+        for _ in 0..60 {
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move { barrier.wait().await }));
+        }
+        while barrier.state.lock().unwrap().issued < 60 {
+            tokio::task::yield_now().await;
+        }
+        let mut published = barrier.synced.subscribe();
+        // The simulated in-flight sync finishes; its runner loops once more
+        // for the queued tickets and then stops.
+        barrier.clone().run().await;
+        assert!(published.has_changed().unwrap());
+        assert_eq!(published.borrow_and_update().ticket, 60);
+        assert!(
+            !published.has_changed().unwrap(),
+            "60 queued commits took exactly one sync"
+        );
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert!(!barrier.state.lock().unwrap().running);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

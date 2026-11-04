@@ -308,7 +308,8 @@ impl Checker<'_> {
             }
         }
         let bytes = self.bytes;
-        members.sort_unstable_by(|left, right| bytes[left.key.clone()].cmp(&bytes[right.key.clone()]));
+        members
+            .sort_unstable_by(|left, right| bytes[left.key.clone()].cmp(&bytes[right.key.clone()]));
         if members
             .windows(2)
             .any(|pair| bytes[pair[0].key.clone()] == bytes[pair[1].key.clone()])
@@ -514,7 +515,9 @@ fn emit_object<'m>(
 fn emit(row: &str, checked: &Checked, range: Range<usize>, out: &mut String) {
     let mut at = range.start;
     let mut number = checked.numbers.partition_point(|(span, _)| span.start < at);
-    let mut object = checked.objects.partition_point(|reorder| reorder.range.start < at);
+    let mut object = checked
+        .objects
+        .partition_point(|reorder| reorder.range.start < at);
     loop {
         let next_number = checked
             .numbers
@@ -539,7 +542,9 @@ fn emit(row: &str, checked: &Checked, range: Range<usize>, out: &mut String) {
                 emit_object(row, checked, reorder.members.iter(), out);
                 at = reorder.range.end;
                 number = checked.numbers.partition_point(|(span, _)| span.start < at);
-                object = checked.objects.partition_point(|reorder| reorder.range.start < at);
+                object = checked
+                    .objects
+                    .partition_point(|reorder| reorder.range.start < at);
             }
             (Some(_), None) => unreachable!("matched by the first number arm"),
         }
@@ -560,7 +565,7 @@ pub(crate) fn member_value(row: &str, checked: &Checked, key: &str) -> Option<Va
 
 /// (raw-path hash, `Value`-path hash, whether the fast path applied) of a
 /// row (tests and the perf fixture).
-#[cfg(any(test, feature = "perf-fixture"))]
+#[cfg(feature = "perf-fixture")]
 pub(crate) fn hashes(row: &str) -> Result<(String, String, bool), serde_json::Error> {
     use sha2::{Digest, Sha256};
     let hex = |text: &str| -> String {
@@ -645,7 +650,10 @@ mod tests {
                 true,
             ),
             (r#"{"mode":"teams","teamIds":["t"],"roles":[]}"#, true),
-            (r#"{"a":{"mode":"teams","teamIds":["t"],"roles":[]},"b":{"d":{},"c":{"f":1,"e":[{"h":1,"g":2}]}}}"#, true),
+            (
+                r#"{"a":{"mode":"teams","teamIds":["t"],"roles":[]},"b":{"d":{},"c":{"f":1,"e":[{"h":1,"g":2}]}}}"#,
+                true,
+            ),
             (r#"{"z":{"b":1,"a":2,"b":3}}"#, false),
             (r#"{"z":{"b":1,"a\"x":2}}"#, false),
             (r#"{"z":{"a":1,"b":[1,{"x":true,"y":false}]}}"#, true),

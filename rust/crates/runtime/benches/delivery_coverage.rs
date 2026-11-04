@@ -101,7 +101,9 @@ fn stage(stage: gonvex_profiler::Stage) -> (u64, u64) {
     gonvex_profiler::snapshot()
         .into_iter()
         .filter(|snapshot| snapshot.stage == stage)
-        .fold((0, 0), |(count, sum), snapshot| (count + snapshot.count, sum + snapshot.sum))
+        .fold((0, 0), |(count, sum), snapshot| {
+            (count + snapshot.count, sum + snapshot.sum)
+        })
 }
 
 struct Conn {
@@ -238,7 +240,10 @@ async fn feed_one(
 async fn run() {
     let mut report = Report::new();
     gonvex_profiler::set_enabled(true);
-    let options = match (std::env::var("DC_MEMBERS").ok(), std::env::var("DC_TASKS").ok()) {
+    let options = match (
+        std::env::var("DC_MEMBERS").ok(),
+        std::env::var("DC_TASKS").ok(),
+    ) {
         (None, None) => FixtureOptions::whagons(),
         _ => FixtureOptions {
             tenants: vec![TenantSpec::new(
@@ -322,7 +327,17 @@ async fn run() {
             let started = Instant::now();
             let mut received = 0;
             for (connection, conn) in connections.iter_mut().zip(conns.iter_mut()) {
-                if feed_one(&fixture, &hub, &tenant_id, connection, conn, &event, &mut frame_ns).await {
+                if feed_one(
+                    &fixture,
+                    &hub,
+                    &tenant_id,
+                    connection,
+                    conn,
+                    &event,
+                    &mut frame_ns,
+                )
+                .await
+                {
                     received += 1;
                 }
             }
@@ -398,10 +413,17 @@ async fn run() {
             "sharedNsPerChange".into(),
             json!(shared_ns as f64 / iterations_f),
         );
-        extra.insert("fullNsPerChange".into(), json!(full_ns as f64 / iterations_f));
+        extra.insert(
+            "fullNsPerChange".into(),
+            json!(full_ns as f64 / iterations_f),
+        );
         extra.insert(
             "sharedFraction".into(),
-            json!(if total == 0 { 0.0 } else { shared as f64 / total as f64 }),
+            json!(if total == 0 {
+                0.0
+            } else {
+                shared as f64 / total as f64
+            }),
         );
         eprintln!("{name}: {extra:?}");
         mix_ns += weight * mean;
@@ -422,7 +444,11 @@ async fn run() {
         let total: f64 = mix_paths.iter().sum();
         extra.insert(
             "sharedFraction".into(),
-            json!(if total == 0.0 { 0.0 } else { (mix_paths[0] + mix_paths[1]) / total }),
+            json!(if total == 0.0 {
+                0.0
+            } else {
+                (mix_paths[0] + mix_paths[1]) / total
+            }),
         );
         let split: BTreeMap<String, f64> = FANOUT_PATHS
             .iter()
@@ -431,7 +457,13 @@ async fn run() {
             .map(|((path, _), count)| (path.to_string(), *count / total))
             .collect();
         extra.insert("pathShare".into(), json!(split));
-        extra.insert("weights".into(), json!(KINDS.iter().map(|(k, w)| (k.to_string(), *w)).collect::<BTreeMap<_, _>>()));
+        extra.insert(
+            "weights".into(),
+            json!(KINDS
+                .iter()
+                .map(|(k, w)| (k.to_string(), *w))
+                .collect::<BTreeMap<_, _>>()),
+        );
         eprintln!("{name}: {extra:?}");
         report.record(name, extra);
     }

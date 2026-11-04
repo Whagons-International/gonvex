@@ -18,14 +18,17 @@ use serde_json::Value;
 use sqlx::Row as _;
 
 use crate::canonical_row::{self, Member};
-use crate::replica::{self, ReplicaError};
 use crate::modules::ReplicaCollectionDefinition;
+use crate::replica::{self, ReplicaError};
 use gonvex_store::TenantTransaction;
 
 /// One row image of the change log.
 pub(crate) enum RawImage {
     /// The trigger's text and its top-level members.
-    Raw { text: Box<str>, members: Vec<Member> },
+    Raw {
+        text: Box<str>,
+        members: Vec<Member>,
+    },
     /// Not provably canonical: parsed (the `Value` path).
     Parsed(Value),
 }
@@ -58,9 +61,7 @@ impl RawImage {
     /// The image as a `Value` (parsed for raw images).
     pub(crate) fn value(&self) -> Cow<'_, Value> {
         match self {
-            Self::Raw { text, .. } => {
-                Cow::Owned(serde_json::from_str(text).unwrap_or(Value::Null))
-            }
+            Self::Raw { text, .. } => Cow::Owned(serde_json::from_str(text).unwrap_or(Value::Null)),
             Self::Parsed(value) => Cow::Borrowed(value),
         }
     }
@@ -87,7 +88,11 @@ impl RawImage {
     }
 
     /// `replica::collection_filters_admit` of the image.
-    pub(crate) fn filters_admit(&self, args: &Value, definition: &ReplicaCollectionDefinition) -> bool {
+    pub(crate) fn filters_admit(
+        &self,
+        args: &Value,
+        definition: &ReplicaCollectionDefinition,
+    ) -> bool {
         let Self::Raw { text, members } = self else {
             let Self::Parsed(value) = self else {
                 unreachable!()
@@ -307,7 +312,11 @@ mod tests {
             r#"{"_id":"e\"q","name":{"b":1,"a":[0.10000000000000001]},"workspaceId":"w"}"#,
             r#"{"_id":"f","workspaceId":"w","_id":"g"}"#,
         ];
-        for args in [serde_json::json!({"ws": "w"}), serde_json::json!({}), Value::Null] {
+        for args in [
+            serde_json::json!({"ws": "w"}),
+            serde_json::json!({}),
+            Value::Null,
+        ] {
             for text in images {
                 let value: Value = serde_json::from_str(text).unwrap();
                 let image = RawImage::new(text.to_owned()).unwrap().unwrap();
@@ -321,13 +330,19 @@ mod tests {
                     replica::row_key(&value, "_id").ok().map(Arc::from),
                     "{text}"
                 );
-                assert_eq!(image.column("n"), value.get("n").cloned().unwrap_or(Value::Null));
+                assert_eq!(
+                    image.column("n"),
+                    value.get("n").cloned().unwrap_or(Value::Null)
+                );
                 assert_eq!(*image.value(), value);
                 if let Some((projection, _, _)) =
                     image.object_text(&definition.columns, &[], &definition.key)
                 {
                     let projected = replica::project_row(&value, &definition).unwrap();
-                    assert_eq!(serde_json::from_str::<Value>(&projection).unwrap(), projected);
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&projection).unwrap(),
+                        projected
+                    );
                 }
             }
         }

@@ -241,7 +241,13 @@ fn keys(subscription: &mut ReplicaSubscription) -> Arc<FanoutKeys> {
     // lives (held only by keys of subscriptions of these plans). Followed
     // parents never inherit again, so the plans determine the set.
     let plans: Vec<&VisibilityPlan> = std::iter::once(subscription.visibility.as_ref())
-        .chain(subscription.resolved.inherited.values().map(|parent| parent.plan.as_ref()))
+        .chain(
+            subscription
+                .resolved
+                .inherited
+                .values()
+                .map(|parent| parent.plan.as_ref()),
+        )
         .collect();
     let moving = interned(
         MOVING.get_or_init(Default::default),
@@ -324,10 +330,8 @@ pub(crate) struct Layout {
 }
 
 fn layout(changes: &[LogChange]) -> Layout {
-    let mut index = FastMap::<(&str, &str), usize>::with_capacity_and_hasher(
-        changes.len(),
-        Default::default(),
-    );
+    let mut index =
+        FastMap::<(&str, &str), usize>::with_capacity_and_hasher(changes.len(), Default::default());
     let mut tables = FastSet::<String>::default();
     let mut rows: Vec<(String, usize, usize)> = Vec::new();
     for (position, change) in changes.iter().enumerate() {
@@ -567,7 +571,11 @@ pub(crate) fn shape(
                 .all(|(_, first, last)| {
                     let admits = |row: &serde_json::Value| {
                         !row.is_null()
-                            && collection_filters_admit(row, &subscription.args, &subscription.definition)
+                            && collection_filters_admit(
+                                row,
+                                &subscription.args,
+                                &subscription.definition,
+                            )
                     };
                     !admits(&changes[*first].old_value) && !admits(&changes[*last].new_value)
                 });
@@ -583,12 +591,14 @@ pub(crate) fn shape(
             let concern = mask::subscription_concern_tables(subscription);
             // Per distinct changed table first (an event has few), per
             // change only for tables that can move a principal.
-            let concerned = layout.tables.iter().any(|table| concern.contains(table.as_str()));
+            let concerned = layout
+                .tables
+                .iter()
+                .any(|table| concern.contains(table.as_str()));
             let moving = concerned
-                && layout
-                    .tables
-                    .iter()
-                    .any(|table| concern.contains(table.as_str()) && keys.moving.contains_key(table.as_str()));
+                && layout.tables.iter().any(|table| {
+                    concern.contains(table.as_str()) && keys.moving.contains_key(table.as_str())
+                });
             for (position, change) in changes.iter().enumerate() {
                 if !moving || !concern.contains(change.table.as_str()) {
                     continue;
@@ -615,7 +625,11 @@ pub(crate) fn shape(
                                         &change.changed_columns,
                                     )
                                 });
-                            share.principal_possible.lock().unwrap().insert(key, possible);
+                            share
+                                .principal_possible
+                                .lock()
+                                .unwrap()
+                                .insert(key, possible);
                             possible
                         });
                     }
@@ -663,8 +677,9 @@ pub(crate) fn shape(
                         continue;
                     }
                     if !new.is_null()
-                        && changed_columns(changes, *first, *last)
-                            .is_some_and(|columns| columns.iter().all(|column| !acl.contains(*column)))
+                        && changed_columns(changes, *first, *last).is_some_and(|columns| {
+                            columns.iter().all(|column| !acl.contains(*column))
+                        })
                     {
                         // No visibility column moved (principal unchanged:
                         // `member_unmoved` above).
@@ -1155,8 +1170,7 @@ impl Runtime {
                     let SubOutcome::Delta(delta) = &outcome.subs[position] else {
                         unreachable!()
                     };
-                    let (item, prefix, suffix) =
-                        texts.subs[position].as_ref().expect("delta text");
+                    let (item, prefix, suffix) = texts.subs[position].as_ref().expect("delta text");
                     let mut tail = String::with_capacity(digest.len() + 32);
                     tail.push_str(",\"digest\":\"");
                     tail.push_str(&digest);
@@ -1214,18 +1228,23 @@ pub(crate) fn wake_interest(
         // (parents): derived sets bound to an index, with their source
         // tokens.
         let mut derived = Vec::new();
-        let levels = std::iter::once((subscription.visibility.as_ref(), &subscription.resolved)).chain(
-            subscription
-                .resolved
-                .inherited
-                .values()
-                .map(|parent| (parent.plan.as_ref(), parent.resolved.as_ref())),
-        );
+        let levels = std::iter::once((subscription.visibility.as_ref(), &subscription.resolved))
+            .chain(
+                subscription
+                    .resolved
+                    .inherited
+                    .values()
+                    .map(|parent| (parent.plan.as_ref(), parent.resolved.as_ref())),
+            );
         for (plan, resolved) in levels {
             for (name, set) in &plan.sets {
                 if set.kind == "derived" && resolved.indexes.contains_key(name) {
                     if let Some(source) = resolved.sets.get(&set.from) {
-                        derived.push((set.table.clone(), set.key.clone(), Arc::new(source.clone())));
+                        derived.push((
+                            set.table.clone(),
+                            set.key.clone(),
+                            Arc::new(source.clone()),
+                        ));
                     }
                 }
             }
@@ -1289,7 +1308,9 @@ pub(crate) fn wake_interest(
 pub(crate) fn wake_key(subscriptions: &BTreeMap<String, ReplicaSubscription>) -> u64 {
     let mut hasher = crate::visibility_class::FxHasher::default();
     let handle = |handle: Option<&crate::visibility_class::MemberHandle>| match handle {
-        Some(crate::visibility_class::MemberHandle::Compiled(member)) => Arc::as_ptr(member) as usize,
+        Some(crate::visibility_class::MemberHandle::Compiled(member)) => {
+            Arc::as_ptr(member) as usize
+        }
         Some(crate::visibility_class::MemberHandle::Fallback) => 1,
         None => 0,
     };
@@ -1364,7 +1385,12 @@ pub(crate) async fn await_indexes(
     let mut waiting = Vec::new();
     for subscription in subscriptions.values() {
         if *revision > subscription.cursor.revision && subscription.visibility.version == Some(2) {
-            pending(&subscription.resolved, *revision, database_epoch, &mut waiting);
+            pending(
+                &subscription.resolved,
+                *revision,
+                database_epoch,
+                &mut waiting,
+            );
         }
     }
     for index in waiting {
@@ -1386,10 +1412,7 @@ pub(crate) enum FanOut {
     /// Not served; `record`: the full path should record the outcome. Hold
     /// `claim` until the full path has finished (it wakes the connections
     /// waiting for this shape's outcome).
-    Miss {
-        record: bool,
-        claim: Option<Claim>,
-    },
+    Miss { record: bool, claim: Option<Claim> },
     /// Another connection of this shape is computing its outcome: wait for
     /// it (`wait_claim`), then call `fan_out` again.
     Wait(tokio::sync::watch::Receiver<bool>),

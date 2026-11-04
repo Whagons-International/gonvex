@@ -327,7 +327,13 @@ impl PrincipalCache {
                 self.misses.fetch_add(1, Relaxed);
                 return Ok(Lookup::Miss);
             }
-            (entry.core.clone(), fingerprint, entry.tables.clone(), low, high)
+            (
+                entry.core.clone(),
+                fingerprint,
+                entry.tables.clone(),
+                low,
+                high,
+            )
         };
         if self.changed(transaction, &tables, low, high).await? {
             self.invalidated.fetch_add(1, Relaxed);
@@ -366,7 +372,9 @@ impl PrincipalCache {
         .into();
         if let Some(entry) = self.entries.lock().unwrap().get_mut(key) {
             if Arc::ptr_eq(&entry.core, &core) {
-                entry.fingerprints.retain(|(_, caches, _)| caches.strong_count() > 0);
+                entry
+                    .fingerprints
+                    .retain(|(_, caches, _)| caches.strong_count() > 0);
                 entry.fingerprints.push((
                     plan_identity(plan),
                     Arc::downgrade(&plan.active_sets_cache.0),
@@ -418,7 +426,8 @@ impl PrincipalCache {
         self.remove(&mut entries, &key);
         self.bytes.fetch_add(bytes, Relaxed);
         entries.insert(key, entry);
-        if self.inserts.fetch_add(1, Relaxed).is_multiple_of(256) || entries.len() > self.config.max_entries
+        if self.inserts.fetch_add(1, Relaxed).is_multiple_of(256)
+            || entries.len() > self.config.max_entries
         {
             self.sweep(&mut entries);
         }

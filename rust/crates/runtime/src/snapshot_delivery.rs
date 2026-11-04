@@ -375,7 +375,9 @@ mod tests {
                 revision: 1,
             },
             result: (0..n)
-                .map(|id| gonvex_protocol::JsonRow::from_value(&json!({"_id":id,"body":"a".repeat(1000)})))
+                .map(|id| {
+                    gonvex_protocol::JsonRow::from_value(&json!({"_id":id,"body":"a".repeat(1000)}))
+                })
                 .collect(),
             metadata: BTreeMap::from([(
                 "digest".into(),
@@ -658,7 +660,7 @@ mod tests {
         let ready = json!({"id":"one","cursor":{"epoch":"e","revision":9},"digest":"new"});
         assert_eq!(
             delivery.gate(&ServerMessage::ReplicaReadyMany {
-                ready: vec![ready.clone(), json!({"id":"other"})]
+                ready: vec![ready, json!({"id":"other"})]
             }),
             Some(ServerMessage::ReplicaReadyMany {
                 ready: vec![json!({"id":"other"})]

@@ -131,10 +131,22 @@ enum Node {
     Const(bool),
     /// Principal-only atom: `role`, `permission`, `nonEmpty`; one bit per class.
     Bit(u16),
-    Eq { column: Slot, literal: Value },
-    InClass { column: Slot, set: u16 },
-    InMember { column: Slot, set: u16 },
-    Context { column: Slot, context: u16 },
+    Eq {
+        column: Slot,
+        literal: Value,
+    },
+    InClass {
+        column: Slot,
+        set: u16,
+    },
+    InMember {
+        column: Slot,
+        set: u16,
+    },
+    Context {
+        column: Slot,
+        context: u16,
+    },
     Inherits(u16),
     And(u32, u32),
     Or(u32, u32),
@@ -318,7 +330,11 @@ impl Compiler<'_> {
                 Some(role) => self.bit(BitAtom::Role(role.to_owned())),
                 None => self.push(Node::Const(false)),
             },
-            "eq" => match expression.value.as_ref().and_then(|value| value.get("literal")) {
+            "eq" => match expression
+                .value
+                .as_ref()
+                .and_then(|value| value.get("literal"))
+            {
                 Some(literal) => {
                     let column = slot(domain.columns, &expression.column);
                     self.push(Node::Eq {
@@ -443,7 +459,8 @@ pub fn compile(plan: &VisibilityPlan) -> CompiledPlan {
     }
     use sha2::{Digest, Sha256};
     let fingerprint: [u8; 32] = Sha256::digest(
-        serde_json::to_vec(&(&plan.table, &plan.key, &plan.sets, &plan.predicate)).unwrap_or_default(),
+        serde_json::to_vec(&(&plan.table, &plan.key, &plan.sets, &plan.predicate))
+            .unwrap_or_default(),
     )
     .into();
     CompiledPlan {
@@ -709,11 +726,12 @@ impl<'a> AclRow<'a> {
         let interner = scope.interner.read().unwrap_or_else(|e| e.into_inner());
         self.generation = scope.generation.load(Ordering::Acquire);
         self.tokens.clear();
-        self.tokens.extend(self.values.iter().map(|value| match value {
-            AclValue::Missing | AclValue::Null => None,
-            AclValue::Str(text) => interner.get(text),
-            other => interner.get(&other.scalar()),
-        }));
+        self.tokens
+            .extend(self.values.iter().map(|value| match value {
+                AclValue::Missing | AclValue::Null => None,
+                AclValue::Str(text) => interner.get(text),
+                other => interner.get(&other.scalar()),
+            }));
     }
 
     fn current(&mut self, scope: &ClassScope) {
@@ -844,8 +862,7 @@ impl<'de: 'a, 'a> serde::Deserialize<'de> for AclValueSeed<'a> {
                 self,
                 seq: S,
             ) -> Result<Self::Value, S::Error> {
-                let value =
-                    Value::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
+                let value = Value::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
                 Ok(AclValue::Json(Cow::Owned(value)))
             }
             fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
@@ -1058,7 +1075,13 @@ fn bind(
             return None;
         }
         let parent_scope = parent_plan.scope(scope_name);
-        let member = bind(&parent_plan, &parent_scope, scope_name, &parent.resolved, depth + 1)?;
+        let member = bind(
+            &parent_plan,
+            &parent_scope,
+            scope_name,
+            &parent.resolved,
+            depth + 1,
+        )?;
         parent_classes.push(Some(ParentClass {
             index: parent.index.clone(),
             class: Some(member.class.clone()),
@@ -1163,7 +1186,12 @@ fn bind(
     let contexts = plan
         .contexts
         .iter()
-        .map(|context| resolved.direct.get(context).map(|value| value.as_str().into()))
+        .map(|context| {
+            resolved
+                .direct
+                .get(context)
+                .map(|value| value.as_str().into())
+        })
         .collect::<Box<[_]>>();
     let has_member_atoms = !plan.member_atoms.is_empty()
         || plan
@@ -1389,13 +1417,14 @@ impl CompiledPlan {
                     && parent_row.is_object()
                     && match (spec.override_root, &parent.class) {
                         (Some(root), _) => {
-                            let mut decoded = AclRow::from_value(&parent_row, &spec.override_columns);
+                            let mut decoded =
+                                AclRow::from_value(&parent_row, &spec.override_columns);
                             decoded.resolve_tokens(&class.scope);
                             self.eval(root, &decoded, class, member)
                         }
                         (None, Some(parent_class)) => {
-                            let parent_member =
-                                member.and_then(|member| member.parents[spec_index as usize].as_deref());
+                            let parent_member = member
+                                .and_then(|member| member.parents[spec_index as usize].as_deref());
                             parent_class.visible_value(&parent_row, parent_member)
                         }
                         (None, None) => false,
@@ -1625,7 +1654,8 @@ impl MemberVisibility {
                 }
             }
             if let Some(parent_member) = parent_member {
-                let mut decoded = AclRow::from_value(&parent_row, &parent_member.class.plan.columns);
+                let mut decoded =
+                    AclRow::from_value(&parent_row, &parent_member.class.plan.columns);
                 decoded.resolve_tokens(&parent_member.class.scope);
                 if parent_member.hit(&decoded) {
                     return true;
@@ -1641,7 +1671,9 @@ impl MemberVisibility {
             return false;
         }
         if self.hit(row) {
-            self.class.plan.eval(self.class.plan.root, row, &self.class, Some(self))
+            self.class
+                .plan
+                .eval(self.class.plan.root, row, &self.class, Some(self))
         } else {
             self.class.visible_default(row)
         }
@@ -1722,6 +1754,7 @@ pub struct ClassScope {
 static NEXT_CLASS: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
+#[allow(clippy::type_complexity)]
 struct ClassIndex {
     /// (class set slot, token) → classes holding the token in that set.
     by_token: FxMap<(u16, u32), Vec<(u64, Weak<VisibilityClass>)>>,
@@ -1804,8 +1837,17 @@ impl ClassScope {
             classes: classes.len(),
             gated_classes: classes.iter().filter(|class| class.gated).count(),
             class_bytes: classes.iter().map(|class| class.heap_bytes()).sum(),
-            tokens: self.interner.read().unwrap_or_else(|e| e.into_inner()).ids.len(),
-            interner_bytes: self.interner.read().unwrap_or_else(|e| e.into_inner()).bytes(),
+            tokens: self
+                .interner
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .ids
+                .len(),
+            interner_bytes: self
+                .interner
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .bytes(),
             index_entries: index.by_token.values().map(Vec::len).sum::<usize>()
                 + index.ungated.len(),
         }
@@ -2047,14 +2089,34 @@ mod scalar_eq_tests {
     #[test]
     fn scalar_eq_matches_scalar() {
         let values = [
-            json_number("0"), json_number("-1"), json_number("42"), json_number("9223372036854775807"),
-            json_number("-9223372036854775808"), json_number("18446744073709551615"), json_number("1.5"),
+            json_number("0"),
+            json_number("-1"),
+            json_number("42"),
+            json_number("9223372036854775807"),
+            json_number("-9223372036854775808"),
+            json_number("18446744073709551615"),
+            json_number("1.5"),
             json_number("1e3"),
         ];
         for value in &values {
             let value = AclValue::from_value(Some(value));
-            for expected in ["0", "-1", "42", "9223372036854775807", "-9223372036854775808", "18446744073709551615", "1.5", "1000.0", "x", ""] {
-                assert_eq!(value.scalar_eq(expected), value.scalar() == expected, "{value:?} {expected}");
+            for expected in [
+                "0",
+                "-1",
+                "42",
+                "9223372036854775807",
+                "-9223372036854775808",
+                "18446744073709551615",
+                "1.5",
+                "1000.0",
+                "x",
+                "",
+            ] {
+                assert_eq!(
+                    value.scalar_eq(expected),
+                    value.scalar() == expected,
+                    "{value:?} {expected}"
+                );
             }
         }
     }

@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gonvex_runtime::change_feed::FeedEvent;
-use gonvex_runtime::perf_fixture::harness::{peak_live_bytes, reset_peak, AllocSnapshot, CountingAlloc};
+use gonvex_runtime::perf_fixture::harness::{
+    peak_live_bytes, reset_peak, AllocSnapshot, CountingAlloc,
+};
 use gonvex_runtime::perf_fixture::{Fixture, FixtureOptions};
 use serde_json::json;
 
@@ -58,7 +60,12 @@ async fn run() {
     let rows: usize = env("FEED_ROWS", 50);
     let fixture = Fixture::build(FixtureOptions::whagons()).await.unwrap();
     let route = fixture.tenant(0).route.clone();
-    let tasks: Vec<String> = fixture.tenant(0).tasks.iter().map(|task| task.id.clone()).collect();
+    let tasks: Vec<String> = fixture
+        .tenant(0)
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect();
 
     // Commit instants by revision, filled by the writer.
     let committed: Arc<Mutex<std::collections::HashMap<u64, Instant>>> = Arc::default();
@@ -73,13 +80,23 @@ async fn run() {
             let mut lagged = 0usize;
             loop {
                 match receiver.recv().await {
-                    Ok(FeedEvent::Transaction { revision, changes, .. }) => {
+                    Ok(FeedEvent::Transaction {
+                        revision, changes, ..
+                    }) => {
                         let now = Instant::now();
                         received += 1;
                         // Touch the images as an apply would.
-                        std::hint::black_box(changes.iter().filter(|c| c.new_value.get("_id").is_some()).count());
+                        std::hint::black_box(
+                            changes
+                                .iter()
+                                .filter(|c| c.new_value.get("_id").is_some())
+                                .count(),
+                        );
                         if let Some(at) = committed.lock().unwrap().get(&revision) {
-                            latencies.lock().unwrap().push(now.saturating_duration_since(*at).as_micros() as u64);
+                            latencies
+                                .lock()
+                                .unwrap()
+                                .push(now.saturating_duration_since(*at).as_micros() as u64);
                         }
                     }
                     Ok(FeedEvent::Reset { .. }) => {}
@@ -109,15 +126,25 @@ async fn run() {
     let started = Instant::now();
     let mut last_revision = 0;
     for i in 0..writes {
-        let placeholders = (0..rows).map(|r| format!("${}", r + 2)).collect::<Vec<_>>().join(",");
-        let statement = format!(r#"UPDATE "tasks" SET "description"=$1 WHERE "_id" IN ({placeholders})"#);
+        let placeholders = (0..rows)
+            .map(|r| format!("${}", r + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let statement =
+            format!(r#"UPDATE "tasks" SET "description"=$1 WHERE "_id" IN ({placeholders})"#);
         let mut transaction =
-            gonvex_store::begin_transaction(fixture.pools(), &route.database_url, false).await.unwrap();
-        let mut query = sqlx::query(&statement).bind(format!("feed backlog write {i} {}", "x".repeat(380)));
+            gonvex_store::begin_transaction(fixture.pools(), &route.database_url, false)
+                .await
+                .unwrap();
+        let mut query =
+            sqlx::query(&statement).bind(format!("feed backlog write {i} {}", "x".repeat(380)));
         for r in 0..rows {
             query = query.bind(tasks[(i * rows + r) % tasks.len()].clone());
         }
-        query.execute(&mut **transaction.transaction()).await.unwrap();
+        query
+            .execute(&mut **transaction.transaction())
+            .await
+            .unwrap();
         transaction.commit().await.unwrap();
         let revision = fixture.revision(0).await.unwrap();
         committed.lock().unwrap().insert(revision, Instant::now());
@@ -131,9 +158,16 @@ async fn run() {
     // Fast receivers finish.
     let mut fast_received = Vec::new();
     for handle in fast {
-        fast_received.push(tokio::time::timeout(Duration::from_secs(120), handle).await.unwrap().unwrap());
+        fast_received.push(
+            tokio::time::timeout(Duration::from_secs(120), handle)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
     }
-    let held = AllocSnapshot::now().live_bytes.saturating_sub(base.live_bytes);
+    let held = AllocSnapshot::now()
+        .live_bytes
+        .saturating_sub(base.live_bytes);
     let peak = peak_live_bytes().saturating_sub(base.live_bytes);
 
     // A call committed while the stalled receivers are behind: its result
@@ -142,7 +176,9 @@ async fn run() {
     let save_started = Instant::now();
     {
         let mut transaction =
-            gonvex_store::begin_transaction(fixture.pools(), &route.database_url, false).await.unwrap();
+            gonvex_store::begin_transaction(fixture.pools(), &route.database_url, false)
+                .await
+                .unwrap();
         sqlx::query(r#"UPDATE "tasks" SET "description"=$1 WHERE "_id"=$2"#)
             .bind("feed backlog save")
             .bind(tasks[0].clone())
@@ -214,12 +250,17 @@ async fn run() {
     println!("{result}");
     if let Ok(path) = std::env::var("BENCH_JSON_OUT") {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
         writeln!(file, "{result}").unwrap();
     }
 }
 
-static WRITES_TARGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+static WRITES_TARGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
 fn writes_target() -> usize {
     WRITES_TARGET.load(std::sync::atomic::Ordering::Relaxed)
 }

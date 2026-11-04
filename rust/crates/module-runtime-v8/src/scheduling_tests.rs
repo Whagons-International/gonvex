@@ -119,22 +119,34 @@ fn scheduled_reducer_outrunning_its_slice_gets_an_error_that_says_to_chunk() {
         });
         let host = GateHost::default();
         let error = engine
-            .invoke(&host, invocation("spin", "-1", InvocationChannel::Scheduler, "cron"))
+            .invoke(
+                &host,
+                invocation("spin", "-1", InvocationChannel::Scheduler, "cron"),
+            )
             .await
             .expect_err("a scheduled Reducer is cut at its slice");
         let ModuleError::BudgetExceeded(message) = error else {
             panic!("wrong error class: {error:?}");
         };
-        assert!(message.contains("scheduled reducer spin exceeded its 100 ms time slice"), "{message}");
+        assert!(
+            message.contains("scheduled reducer spin exceeded its 100 ms time slice"),
+            "{message}"
+        );
         assert!(message.contains("ctx.scheduler.runAfter"), "{message}");
         // The same work from a user, or within the slice, runs.
         let user = engine
-            .invoke(&host, invocation("spin", "100000", InvocationChannel::Ui, "user"))
+            .invoke(
+                &host,
+                invocation("spin", "100000", InvocationChannel::Ui, "user"),
+            )
             .await
             .unwrap();
         assert_eq!(user.value, br#""spun""#);
         let short = engine
-            .invoke(&host, invocation("spin", "10", InvocationChannel::Scheduler, "short"))
+            .invoke(
+                &host,
+                invocation("spin", "10", InvocationChannel::Scheduler, "short"),
+            )
             .await
             .unwrap();
         assert_eq!(short.value, br#""spun""#);
@@ -144,7 +156,10 @@ fn scheduled_reducer_outrunning_its_slice_gets_an_error_that_says_to_chunk() {
             execution_timeout: Duration::from_millis(200),
             ..Default::default()
         })
-        .invoke(&host, invocation("spin", "-1", InvocationChannel::Scheduler, "cron"))
+        .invoke(
+            &host,
+            invocation("spin", "-1", InvocationChannel::Scheduler, "cron"),
+        )
         .await
         .expect_err("the execution ceiling still applies");
         assert!(
@@ -169,7 +184,10 @@ fn queued_user_calls_take_the_isolate_before_queued_scheduled_work() {
                 let (engine, host) = (Arc::clone(&engine), Arc::clone(&host));
                 async move {
                     engine
-                        .invoke(&*host, invocation("gate", "null", InvocationChannel::Ui, "holder"))
+                        .invoke(
+                            &*host,
+                            invocation("gate", "null", InvocationChannel::Ui, "holder"),
+                        )
                         .await
                 }
             });
@@ -223,7 +241,10 @@ fn scheduled_isolate_keeps_user_calls_off_a_running_cron() {
                 let (engine, host) = (Arc::clone(&engine), Arc::clone(&host));
                 async move {
                     engine
-                        .invoke(&*host, invocation("gate", "null", InvocationChannel::Scheduler, "cron"))
+                        .invoke(
+                            &*host,
+                            invocation("gate", "null", InvocationChannel::Scheduler, "cron"),
+                        )
                         .await
                 }
             });
@@ -232,18 +253,33 @@ fn scheduled_isolate_keeps_user_calls_off_a_running_cron() {
             }
             let user = tokio::time::timeout(
                 Duration::from_millis(if separate { 5_000 } else { 300 }),
-                engine.invoke(&*host, invocation("spin", "1", InvocationChannel::Ui, "user")),
+                engine.invoke(
+                    &*host,
+                    invocation("spin", "1", InvocationChannel::Ui, "user"),
+                ),
             )
             .await;
             if separate {
-                assert_eq!(user.expect("user call runs while the cron holds its own isolate").unwrap().value, br#""spun""#);
+                assert_eq!(
+                    user.expect("user call runs while the cron holds its own isolate")
+                        .unwrap()
+                        .value,
+                    br#""spun""#
+                );
             } else {
-                assert!(user.is_err(), "with one shared isolate the user call waits for the cron");
+                assert!(
+                    user.is_err(),
+                    "with one shared isolate the user call waits for the cron"
+                );
             }
             host.open.add_permits(1);
             cron.await.unwrap().unwrap();
             let (_, on_demand) = engine.idle_isolates();
-            assert_eq!(on_demand, usize::from(separate), "the scheduled isolate is pooled until idle");
+            assert_eq!(
+                on_demand,
+                usize::from(separate),
+                "the scheduled isolate is pooled until idle"
+            );
         }
     });
 }

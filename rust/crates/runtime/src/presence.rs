@@ -985,7 +985,14 @@ mod tests {
             vec![("m1".into(), "active".into())]
         );
         // After a quiet window the next change is a leading edge again.
-        hub.set_state("c1", &scope("a"), "m1", PresenceState::Idle, false, t0 + ms(400));
+        hub.set_state(
+            "c1",
+            &scope("a"),
+            "m1",
+            PresenceState::Idle,
+            false,
+            t0 + ms(400),
+        );
         let (stats, next) = hub.run_due(t0 + ms(400), 2);
         assert_eq!((stats.changes, next), (1, None));
         assert_eq!(
@@ -1015,7 +1022,11 @@ mod tests {
         set("c3", "m3", PresenceState::Offline, 140);
         let (stats, next) = hub.run_due(t0 + ms(140), 2);
         assert_eq!(stats.changes, 0, "nothing inside the window");
-        assert_eq!(next, Some(t0 + ms(250)), "one trailing edge, at the window end");
+        assert_eq!(
+            next,
+            Some(t0 + ms(250)),
+            "one trailing edge, at the window end"
+        );
         assert_eq!(slot.pending(), 0);
         let (stats, next) = hub.run_due(t0 + ms(250), 3);
         assert_eq!((stats.changes, stats.frames, next), (2, 1, None));
@@ -1062,10 +1073,34 @@ mod tests {
         hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0);
         assert!(woken(&hub).await, "leading edge wakes the scheduler");
         hub.run_due(t0, 1);
-        hub.set_state("c1", &scope("a"), "m1", PresenceState::Idle, false, t0 + ms(10));
-        assert!(woken(&hub).await, "first change in the window schedules its end");
-        hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0 + ms(20));
-        hub.set_state("c2", &scope("a"), "m2", PresenceState::Active, false, t0 + ms(30));
+        hub.set_state(
+            "c1",
+            &scope("a"),
+            "m1",
+            PresenceState::Idle,
+            false,
+            t0 + ms(10),
+        );
+        assert!(
+            woken(&hub).await,
+            "first change in the window schedules its end"
+        );
+        hub.set_state(
+            "c1",
+            &scope("a"),
+            "m1",
+            PresenceState::Active,
+            false,
+            t0 + ms(20),
+        );
+        hub.set_state(
+            "c2",
+            &scope("a"),
+            "m2",
+            PresenceState::Active,
+            false,
+            t0 + ms(30),
+        );
         assert!(!woken(&hub).await, "already due at the window end");
         hub.close();
         assert!(hub.closed());

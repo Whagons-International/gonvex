@@ -14,6 +14,9 @@
 use super::*;
 use crate::visibility::{grant_contribution, GrantContribution, VisibilityExpression};
 
+// `Apply` is built once per subscription per transaction and matched in
+// place; boxing it would add an allocation on the fan-out hot path.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Step {
     /// Nothing in the transaction concerns this subscription.
     Skip,
@@ -39,6 +42,7 @@ pub(super) struct ApplyContext {
     /// The principal before this transaction's grants (None: unchanged).
     pub before: Option<ResolvedVisibility>,
     /// Parent rows as they were before this transaction.
+    #[allow(clippy::type_complexity)]
     pub overlay: Option<Arc<Vec<(String, String, Option<Arc<Value>>)>>>,
     /// Rows of the source table whose visibility may have moved without the
     /// row changing, as they are at the event's revision.
@@ -115,7 +119,11 @@ pub(super) fn subscription_concern_tables(
         let mut tables = crate::fast_hash::FastSet::default();
         tables.insert(subscription.definition.table.clone());
         tables.insert("members".to_owned());
-        concern_tables(&subscription.visibility, &subscription.resolved, &mut tables);
+        concern_tables(
+            &subscription.visibility,
+            &subscription.resolved,
+            &mut tables,
+        );
         Arc::new(tables)
     }))
 }
@@ -125,7 +133,10 @@ pub(super) fn subscription_parent_acl_columns(
     subscription: &mut ReplicaSubscription,
 ) -> Arc<BTreeMap<String, BTreeSet<String>>> {
     Arc::clone(subscription.parent_acl_columns.get_or_insert_with(|| {
-        Arc::new(parent_acl_columns(&subscription.visibility, &subscription.resolved))
+        Arc::new(parent_acl_columns(
+            &subscription.visibility,
+            &subscription.resolved,
+        ))
     }))
 }
 
@@ -244,7 +255,10 @@ pub(super) fn member_unmoved(
     !checks.grant
         || (matches!(grant_delta(plan, resolved, change), GrantDelta::None)
             && resolved.inherited.values().all(|parent| {
-                matches!(grant_delta(&parent.plan, &parent.resolved, change), GrantDelta::None)
+                matches!(
+                    grant_delta(&parent.plan, &parent.resolved, change),
+                    GrantDelta::None
+                )
             }))
 }
 
@@ -262,7 +276,7 @@ impl Runtime {
         let plan = Arc::clone(&subscription.visibility);
         let parents = plan.inherited_columns();
         let any_parents = visibility::inherits_any(&subscription.visibility)
-            .into_iter()
+            .iter()
             .filter_map(|expression| Some((expression.via.clone()?, expression.table.clone())))
             .collect::<Vec<_>>();
         let tables = subscription_concern_tables(subscription);

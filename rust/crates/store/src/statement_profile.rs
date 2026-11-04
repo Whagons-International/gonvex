@@ -122,7 +122,7 @@ pub fn snapshot() -> Vec<(String, StatementStats)> {
         .iter()
         .map(|(sql, stats)| (sql.to_string(), *stats))
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| right.1.total_ns.cmp(&left.1.total_ns));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.1.total_ns));
     rows
 }
 
@@ -140,6 +140,9 @@ mod tests {
 
     #[test]
     fn normalizes_whitespace() {
-        assert_eq!(normalize("  SELECT\n  a,\tb FROM t  "), "SELECT a, b FROM t");
+        assert_eq!(
+            normalize("  SELECT\n  a,\tb FROM t  "),
+            "SELECT a, b FROM t"
+        );
     }
 }

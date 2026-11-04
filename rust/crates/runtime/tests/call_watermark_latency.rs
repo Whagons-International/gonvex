@@ -211,7 +211,9 @@ async fn a_call_whose_commit_sends_the_caller_no_rows_completes_within_50_ms() {
         // itself ran.
         gaps.push(result_at.map_or(Duration::ZERO, |at| at.elapsed().min(elapsed)));
     }
-    eprintln!("call completion (result + covering watermark): {timings:?}; result -> watermark: {gaps:?}");
+    eprintln!(
+        "call completion (result + covering watermark): {timings:?}; result -> watermark: {gaps:?}"
+    );
     // The batch-timer regression shows in the gap on any build: every gap stays
     // well under the 1 s idle delay, and the typical gap well under the 50 ms tick.
     let mut sorted = gaps.clone();

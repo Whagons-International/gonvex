@@ -1977,7 +1977,9 @@ mod tests {
             operation: "insert".into(),
             changed_columns: vec![],
             old_value: std::sync::Arc::new(Value::Null),
-            new_value: std::sync::Arc::new(serde_json::json!({"id":"note","memberId":member,"taskId":"task"})),
+            new_value: std::sync::Arc::new(
+                serde_json::json!({"id":"note","memberId":member,"taskId":"task"}),
+            ),
             provenance: Default::default(),
         }
     }

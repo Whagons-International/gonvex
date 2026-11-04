@@ -108,7 +108,10 @@ async fn stop_probes(probes: Probes, name: &str, mut extra: serde_json::Map<Stri
     let lag = Summary::of(lag);
     let echo = Summary::of(echo);
     let pool = offload();
-    extra.insert("seconds".into(), json!(probes.started.elapsed().as_secs_f64()));
+    extra.insert(
+        "seconds".into(),
+        json!(probes.started.elapsed().as_secs_f64()),
+    );
     let line = json!({
         "name": name,
         "strategy": format!("{:?}", pool.strategy()),
@@ -182,7 +185,11 @@ async fn run() {
             println!("STALL_JSON {line}");
             if let Ok(path) = std::env::var("BENCH_JSON_OUT") {
                 use std::io::Write;
-                let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .unwrap();
                 writeln!(file, "{line}").unwrap();
             }
         }
@@ -200,7 +207,8 @@ async fn run() {
         let rate: f64 = env("STALL_OPEN_RATE", 10.0);
         // Warm the interner/estimates the way a running server would be.
         for member in 0..members {
-            let _ = stalls::socket_open(&fixture.runtime, &fixture.session(BIG, member), TASKS).await;
+            let _ =
+                stalls::socket_open(&fixture.runtime, &fixture.session(BIG, member), TASKS).await;
         }
         let probes = start_probes().await;
         let latencies = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -214,20 +222,23 @@ async fn run() {
             let latencies = latencies.clone();
             let member = n % members;
             n += 1;
-            handles.push(tokio::spawn(timed(gonvex_profiler::instrument(gonvex_profiler::TaskKind::WsConnection, async move {
-                let started = Instant::now();
-                let opened =
-                    stalls::socket_open(&fixture.runtime, &fixture.session(BIG, member), TASKS)
-                        .await
-                        .unwrap();
-                latencies
-                    .lock()
-                    .unwrap()
-                    .push(started.elapsed().as_micros() as u64);
-                // A closed subscription is freed as the socket loop frees it.
-                gonvex_runtime::offload::retire(opened.subscription);
-                opened.rows
-            }))));
+            handles.push(tokio::spawn(timed(gonvex_profiler::instrument(
+                gonvex_profiler::TaskKind::WsConnection,
+                async move {
+                    let started = Instant::now();
+                    let opened =
+                        stalls::socket_open(&fixture.runtime, &fixture.session(BIG, member), TASKS)
+                            .await
+                            .unwrap();
+                    latencies
+                        .lock()
+                        .unwrap()
+                        .push(started.elapsed().as_micros() as u64);
+                    // A closed subscription is freed as the socket loop frees it.
+                    gonvex_runtime::offload::retire(opened.subscription);
+                    opened.rows
+                },
+            ))));
         }
         let mut rows = 0;
         for handle in handles {
@@ -266,7 +277,11 @@ async fn run() {
         // Warm the apply-cost averages with two updates.
         for n in 0..2 {
             let event = fixture
-                .update_task(BIG, n * 131 % tasks, json!({"description": format!("warm {n}")}))
+                .update_task(
+                    BIG,
+                    n * 131 % tasks,
+                    json!({"description": format!("warm {n}")}),
+                )
                 .await
                 .unwrap();
             let _ = sender.send((Instant::now(), event));
@@ -284,7 +299,11 @@ async fn run() {
             } else {
                 let task = (updates * 7919 + 13) % tasks;
                 fixture
-                    .update_task(BIG, task, json!({"description": format!("update {updates}")}))
+                    .update_task(
+                        BIG,
+                        task,
+                        json!({"description": format!("update {updates}")}),
+                    )
                     .await
                     .unwrap()
             };
@@ -294,20 +313,35 @@ async fn run() {
         // Let queued deliveries finish inside the window.
         let expected = (updates + 2) * loops.len();
         let drain = Instant::now();
-        while counters.deliveries.load(Relaxed) < expected && drain.elapsed() < Duration::from_secs(60) {
+        while counters.deliveries.load(Relaxed) < expected
+            && drain.elapsed() < Duration::from_secs(60)
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let latencies = std::mem::take(&mut *counters.latency_us.lock().unwrap());
         let mut extra = serde_json::Map::new();
         extra.insert("updates".into(), json!(updates));
         extra.insert("targetRate".into(), json!(rate));
-        extra.insert("deliveries".into(), json!(counters.deliveries.load(Relaxed)));
+        extra.insert(
+            "deliveries".into(),
+            json!(counters.deliveries.load(Relaxed)),
+        );
         extra.insert("messages".into(), json!(counters.messages.load(Relaxed)));
         extra.insert("errors".into(), json!(counters.errors.load(Relaxed)));
         extra.insert("deliveryLatency".into(), Summary::of(latencies).to_json());
-        extra.insert("fanoutInlineMaxUs".into(), json!(counters.fanout_max_us.load(Relaxed)));
-        extra.insert("pushInlineMaxUs".into(), json!(counters.push_max_us.load(Relaxed)));
-        let kind = if presence { "presence_beats" } else { "task_updates" };
+        extra.insert(
+            "fanoutInlineMaxUs".into(),
+            json!(counters.fanout_max_us.load(Relaxed)),
+        );
+        extra.insert(
+            "pushInlineMaxUs".into(),
+            json!(counters.push_max_us.load(Relaxed)),
+        );
+        let kind = if presence {
+            "presence_beats"
+        } else {
+            "task_updates"
+        };
         stop_probes(probes, &format!("stall/fanout_{rate}_{kind}_per_s"), extra).await;
         drop(sender);
         for handle in loops {
@@ -322,7 +356,10 @@ async fn run() {
         // STALL_BURST_RETAIN=0: drop each subscription when its open completes,
         // so the peak is the transient build memory (not the retained rows).
         let retain = std::env::var("STALL_BURST_RETAIN").map_or(true, |value| value != "0");
-        for burst in bursts.split(',').filter_map(|value| value.trim().parse::<usize>().ok()) {
+        for burst in bursts
+            .split(',')
+            .filter_map(|value| value.trim().parse::<usize>().ok())
+        {
             let _ = SnapshotAdmission::global().take_peak_reserved_bytes();
             let base = reset_peak();
             let rss_before = rss_bytes();
@@ -332,14 +369,20 @@ async fn run() {
             let mut handles = Vec::new();
             for n in 0..burst {
                 let fixture = fixture.clone();
-                handles.push(tokio::spawn(timed(gonvex_profiler::instrument(gonvex_profiler::TaskKind::WsConnection, async move {
-                    let opened_at = Instant::now();
-                    let opened =
-                        stalls::socket_open(&fixture.runtime, &fixture.session(BIG, n % members), TASKS)
-                            .await
-                            .unwrap();
-                    (opened, opened_at.elapsed().as_micros() as u64)
-                }))));
+                handles.push(tokio::spawn(timed(gonvex_profiler::instrument(
+                    gonvex_profiler::TaskKind::WsConnection,
+                    async move {
+                        let opened_at = Instant::now();
+                        let opened = stalls::socket_open(
+                            &fixture.runtime,
+                            &fixture.session(BIG, n % members),
+                            TASKS,
+                        )
+                        .await
+                        .unwrap();
+                        (opened, opened_at.elapsed().as_micros() as u64)
+                    },
+                ))));
             }
             let mut held = Vec::new();
             let mut latencies = Vec::new();
@@ -367,7 +410,9 @@ async fn run() {
             extra.insert("transientPeakBytes".into(), json!(peak - retained));
             extra.insert(
                 "rssDeltaBytes".into(),
-                json!(rss_bytes().zip(rss_before).map(|(after, before)| after as i64 - before as i64)),
+                json!(rss_bytes()
+                    .zip(rss_before)
+                    .map(|(after, before)| after as i64 - before as i64)),
             );
             extra.insert(
                 "peakReservedSnapshotBytes".into(),

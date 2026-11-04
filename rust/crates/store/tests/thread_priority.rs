@@ -12,7 +12,9 @@ use gonvex_store::{database_url, PoolLimits, PoolRegistry};
 fn threads() -> Vec<(String, i32)> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else { continue };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
         // pid (comm) state ppid ... field 19 = nice; comm may contain spaces.
         let close = stat.rfind(')').unwrap();
         let comm = stat[stat.find('(').unwrap() + 1..close].to_owned();
@@ -23,7 +25,11 @@ fn threads() -> Vec<(String, i32)> {
 }
 
 fn sqlx_workers() -> Vec<i32> {
-    threads().into_iter().filter(|(comm, _)| comm.starts_with("sqlx-sqlite")).map(|(_, nice)| nice).collect()
+    threads()
+        .into_iter()
+        .filter(|(comm, _)| comm.starts_with("sqlx-sqlite"))
+        .map(|(_, nice)| nice)
+        .collect()
 }
 
 #[test]
@@ -39,7 +45,11 @@ fn writer_workers_stay_at_base_and_readers_at_reader_nice_whoever_opens_them() {
         return;
     }
     // The base runtime writers open on (the network runtime in the binary).
-    let home = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+    let home = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
     gonvex_store::reader_priority::set_home_runtime(home.handle().clone());
     // A niced runtime, as the offload pool is.
     let niced = tokio::runtime::Builder::new_multi_thread()
@@ -50,30 +60,51 @@ fn writer_workers_stay_at_base_and_readers_at_reader_nice_whoever_opens_them() {
         })
         .build()
         .unwrap();
-    let dir = std::env::temp_dir().join(format!("gonvex-thread-priority-{}", uuid::Uuid::new_v4().simple()));
+    let dir = std::env::temp_dir().join(format!(
+        "gonvex-thread-priority-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let url = database_url(&dir.join("tenant.db"));
     let registry = PoolRegistry::new(PoolLimits::default());
     let registry = std::sync::Arc::new(registry);
     // Spawned (not block_on, which runs on the calling thread): on the niced worker.
     let (r, u) = (registry.clone(), url.clone());
-    niced.block_on(niced.spawn(async move {
-        assert_eq!(priority::current(), base + 6, "the opening thread is niced");
-        let writer = r.pool(&u).await.unwrap();
-        sqlx::query("CREATE TABLE t(id INTEGER PRIMARY KEY)").execute(&writer).await.unwrap();
-    }))
-    .unwrap();
+    niced
+        .block_on(niced.spawn(async move {
+            assert_eq!(priority::current(), base + 6, "the opening thread is niced");
+            let writer = r.pool(&u).await.unwrap();
+            sqlx::query("CREATE TABLE t(id INTEGER PRIMARY KEY)")
+                .execute(&writer)
+                .await
+                .unwrap();
+        }))
+        .unwrap();
     let writers = sqlx_workers();
-    assert_eq!(writers, vec![base], "writer worker at base, not inherited base + 6: {:?}", threads());
+    assert_eq!(
+        writers,
+        vec![base],
+        "writer worker at base, not inherited base + 6: {:?}",
+        threads()
+    );
     let (r, u) = (registry.clone(), url.clone());
-    niced.block_on(niced.spawn(async move {
-        let reader = r.reader(&u).await.unwrap();
-        let _: i64 = sqlx::query_scalar("SELECT count(*) FROM t").fetch_one(&reader).await.unwrap();
-    }))
-    .unwrap();
+    niced
+        .block_on(niced.spawn(async move {
+            let reader = r.reader(&u).await.unwrap();
+            let _: i64 = sqlx::query_scalar("SELECT count(*) FROM t")
+                .fetch_one(&reader)
+                .await
+                .unwrap();
+        }))
+        .unwrap();
     let mut workers = sqlx_workers();
     workers.sort();
-    assert_eq!(workers, vec![base, base + 8], "writer at base, reader at base + 8 (raised from the creator's base + 6): {:?}", threads());
+    assert_eq!(
+        workers,
+        vec![base, base + 8],
+        "writer at base, reader at base + 8 (raised from the creator's base + 6): {:?}",
+        threads()
+    );
     home.block_on(registry.close());
     let _ = std::fs::remove_dir_all(&dir);
 }

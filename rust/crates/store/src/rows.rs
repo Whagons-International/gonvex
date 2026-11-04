@@ -263,7 +263,12 @@ pub async fn result_column_kinds(
     let kinds = unsafe { declared_kinds(raw.as_ptr(), sql) }?;
     let kinds = Arc::new(kinds);
     let mut cache = cache.lock().unwrap();
-    if cache.values().map(|statements| statements.len()).sum::<usize>() > 4096 {
+    if cache
+        .values()
+        .map(|statements| statements.len())
+        .sum::<usize>()
+        > 4096
+    {
         cache.clear();
     }
     cache

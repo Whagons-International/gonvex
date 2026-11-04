@@ -947,7 +947,10 @@ pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, St
     }
     // Declared only by modules that use `ctx.permissions`; absent keeps every
     // earlier artifact hash unchanged.
-    if let Some(grants) = module.get("permissionGrants").filter(|value| !value.is_null()) {
+    if let Some(grants) = module
+        .get("permissionGrants")
+        .filter(|value| !value.is_null())
+    {
         contract["permissionGrants"] = grants.clone();
     }
     let bytes = canonical_json(&contract)?.into_bytes();

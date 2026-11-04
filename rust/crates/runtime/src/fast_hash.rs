@@ -19,7 +19,12 @@ mod tests {
     fn serde_json_objects_keep_insertion_order() {
         let text = r#"{"z":1,"_id":"a","m":{"y":true,"b":null},"a":[1,2]}"#;
         let value: serde_json::Value = serde_json::from_str(text).unwrap();
-        let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(keys, ["z", "_id", "m", "a"]);
         assert_eq!(serde_json::to_string(&value).unwrap(), text);
         let mut map = serde_json::Map::with_capacity(4);

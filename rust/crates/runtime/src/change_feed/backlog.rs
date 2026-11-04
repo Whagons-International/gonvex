@@ -126,7 +126,8 @@ pub(crate) fn change_bytes(change: &LogChange) -> usize {
             Value::Null | Value::Bool(_) | Value::Number(_) => 0,
             Value::String(text) => text.capacity(),
             Value::Array(items) => {
-                items.capacity() * std::mem::size_of::<Value>() + items.iter().map(heap).sum::<usize>()
+                items.capacity() * std::mem::size_of::<Value>()
+                    + items.iter().map(heap).sum::<usize>()
             }
             // A map node per entry: key, value and tree overhead.
             Value::Object(map) => map
@@ -168,6 +169,7 @@ pub(crate) fn change_bytes(change: &LogChange) -> usize {
         .sum::<usize>()
 }
 
+#[allow(clippy::type_complexity)]
 struct StoreState {
     /// (revision, images, estimated bytes, unread token of its signal).
     entries: VecDeque<(u64, Arc<Vec<LogChange>>, usize, Weak<()>)>,
@@ -198,6 +200,7 @@ pub(crate) struct FeedStore {
 /// first while the process-wide refill bytes exceed
 /// `GONVEX_FEED_REFILL_BYTES` (default 32 MiB).
 #[derive(Default)]
+#[allow(clippy::type_complexity)]
 struct Refilled {
     next: std::collections::HashMap<u64, (u64, Option<Arc<Vec<LogChange>>>)>,
     /// Insertion order: (cursor key, revision, bytes).
@@ -229,7 +232,10 @@ impl Refilled {
     fn record(&mut self, after: u64, fill: &Fill) {
         let mut cursor = after;
         for event in &fill.events {
-            if let FeedEvent::Transaction { revision, changes, .. } = event {
+            if let FeedEvent::Transaction {
+                revision, changes, ..
+            } = event
+            {
                 self.insert(cursor, *revision, Some(Arc::clone(changes)));
                 cursor = *revision;
             }
@@ -243,7 +249,11 @@ impl Refilled {
             let Some((cursor, revision, bytes)) = self.order.pop_front() else {
                 break;
             };
-            if self.next.get(&cursor).is_some_and(|entry| entry.0 == revision) {
+            if self
+                .next
+                .get(&cursor)
+                .is_some_and(|entry| entry.0 == revision)
+            {
                 self.next.remove(&cursor);
             }
             self.bytes -= bytes;
@@ -252,7 +262,9 @@ impl Refilled {
     }
 
     fn clear(&mut self) {
-        counters().refill_bytes.fetch_sub(self.bytes, Ordering::Relaxed);
+        counters()
+            .refill_bytes
+            .fetch_sub(self.bytes, Ordering::Relaxed);
         self.next.clear();
         self.order.clear();
         self.bytes = 0;
@@ -300,7 +312,9 @@ impl FeedStore {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, StoreState> {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The revision the feed reader starts after: receivers subscribed before
@@ -334,7 +348,12 @@ impl FeedStore {
         self.sender.receiver_count()
     }
 
-    pub(crate) fn publish(&self, database_epoch: &Arc<str>, revision: u64, changes: Vec<LogChange>) {
+    pub(crate) fn publish(
+        &self,
+        database_epoch: &Arc<str>,
+        revision: u64,
+        changes: Vec<LogChange>,
+    ) {
         let bytes = changes.iter().map(change_bytes).sum::<usize>()
             + std::mem::size_of::<Vec<LogChange>>()
             + 32;
@@ -367,8 +386,7 @@ impl FeedStore {
         // The newest transaction always stays: receivers that keep up never
         // read the log, whatever its size.
         while state.entries.len() > 1
-            && (state.entries.len() > STORE_MAX_ENTRIES
-                || c.bytes.load(Ordering::Relaxed) > budget)
+            && (state.entries.len() > STORE_MAX_ENTRIES || c.bytes.load(Ordering::Relaxed) > budget)
         {
             let Some((_, _, evicted, _)) = state.entries.pop_front() else {
                 break;
@@ -424,7 +442,9 @@ impl FeedStore {
     }
 
     fn refilled(&self) -> std::sync::MutexGuard<'_, Refilled> {
-        self.refilled.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.refilled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `(latest broadcast revision, oldest revision still held)`.
@@ -436,7 +456,10 @@ impl FeedStore {
 
 impl Drop for FeedStore {
     fn drop(&mut self) {
-        let state = self.state.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let c = counters();
         c.bytes.fetch_sub(state.bytes, Ordering::Relaxed);
         c.entries.fetch_sub(state.entries.len(), Ordering::Relaxed);
@@ -500,14 +523,19 @@ impl From<broadcast::Receiver<FeedEvent>> for FeedReceiver {
 
 impl std::fmt::Debug for FeedReceiver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FeedReceiver").field("len", &self.len()).finish()
+        f.debug_struct("FeedReceiver")
+            .field("len", &self.len())
+            .finish()
     }
 }
 
 enum Step {
     Yield(Result<FeedEvent, RecvError>),
     /// A refill must run before the next event.
-    Fill { after: u64, through: u64 },
+    Fill {
+        after: u64,
+        through: u64,
+    },
     Continue,
 }
 
@@ -545,12 +573,7 @@ impl HubReceiver {
                     reason: reason.to_string(),
                 }))
             }
-            Ok(
-                signal @ FeedSignal::Transaction {
-                    revision,
-                    ..
-                },
-            ) => {
+            Ok(signal @ FeedSignal::Transaction { revision, .. }) => {
                 if self.last.is_some_and(|last| revision <= last) {
                     // Already yielded from the log.
                     return Step::Continue;
@@ -656,11 +679,19 @@ impl HubReceiver {
     }
 
     fn finish_fill(&mut self, result: Result<FillResult, tokio::task::JoinError>) -> Step {
-        let result = result.map_err(|error| error.to_string()).and_then(|result| result);
+        let result = result
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
         let c = counters();
         match result {
-            Ok(fill) if self.epoch.as_deref().is_none_or(|epoch| epoch == fill.epoch) => {
-                c.fill_events.fetch_add(fill.events.len() as u64, Ordering::Relaxed);
+            Ok(fill)
+                if self
+                    .epoch
+                    .as_deref()
+                    .is_none_or(|epoch| epoch == fill.epoch) =>
+            {
+                c.fill_events
+                    .fetch_add(fill.events.len() as u64, Ordering::Relaxed);
                 if self.epoch.is_none() {
                     self.epoch = Some(Arc::from(fill.epoch.as_str()));
                 }
@@ -827,8 +858,10 @@ async fn read_fill(
     };
     let c = counters();
     c.fills.fetch_add(1, Ordering::Relaxed);
-    c.fill_revisions.fetch_add(through - after, Ordering::Relaxed);
-    c.fill_changes.fetch_add(changes.len() as u64, Ordering::Relaxed);
+    c.fill_revisions
+        .fetch_add(through - after, Ordering::Relaxed);
+    c.fill_changes
+        .fetch_add(changes.len() as u64, Ordering::Relaxed);
     let events = group_transactions(&clock.epoch, changes);
     c.fill_ns
         .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -849,7 +882,10 @@ pub(crate) fn group_transactions(epoch: &str, changes: Vec<LogChange>) -> Vec<Fe
     let mut events = Vec::new();
     let mut batch: Vec<LogChange> = Vec::new();
     for change in changes {
-        if batch.last().is_some_and(|last| last.revision != change.revision) {
+        if batch
+            .last()
+            .is_some_and(|last| last.revision != change.revision)
+        {
             let revision = batch[0].revision;
             events.push(FeedEvent::Transaction {
                 database_epoch: epoch.to_owned(),

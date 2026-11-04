@@ -271,9 +271,9 @@ impl IsolateWorker {
         gonvex_profiler::thread_priority::spawn_at("gonvex-module-isolate", 0, move || {
             worker_main(source, config, ready, call_receiver, worker_control)
         })
-            .map_err(|err| {
-                ModuleError::Execution(format!("failed to start module isolate thread: {err}"))
-            })?;
+        .map_err(|err| {
+            ModuleError::Execution(format!("failed to start module isolate thread: {err}"))
+        })?;
         Ok((Self { calls, control }, ready_receiver))
     }
 
@@ -423,7 +423,7 @@ async fn worker_loop(
         served += 1;
         let gc = isolate.gc.values();
         tally.update(&mut isolate.runtime, gc, served);
-        if heap_stats_enabled() && (served == 1 || served % 200 == 0) {
+        if heap_stats_enabled() && (served == 1 || served.is_multiple_of(200)) {
             log_heap_statistics(
                 &mut isolate.runtime,
                 &source.specifier,
@@ -531,9 +531,17 @@ extern "C" fn gc_epilogue(
     }
     let elapsed = gonvex_profiler::now_ns().saturating_sub(started);
     let (stage, count, total) = if gc_type == v8::GCType::MARK_SWEEP_COMPACT {
-        (gonvex_profiler::Stage::V8GcMajor, &stats.major, &stats.major_ns)
+        (
+            gonvex_profiler::Stage::V8GcMajor,
+            &stats.major,
+            &stats.major_ns,
+        )
     } else {
-        (gonvex_profiler::Stage::V8GcMinor, &stats.minor, &stats.minor_ns)
+        (
+            gonvex_profiler::Stage::V8GcMinor,
+            &stats.minor,
+            &stats.minor_ns,
+        )
     };
     count.fetch_add(1, Ordering::Relaxed);
     total.fetch_add(elapsed, Ordering::Relaxed);
@@ -546,7 +554,9 @@ impl GcStats {
         if !gonvex_profiler::enabled() {
             return;
         }
-        let data = (self as *const GcStats).cast_mut().cast::<std::ffi::c_void>();
+        let data = (self as *const GcStats)
+            .cast_mut()
+            .cast::<std::ffi::c_void>();
         #[cfg(unix)]
         {
             isolate.add_gc_prologue_callback(gc_prologue, data, gc_pause_types());
@@ -833,8 +843,9 @@ fn heap_stats_enabled() -> bool {
 /// statistics, so memory studies can attribute RSS to isolate heaps.
 /// Process-wide V8 heap tally (perf: /dev/metrics `memory.v8`): one slot per
 /// live isolate worker, refreshed after each call, removed when the worker ends.
-static HEAP_TALLY: std::sync::Mutex<std::collections::BTreeMap<u64, [u64; ISOLATE_STAT_FIELDS.len()]>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
+static HEAP_TALLY: std::sync::Mutex<
+    std::collections::BTreeMap<u64, [u64; ISOLATE_STAT_FIELDS.len()]>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Per-isolate values reported by [`isolate_stats`]: the five heap figures
 /// of [`heap_tally`], then calls served and GC pause counts and time.
@@ -893,7 +904,9 @@ impl Drop for HeapTallySlot {
 /// `(isolates reporting, [total heap, used heap, physical, external, malloced])`
 /// summed over live isolate workers, as of each one's last call.
 pub fn heap_tally() -> (usize, [u64; 5]) {
-    let tally = HEAP_TALLY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tally = HEAP_TALLY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut sum = [0u64; 5];
     for values in tally.values() {
         for (total, value) in sum.iter_mut().zip(values) {
@@ -1476,9 +1489,9 @@ impl Watchdog {
         gonvex_profiler::thread_priority::spawn_at("gonvex-module-watchdog", 0, move || {
             watchdog_main(handle, terminated, inbox)
         })
-            .map_err(|err| {
-                ModuleError::Execution(format!("failed to start module watchdog thread: {err}"))
-            })?;
+        .map_err(|err| {
+            ModuleError::Execution(format!("failed to start module watchdog thread: {err}"))
+        })?;
         Ok(Self { signals })
     }
 

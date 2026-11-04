@@ -127,7 +127,10 @@ impl Scenario {
         raw_sites::reset();
         Self {
             samples: Vec::new(),
-            sites: raw_sites::snapshot().into_iter().map(|(name, ..)| (name, 0, 0, 0, 0)).collect(),
+            sites: raw_sites::snapshot()
+                .into_iter()
+                .map(|(name, ..)| (name, 0, 0, 0, 0))
+                .collect(),
         }
     }
 
@@ -187,7 +190,11 @@ impl Scenario {
     }
 }
 
-fn request(path: &str, args: Value, resume: Option<&(ReplicaCursor, String)>) -> ReplicaOpenRequest {
+fn request(
+    path: &str,
+    args: Value,
+    resume: Option<&(ReplicaCursor, String)>,
+) -> ReplicaOpenRequest {
     let mut request = json!({"id": path, "path": path, "args": args});
     if let Some((cursor, digest)) = resume {
         request["cursor"] = serde_json::to_value(cursor).unwrap();
@@ -216,7 +223,11 @@ fn rows_of(messages: &[ServerMessage]) -> usize {
 }
 
 /// One transaction updating `count` tasks (`count` change-log rows).
-async fn update_tasks(fixture: &Fixture, count: usize, salt: usize) -> gonvex_runtime::change_feed::FeedEvent {
+async fn update_tasks(
+    fixture: &Fixture,
+    count: usize,
+    salt: usize,
+) -> gonvex_runtime::change_feed::FeedEvent {
     let tasks = fixture.tenant(TENANT).tasks.len();
     let offset = (salt * 7919) % tasks.saturating_sub(count).max(1);
     fixture
@@ -230,7 +241,12 @@ async fn update_tasks(fixture: &Fixture, count: usize, salt: usize) -> gonvex_ru
         .unwrap()
 }
 
-async fn open(fixture: &Fixture, session: &TenantSession, path: &str, args: Value) -> Vec<ServerMessage> {
+async fn open(
+    fixture: &Fixture,
+    session: &TenantSession,
+    path: &str,
+    args: Value,
+) -> Vec<ServerMessage> {
     fixture
         .runtime
         .open_replica(session, request(path, args, None))
@@ -261,7 +277,10 @@ async fn run() {
         started.elapsed().as_secs_f64()
     );
     let runtime = fixture.runtime.clone();
-    let kinds = [("Admin", MemberKind::Admin), ("TeamSpots", MemberKind::TeamSpots)];
+    let kinds = [
+        ("Admin", MemberKind::Admin),
+        ("TeamSpots", MemberKind::TeamSpots),
+    ];
 
     for (label, kind) in kinds {
         let session = fixture.session(TENANT, fixture.members_of_kind(TENANT, kind)[0]);
@@ -288,16 +307,23 @@ async fn run() {
             let mut scenario = Scenario::start();
             for _ in 0..iterations {
                 runtime.clear_snapshot_cache();
-                scenario.run(open(&fixture, &session, TASKS, json!({}))).await;
+                scenario
+                    .run(open(&fixture, &session, TASKS, json!({})))
+                    .await;
             }
-            scenario.finish(&name, json!({"cache": format!("{:?}", runtime.snapshot_cache_stats())}));
+            scenario.finish(
+                &name,
+                json!({"cache": format!("{:?}", runtime.snapshot_cache_stats())}),
+            );
         }
         let name = format!("open/{label}/hit");
         if enabled(&name) {
             let _ = open(&fixture, &session, TASKS, json!({})).await;
             let mut scenario = Scenario::start();
             for _ in 0..iterations {
-                scenario.run(open(&fixture, &session, TASKS, json!({}))).await;
+                scenario
+                    .run(open(&fixture, &session, TASKS, json!({})))
+                    .await;
             }
             scenario.finish(&name, json!({}));
         }
@@ -312,7 +338,9 @@ async fn run() {
                 runtime.clear_snapshot_cache();
                 let _ = open(&fixture, &session, TASKS, json!({})).await;
                 update_tasks(&fixture, changes, i).await;
-                scenario.run(open(&fixture, &session, TASKS, json!({}))).await;
+                scenario
+                    .run(open(&fixture, &session, TASKS, json!({})))
+                    .await;
             }
             scenario.finish(&name, json!({}));
         }
@@ -401,7 +429,10 @@ async fn run() {
                     .await;
                 messages = delivery.unwrap().messages;
             }
-            scenario.finish(&name, json!({"connections": connections.len(), "messages": messages}));
+            scenario.finish(
+                &name,
+                json!({"connections": connections.len(), "messages": messages}),
+            );
         }
     }
 }

@@ -136,8 +136,12 @@ pub struct EventShare {
     pub(crate) layout: std::sync::OnceLock<crate::replica::fanout::Layout>,
     /// The event's rows collapsed (first before-image, last after-image).
     collapsed: std::sync::OnceLock<Arc<crate::replica::CollapseIndex>>,
-    pub(crate) outcomes:
-        Mutex<crate::fast_hash::FastMap<crate::replica::fanout::Shape, Arc<crate::replica::fanout::Outcome>>>,
+    pub(crate) outcomes: Mutex<
+        crate::fast_hash::FastMap<
+            crate::replica::fanout::Shape,
+            Arc<crate::replica::fanout::Outcome>,
+        >,
+    >,
     /// Delivery coverage: shapes whose first connection is computing the
     /// outcome right now (others wait for it), or whose outcome could not be
     /// recorded (others take their own path at once).
@@ -145,8 +149,12 @@ pub struct EventShare {
     /// change can concern any member's principal
     /// (`VisibilityPlan::principal_change_possible`), evaluated once.
     pub(crate) principal_possible: Mutex<crate::fast_hash::FastMap<(usize, usize), bool>>,
-    pub(crate) claims:
-        Mutex<crate::fast_hash::FastMap<crate::replica::fanout::Shape, crate::replica::fanout::ClaimState>>,
+    pub(crate) claims: Mutex<
+        crate::fast_hash::FastMap<
+            crate::replica::fanout::Shape,
+            crate::replica::fanout::ClaimState,
+        >,
+    >,
 }
 
 impl EventShare {

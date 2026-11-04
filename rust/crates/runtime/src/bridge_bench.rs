@@ -100,8 +100,10 @@ impl gonvex_module_runtime::InlineHost for ProbeInline {
     fn call_inline(
         &self,
         call: gonvex_module_runtime::HostCall,
-    ) -> Result<Result<gonvex_module_runtime::HostResponse, gonvex_module_runtime::HostError>, gonvex_module_runtime::HostCall>
-    {
+    ) -> Result<
+        Result<gonvex_module_runtime::HostResponse, gonvex_module_runtime::HostError>,
+        gonvex_module_runtime::HostCall,
+    > {
         use std::sync::atomic::Ordering::Relaxed;
         let Some(target) = self.target.get() else {
             return Err(call);
@@ -119,7 +121,8 @@ impl gonvex_module_runtime::InlineHost for ProbeInline {
         } else {
             target.call_inline(call)?
         };
-        self.nanos.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        self.nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
         if let Some(statement) = trace {
             let bytes = match &result {
                 Ok(response) => response.value.len(),
@@ -129,7 +132,13 @@ impl gonvex_module_runtime::InlineHost for ProbeInline {
                 "BRIDGE_TRACE {:>8.1}us {:>7}B {}",
                 started.elapsed().as_secs_f64() * 1e6,
                 bytes,
-                statement.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(220).collect::<String>()
+                statement
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(220)
+                    .collect::<String>()
             );
         }
         self.calls.fetch_add(1, Relaxed);
@@ -145,8 +154,10 @@ type ThreadJob = Box<dyn FnOnce() + Send>;
 fn writer_thread_call(
     target: Arc<dyn gonvex_module_runtime::InlineHost>,
     call: gonvex_module_runtime::HostCall,
-) -> Result<Result<gonvex_module_runtime::HostResponse, gonvex_module_runtime::HostError>, gonvex_module_runtime::HostCall>
-{
+) -> Result<
+    Result<gonvex_module_runtime::HostResponse, gonvex_module_runtime::HostError>,
+    gonvex_module_runtime::HostCall,
+> {
     static THREAD: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<ThreadJob>>> =
         std::sync::OnceLock::new();
     let jobs = THREAD.get_or_init(|| {

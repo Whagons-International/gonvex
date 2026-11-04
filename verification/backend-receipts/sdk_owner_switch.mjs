@@ -68,6 +68,8 @@ export async function runSDKOwnerSwitch(url, output, dimension = 'account') {
         }
         if (message.type === 'reducer.result' && owner === firstOwner) committedRevision = message.committedRevision;
         if (message.type === 'replica.watermark') watermarks.push({ owner, revision: message.revision });
+        // Delivery v2 carries the tick's watermark on its replica.batch message.
+        if (message.type === 'replica.batch' && typeof message.watermark === 'number') watermarks.push({ owner, revision: message.watermark });
         if (typeof listener === 'function') listener.call(this, event); else listener.handleEvent(event);
       }, options);
     }

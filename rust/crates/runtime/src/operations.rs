@@ -1688,10 +1688,10 @@ pub(crate) async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option
     // `client`; a function nobody counted on the server keeps it at the top
     // level as before.
     for row in rows {
-        let path = row.get::<String,_>("path");
+        let path = row.get::<String, _>("path");
         let client = json!({"calls":row.get::<i64,_>("calls"),"errors":row.get::<i64,_>("errors"),"averageDurationMs":row.get::<f64,_>("average_duration_ms"),"lastDurationMs":row.get::<f64,_>("last_duration_ms"),"lastCalledAt":row_time_opt(&row,"last_called_at")});
         let mut entry = client.clone();
-        entry["kind"] = json!(row.get::<String,_>("kind"));
+        entry["kind"] = json!(row.get::<String, _>("kind"));
         entry["series"] = json!([]);
         entry["client"] = client;
         functions.insert(path, entry);
@@ -1703,7 +1703,9 @@ pub(crate) async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option
         use gonvex_profiler::function::FunctionField as F;
         let calls = row.get(F::Invocations);
         let ms = |ns: u64| ns as f64 / 1e6;
-        let entry = functions.entry(row.path.clone()).or_insert_with(|| json!({"kind":"","series":[]}));
+        let entry = functions
+            .entry(row.path.clone())
+            .or_insert_with(|| json!({"kind":"","series":[]}));
         entry["calls"] = json!(calls);
         entry["errors"] = json!(row.get(F::Errors));
         entry["cancelled"] = json!(row.get(F::Cancelled));
@@ -1711,9 +1713,9 @@ pub(crate) async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option
         entry["maxDurationMs"] = json!(ms(row.get(F::MaxNs)));
         entry["lastDurationMs"] = json!(ms(row.get(F::LastNs)));
         entry["totalDurationMs"] = json!(ms(row.get(F::TotalNs)));
-        entry["lastCalledAt"] = json!(millis_to_datetime(
-            gonvex_profiler::unix_ms_of(row.get(F::LastAtNs)) as i64
-        ));
+        entry["lastCalledAt"] = json!(millis_to_datetime(gonvex_profiler::unix_ms_of(
+            row.get(F::LastAtNs)
+        ) as i64));
         entry["source"] = json!("server");
     }
     let logs=sqlx::query("SELECT kind,path,outcome,error,client_duration_ms,reason,tenant_id,account_id,created_at,event_id FROM gonvex_performance_events WHERE project_id=$1 ORDER BY created_at DESC LIMIT 200").bind(project).fetch_all(&mut **transaction.transaction()).await.unwrap_or_default().into_iter().map(|row|json!({"time":row_time(&row,"created_at"),"operationId":row.get::<String,_>("event_id"),"project":project,"tenant":row.get::<String,_>("tenant_id"),"accountId":row.get::<String,_>("account_id"),"path":row.get::<String,_>("path"),"kind":row.get::<String,_>("kind"),"outcome":row.get::<String,_>("outcome"),"durationMs":row.get::<Option<f64>,_>("client_duration_ms").unwrap_or(0.0),"error":row.get::<String,_>("error"),"reason":row.get::<String,_>("reason"),"source":"client"})).collect::<Vec<_>>();

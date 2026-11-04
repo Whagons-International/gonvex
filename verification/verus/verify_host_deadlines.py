@@ -44,7 +44,7 @@ def check_bridge(protocol, session):
     context = method(protocol, 'pub fn into_context(')
     if 'let deadline = self.effective_deadline(request_deadline);' not in context or len(re.findall(r'\bdeadline\b', context)) != 2 or not re.search(r'deadline,\s*}\s*}$', context):
         raise RuntimeError('engine context no longer carries the same effective deadline')
-    invoke = method(session, 'async fn handle_invoke(')
+    invoke = method(session, 'async fn invoke_with_host(')
     start = invoke.index('let permit: Option<OwnedSemaphorePermit>')
     end = invoke.index('let lease =', start)
     bridge = invoke[start:end]

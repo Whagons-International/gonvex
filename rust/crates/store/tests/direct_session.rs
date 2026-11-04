@@ -39,7 +39,9 @@ async fn tenant(durability: Durability) -> (TestDir, PoolRegistry, String) {
     let pools = PoolRegistry::with_durability(PoolLimits::default(), durability);
     let writer = pools.pool(&url).await.unwrap();
     let mut connection = writer.acquire().await.unwrap();
-    execute_script(&mut connection, SYNC_INFRASTRUCTURE_SQL).await.unwrap();
+    execute_script(&mut connection, SYNC_INFRASTRUCTURE_SQL)
+        .await
+        .unwrap();
     execute_script(
         &mut connection,
         "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL UNIQUE)",
@@ -66,7 +68,12 @@ async fn insert_direct(pools: &PoolRegistry, url: &str, id: i64, value: &str) ->
     tx.set_command_id(&format!("cmd-{id}")).await.unwrap();
     let session = tx.direct().await.unwrap();
     let changed = session
-        .run(|conn| conn.execute("INSERT INTO t VALUES ($1, $2)", &[Bind::Integer(id), Bind::Text(value)]))
+        .run(|conn| {
+            conn.execute(
+                "INSERT INTO t VALUES ($1, $2)",
+                &[Bind::Integer(id), Bind::Text(value)],
+            )
+        })
         .unwrap()
         .unwrap();
     assert_eq!(changed, 1);
@@ -79,7 +86,9 @@ async fn direct_writes_commit_through_the_change_feed_and_reuse_statements() {
     let first = insert_direct(&pools, &url, 1, "a").await.unwrap();
     let after_first = pools.writer_statement_stats(&url).await.unwrap();
     for id in 2..=20 {
-        insert_direct(&pools, &url, id, &format!("v{id}")).await.unwrap();
+        insert_direct(&pools, &url, id, &format!("v{id}"))
+            .await
+            .unwrap();
     }
     let stats = pools.writer_statement_stats(&url).await.unwrap();
     // Every statement after the first transaction (the insert, finalize and
@@ -140,7 +149,10 @@ async fn sqlx_and_direct_statements_share_one_transaction() {
         .unwrap();
     assert_eq!(count, Some(2));
     tx.commit().await.unwrap();
-    assert_eq!(values(&pools, &url).await, vec![(1, "direct".into()), (2, "sqlx".into())]);
+    assert_eq!(
+        values(&pools, &url).await,
+        vec![(1, "direct".into()), (2, "sqlx".into())]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -201,7 +213,12 @@ async fn rollback_cancel_and_errors_stay_inside_their_transaction() {
             let mut tx = begin_transaction(&pools, &url, false).await.unwrap();
             let session = tx.direct().await.unwrap();
             session
-                .run(|conn| conn.execute("INSERT INTO t VALUES ($1, $2)", &[Bind::Integer(id), Bind::Text(&format!("v{id}"))]))
+                .run(|conn| {
+                    conn.execute(
+                        "INSERT INTO t VALUES ($1, $2)",
+                        &[Bind::Integer(id), Bind::Text(&format!("v{id}"))],
+                    )
+                })
                 .unwrap()
                 .unwrap();
             match id % 3 {
@@ -217,13 +234,18 @@ async fn rollback_cancel_and_errors_stay_inside_their_transaction() {
         task.await.unwrap();
     }
     let mut expected = vec![(1, "kept".to_owned())];
-    expected.extend((10..30).filter(|id| id % 3 == 2).map(|id| (id, format!("v{id}"))));
+    expected.extend(
+        (10..30)
+            .filter(|id| id % 3 == 2)
+            .map(|id| (id, format!("v{id}"))),
+    );
     assert_eq!(values(&pools, &url).await, expected);
     // No orphaned change rows: every staged change got a revision.
-    let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM _gonvex_sync_changes WHERE revision IS NULL")
-        .fetch_one(&pools.reader(&url).await.unwrap())
-        .await
-        .unwrap();
+    let pending: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM _gonvex_sync_changes WHERE revision IS NULL")
+            .fetch_one(&pools.reader(&url).await.unwrap())
+            .await
+            .unwrap();
     assert_eq!(pending, 0);
 }
 
@@ -236,7 +258,9 @@ async fn revisions_publish_after_commit_and_in_commit_order() {
     for id in 0..24i64 {
         let (pools, url) = (pools.clone(), url.clone());
         tasks.push(tokio::spawn(async move {
-            insert_direct(&pools, &url, id, &format!("v{id}")).await.unwrap()
+            insert_direct(&pools, &url, id, &format!("v{id}"))
+                .await
+                .unwrap()
         }));
     }
     let mut returned = Vec::new();
@@ -275,12 +299,11 @@ async fn revisions_publish_after_commit_and_in_commit_order() {
     assert_eq!(published, (base..base + 24).collect::<Vec<_>>());
     // Each transaction's revision covers its own row only, assigned in commit
     // order (the writer serializes commits).
-    let order: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT revision, event_id FROM _gonvex_sync_changes ORDER BY event_id",
-    )
-    .fetch_all(&reader)
-    .await
-    .unwrap();
+    let order: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT revision, event_id FROM _gonvex_sync_changes ORDER BY event_id")
+            .fetch_all(&reader)
+            .await
+            .unwrap();
     assert!(order.windows(2).all(|pair| pair[0].0 < pair[1].0));
 }
 
@@ -310,7 +333,10 @@ async fn schema_migration_invalidates_cached_statements() {
     let before = select(pools.clone(), url.clone()).await;
     assert_eq!(
         before,
-        vec![("id".into(), Some("INTEGER".into())), ("v".into(), Some("TEXT".into()))]
+        vec![
+            ("id".into(), Some("INTEGER".into())),
+            ("v".into(), Some("TEXT".into()))
+        ]
     );
     let prepared = pools.writer_statement_stats(&url).await.unwrap().prepared;
     // A migration through sqlx on the writer adds a column.
@@ -325,14 +351,18 @@ async fn schema_migration_invalidates_cached_statements() {
     assert_eq!(after.len(), 3);
     assert_eq!(after[2], ("meta".into(), Some("JSON".into())));
     let stats = pools.writer_statement_stats(&url).await.unwrap();
-    assert!(stats.prepared > prepared, "the cache was cleared and re-prepared: {stats:?}");
+    assert!(
+        stats.prepared > prepared,
+        "the cache was cleared and re-prepared: {stats:?}"
+    );
 
     // DDL through a session clears the cache too.
     let mut tx = begin_transaction(&pools, &url, false).await.unwrap();
     let session = tx.direct().await.unwrap();
     session
         .run(|conn| {
-            conn.execute("ALTER TABLE t ADD COLUMN flag BOOLEAN", &[]).unwrap();
+            conn.execute("ALTER TABLE t ADD COLUMN flag BOOLEAN", &[])
+                .unwrap();
             conn.schema_changed();
             let statement = conn.prepare("SELECT * FROM t").unwrap();
             assert_eq!(statement.column_count(), 4);
@@ -420,10 +450,7 @@ two', x'00ff10'),
         }
     }
     drop(stream);
-    assert_eq!(
-        streamed,
-        via_sqlx.into_iter().flatten().collect::<Vec<_>>()
-    );
+    assert_eq!(streamed, via_sqlx.into_iter().flatten().collect::<Vec<_>>());
     tx.commit().await.unwrap();
 }
 

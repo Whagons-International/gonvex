@@ -33,7 +33,7 @@ fn test_config(
     let data_dir = gonvex_store::DataDir::parse(&database_url);
     Config {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        control_plane_database_url: Some(database_url.clone()),
+        control_plane_database_url: Some(database_url),
         default_database_url: Some(gonvex_store::database_url(data_dir.root())),
         tenant_database_urls: BTreeMap::new(),
         project_database_urls: BTreeMap::new(),
@@ -213,7 +213,8 @@ impl Fixture {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.address))
             .await
             .unwrap();
-        self.authenticate(&mut socket, token, tenant, capabilities).await;
+        self.authenticate(&mut socket, token, tenant, capabilities)
+            .await;
         socket
     }
 
@@ -244,7 +245,13 @@ impl Fixture {
         socket
     }
 
-    async fn authenticate(&self, socket: &mut Socket, token: &str, tenant: &str, capabilities: Value) {
+    async fn authenticate(
+        &self,
+        socket: &mut Socket,
+        token: &str,
+        tenant: &str,
+        capabilities: Value,
+    ) {
         let ready = next_json(socket).await;
         assert_eq!(ready["type"], "session.ready");
         assert_eq!(ready["capabilities"]["presence"], 1);
@@ -769,15 +776,22 @@ async fn presence_patches_ride_in_the_replica_batch() {
     let snapshot = next_presence(&mut bob).await;
     assert_eq!(snapshot["type"], "presence.snapshot");
     let mut alice_socket = fixture.connect(&alice_token, "tenant-a", true).await;
-    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    send(
+        &mut alice_socket,
+        json!({"type":"presence.set","state":"active"}),
+    )
+    .await;
     let batch = loop {
         let frame = next_json(&mut bob).await;
-        assert_ne!(frame["type"], "presence.patch", "presence outside the batch: {frame}");
+        assert_ne!(
+            frame["type"], "presence.patch",
+            "presence outside the batch: {frame}"
+        );
         if frame["type"] == "replica.batch" {
             break frame;
         }
     };
-    assert_eq!(batch["tenant"].is_string(), true);
+    assert!(batch["tenant"].is_string());
     let items = batch["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "{batch}");
     assert_eq!(changes(&items[0]), vec![(alice.clone(), "active".into())]);
@@ -787,7 +801,10 @@ async fn presence_patches_ride_in_the_replica_batch() {
 async fn next_presence_items(socket: &mut Socket) -> Vec<Value> {
     loop {
         let frame = next_json(socket).await;
-        assert_ne!(frame["type"], "presence.patch", "presence outside the batch: {frame}");
+        assert_ne!(
+            frame["type"], "presence.patch",
+            "presence outside the batch: {frame}"
+        );
         if frame["type"] == "replica.batch" {
             let items: Vec<Value> = frame["items"]
                 .as_array()
@@ -830,7 +847,11 @@ async fn presence_leading_edge_then_one_trailing_emission_per_window() {
     let mut dave_socket = fixture.connect(&dave_token, "tenant-a", true).await;
 
     let sent = std::time::Instant::now();
-    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    send(
+        &mut alice_socket,
+        json!({"type":"presence.set","state":"active"}),
+    )
+    .await;
     let items = next_presence_items(&mut bob).await;
     let leading = sent.elapsed();
     assert_eq!(items.len(), 1);
@@ -840,15 +861,26 @@ async fn presence_leading_edge_then_one_trailing_emission_per_window() {
     // Inside the window: Alice idle -> active -> idle, Dave comes online.
     let first = std::time::Instant::now();
     for state in ["idle", "active", "idle"] {
-        send(&mut alice_socket, json!({"type":"presence.set","state":state})).await;
+        send(
+            &mut alice_socket,
+            json!({"type":"presence.set","state":state}),
+        )
+        .await;
     }
-    send(&mut dave_socket, json!({"type":"presence.set","state":"active"})).await;
+    send(
+        &mut dave_socket,
+        json!({"type":"presence.set","state":"active"}),
+    )
+    .await;
     let items = next_presence_items(&mut bob).await;
     let trailing = first.elapsed();
     assert_eq!(items.len(), 1, "one emission for the whole window");
     let mut got = changes(&items[0]);
     got.sort();
-    let mut want = vec![(alice.clone(), "idle".to_owned()), (dave.clone(), "active".to_owned())];
+    let mut want = vec![
+        (alice.clone(), "idle".to_owned()),
+        (dave.clone(), "active".to_owned()),
+    ];
     want.sort();
     assert_eq!(got, want);
     // Due at the end of the window opened by the leading publication.
@@ -861,10 +893,18 @@ async fn presence_leading_edge_then_one_trailing_emission_per_window() {
 
     // A quiet window later the next change is a leading edge again.
     let sent = std::time::Instant::now();
-    send(&mut dave_socket, json!({"type":"presence.set","state":"idle"})).await;
+    send(
+        &mut dave_socket,
+        json!({"type":"presence.set","state":"idle"}),
+    )
+    .await;
     let items = next_presence_items(&mut bob).await;
     assert_eq!(changes(&items[0]), vec![(dave.clone(), "idle".into())]);
-    assert!(sent.elapsed() < window / 2, "second leading edge took {:?}", sent.elapsed());
+    assert!(
+        sent.elapsed() < window / 2,
+        "second leading edge took {:?}",
+        sent.elapsed()
+    );
 
     fixture.server.abort();
     fixture.runtime.shutdown().await;
@@ -916,7 +956,11 @@ async fn a_client_that_stops_reading_is_reset_by_the_send_stall_timeout() {
     send(&mut bob, json!({"type":"presence.subscribe","id":"watch"})).await;
     next_presence(&mut bob).await;
     let mut alice_socket = fixture.connect(&alice_token, "tenant-a", true).await;
-    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    send(
+        &mut alice_socket,
+        json!({"type":"presence.set","state":"active"}),
+    )
+    .await;
     assert_eq!(
         changes(&next_presence(&mut bob).await),
         vec![(alice.clone(), "active".into())]
@@ -937,7 +981,11 @@ async fn a_client_that_stops_reading_is_reset_by_the_send_stall_timeout() {
         vec![(alice.clone(), "offline".into())]
     );
     // Stall timeout + offline grace, far below the 30 s liveness timeout.
-    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
     // Alice's socket was reset: reading ends in an error or EOF, never a
     // liveness close.
     let ended = tokio::time::timeout(Duration::from_secs(10), async {
@@ -985,7 +1033,10 @@ async fn a_client_draining_a_large_send_outlives_the_liveness_timeout() {
         .await;
     let total = 24;
     for index in 0..total {
-        alice.send(large_reply_request(index, 32 << 10)).await.unwrap();
+        alice
+            .send(large_reply_request(index, 32 << 10))
+            .await
+            .unwrap();
     }
     // Read the first replies quickly, then the last 8 at one per 800 ms: the
     // server has read every request by then, and the client's Pong replies

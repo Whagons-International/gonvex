@@ -460,7 +460,9 @@ mod tests {
             "scope": "workspace-1"
         }))
         .expect("permissions request should decode");
-        let call = request.into_host_call().expect("permissions request should lower");
+        let call = request
+            .into_host_call()
+            .expect("permissions request should lower");
         assert_eq!(call.capability(), "db_read");
         assert_eq!(
             call,

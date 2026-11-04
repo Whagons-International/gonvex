@@ -53,13 +53,13 @@ use gonvex_module_runtime::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+pub use crate::admission::Lane;
 use crate::budget::CallBudget;
 pub use crate::isolate::{
     heap_tally, isolate_stats, live_isolates, trim_native_heap, ISOLATE_STAT_FIELDS,
 };
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
 use crate::pool::IsolatePool;
-pub use crate::admission::Lane;
 use gonvex_module_runtime::effective_capabilities;
 
 /// Initialize V8 on the process's common parent thread before any isolate
@@ -168,10 +168,15 @@ impl V8Config {
             lookup(name)
                 .map(|value| value.trim().to_ascii_lowercase())
                 .filter(|value| !value.is_empty())
-                .map_or(default, |value| !matches!(value.as_str(), "0" | "false" | "off" | "no"))
+                .map_or(default, |value| {
+                    !matches!(value.as_str(), "0" | "false" | "off" | "no")
+                })
         };
         self.isolate_priority = flag("GONVEX_MODULE_HOST_ISOLATE_PRIORITY", self.isolate_priority);
-        self.scheduled_isolate = flag("GONVEX_MODULE_HOST_SCHEDULED_ISOLATE", self.scheduled_isolate);
+        self.scheduled_isolate = flag(
+            "GONVEX_MODULE_HOST_SCHEDULED_ISOLATE",
+            self.scheduled_isolate,
+        );
         if let Some(ms) = lookup("GONVEX_MODULE_HOST_SCHEDULED_SLICE_MS")
             .and_then(|value| value.trim().parse::<u64>().ok())
         {
@@ -481,8 +486,14 @@ impl EngineInner {
         } else {
             &self.actions
         };
-        on_demand.iter().map(|pool| pool.evict_idle(ttl)).sum::<usize>()
-            + self.scheduled.as_ref().map_or(0, |pool| pool.evict_idle(ttl))
+        on_demand
+            .iter()
+            .map(|pool| pool.evict_idle(ttl))
+            .sum::<usize>()
+            + self
+                .scheduled
+                .as_ref()
+                .map_or(0, |pool| pool.evict_idle(ttl))
     }
 
     /// The pool family and slot for one call.

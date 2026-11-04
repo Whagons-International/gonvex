@@ -51,11 +51,10 @@ impl IsolatePool {
     /// Takes capacity in `lane` (see `admission`), then an idle isolate or a
     /// new one.
     pub(crate) async fn acquire_in(&self, lane: Lane) -> Result<IsolateLease<'_>, ModuleError> {
-        let permit = self
-            .permits
-            .acquire(lane)
-            .await
-            .map_err(|_| ModuleError::Unsupported("module isolate pool is closed".to_owned()))?;
+        let permit =
+            self.permits.acquire(lane).await.map_err(|_| {
+                ModuleError::Unsupported("module isolate pool is closed".to_owned())
+            })?;
         // The guard is dropped before the await below: an isolate is started
         // outside the lock so a slow bundle load never blocks other calls.
         let pooled = self.idle.lock().expect("isolate pool lock").pop();

@@ -405,14 +405,36 @@ fn module_host_binary() -> Option<String> {
     }
 }
 
-#[tokio::test]
-async fn visibility_fanout_stays_within_statement_budgets() {
-    run_visibility_fixture(false).await;
+#[test]
+fn visibility_fanout_stays_within_statement_budgets() {
+    run_on_large_stack(false);
 }
 
-#[tokio::test]
-async fn visibility_fanout_legacy_baseline() {
-    run_visibility_fixture(true).await;
+#[test]
+fn visibility_fanout_legacy_baseline() {
+    run_on_large_stack(true);
+}
+
+/// In debug builds the fixture's poll function alone needs ~1.4 MB of stack
+/// (the large futures it awaits are moved through stack temporaries), which
+/// overflows the 2 MiB test thread on CI's toolchain. Boxing the future does
+/// not help because the frame is the poll function's own. Run it on a thread
+/// with room to spare instead.
+fn run_on_large_stack(legacy: bool) {
+    let fixture = std::thread::Builder::new()
+        .name(format!("visibility-fanout-{legacy}"))
+        .stack_size(16 << 20)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run_visibility_fixture(legacy))
+        })
+        .unwrap();
+    if let Err(panic) = fixture.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 async fn run_visibility_fixture(legacy: bool) {

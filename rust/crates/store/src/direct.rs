@@ -283,7 +283,9 @@ impl WriterStatements {
     }
 
     fn lock(&self) -> MutexGuard<'_, StatementCache> {
-        self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Finalizes every statement and stops caching: the connection closes next.
@@ -352,7 +354,10 @@ impl DirectSession {
     /// Marks the owning transaction failed: it will refuse to commit, as
     /// `TenantTransaction::mark_failed` does.
     pub fn mark_failed(&self, reason: impl Into<String>) {
-        let mut failure = self.failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut failure = self
+            .failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if failure.is_none() {
             *failure = Some(reason.into());
         }
@@ -360,11 +365,16 @@ impl DirectSession {
 
     /// Clears the mark after a `ROLLBACK TO` (`TenantTransaction::clear_failure`).
     pub fn clear_failure(&self) {
-        *self.failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self
+            .failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     fn lock(&self) -> MutexGuard<'_, SessionInner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Whether the transaction still lends its connection to this session.
@@ -382,7 +392,10 @@ impl DirectSession {
             Statements::Writer(writer) => {
                 let mut cache = writer.lock();
                 cache.attach(db);
-                Some(work(&mut Conn { db, cache: &mut *cache }))
+                Some(work(&mut Conn {
+                    db,
+                    cache: &mut cache,
+                }))
             }
             Statements::Local(cache) => {
                 cache.attach(db);
@@ -428,7 +441,7 @@ impl Conn<'_> {
             Some(statement) => statement,
             None => {
                 self.cache.prepared += 1;
-                self.prepare_raw(sql, ffi::SQLITE_PREPARE_PERSISTENT as u32)?
+                self.prepare_raw(sql, ffi::SQLITE_PREPARE_PERSISTENT)?
             }
         };
         Ok(Stmt {
@@ -452,7 +465,11 @@ impl Conn<'_> {
         })
     }
 
-    fn prepare_raw(&mut self, sql: &str, flags: u32) -> Result<NonNull<ffi::sqlite3_stmt>, sqlx::Error> {
+    fn prepare_raw(
+        &mut self,
+        sql: &str,
+        flags: u32,
+    ) -> Result<NonNull<ffi::sqlite3_stmt>, sqlx::Error> {
         let length = c_int::try_from(sql.len())
             .map_err(|_| database_error(SqliteError::from_code(ffi::SQLITE_TOOBIG)))?;
         let mut statement = std::ptr::null_mut();
@@ -472,9 +489,8 @@ impl Conn<'_> {
             }
             return Err(unsafe { last_error(self.db) });
         }
-        NonNull::new(statement).ok_or_else(|| {
-            sqlx::Error::Protocol("the statement is empty".to_owned())
-        })
+        NonNull::new(statement)
+            .ok_or_else(|| sqlx::Error::Protocol("the statement is empty".to_owned()))
     }
 
     /// Runs a statement to completion and returns the rows it changed.
@@ -694,15 +710,28 @@ impl Stmt<'_> {
 
     /// Writes the current row's value as JSON, interpreted through `kind`
     /// exactly as [`crate::rows::decode_value`] decodes it.
-    pub fn write_json(&self, index: usize, kind: JsonKind, out: &mut Vec<u8>) -> Result<(), String> {
+    pub fn write_json(
+        &self,
+        index: usize,
+        kind: JsonKind,
+        out: &mut Vec<u8>,
+    ) -> Result<(), String> {
         match (kind, self.column_type(index)) {
             (_, ffi::SQLITE_NULL) => out.extend_from_slice(b"null"),
-            (JsonKind::Boolean, ffi::SQLITE_INTEGER) => out.extend_from_slice(
-                if self.int64(index) != 0 { b"true" } else { b"false" },
-            ),
-            (JsonKind::Boolean, ffi::SQLITE_FLOAT) => out.extend_from_slice(
-                if self.double(index) != 0.0 { b"true" } else { b"false" },
-            ),
+            (JsonKind::Boolean, ffi::SQLITE_INTEGER) => {
+                out.extend_from_slice(if self.int64(index) != 0 {
+                    b"true"
+                } else {
+                    b"false"
+                })
+            }
+            (JsonKind::Boolean, ffi::SQLITE_FLOAT) => {
+                out.extend_from_slice(if self.double(index) != 0.0 {
+                    b"true"
+                } else {
+                    b"false"
+                })
+            }
             (JsonKind::Json, ffi::SQLITE_TEXT) => {
                 let text = self.str(index)?;
                 match serde_json::from_str::<Value>(text) {

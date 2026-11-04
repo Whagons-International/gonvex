@@ -219,7 +219,10 @@ impl CachedRow {
         }
         let key = image.key(&definition.key)?;
         let sort = (!definition.order_by.is_empty()).then(|| {
-            Arc::new((image.column(&definition.order_by), image.column(&definition.key)))
+            Arc::new((
+                image.column(&definition.order_by),
+                image.column(&definition.key),
+            ))
         });
         let (row, hash, bytes) = Self::projection(projection, scratch)?;
         let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
@@ -727,7 +730,10 @@ impl SnapshotCache {
 
     /// (entries dropped as sparse, opens that skipped a sparse key).
     pub fn sparse_counts(&self) -> (u64, u64) {
-        (self.sparse_drops.load(Relaxed), self.sparse_skips.load(Relaxed))
+        (
+            self.sparse_drops.load(Relaxed),
+            self.sparse_skips.load(Relaxed),
+        )
     }
 
     /// Records what one open of `key` admitted out of the entry rows it
@@ -1063,7 +1069,10 @@ pub(crate) fn extra_columns(
     definition: &ReplicaCollectionDefinition,
     plan: &VisibilityPlan,
 ) -> Vec<String> {
-    let projected = definition.columns.iter().collect::<crate::fast_hash::FastSet<_>>();
+    let projected = definition
+        .columns
+        .iter()
+        .collect::<crate::fast_hash::FastSet<_>>();
     let mut needed = visibility::acl_columns(plan);
     needed.extend(definition.exclude_when_set.iter().cloned());
     needed.extend(definition.equal_filters.keys().cloned());
@@ -1201,7 +1210,12 @@ pub(crate) fn view(
             }
         }
         if let Some(new) = change.new.filter(|new| new.filters_admit(args, definition)) {
-            inserted.push(CachedRow::from_raw_image(new, definition, &extra, &mut scratch)?);
+            inserted.push(CachedRow::from_raw_image(
+                new,
+                definition,
+                &extra,
+                &mut scratch,
+            )?);
         }
     }
     let ordered = !definition.order_by.is_empty();
@@ -1490,11 +1504,12 @@ mod tests {
 
     #[test]
     fn cache_arguments_keep_only_equality_filter_arguments() {
-        let mut definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
-            "table": "taskNotes", "key": "_id", "columns": ["_id", "taskId"],
-            "equalFilters": {"taskId": "taskId"}
-        }))
-        .unwrap();
+        let mut definition: ReplicaCollectionDefinition =
+            serde_json::from_value(serde_json::json!({
+                "table": "taskNotes", "key": "_id", "columns": ["_id", "taskId"],
+                "equalFilters": {"taskId": "taskId"}
+            }))
+            .unwrap();
         let args = serde_json::json!({"taskId": "t1", "limit": 20, "memberHint": "m9"});
         assert_eq!(
             cache_arguments(&definition, &args),
