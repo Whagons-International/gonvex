@@ -205,6 +205,17 @@ fn now_ms() -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Minimum time between two budget closures of the same busy database's
+/// extra readers (`GONVEX_DB_BUSY_BUDGET_CLOSE_MS`, default 60,000; 0 = every
+/// sweep, the previous behaviour). Under steady load the writers plus one warm
+/// reader per database can exceed the allowance by themselves; closing busy
+/// databases' extra readers every few seconds then only churns them (1.5
+/// reopens/s at 1k users, statement re-preparation 4-10 % of runtime CPU).
+fn busy_budget_close_interval_ms() -> u64 {
+    static INTERVAL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| env_u64("GONVEX_DB_BUSY_BUDGET_CLOSE_MS", 60_000))
+}
+
 fn sweep_interval(limits: &PoolLimits) -> Duration {
     let shortest = if limits.warm_reader_window.is_zero() {
         limits.idle_timeout
@@ -294,7 +305,16 @@ async fn sweep_readers(databases: &[Database], limits: &PoolLimits) {
         }
     }
     busy.sort_by_key(|(used, _)| *used);
+    let interval = busy_budget_close_interval_ms();
     for (_, database) in busy {
+        // A busy database reopens closed readers at once (schema parse and a
+        // cold statement cache each time) and the heap returns; close them at
+        // most once per interval instead of on every sweep.
+        let last = database.budget_closed.load(Ordering::Relaxed);
+        if interval > 0 && last > 0 && now.saturating_sub(last) < interval {
+            continue;
+        }
+        database.budget_closed.store(now.max(1), Ordering::Relaxed);
         close_idle_readers(&database.reader, 1).await;
         if sqlite_connection_heap() <= allowance {
             return;
@@ -442,6 +462,9 @@ pub(crate) struct Database {
     /// One reader open at a time for this database (see
     /// [`PoolLimits::reader_opens`]).
     reader_open: Arc<Semaphore>,
+    /// When the budget sweep last closed this busy database's extra readers
+    /// (`now_ms`; 0 = never). See [`busy_budget_close_interval_ms`].
+    budget_closed: Arc<AtomicU64>,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Batched WAL syncs for `Durability::Full` (see `sync_barrier`).
@@ -655,6 +678,7 @@ impl PoolRegistry {
             reader,
             reader_used,
             reader_open: Arc::new(Semaphore::new(1)),
+            budget_closed: Arc::default(),
             notify,
             locks: Arc::default(),
             sync: crate::sync_barrier::SyncBarrier::new(&path),
