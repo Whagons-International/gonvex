@@ -103,7 +103,7 @@ async fn run() {
     WRITES_TARGET.store(writes, std::sync::atomic::Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let base = AllocSnapshot::take();
+    let base = AllocSnapshot::now();
     reset_peak();
     let mut heap_samples = Vec::new();
     let started = Instant::now();
@@ -123,7 +123,7 @@ async fn run() {
         committed.lock().unwrap().insert(revision, Instant::now());
         last_revision = revision;
         if i % 100 == 99 {
-            let now = AllocSnapshot::take();
+            let now = AllocSnapshot::now();
             heap_samples.push(now.live_bytes.saturating_sub(base.live_bytes));
         }
     }
@@ -133,13 +133,16 @@ async fn run() {
     for handle in fast {
         fast_received.push(tokio::time::timeout(Duration::from_secs(120), handle).await.unwrap().unwrap());
     }
-    let held = AllocSnapshot::take().live_bytes.saturating_sub(base.live_bytes);
+    let held = AllocSnapshot::now().live_bytes.saturating_sub(base.live_bytes);
     let peak = peak_live_bytes().saturating_sub(base.live_bytes);
 
     // Stalled receivers drain.
+    reset_peak();
     let drain_started = Instant::now();
     let mut slow_results = Vec::new();
+    let mut drains = Vec::new();
     for mut receiver in slow {
+        drains.push(tokio::spawn(async move {
         let (mut events, mut lagged, mut resets, mut ordered, mut last, mut changes) = (0, 0, 0, true, 0u64, 0usize);
         loop {
             match tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await {
@@ -160,13 +163,19 @@ async fn run() {
                 Ok(Err(_)) | Err(_) => break,
             }
         }
-        slow_results.push(json!({"events": events, "changes": changes, "ordered": ordered, "lastRevision": last, "lagged": lagged, "resets": resets}));
+        json!({"events": events, "changes": changes, "ordered": ordered, "lastRevision": last, "lagged": lagged, "resets": resets})
+        }));
+    }
+    // Stalled connections catch up concurrently, as on a server.
+    for drain in drains {
+        slow_results.push(drain.await.unwrap());
     }
     let drain_ms = drain_started.elapsed().as_secs_f64() * 1e3;
+    let drain_peak = peak_live_bytes().saturating_sub(base.live_bytes);
     let mut latency = latencies.lock().unwrap().clone();
     let result = json!({
         "bench": "feed_backlog",
-        "fast": fast_count, "slow": slow_count, "writes": writes, "rowsPerWrite": rows,
+        "fast": fast_count, "slowCount": slow_count, "writes": writes, "rowsPerWrite": rows,
         "writeSecs": write_secs,
         "heapDuringWritesMiB": heap_samples.iter().map(|b| *b as f64 / 1048576.0).collect::<Vec<_>>(),
         "heapHeldAfterWritesMiB": held as f64 / 1048576.0,
@@ -176,6 +185,7 @@ async fn run() {
         "fastLagged": fast_received.iter().map(|r| r.1).sum::<usize>(),
         "slow": slow_results,
         "slowDrainMs": drain_ms,
+        "heapPeakDrainMiB": drain_peak as f64 / 1048576.0,
         "backlog": backlog_metrics(),
     });
     println!("{result}");

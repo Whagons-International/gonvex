@@ -41,7 +41,7 @@ fn ring_capacity() -> usize {
 const STORE_MAX_ENTRIES: usize = 1024;
 /// Revisions one log refill reads at most (bounds a lagging connection's
 /// transient copy).
-const FILL_REVISIONS: u64 = 64;
+const FILL_REVISIONS: u64 = 16;
 const DEFAULT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 /// One element of the broadcast ring.
@@ -72,6 +72,8 @@ struct Counters {
     fill_ns: AtomicU64,
     lag_resumes: AtomicU64,
     fill_resets: AtomicU64,
+    shared_events: AtomicU64,
+    refill_bytes: AtomicUsize,
 }
 
 fn counters() -> &'static Counters {
@@ -106,6 +108,9 @@ pub fn metrics() -> Value {
         "fillMs": c.fill_ns.load(Ordering::Relaxed) as f64 / 1e6,
         "lagResumes": c.lag_resumes.load(Ordering::Relaxed),
         "fillResets": c.fill_resets.load(Ordering::Relaxed),
+        "sharedRefillEvents": c.shared_events.load(Ordering::Relaxed),
+        "refillBudgetBytes": refill_budget_bytes(),
+        "refillBytes": c.refill_bytes.load(Ordering::Relaxed),
     })
 }
 
@@ -172,6 +177,100 @@ pub(crate) struct FeedStore {
     route: TenantRoute,
     sender: broadcast::Sender<FeedSignal>,
     state: Mutex<StoreState>,
+    refilled: Mutex<Refilled>,
+    /// Refills of one tenant run one at a time, so receivers at the same
+    /// position read the log once and share the result.
+    fill_lock: tokio::sync::Mutex<()>,
+}
+
+/// Events receivers re-read from the log, kept for receivers at about the
+/// same position: `next[cursor] = (revision, images)` says no transaction
+/// lies in `(cursor, revision)` and `revision` is the next one (`None`: no
+/// transaction at all through `revision`). Strong references, oldest dropped
+/// first while the process-wide refill bytes exceed
+/// `GONVEX_FEED_REFILL_BYTES` (default 32 MiB).
+#[derive(Default)]
+struct Refilled {
+    next: std::collections::HashMap<u64, (u64, Option<Arc<Vec<LogChange>>>)>,
+    /// Insertion order: (cursor key, revision, bytes).
+    order: VecDeque<(u64, u64, usize)>,
+    bytes: usize,
+}
+
+fn refill_budget_bytes() -> usize {
+    static BUDGET: OnceLock<usize> = OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("GONVEX_FEED_REFILL_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(32 * 1024 * 1024)
+    })
+}
+
+impl Refilled {
+    fn insert(&mut self, cursor: u64, revision: u64, images: Option<Arc<Vec<LogChange>>>) {
+        let bytes = images.as_ref().map_or(16, |changes| {
+            changes.iter().map(change_bytes).sum::<usize>() + 32
+        });
+        self.next.insert(cursor, (revision, images));
+        self.order.push_back((cursor, revision, bytes));
+        self.bytes += bytes;
+        counters().refill_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn record(&mut self, after: u64, fill: &Fill) {
+        let mut cursor = after;
+        for event in &fill.events {
+            if let FeedEvent::Transaction { revision, changes, .. } = event {
+                self.insert(cursor, *revision, Some(Arc::clone(changes)));
+                cursor = *revision;
+            }
+        }
+        if fill.through > cursor {
+            self.insert(cursor, fill.through, None);
+        }
+        let budget = refill_budget_bytes();
+        let c = counters();
+        while c.refill_bytes.load(Ordering::Relaxed) > budget {
+            let Some((cursor, revision, bytes)) = self.order.pop_front() else {
+                break;
+            };
+            if self.next.get(&cursor).is_some_and(|entry| entry.0 == revision) {
+                self.next.remove(&cursor);
+            }
+            self.bytes -= bytes;
+            c.refill_bytes.fetch_sub(bytes, Ordering::Relaxed);
+        }
+    }
+
+    fn clear(&mut self) {
+        counters().refill_bytes.fetch_sub(self.bytes, Ordering::Relaxed);
+        self.next.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+
+    /// Kept events after `after` through at most `through`, and the revision
+    /// they cover through.
+    fn take(&self, epoch: &str, after: u64, through: u64) -> (Vec<FeedEvent>, u64) {
+        let mut events = Vec::new();
+        let mut cursor = after;
+        while cursor < through {
+            match self.next.get(&cursor) {
+                Some((revision, Some(changes))) if *revision <= through => {
+                    events.push(FeedEvent::Transaction {
+                        database_epoch: epoch.to_owned(),
+                        revision: *revision,
+                        changes: Arc::clone(changes),
+                    });
+                    cursor = *revision;
+                }
+                Some((revision, None)) => cursor = (*revision).min(through),
+                _ => break,
+            }
+        }
+        (events, cursor)
+    }
 }
 
 impl FeedStore {
@@ -186,6 +285,8 @@ impl FeedStore {
                 bytes: 0,
                 latest: 0,
             }),
+            refilled: Mutex::new(Refilled::default()),
+            fill_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -261,6 +362,7 @@ impl FeedStore {
     }
 
     pub(crate) fn reset(&self, reason: String, revision: Option<u64>) {
+        self.refilled().clear();
         let mut state = self.state();
         if let Some(revision) = revision {
             state.latest = state.latest.max(revision);
@@ -268,6 +370,10 @@ impl FeedStore {
         let _ = self.sender.send(FeedSignal::Reset {
             reason: Arc::from(reason),
         });
+    }
+
+    fn refilled(&self) -> std::sync::MutexGuard<'_, Refilled> {
+        self.refilled.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `(latest broadcast revision, oldest revision still held)`.
@@ -283,6 +389,10 @@ impl Drop for FeedStore {
         let c = counters();
         c.bytes.fetch_sub(state.bytes, Ordering::Relaxed);
         c.entries.fetch_sub(state.entries.len(), Ordering::Relaxed);
+        self.refilled
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
@@ -445,11 +555,40 @@ impl HubReceiver {
     }
 
     fn start_fill(&mut self, after: u64, through: u64) {
-        let pools = self.store.pools.clone();
-        let route = self.store.route.clone();
+        if let Some(epoch) = self.epoch.clone() {
+            let (events, covered) = self.store.refilled().take(&epoch, after, through);
+            if covered > after {
+                counters()
+                    .shared_events
+                    .fetch_add(events.len() as u64, Ordering::Relaxed);
+                self.last = Some(covered);
+                self.ready.extend(events);
+                return;
+            }
+        }
+        let store = Arc::clone(&self.store);
+        let epoch = self.epoch.clone();
         self.fill = Some(tokio::spawn(gonvex_profiler::instrument(
             gonvex_profiler::TaskKind::Feed,
-            async move { read_fill(&pools, &route, after, through).await },
+            async move {
+                let _single = store.fill_lock.lock().await;
+                if let Some(epoch) = epoch {
+                    let (events, covered) = store.refilled().take(&epoch, after, through);
+                    if covered > after {
+                        counters()
+                            .shared_events
+                            .fetch_add(events.len() as u64, Ordering::Relaxed);
+                        return Ok(Fill {
+                            epoch: epoch.to_string(),
+                            events,
+                            through: covered,
+                        });
+                    }
+                }
+                let fill = read_fill(&store.pools, &store.route, after, through).await?;
+                store.refilled().record(after, &fill);
+                Ok(fill)
+            },
         )));
     }
 
@@ -459,6 +598,9 @@ impl HubReceiver {
         match result {
             Ok(fill) if self.epoch.as_deref().is_none_or(|epoch| epoch == fill.epoch) => {
                 c.fill_events.fetch_add(fill.events.len() as u64, Ordering::Relaxed);
+                if self.epoch.is_none() {
+                    self.epoch = Some(Arc::from(fill.epoch.as_str()));
+                }
                 self.last = Some(fill.through);
                 self.ready.extend(fill.events);
                 Step::Continue
