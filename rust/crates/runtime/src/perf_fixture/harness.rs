@@ -33,6 +33,23 @@ static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
 static PEAK_LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
+
+thread_local! {
+    /// Allocations (and reallocations) made by this thread (`raw_sites`).
+    static THREAD_ALLOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Allocations made by the calling thread so far (0 without the counting
+/// allocator).
+pub fn thread_allocations() -> u64 {
+    THREAD_ALLOCATIONS.with(|count| count.get())
+}
+
+#[inline]
+fn count_thread_allocation() {
+    // `try_with`: the allocator also runs during thread-local teardown.
+    let _ = THREAD_ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+}
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Counting wrapper around any global allocator (use mimalloc to match
@@ -55,6 +72,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAlloc<A> {
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Relaxed);
+        count_thread_allocation();
         ALLOCATED_BYTES.fetch_add(new_size as u64, Relaxed);
         let delta = new_size as i64 - layout.size() as i64;
         let live = LIVE_BYTES.fetch_add(delta, Relaxed) + delta;
@@ -69,6 +87,7 @@ fn record_alloc(size: usize) {
         INSTALLED.store(true, Relaxed);
     }
     ALLOCATIONS.fetch_add(1, Relaxed);
+    count_thread_allocation();
     ALLOCATED_BYTES.fetch_add(size as u64, Relaxed);
     let live = LIVE_BYTES.fetch_add(size as i64, Relaxed) + size as i64;
     PEAK_LIVE_BYTES.fetch_max(live, Relaxed);

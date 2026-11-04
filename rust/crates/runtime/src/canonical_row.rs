@@ -12,13 +12,15 @@
 //! differs (a REAL written by SQLite with 17 significant digits, `1.0`,
 //! `1E5`, `-0`, an integer beyond 64 bits): it is parsed as serde_json does
 //! (correctly rounded f64) and written as `stable_json` writes it (JavaScript
-//! shortest form, `ryu_js`). [`canonical`] then returns the bytes, borrowed
-//! when nothing differs, else re-assembled (top-level members in key order,
-//! numbers replaced). Anything else it cannot prove canonical (an escape
-//! serde would not write, U+2028/U+2029, unsorted or duplicate nested keys,
-//! whitespace, deep nesting, a non-finite number) falls back to parsing the
-//! row and writing `stable_json`, so the hash is always byte-identical to the
-//! `Value` path.
+//! shortest form, `ryu_js`). Nested objects whose keys are out of order (a
+//! JSON column such as `{"mode":…,"teamIds":…,"roles":…}`) are recorded with
+//! their members and re-ordered the same way. [`canonical`] then returns the
+//! bytes, borrowed when nothing differs, else re-assembled (members of every
+//! recorded object in key order, numbers replaced). Anything else it cannot
+//! prove canonical (an escape serde would not write, U+2028/U+2029, an escaped
+//! or duplicate key, whitespace, deep nesting, a non-finite number) falls
+//! back to parsing the row and writing `stable_json`, so the hash is always
+//! byte-identical to the `Value` path.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -36,6 +38,14 @@ pub(crate) struct Member {
     pub value: Range<usize>,
 }
 
+/// A nested object whose keys are not in canonical order: its byte range
+/// and its members, sorted by key.
+#[derive(Clone, Debug)]
+pub(crate) struct Reorder {
+    pub range: Range<usize>,
+    pub members: Vec<Member>,
+}
+
 /// The result of checking a row.
 pub(crate) struct Checked {
     pub members: Vec<Member>,
@@ -43,12 +53,14 @@ pub(crate) struct Checked {
     pub sorted: bool,
     /// Number tokens whose canonical spelling differs, in text order.
     pub numbers: Vec<(Range<usize>, String)>,
+    /// Nested objects to re-order, by start offset.
+    pub objects: Vec<Reorder>,
 }
 
 impl Checked {
     /// Whether the row text already is its canonical JSON.
     pub fn canonical(&self) -> bool {
-        self.sorted && self.numbers.is_empty()
+        self.sorted && self.numbers.is_empty() && self.objects.is_empty()
     }
 }
 
@@ -56,6 +68,7 @@ struct Checker<'a> {
     bytes: &'a [u8],
     at: usize,
     numbers: Vec<(Range<usize>, String)>,
+    objects: Vec<Reorder>,
 }
 
 impl Checker<'_> {
@@ -202,12 +215,14 @@ impl Checker<'_> {
         }
         match self.peek()? {
             b'{' => {
+                let object_start = self.at;
                 self.at += 1;
                 if self.peek()? == b'}' {
                     self.at += 1;
                     return Some(());
                 }
                 let mut previous: Option<Range<usize>> = None;
+                let mut sorted = true;
                 loop {
                     let start = self.at + 1;
                     if self.string()? {
@@ -216,7 +231,7 @@ impl Checker<'_> {
                     let key = start..self.at - 1;
                     if let Some(previous) = &previous {
                         if self.bytes[previous.clone()] >= self.bytes[key.clone()] {
-                            return None;
+                            sorted = false;
                         }
                     }
                     previous = Some(key);
@@ -226,6 +241,13 @@ impl Checker<'_> {
                         b',' => self.at += 1,
                         b'}' => {
                             self.at += 1;
+                            if !sorted {
+                                let members = self.members_of(object_start, depth)?;
+                                self.objects.push(Reorder {
+                                    range: object_start..self.at,
+                                    members,
+                                });
+                            }
                             return Some(());
                         }
                         _ => return None,
@@ -259,11 +281,49 @@ impl Checker<'_> {
         }
     }
 
+    /// The members of the (already checked) object at `start`, sorted by
+    /// key; None when two keys are equal (serde keeps the last one).
+    fn members_of(&self, start: usize, depth: usize) -> Option<Vec<Member>> {
+        let mut scan = Checker {
+            bytes: self.bytes,
+            at: start + 1,
+            numbers: Vec::new(),
+            objects: Vec::new(),
+        };
+        let mut members = Vec::new();
+        loop {
+            let key_start = scan.at + 1;
+            scan.string()?;
+            let key = key_start..scan.at - 1;
+            scan.expect(b':')?;
+            let value_start = scan.at;
+            scan.value(depth + 1)?;
+            members.push(Member {
+                key,
+                value: value_start..scan.at,
+            });
+            match scan.peek()? {
+                b',' => scan.at += 1,
+                _ => break,
+            }
+        }
+        let bytes = self.bytes;
+        members.sort_unstable_by(|left, right| bytes[left.key.clone()].cmp(&bytes[right.key.clone()]));
+        if members
+            .windows(2)
+            .any(|pair| bytes[pair[0].key.clone()] == bytes[pair[1].key.clone()])
+        {
+            return None;
+        }
+        Some(members)
+    }
+
     /// The top-level object: members are recorded, their order is checked
     /// by the caller.
-    fn row(mut self) -> Option<Checked> {
+    fn row(mut self, mut members: Vec<Member>) -> Option<Checked> {
         self.expect(b'{')?;
-        let mut members = Vec::with_capacity(32);
+        members.clear();
+        members.reserve(32);
         let mut sorted = true;
         if self.peek()? == b'}' {
             self.at += 1;
@@ -310,10 +370,13 @@ impl Checker<'_> {
                 return None;
             }
         }
+        // Inner objects complete (and are recorded) before outer ones.
+        self.objects.sort_by_key(|object| object.range.start);
         Some(Checked {
             members,
             sorted,
             numbers: self.numbers,
+            objects: self.objects,
         })
     }
 }
@@ -321,12 +384,77 @@ impl Checker<'_> {
 /// Checks that `row` is canonical JSON up to the order of its top-level
 /// members. None: not provably canonical (use [`canonical`]'s fallback).
 pub(crate) fn check(row: &str) -> Option<Checked> {
+    check_reusing(row, &mut Vec::new())
+}
+
+/// [`check`] with the member list allocated from `spare` (give it back with
+/// [`recycle`]): no allocation per row on the common path.
+pub(crate) fn check_reusing(row: &str, spare: &mut Vec<Member>) -> Option<Checked> {
     Checker {
         bytes: row.as_bytes(),
         at: 0,
         numbers: Vec::new(),
+        objects: Vec::new(),
     }
-    .row()
+    .row(std::mem::take(spare))
+}
+
+/// Returns a checked row's member list to `spare` for the next row.
+pub(crate) fn recycle(checked: Checked, spare: &mut Vec<Member>) {
+    let mut members = checked.members;
+    members.clear();
+    *spare = members;
+}
+
+/// Top-level member `key` (the last one with that key, as serde keeps).
+pub(crate) fn find<'c>(row: &str, members: &'c [Member], key: &str) -> Option<&'c Member> {
+    members
+        .iter()
+        .rev()
+        .find(|member| &row[member.key.clone()] == key)
+}
+
+/// A key column's value as the row key (`replica::row_key`): a string's
+/// text (borrowed when it has no escapes), a number's or boolean's text.
+/// None for any other value.
+pub(crate) fn member_key(row: &str, member: &Member) -> Option<std::sync::Arc<str>> {
+    let value = &row[member.value.clone()];
+    if value.len() >= 2 && value.starts_with('"') && !value.contains('\\') {
+        return Some(std::sync::Arc::from(&value[1..value.len() - 1]));
+    }
+    match serde_json::from_str::<Value>(value).ok()? {
+        Value::String(text) => Some(text.into()),
+        Value::Number(number) => Some(number.to_string().into()),
+        Value::Bool(flag) => Some(flag.to_string().into()),
+        _ => None,
+    }
+}
+
+/// Hex SHA-256 of `bytes` as shared text (one allocation).
+pub(crate) fn hex_sha256(bytes: &[u8]) -> std::sync::Arc<str> {
+    use sha2::{Digest, Sha256};
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 64];
+    for (index, byte) in digest.iter().enumerate() {
+        out[index * 2] = HEX[usize::from(byte >> 4)];
+        out[index * 2 + 1] = HEX[usize::from(byte & 15)];
+    }
+    std::sync::Arc::from(std::str::from_utf8(&out).expect("hex is ASCII"))
+}
+
+/// The parsed value of `member` (key and order columns only).
+pub(crate) fn value_of(row: &str, member: Option<&Member>) -> Value {
+    member
+        .and_then(|member| serde_json::from_str(&row[member.value.clone()]).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// A checked row as a `JsonRow` (one allocation; the scanner validated it).
+pub(crate) fn json_row(row: &str, _checked: &Checked) -> gonvex_protocol::JsonRow {
+    // SAFETY: `check` accepted `row`: one JSON object, no surrounding
+    // whitespace (`Checker::row` requires the object to end the text).
+    unsafe { gonvex_protocol::JsonRow::from_str_unchecked(row) }
 }
 
 /// The canonical JSON text of `row` (a JSON object), as
@@ -342,38 +470,17 @@ pub(crate) fn canonical<'a>(
     match checked {
         Some(checked) if checked.canonical() => Ok(Cow::Borrowed(row)),
         Some(checked) => {
-            let mut members: Vec<&Member> = checked.members.iter().collect();
-            if !checked.sorted {
+            scratch.clear();
+            scratch.reserve(row.len() + 16);
+            if checked.sorted {
+                emit_object(row, checked, checked.members.iter(), scratch);
+            } else {
+                let mut members: Vec<&Member> = checked.members.iter().collect();
                 members.sort_unstable_by(|left, right| {
                     row.as_bytes()[left.key.clone()].cmp(&row.as_bytes()[right.key.clone()])
                 });
+                emit_object(row, checked, members.into_iter(), scratch);
             }
-            scratch.clear();
-            scratch.reserve(row.len() + 16);
-            scratch.push('{');
-            for (index, member) in members.into_iter().enumerate() {
-                if index > 0 {
-                    scratch.push(',');
-                }
-                scratch.push('"');
-                scratch.push_str(&row[member.key.clone()]);
-                scratch.push_str("\":");
-                // The value, with its replaced number tokens.
-                let mut at = member.value.start;
-                let first = checked
-                    .numbers
-                    .partition_point(|(range, _)| range.start < member.value.start);
-                for (range, canonical) in checked.numbers[first..]
-                    .iter()
-                    .take_while(|(range, _)| range.end <= member.value.end)
-                {
-                    scratch.push_str(&row[at..range.start]);
-                    scratch.push_str(canonical);
-                    at = range.end;
-                }
-                scratch.push_str(&row[at..member.value.end]);
-            }
-            scratch.push('}');
             Ok(Cow::Borrowed(scratch.as_str()))
         }
         None => {
@@ -383,8 +490,66 @@ pub(crate) fn canonical<'a>(
     }
 }
 
+/// `members` (in the order given) as a canonical object.
+fn emit_object<'m>(
+    row: &str,
+    checked: &Checked,
+    members: impl Iterator<Item = &'m Member>,
+    out: &mut String,
+) {
+    out.push('{');
+    for (index, member) in members.enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&row[member.key.clone()]);
+        out.push_str("\":");
+        emit(row, checked, member.value.clone(), out);
+    }
+    out.push('}');
+}
+
+/// `row[range]` with its replaced numbers and re-ordered objects.
+fn emit(row: &str, checked: &Checked, range: Range<usize>, out: &mut String) {
+    let mut at = range.start;
+    let mut number = checked.numbers.partition_point(|(span, _)| span.start < at);
+    let mut object = checked.objects.partition_point(|reorder| reorder.range.start < at);
+    loop {
+        let next_number = checked
+            .numbers
+            .get(number)
+            .filter(|(span, _)| span.end <= range.end);
+        let next_object = checked
+            .objects
+            .get(object)
+            .filter(|reorder| reorder.range.end <= range.end);
+        match (next_number, next_object) {
+            (None, None) => break,
+            (Some((span, canonical)), next_object)
+                if next_object.is_none_or(|reorder| span.start < reorder.range.start) =>
+            {
+                out.push_str(&row[at..span.start]);
+                out.push_str(canonical);
+                at = span.end;
+                number += 1;
+            }
+            (_, Some(reorder)) => {
+                out.push_str(&row[at..reorder.range.start]);
+                emit_object(row, checked, reorder.members.iter(), out);
+                at = reorder.range.end;
+                number = checked.numbers.partition_point(|(span, _)| span.start < at);
+                object = checked.objects.partition_point(|reorder| reorder.range.start < at);
+            }
+            (Some(_), None) => unreachable!("matched by the first number arm"),
+        }
+    }
+    out.push_str(&row[at..range.end]);
+}
+
 /// The value of top-level member `key`, parsed (a small slice: key and order
 /// columns only).
+#[cfg(test)]
 pub(crate) fn member_value(row: &str, checked: &Checked, key: &str) -> Option<Value> {
     checked
         .members
@@ -473,8 +638,16 @@ mod tests {
             ("{\"a\":\"é ü 日本 😀 \u{7f}\"}", true),
             ("{\"a\":\"line\u{2028}sep\u{2029}\"}", false),
             (r#"{"a":"😀"}"#, true),
-            (r#"{"z":{"b":1,"a":2},"a":null}"#, false),
-            (r#"{"z":{"a":1,"b":[1,{"y":true,"x":false}]}}"#, false),
+            (r#"{"z":{"b":1,"a":2},"a":null}"#, true),
+            (r#"{"z":{"a":1,"b":[1,{"y":true,"x":false}]}}"#, true),
+            (
+                r#"{"b":{"y":{"q":1.0,"p":[{"d":2,"c":1e2},{"b":{"z":0.10000000000000001,"a":[]}}]},"x":0.5E1},"a":-0}"#,
+                true,
+            ),
+            (r#"{"mode":"teams","teamIds":["t"],"roles":[]}"#, true),
+            (r#"{"a":{"mode":"teams","teamIds":["t"],"roles":[]},"b":{"d":{},"c":{"f":1,"e":[{"h":1,"g":2}]}}}"#, true),
+            (r#"{"z":{"b":1,"a":2,"b":3}}"#, false),
+            (r#"{"z":{"b":1,"a\"x":2}}"#, false),
             (r#"{"z":{"a":1,"b":[1,{"x":true,"y":false}]}}"#, true),
             (r#"{"z":{"a":1,"a":2}}"#, false),
             (r#"{"a":1,"a":2}"#, false),

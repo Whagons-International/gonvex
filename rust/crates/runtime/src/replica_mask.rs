@@ -394,9 +394,9 @@ impl Runtime {
                         Arc::new(parent_acl_columns(&subscription.visibility, &subscription.resolved))
                     }));
                     let unchanged = net.is_some_and(|net| {
-                        !net.changed_columns.is_empty()
+                        net.changed_columns().next().is_some()
                             && columns.get(&change.table).is_some_and(|acl| {
-                                net.changed_columns.iter().all(|column| !acl.contains(*column))
+                                net.changed_columns().all(|column| !acl.contains(column))
                             })
                     });
                     if unchanged {

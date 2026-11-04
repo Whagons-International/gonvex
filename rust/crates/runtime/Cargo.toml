@@ -156,3 +156,8 @@ required-features = ["perf-fixture"]
 name = "open_visibility"
 harness = false
 required-features = ["perf-fixture"]
+
+[[bench]]
+name = "snapshot_raw"
+harness = false
+required-features = ["perf-fixture"]
