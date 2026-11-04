@@ -106,6 +106,8 @@ if [ "${LOAD_PERF:-1}" != 0 ] && command -v perf >/dev/null; then
    mkdir -p "$out/symfs/binhost" "$out/symfs/usr"
    ln -sfn "$LOAD_BIN_DIR/gonvex-runtime" "$out/symfs/binhost/gonvex-runtime"
    ln -sfn /usr/lib "$out/symfs/usr/lib"; ln -sfn /usr/lib64 "$out/symfs/usr/lib64"
+   # A runtime started from its host path (LOAD_RUNTIME_COMMAND) resolves there too.
+   mkdir -p "$out/symfs$LOAD_BIN_DIR"; ln -sfn "$LOAD_BIN_DIR/gonvex-runtime" "$out/symfs$LOAD_BIN_DIR/gonvex-runtime"
    export PERF_SYMFS="$out/symfs" PERF_CALLGRAPH=${PERF_CALLGRAPH:-dwarf,32768}
    # LOAD_PERF_PARALLEL=1: on- and off-CPU over the same window (e.g. across a :00
    # boundary), off-CPU keeps its per-switch timeline.

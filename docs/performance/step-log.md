@@ -1055,3 +1055,106 @@ offload pool (44 %: building `serde_json::Value` rows, visibility, hashing) and 
 network worker (30 %); snapshot permits are the queue (p50 33 s), and the delivery backlog
 (p50 15 s) is the largest heap owner. At 500 (default mix) the same plus change collapsing and
 V8 (26 %). Not passing at either step; 2.5k not run.
+
+## Step 13: snapshot-raw 61911345 + feed-backlog 0d2b261a + resume-fix c25141f3 (ebb65fdd)
+
+Merges: snapshot-raw on 3db7f121 (clean); feed-backlog (conflicts: runtime `Cargo.toml` bench/test
+lists, both kept; `replica.rs` duplicate `resume_changes` dropped, snapshot-raw had moved it to
+`raw_log.rs` with the same per-table query); resume-fix (`Cargo.toml` test list). Tests:
+snapshot-raw alone 658/0 workspace, 408/0 perf-fixture; feed-backlog + snapshot-raw 658/0, 409/0;
+**ebb65fdd: workspace 658 passed / 0 failed / 8 ignored; perf-fixture 410 / 0 / 9**, incl.
+`resume_log_only::valid_cursor_resumes_read_no_full_set_even_on_a_sparse_key`. Pushes over HTTPS
+(`gh` credential) since the SSH agent is gone. An attempt to start the new-lab runtime before the
+build had installed its binaries created `bin-resume-fix` root-owned (install failed); fixed
+before any run (binary sha256 `54e689f9ee4f…`). New-lab runtime now starts from its host path
+(`LOAD_RUNTIME_COMMAND`, empty entrypoint) so host perf can open it.
+
+Oracle gate (old app, 100 users): rf-oracle-100 23 checks / 0 mismatched / `unsupported` {} /
+0.06 % errors, heartbeat p95/p99 52/110, save 86/110, delivery 95/642, taskDelivery 118/149 ms;
+nobatch 23 / 0 / {} / 0.10 %, heartbeat 45/68, save 107/137, delivery 57/240 ms. Runtime 0.07 cores.
+
+| case | users | errors | oracle | save p50/p95/p99 | taskDelivery | presence delivery | query | reconnect | cores (throttled) | anon peak |
+|---|---:|---:|---|---|---|---|---|---|---|---:|
+| rf-500 (default mix) | 500 | 0.17 % | 8 / 0 | 142 / 965 / 1,929 | 214 / 875 / 1,799 | 545 / 1,006 / 1,119 | 53 / 617 / 3,613 | 48 / 104 / 224 | 0.67 (815/1,775) | 1,215 MiB |
+| rf-500-prod | 500 | 0.08 % | 8 / 0 | 30 / 92 / 233 | 87 / 155 / 296 | 533 / 1,003 / 1,063 | 52 / 105 / 568 | 46 / 81 / 133 | 0.31 (96/1,778) | 997 MiB |
+| rf-1k-prod-1 | 1,000 | 0.89 % | 9 / 0 | 50 / 12,434 / 38,176 | 111 / 7,794 / 37,083 | 583 / 1,118 / 25,886 | 53 / 9,859 / 12,960 | 53 / 115 / 188 | 0.64 (539/1,763) | 1,191 MiB |
+| rf-1k-prod-2 | 1,000 | 0.04 % | 9 / 0 | 48 / 4,225 / 9,510 | 111 / 1,023 / 4,536 | 591 / 1,023 / 1,197 | 53 / 5,438 / 8,435 | 56 / 184 / 494 | 0.64 (543/1,772) | 1,174 MiB |
+| rf-1k-prod-3 | 1,000 | 0.04 % | 9 / 0 | 44 / 2,053 / 8,804 | 106 / 540 / 3,976 | 554 / 1,013 / 1,108 | 53 / 5,717 / 9,116 | 55 / 135 / 190 | 0.65 (554/1,762) | 1,168 MiB |
+| **1k median (spread)** | | 0.04 % (0.04–0.89) | | 48 / 4,225 (2,053–12,434) / 9,510 (8,804–38,176) | 111 / 1,023 (540–7,794) / 4,536 | 583 / 1,023 / 1,197 | 53 / 5,717 / 9,116 | | 0.64 | |
+
+All runs: 1.00 sockets per account; clock offset Mac − arch3 −40 to −56 ms.
+**Production mix at 500 passes every kind except presence delivery** (p95 1,003 / p99 1,063 ms,
+bounded by the 1 s presence-v2 tick; pending Gabriel's decision). 1k keeps up on average (p50s
+fine, errors ≤ 0.9 %, 0 mismatches) but fails on p95/p99 tails: snapshot permit wait p90 5–8 s
+(bursts: 31 % of periods throttled at 0.64 cores), delivery queue p99 7–11 s. Run-to-run spread
+at 1k is ~3–6× in tails (run 1 vs runs 2–3), consistent with feed-backlog's observation.
+reducer isolate wait p50 31–32 µs, p99 248–445 ms.
+
+Resume opens: `snapshot.query` is still not recorded on these paths, so use the cache counters.
+Fallbacks (an open with a cache entry that still scanned SQL) per reconnect: ov-500 (before
+resume-fix) 117 / 514 reconnects = 0.23; rf-500 96 / 1,214 = 0.08; rf-500-prod 42 / 1,269 = 0.03;
+reconnect p50 / p99 138 ms / 1.3 s (ov-1k) → 48 / 224 ms. sparseSkips (narrow members on indexed
+SQL by design) ~1,700 per run.
+## CPU cost model (production mix, resume-fix + feed-backlog + snapshot-raw line, ebb65fdd)
+
+Method (`bench/whagons/cost-model.py`, `bench/whagons/cpu-attribution.py`): one 500-user
+production-mix run with a frame-pointer build of the same commit (`rf-500-prod-fp`,
+`-C force-frame-pointers=yes`, `PERF_CALLGRAPH=fp`; DWARF unwinding stops after one frame on
+these binaries, so earlier "CPU by thread" tables were self time only). Each on-CPU stack is
+assigned to the first matching work category (inclusive), scaled to the cgroup's measured
+cores over the plateau (0.309 cores). Unit rates come from the `/dev/profile` dumps of the
+same plateau (stage counts, per-function invocation counters) and the generator's samples.
+Scaling is calibrated on the median 1k production-mix run (rf-1k-prod-2, 0.633 cores, 31 %
+of periods throttled, so 1k demand is at or slightly above that).
+
+| work (500 users, production mix) | share | cores | unit rate | cost per unit |
+|---|---:|---:|---|---|
+| delivery: feed apply per connection (offload pool 81 %) | 28.9 % | 0.089 | 829 deliveries/s from 5.9 changes/s (≈141 receivers per change) | 0.108 ms per delivery |
+| delivery: socket encode / compress / write | 8.4 % | 0.026 | same | 0.031 ms per delivery |
+| SQLite worker threads (caller not on the stack: snapshot reads, log catch-up) | 18.6 % | 0.058 | 42 opens/s | ≤ 1.4 ms per open if all of it is snapshot reads |
+| per-connection socket task (inbound frames, auth, bookkeeping) | 9.6 % | 0.030 | 500 connections | 60 µs/s per connected user |
+| reducers / actions (V8 + inline SQL) | 11.2 % | 0.035 | 32.6 calls/s (24.6/s `pushNotifications.deliverScheduled`, 4.3/s user saves/views) | 1.07 ms per call (user saves 0.9–1.6 ms, bridge_bench) |
+| snapshot opens (build, cache, visibility; offload 90 %) | 7.4 % | 0.023 | 42 opens/s (login/reconnect 9 collections, detail window 8) | 0.54 ms per open (+ up to 1.4 ms SQLite reads); ≈ 5–17 ms per login or detail window |
+| commit / checkpoint / storage | 4.2 % | 0.013 | ~10 writes/s | ≈ 1.3 ms per write incl. checkpoints (checkpoint 14.3 ms/s) |
+| scheduled functions (scheduler thread) | 3.9 % | 0.012 | 14 crons, staggered | fixed ≈ 0.012 cores |
+| presence (v2 ticks and patches) | 2.4 % | 0.007 | 500 users, transitions ~1/100 s | 15 µs/s per user |
+| runtime scheduling / kernel / other | 5.3 % | 0.016 | – | overhead |
+| **total** | 100 % | **0.309** | | |
+
+Per user action (500 users, production mix): a save costs ≈ 1.1 ms of V8 + ≈ 1.3 ms of
+commit/storage, plus its delivery: **≈ 20 ms per change at 141 receivers** (feed apply +
+socket), i.e. delivery is ~90 % of a save's total CPU. A view (detail window, 8 collections)
+≈ 4–12 ms; a sign-in or reconnect (9 collections) ≈ 5–17 ms. Background (checkpoints, GC,
+crons) ≈ 0.03 cores, roughly constant. GC 1.1 ms/s.
+
+**Scaling 500 → 1k (production mix):** deliveries ×3.67 (≈ N², every change reaches ~2× the
+receivers) but CPU per thread only ×1.86 (offload), ×1.97 (network worker), ×1.86 (SQLite),
+×3.1 (V8: 0.029 → 0.090 cores; push-notification actions ×1.41, user calls ×1.9; isolate
+contention not separated), total ×2.04. Per-tick batching (one frame per connection per tick)
+and class-shared decisions keep delivery CPU close to linear in connections up to 1k: per
+delivery cost fell from 0.139 ms to 0.071 ms.
+
+### Projection (cores of runtime CPU demand)
+
+| users | production mix (linear from 500→1k) | production mix if delivery turns quadratic past 1k | default mix (linear from rf-500) | dominant line item |
+|---:|---:|---:|---:|---|
+| 500 | 0.31 (measured) | 0.31 | 0.67 (measured) | prod: delivery (37 %); default: V8 push/notification work (33 %) |
+| 1,000 | 0.63–0.65 (measured, 31 % throttled) | 0.65 | ≈ 1.4 | delivery (offload + socket) |
+| 2,500 | ≈ 1.6 | ≈ 2.4 | ≈ 3.4 | delivery; then SQLite reads and per-connection socket work |
+| 5,000 | ≈ 3.2 | ≈ 6–8 | ≈ 6.7 | delivery (and V8 notification work in the default mix) |
+
+Linear: total(N) = total(1k) × N/1k. Quadratic case: the 1k delivery share (≈ 0.25 cores) ×
+(N/1k)², the rest linear. Default mix: rf-500 (0.67 cores, unsaturated: 54 % of periods
+throttled in bursts) × N/500; its extra over production is V8 (0.22 vs 0.03 cores:
+`pushNotifications.deliverScheduled` 75/s vs 25/s, `notifyIfUnassigned` 0.75/s) and SQLite/other
+threads (notification rows written and delivered).
+
+**How far is 5k on 1 vCPU?** With ~30 % headroom for bursts (the 1k runs throttle 31 % of
+periods at 0.64 cores average), the budget is ≈ 0.7 cores. Production mix at 5k needs ≈ 3.2
+cores at today's per-unit costs (linear) → **≈ 4.5× less CPU per user overall**, of which
+delivery (≈ 37 % now, growing) must shrink the most: ≈ 5× per delivered change (feed apply
+per connection is the largest single item: 0.108 ms × receivers), SQLite reads per open ≈ 4×,
+per-connection socket work ≈ 4×. The default mix additionally needs the notification path
+(push-notification actions, unassigned-task fan-out) cut ≈ 7× or moved off the 1 vCPU.
+Not measured: a 2.5k run (1k does not pass yet), the quadratic case past 1k (only two points),
+a frame-pointer run at 1k, and the per-class vs per-connection split of delivery (no counter).
