@@ -446,3 +446,49 @@ describe('admission independent of working-set hydration', () => {
     client.close(); await direct; await batch;
   });
 });
+
+it('bounds auth recovery even when every replacement transport opens successfully', async () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  const { client } = await fixture();
+  await client.localSessionReady;
+  client.setAuth({ fetchToken: undefined });
+  let socket = socketFor(client);
+  const errors = vi.fn();
+  client.onAuthError(errors);
+  for (const delay of [250, 500, 1000, 2000, 4000, 5000]) {
+    socket.receive({ type: 'auth.error', id: socket.sent.at(-1).id, code: 'transient', error: 'unavailable' });
+    const count = Socket.all.length;
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(Socket.all).toHaveLength(count);
+    await vi.advanceTimersByTimeAsync(1);
+    socket = Socket.all.at(-1)!;
+    socket.open();
+    expect(Socket.all).toHaveLength(count + 1);
+  }
+  socket.receive({ type: 'auth.error', id: socket.sent.at(-1).id, code: 'transient', error: 'unavailable' });
+  const count = Socket.all.length;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(Socket.all).toHaveLength(count);
+  expect(errors).toHaveBeenCalledWith(expect.any(String), { definitive: false, code: 'auth_retry_exhausted' });
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+
+it('treats a typed unauthenticated auth Action error as definitive', async () => {
+  const client = new GonvexClient(url, { project: 'project', role: 'control' });
+  clients.push(client);
+  const socket = socketFor(client);
+  socket.receive({ type: 'auth.result', id: socket.sent[0].id, result: { projectId: 'project', accountId: '', tenantId: '' } });
+  const errors = vi.fn();
+  client.onAuthError(errors);
+  const pending = client.action({ kind: 'action', path: 'control.auth.exchangeExternalToken', scope: 'control' } as any, { provider: 'firebase', token: 'test-token' });
+  const rejection = expect(pending).rejects.toMatchObject({ code: 'auth' });
+  await Promise.resolve();
+  const call = socket.sent.find(frame => frame.type === 'action.call');
+  expect(call).toBeDefined();
+  socket.receive({ type: 'action.error', id: call.id, code: 'unauthenticated', error: 'authentication is required' });
+  await rejection;
+  expect(errors).toHaveBeenCalledWith('authentication is required', { definitive: true, code: 'unauthenticated' });
+});

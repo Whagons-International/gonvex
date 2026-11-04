@@ -458,6 +458,12 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   }, [installSession, storageKey]);
 
   useEffect(() => props.client.onAuthError((message, details) => {
+    if (details?.code === "auth_retry_exhausted") {
+      setIsLoading(false);
+      setError(message);
+      setSessionState("degraded");
+      return;
+    }
     const developer = developerModeRef.current;
     if (!developer) {
       if (!details?.definitive) return;

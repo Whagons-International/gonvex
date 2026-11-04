@@ -421,6 +421,7 @@ impl Runtime {
                         trace: None,
                     },
                     Err(error) => ServerMessage::ActionError {
+                        code: None,
                         id,
                         path: Some(path),
                         error,

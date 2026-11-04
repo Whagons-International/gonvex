@@ -3620,8 +3620,9 @@ async fn load_external_configuration(
         "SELECT COALESCE(NULLIF(auth_mode,''),'gonvex-native') FROM gonvex_runtime_projects WHERE id=$1",
     )
     .bind(project)
-    .fetch_one(&mut **transaction.transaction())
-    .await?;
+    .fetch_optional(&mut **transaction.transaction())
+    .await?
+    .ok_or(ControlError::AuthenticationRequired)?;
     if mode != "hybrid" && mode != provider {
         return Err(ControlError::InvalidArguments(format!(
             "project auth mode {mode:?} does not allow provider {provider:?}"
