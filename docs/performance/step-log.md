@@ -985,3 +985,73 @@ ignored (all oracles, perf fixture v2 rebuilt). Binary `lab-5k/bin-open-vis`.
   completion proxy (5.4/s vs 40/s builds even at 500 production-mix, where nothing times out).
   To settle it, count preparations aborted after permit acquisition (in `ReplicaOpenQueue::remove`
   for an active entry) and cache builds whose holder was dropped.
+
+### Step 12 runs (open-visibility + fast-hash, without feed-backlog)
+
+Oracle gate (old-app lab, 100 users, 16 SDK, permission changes): **pass both modes**.
+
+| case | checks | conv. | no change | mismatched | batches | unsupported | errors | heartbeat p95/p99 | save p95/p99 | delivery p95/p99 |
+|---|---:|---:|---:|---|---:|---|---:|---|---|---|
+| ov-oracle-100 (batch on) | 23 | 16 | 7 | 0 | 27,013 | {} | 0.08 % | 61 / 171 | 106 / 223 | 140 / 1,185 |
+| ov-oracle-100-nobatch | 23 | 14 | 8 | 0 | 0 | {} | 0.09 % | 59 / 221 | 140 / 595 | 218 / 2,527 |
+
+(1 × `tasks.create` "Workspace not found" right after a permission change, both runs: app behaviour. The
+batch-off tail of the cache-heap gate is gone: heartbeat p99 221 ms vs 1,756 ms.)
+
+**ov-1k-prod was invalid (transport):** the runtime saw ~1,890 sockets for ~970 accounts (2×,
+with real subscriptions: 14k vs 9k) and the Mac tunnels logged `connect: resource temporarily
+unavailable` on the proxy socket. `asyncio.start_unix_server(sock=…)` re-listens with its default
+backlog 100, overriding the proxy's 4096; eight tunnels opening sockets at once overflowed it and
+client retries left extra server sockets. Fixed (backlog 4096, 80e4c7e7); step-report.py now
+prints sockets per account and flags > 1.1. Rerun: ov-1k-prod-b (1,004 sockets / 1,000 accounts).
+
+| | ch-500 (cache-heap) | **ov-500** (default mix) | ch-1k-prod-b (cache-heap) | **ov-1k-prod-b** (production mix) |
+|---|---|---|---|---|
+| users / sockets per account | 500 / 1.00 | 500 / 1.00 | 1,000 / 1.00 | 1,000 / 1.00 |
+| errors | 11.5 % | 15.6 % (223 metadata subscriptions never current) | 82 % | 21 % (406 detail queries never current) |
+| oracle | 1 mism. (0 leaked) | 1 mism. (0 leaked) | 2 mism. (0 leaked) | 3 mism. (0 leaked; 236 / 1,080 / 2,316 missing) |
+| save p50 / p95 / p99 | 19.1 / 79.4 / 106.1 s | 1.80 / 27.1 / 37.7 s | 91.2 / 188.6 / 216.3 s | 39.9 / 109.7 / 136.8 s |
+| taskDelivery p50 / p95 / p99 | 8.2 / 53.8 / 78.0 s | 1.33 / 17.0 / 30.4 s | 55.5 / 150.9 / 176.6 s | 17.4 / 70.8 / 99.5 s |
+| presence delivery p50 / p95 / p99 | 0.73 / 2.1 / 4.6 s | 0.68 / 1.5 / 2.6 s | 0.70 / 1.3 / 2.5 s | 0.67 / 1.3 / 3.0 s |
+| query p50 / p95 | 12.1 / 28.8 s | 6.4 / 22.6 s | – (8 samples) | 17.7 / 29.2 s |
+| runtime CPU | 1.00 | 1.00 | 1.00 | 1.00 |
+| anon peak | 1,280 MiB | 1,154 MiB | 1,491 MiB | 1,374 MiB |
+| reducer isolate wait p50 / p99 / max | 855 ms / 6.8 / 7.2 s | 465 ms / 2.08 / 2.42 s | 63 ms / 1.83 / 2.13 s | 12 ms / 1.48 / 2.19 s |
+| cron isolate wait p99 / max | 10 / 10 s | 4.2 / 5.8 s | 2.15 / 3.0 s | 1.54 / 5.4 s |
+| `snapshot.permit_wait` p50 | 15.1 s | 3.5 s | 35.8 s | 32.9 s |
+| `delivery.queue_wait` p50 / p99 | 8.4 / 105.8 s | 0.11 / 28.9 s | 23.9 / 124.7 s | 15.4 / 114.8 s |
+| clock offset Mac − arch3 | −32 ms | −61 / −65 ms | −17 / −16 ms | −66 / −71 ms |
+
+No 3 s slice errors (scheduled `fn.total` max 6.0 s at 500 and 5.4 s at 1k are isolate wait
+before the slice; slices count from the lease). Background work, ov-1k-prod-b (ms/s): checkpoint
+66.4 + inline 6.9, GC minor 15.3 + major 0.9, offload busy 723. Top functions by server time
+(1k): recordTaskViewByTaskId 16.9 % (2.4/s, mean 250 ms), createNote 11.1 %, updateDescription
+8.9 %, update 7.6 %, start 6.6 %; means are 85 % isolate wait.
+
+Snapshot builds without an entry at 1k: `snapshot.build` 73.3/s vs post-permit stages
+(`snapshot.acl`) 52.6/s: **20.7/s builds end before getting a permit** (dropped while waiting,
+permit wait p50 33 s) and do no SQL or visibility work. So the wasted share is queue slots and
+later re-opens, not build CPU.
+
+Heap by owner, ov-1k-prod-b plateau: SQLite 121–138 MiB, snapshot cache 73–94 MiB, principal cache
+5–10 MiB, V8 53–55 MiB, rest of anon ~1.0 GiB (anon 1,041–1,241 MiB); page cache 580–630 MiB.
+
+CPU by thread (self time):
+
+| thread | ov-500 | ov-1k-prod-b | of which (1k): JSON / replica+hash / visibility / deflate / kernel |
+|---|---:|---:|---|
+| `gonvex-offload` (snapshot builds, batch items) | 35.1 | 44.4 | 10.5 / 6.5 / 7.4 / 0 / 8.2 |
+| `tokio-rt-worker` (sockets, delivery) | 20.9 | 29.5 | 2.8 / 3.6 / 0.2 / 3.0 / 9.2 |
+| `sqlx-sqlite-worker` | 12.4 | 12.6 | SQLite 3.0, kernel 6.6 |
+| `gonvex-module-isolate` | 26.5 | 10.0 | V8 2.0, kernel 3.6 |
+
+Top self symbols (1k): `indexmap::Core<String, Value>::insert_full` 2.2 %, indexmap bucket clones
+1.7 %, `mi_free` 1.3 %, deflate 2.5 %, indexmap lookups 1.2 %, `format_escaped_str` 1.1 %, foldhash
+1.1 %, `sqlite3VdbeExec` 1.1 %, `drop_glue<Value>` 1.1 %. SipHash is gone (fast-hash). At 500
+(default mix) the top symbol is change collapsing (`BTreeMap<(&str,&str), CollapsedChange>` 2.3 %).
+
+**Binding constraint (both):** CPU. At 1k (production mix) per-open snapshot builds on the
+offload pool (44 %: building `serde_json::Value` rows, visibility, hashing) and delivery on the
+network worker (30 %); snapshot permits are the queue (p50 33 s), and the delivery backlog
+(p50 15 s) is the largest heap owner. At 500 (default mix) the same plus change collapsing and
+V8 (26 %). Not passing at either step; 2.5k not run.
