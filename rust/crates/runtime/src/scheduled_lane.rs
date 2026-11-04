@@ -210,10 +210,8 @@ impl ScheduledLane {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(stop);
         let (sender, receiver) = std::sync::mpsc::channel();
-        let started = std::thread::Builder::new()
-            .name("gonvex-scheduled".to_owned())
-            .spawn(move || {
-                lower_thread_priority(nice);
+        // Created by the base-priority spawner: runs at base + `nice` whoever starts it.
+        let started = gonvex_profiler::thread_priority::spawn_at("gonvex-scheduled", nice, move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .thread_name("gonvex-scheduled")
@@ -239,26 +237,6 @@ impl ScheduledLane {
         }
     }
 }
-
-#[cfg(target_os = "linux")]
-fn lower_thread_priority(nice: i32) {
-    extern "C" {
-        fn setpriority(which: i32, who: u32, prio: i32) -> i32;
-        fn gettid() -> i32;
-    }
-    if nice <= 0 {
-        return;
-    }
-    // PRIO_PROCESS with a thread id sets that thread's nice value (Linux).
-    // Raising one's own nice value needs no privilege.
-    let result = unsafe { setpriority(0, gettid() as u32, nice) };
-    if result != 0 {
-        tracing::warn!(nice, "could not lower the scheduled-work thread priority");
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn lower_thread_priority(_nice: i32) {}
 
 #[cfg(test)]
 mod tests {

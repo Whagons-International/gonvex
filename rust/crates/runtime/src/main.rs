@@ -58,11 +58,23 @@ fn main() -> ExitCode {
     // In-process module isolates need the V8 platform initialized on this
     // thread before Tokio starts its workers (see gonvex-module-host main).
     gonvex_module_runtime_v8::initialize_v8_platform();
+    // Base priority and the thread spawner (parent of isolate, checkpoint and
+    // scheduled-lane threads), after V8 and before any thread is niced
+    // (gonvex_profiler::thread_priority).
+    gonvex_profiler::thread_priority::init();
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        // Network workers (and their blocking threads) at base priority.
+        .on_thread_start(|| {
+            gonvex_profiler::thread_priority::set_current_target(0);
+        })
         .build()
     {
-        Ok(runtime) => runtime.block_on(run()),
+        Ok(runtime) => {
+            // Writer pools open here, never on a niced offload thread.
+            gonvex_store::reader_priority::set_home_runtime(runtime.handle().clone());
+            runtime.block_on(run())
+        }
         Err(error) => {
             eprintln!("gonvex-runtime: failed to start async runtime: {error}");
             ExitCode::FAILURE

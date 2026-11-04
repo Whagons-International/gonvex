@@ -155,9 +155,8 @@ fn checkpointer() -> &'static mpsc::Sender<Message> {
     static SENDER: OnceLock<mpsc::Sender<Message>> = OnceLock::new();
     SENDER.get_or_init(|| {
         let (sender, receiver) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("gonvex-sqlite-checkpoint".into())
-            .spawn(move || run(receiver))
+        // Base priority whoever opens the first database (an offload thread may).
+        gonvex_profiler::thread_priority::spawn_at("gonvex-sqlite-checkpoint", 0, move || run(receiver))
             .expect("spawn the SQLite checkpoint thread");
         sender
     })

@@ -561,6 +561,7 @@ impl PoolRegistry {
         let writer_wal = wal.clone();
         // The writer creates the file and switches it to WAL before any reader
         // opens it; a read-only connection cannot change the journal mode.
+        let writer_options = self.options(&path, false)?;
         let writer = SqlitePoolOptions::new()
             .max_connections(1)
             .min_connections(1)
@@ -592,8 +593,10 @@ impl PoolRegistry {
                     Ok(())
                 })
             })
-            .connect_with(self.options(&path, false)?)
-            .await?;
+            .connect_with(writer_options);
+        // The writer's sqlx worker thread is created by whichever thread polls
+        // the connect; open it at base priority (see `reader_priority`).
+        let writer = crate::reader_priority::at_base_priority(writer).await?;
         let reader_used = Arc::new(AtomicU64::new(now_ms()));
         let released = reader_used.clone();
         // Readers close through `sweep_readers`, which knows when the

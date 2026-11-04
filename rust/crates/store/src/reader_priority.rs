@@ -24,12 +24,38 @@ fn nice() -> i32 {
     })
 }
 
-/// Registers the auto-extension once when a nice value is set.
+/// The process's base-priority tokio runtime (the network runtime), set once
+/// by the binary. Writer pools open on it, so their sqlx worker threads (and
+/// sqlx's pool maintenance task) never start from a niced offload thread.
+static HOME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+pub fn set_home_runtime(handle: tokio::runtime::Handle) {
+    let _ = HOME.set(handle);
+}
+
+/// Runs `future` on the home runtime when the caller's thread is niced above
+/// the process base, else in place.
+pub(crate) async fn at_base_priority<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    use gonvex_profiler::thread_priority as priority;
+    match HOME.get() {
+        Some(home) if priority::current() > priority::base() => match home.spawn(future).await {
+            Ok(value) => value,
+            Err(error) => std::panic::resume_unwind(error.into_panic()),
+        },
+        _ => future.await,
+    }
+}
+
+/// Registers the auto-extension once. It sets every connection's worker
+/// thread to an absolute target: base + `nice()` for read-only connections,
+/// base for writers (a writer opened from a niced thread would otherwise
+/// inherit its creator's nice value; see `gonvex_profiler::thread_priority`).
 pub fn install() {
     static INSTALLED: Once = Once::new();
-    if nice() == 0 {
-        return;
-    }
     INSTALLED.call_once(|| unsafe {
         ffi::sqlite3_auto_extension(Some(entry_point));
     });
@@ -40,13 +66,17 @@ unsafe extern "C" fn entry_point(
     _error: *mut *mut c_char,
     _api: *const ffi::sqlite3_api_routines,
 ) -> c_int {
-    if ffi::sqlite3_db_readonly(db, c"main".as_ptr()) == 1 {
-        // Per-thread on Linux: PRIO_PROCESS with a thread id.
-        #[cfg(target_os = "linux")]
-        {
-            let thread = libc::syscall(libc::SYS_gettid) as libc::id_t;
-            libc::setpriority(libc::PRIO_PROCESS, thread, nice());
-        }
+    // Runs inside sqlite3_open, on the connection's own sqlx worker thread.
+    let read_only = ffi::sqlite3_db_readonly(db, c"main".as_ptr()) == 1;
+    let offset = if read_only { nice() } else { 0 };
+    if !gonvex_profiler::thread_priority::set_current_target(offset) && !read_only {
+        static WARNED: Once = Once::new();
+        WARNED.call_once(|| {
+            eprintln!(
+                "gonvex-store: a SQLite writer connection was opened from a niced thread (nice {}) and cannot return to base priority (no CAP_SYS_NICE)",
+                gonvex_profiler::thread_priority::current()
+            )
+        });
     }
     ffi::SQLITE_OK
 }

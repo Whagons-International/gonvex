@@ -266,9 +266,11 @@ impl IsolateWorker {
         let (ready, ready_receiver) = oneshot::channel();
         let control = Arc::<WorkerControl>::default();
         let worker_control = Arc::clone(&control);
-        thread::Builder::new()
-            .name("gonvex-module-isolate".to_owned())
-            .spawn(move || worker_main(source, config, ready, call_receiver, worker_control))
+        // Base priority whoever starts it (an on-demand isolate may be started
+        // from the niced scheduled lane or offload pool).
+        gonvex_profiler::thread_priority::spawn_at("gonvex-module-isolate", 0, move || {
+            worker_main(source, config, ready, call_receiver, worker_control)
+        })
             .map_err(|err| {
                 ModuleError::Execution(format!("failed to start module isolate thread: {err}"))
             })?;
@@ -1471,9 +1473,9 @@ struct Watchdog {
 impl Watchdog {
     fn spawn(handle: v8::IsolateHandle, terminated: Arc<AtomicBool>) -> Result<Self, ModuleError> {
         let (signals, inbox) = sync_mpsc::channel();
-        thread::Builder::new()
-            .name("gonvex-module-watchdog".to_owned())
-            .spawn(move || watchdog_main(handle, terminated, inbox))
+        gonvex_profiler::thread_priority::spawn_at("gonvex-module-watchdog", 0, move || {
+            watchdog_main(handle, terminated, inbox)
+        })
             .map_err(|err| {
                 ModuleError::Execution(format!("failed to start module watchdog thread: {err}"))
             })?;

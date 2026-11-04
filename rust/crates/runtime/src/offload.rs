@@ -93,18 +93,10 @@ fn cpus() -> usize {
 }
 
 /// Lowers the calling thread's CPU priority by `increment` (Linux: per thread).
-fn lower_priority(increment: i32) {
-    #[cfg(target_os = "linux")]
-    if increment > 0 {
-        // SAFETY: plain syscalls on the calling thread's id.
-        unsafe {
-            let tid = libc::gettid() as libc::id_t;
-            let current = libc::getpriority(libc::PRIO_PROCESS, tid);
-            libc::setpriority(libc::PRIO_PROCESS, tid, (current + increment).min(19));
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = increment;
+/// Sets a pool thread to base + `nice` (absolute: a pool thread started by
+/// another pool thread, e.g. a tokio blocking thread, does not stack).
+fn lower_priority(nice: i32) {
+    gonvex_profiler::thread_priority::set_current_target(nice);
 }
 
 /// The process-wide pool, configured from the environment on first use.

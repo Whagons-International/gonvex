@@ -38,6 +38,9 @@ mod scheduling_tests;
 mod split_tests;
 mod webcrypto;
 
+/// Per-thread priority (re-exported for gonvex-module-host).
+pub use gonvex_profiler::thread_priority;
+
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;

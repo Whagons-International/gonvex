@@ -175,6 +175,8 @@ fn main() -> ExitCode {
     // otherwise isolate threads spawned by different workers do not have the
     // common initialized parent V8 11.6 requires.
     initialize_v8_platform();
+    // The spawner that creates isolate threads at base priority (after V8).
+    gonvex_module_runtime_v8::thread_priority::init();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

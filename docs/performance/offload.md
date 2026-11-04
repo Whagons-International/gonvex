@@ -146,6 +146,13 @@ did later; nice was not shown to help and risks starving the pool's cgroup
 share on a shared host, so the default was 0 (`GONVEX_OFFLOAD_NICE`). Since 2026-11-04 the
 default is 10, together with `GONVEX_SQLITE_READER_NICE=10` (cache-heap.md §5: the pool alone at
 nice 10 is worse, both together let the writer and the isolate run first).
+Nice values are absolute targets (base + n, base = the main thread's nice), set on every pool
+thread start, so a pool thread started by another pool thread (a tokio blocking thread) does not
+stack to 19. Threads that must run at base (writer connection workers, the checkpoint thread,
+module isolates, the network runtime) do not inherit a niced creator's value: they are created by
+a base-priority spawner thread or opened on the network runtime
+(`gonvex_profiler::thread_priority`), since lowering a nice value needs CAP_SYS_NICE, which
+containers do not have.
 
 ## Memory during bursts
 

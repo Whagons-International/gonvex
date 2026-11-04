@@ -21,6 +21,7 @@
 
 pub mod cron;
 pub mod function;
+pub mod thread_priority;
 
 use std::cell::Cell;
 use std::future::Future;
