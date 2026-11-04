@@ -197,3 +197,7 @@ required-features = ["perf-fixture"]
 [[test]]
 name = "resume_log_only"
 required-features = ["perf-fixture"]
+
+[[test]]
+name = "redeploy_cache"
+required-features = ["perf-fixture"]

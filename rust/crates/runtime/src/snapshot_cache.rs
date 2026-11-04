@@ -1,6 +1,6 @@
 //! Shared collection snapshots: the "base" of base + change-log delta.
 //!
-//! One entry per (tenant database, project, module generation, collection
+//! One entry per (tenant database, project, collection content, collection
 //! path, arguments) holds every row the collection's own filters admit at one
 //! revision `R`, in snapshot order, with each row's projection, canonical hash
 //! and byte size. It is principal-free: no visibility predicate went into it.
@@ -626,7 +626,10 @@ pub(crate) enum Lookup {
 pub(crate) struct CacheKey<'a> {
     pub database_url: &'a str,
     pub project: &'a str,
-    pub generation: u64,
+    /// [`content_hash`] of what the entry's rows depend on (definition,
+    /// visibility plan, table schema), not the module generation: a deploy
+    /// that leaves a collection unchanged keeps its entries.
+    pub content: u64,
     pub path: &'a str,
     pub args: &'a Value,
     /// The opening member (not part of the entry's key): sparse decisions
@@ -640,7 +643,7 @@ impl CacheKey<'_> {
         (
             self.database_url.to_owned(),
             self.project.to_owned(),
-            self.generation,
+            self.content,
             self.path.to_owned(),
             replica::stable_json(self.args),
         )
@@ -1000,6 +1003,43 @@ impl SnapshotCache {
 /// The arguments an entry depends on: the ones its equality filters read
 /// (`build_entry` and `view` read no other argument). Non-object arguments
 /// stay as they are (opens with them never use the cache).
+/// What a collection's cache entries depend on besides the database and the
+/// arguments: its definition (table, key, columns, filters, order), its
+/// visibility plan (`build_entry` reads the plan's ACL columns into every
+/// row) and its table's declared schema. Entries keyed by this survive a
+/// module deploy that does not change them; the change log brings them to
+/// the open's clock exactly as it brings a client's cursor (a deploy never
+/// invalidates cursors either). Memoized per (project, generation, path).
+pub(crate) fn content_hash(
+    project: &str,
+    generation: u64,
+    path: &str,
+    definition: &ReplicaCollectionDefinition,
+    plan: &VisibilityPlan,
+    schema: &Value,
+) -> u64 {
+    type Memo = HashMap<(String, u64, String), u64>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    let key = (project.to_owned(), generation, path.to_owned());
+    if let Some(hash) = memo.lock().unwrap().get(&key) {
+        return *hash;
+    }
+    use sha2::Digest;
+    let content = serde_json::json!({
+        "definition": definition,
+        "plan": plan,
+        "schema": schema.get(&definition.table),
+    });
+    let digest = sha2::Sha256::digest(serde_json::to_vec(&content).unwrap_or_default());
+    let hash = u64::from_le_bytes(digest[..8].try_into().expect("8 bytes"));
+    let mut memo = memo.lock().unwrap();
+    // Generations only grow; drop older ones of this project.
+    memo.retain(|(other, other_generation, _), _| other != project || *other_generation >= generation);
+    memo.insert(key, hash);
+    hash
+}
+
 pub(crate) fn cache_arguments(definition: &ReplicaCollectionDefinition, args: &Value) -> Value {
     let Some(object) = args.as_object() else {
         return args.clone();
@@ -1378,11 +1418,38 @@ mod tests {
         CacheKey {
             database_url: "db",
             project: "p",
-            generation: 1,
+            content: 1,
             path,
             args,
             member: "m",
         }
+    }
+
+    #[test]
+    fn content_hash_ignores_the_generation_but_not_what_rows_depend_on() {
+        let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
+            "table": "tasks", "key": "_id", "columns": ["_id", "name"]
+        }))
+        .unwrap();
+        let plan: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "version": 2, "table": "tasks", "key": "_id",
+            "where": {"operator": "always"}
+        }))
+        .unwrap();
+        let schema = serde_json::json!({"tasks": {"_id": "text", "name": "text"}});
+        let hash = |project: &str, generation, path: &str, definition: &ReplicaCollectionDefinition, plan: &VisibilityPlan, schema: &Value| {
+            content_hash(project, generation, path, definition, plan, schema)
+        };
+        let base = hash("content-p", 1, "tasks.all", &definition, &plan, &schema);
+        assert_eq!(base, hash("content-p", 2, "tasks.all", &definition, &plan, &schema));
+        let mut wider = definition.clone();
+        wider.columns.push("description".into());
+        assert_ne!(base, hash("content-p", 3, "tasks.all", &wider, &plan, &schema));
+        let mut other_plan = plan.clone();
+        other_plan.version = Some(1);
+        assert_ne!(base, hash("content-p", 4, "tasks.all", &definition, &other_plan, &schema));
+        let altered = serde_json::json!({"tasks": {"_id": "text", "name": "integer"}});
+        assert_ne!(base, hash("content-p", 5, "tasks.all", &definition, &plan, &altered));
     }
 
     #[tokio::test]

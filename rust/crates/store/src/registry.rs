@@ -459,12 +459,12 @@ pub(crate) struct Database {
     pub(crate) reader: SqlitePool,
     /// When a reader connection was last released ([`now_ms`]).
     reader_used: Arc<AtomicU64>,
-    /// When the budget sweep last closed this busy database's extra readers
-    /// (`now_ms`; 0 = never). See [`busy_budget_close_interval_ms`].
-    budget_closed: Arc<AtomicU64>,
     /// One reader open at a time for this database (see
     /// [`PoolLimits::reader_opens`]).
     reader_open: Arc<Semaphore>,
+    /// When the budget sweep last closed this busy database's extra readers
+    /// (`now_ms`; 0 = never). See [`busy_budget_close_interval_ms`].
+    budget_closed: Arc<AtomicU64>,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Batched WAL syncs for `Durability::Full` (see `sync_barrier`).
@@ -677,8 +677,8 @@ impl PoolRegistry {
             writer_stats: Arc::default(),
             reader,
             reader_used,
-            budget_closed: Arc::default(),
             reader_open: Arc::new(Semaphore::new(1)),
+            budget_closed: Arc::default(),
             notify,
             locks: Arc::default(),
             sync: crate::sync_barrier::SyncBarrier::new(&path),
