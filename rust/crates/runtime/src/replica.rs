@@ -1441,9 +1441,13 @@ impl<'a> CollapsedChange<'a> {
 /// per event and shared by every connection (`feed_share`), instead of a
 /// `BTreeMap` of borrowed keys per connection.
 pub(crate) struct CollapseIndex {
-    /// By (table, row id); positions of the first and last change.
-    rows: Vec<(u32, u32, Box<[(u32, u32)]>)>,
+    /// By (table, row id).
+    rows: Vec<CollapsedRow>,
 }
+
+/// Positions of a row's first and last change, and its changed columns as
+/// (change, column) positions in byte order.
+type CollapsedRow = (u32, u32, Box<[(u32, u32)]>);
 
 impl CollapseIndex {
     pub(crate) fn new(changes: &[LogChange]) -> Self {
@@ -1501,7 +1505,7 @@ impl<'a> CollapsedChanges<'a> {
         (change.table.as_str(), change.row_id.as_str())
     }
 
-    fn change<'s>(&'s self, row: &'s (u32, u32, Box<[(u32, u32)]>)) -> CollapsedChange<'s> {
+    fn change<'s>(&'s self, row: &'s CollapsedRow) -> CollapsedChange<'s> {
         CollapsedChange {
             old: &self.changes[row.0 as usize].old_value,
             new: &self.changes[row.1 as usize].new_value,
@@ -2227,7 +2231,7 @@ pub(crate) async fn scan_window(
     'batches: while let Some(batch) = rows.next_batch().await {
         let batch = batch?;
         for row in batch.rows() {
-            if collector.window.rows % 32 == 0 {
+            if collector.window.rows.is_multiple_of(32) {
                 tokio::task::yield_now().await;
             }
             let text = std::str::from_utf8(row)
@@ -2276,7 +2280,7 @@ async fn collect_window(
     futures_util::pin_mut!(rows);
     let mut collector = WindowCollector::new(definition);
     while let Some(row) = rows.next().await {
-        if collector.window.rows % 32 == 0 {
+        if collector.window.rows.is_multiple_of(32) {
             tokio::task::yield_now().await;
         }
         if !collector.push(&row?, &mut visit)? {
