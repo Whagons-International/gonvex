@@ -168,7 +168,9 @@ struct Cached {
 /// Prepared statements of one connection, keyed by SQL text.
 pub(crate) struct StatementCache {
     db: usize,
-    entries: HashMap<Box<str>, Cached>,
+    // Per connection, bounded by `capacity`; looked up once per statement
+    // with its whole SQL text: foldhash (seeded per process), not SipHash.
+    entries: HashMap<Box<str>, Cached, foldhash::fast::RandomState>,
     capacity: usize,
     tick: u64,
     schema_version: Option<i64>,
@@ -184,7 +186,7 @@ impl StatementCache {
     fn new(capacity: usize) -> Self {
         Self {
             db: 0,
-            entries: HashMap::new(),
+            entries: HashMap::default(),
             capacity,
             tick: 0,
             schema_version: None,

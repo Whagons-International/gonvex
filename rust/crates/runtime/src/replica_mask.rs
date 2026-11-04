@@ -82,7 +82,7 @@ fn parent_acl_columns(
 fn concern_tables(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
-    out: &mut std::collections::HashSet<String>,
+    out: &mut crate::fast_hash::FastSet<String>,
 ) {
     out.insert(plan.table.clone());
     for set in plan.sets.values() {
@@ -179,7 +179,7 @@ impl Runtime {
             .filter_map(|expression| Some((expression.via.clone()?, expression.table.clone())))
             .collect::<Vec<_>>();
         let tables = Arc::clone(subscription.concern_tables.get_or_insert_with(|| {
-            let mut tables = std::collections::HashSet::new();
+            let mut tables = crate::fast_hash::FastSet::default();
             tables.insert(subscription.definition.table.clone());
             tables.insert("members".to_owned());
             concern_tables(&subscription.visibility, &subscription.resolved, &mut tables);

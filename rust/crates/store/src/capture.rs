@@ -94,7 +94,8 @@ struct TableShape {
 
 /// Captured tables of one schema, shared by every connection whose schema
 /// has the same digest (every tenant of a module, typically).
-type Shapes = Arc<HashMap<String, Arc<TableShape>>>;
+// Keyed by the tenant schema's table names, looked up per captured row.
+type Shapes = Arc<HashMap<String, Arc<TableShape>, foldhash::fast::RandomState>>;
 
 #[derive(Default)]
 struct Context {

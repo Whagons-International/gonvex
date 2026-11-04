@@ -475,7 +475,7 @@ impl PresenceHub {
             1 => Some(batches[0].encoded.to_string()),
             _ => {
                 let mut merged: Vec<PresenceMember> = Vec::new();
-                let mut index: HashMap<&str, usize> = HashMap::new();
+                let mut index = crate::fast_hash::FastMap::<&str, usize>::default();
                 for batch in &batches {
                     for change in &batch.changes {
                         if let Some(position) = index.get(change.member_id.as_str()) {
