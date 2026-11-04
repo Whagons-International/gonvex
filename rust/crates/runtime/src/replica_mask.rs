@@ -361,7 +361,7 @@ impl Runtime {
             for change in &parent_changes {
                 let image = collapsed
                     .get(&(change.table.as_str(), change.row_id.as_str()))
-                    .map_or(&change.old_value, |collapsed| collapsed.old);
+                    .map_or(&*change.old_value, |collapsed| collapsed.old);
                 if overlay.iter().any(|(table, key, _): &(String, String, _)| {
                     *table == change.table && *key == change.row_id
                 }) {
@@ -384,7 +384,7 @@ impl Runtime {
                     continue;
                 };
                 let net = collapsed.get(&(change.table.as_str(), change.row_id.as_str()));
-                let last = net.map_or(&change.new_value, |collapsed| collapsed.new);
+                let last = net.map_or(&*change.new_value, |collapsed| collapsed.new);
                 // An update that changed none of the parent's ACL index
                 // columns, under an unchanged principal, cannot flip whether
                 // the parent admits its children (parent visibility reads

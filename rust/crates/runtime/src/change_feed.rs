@@ -7,7 +7,11 @@ use gonvex_store::{PoolRegistry, TenantRoute};
 use serde_json::Value;
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
-use tokio::sync::{broadcast, watch, RwLock};
+use tokio::sync::{watch, RwLock};
+
+pub mod backlog;
+pub use backlog::FeedReceiver;
+use backlog::FeedStore;
 
 #[derive(Clone, Debug)]
 pub struct ReplicaClock {
@@ -25,8 +29,10 @@ pub struct LogChange {
     pub row_id: String,
     pub operation: String,
     pub changed_columns: Vec<String>,
-    pub old_value: Value,
-    pub new_value: Value,
+    /// Row images, shared: merged catch-up events and refilled copies
+    /// reference the same parsed JSON instead of deep-copying it.
+    pub old_value: std::sync::Arc<Value>,
+    pub new_value: std::sync::Arc<Value>,
     pub provenance: TransactionProvenance,
 }
 
@@ -107,7 +113,7 @@ pub fn first_revision(event: &FeedEvent) -> Option<u64> {
 
 pub struct ChangeFeedHub {
     pools: PoolRegistry,
-    feeds: RwLock<BTreeMap<String, broadcast::Sender<FeedEvent>>>,
+    feeds: RwLock<BTreeMap<String, std::sync::Arc<FeedStore>>>,
     shutdown: watch::Sender<bool>,
 }
 
@@ -121,29 +127,33 @@ impl ChangeFeedHub {
         }
     }
 
-    pub async fn subscribe(&self, route: &TenantRoute) -> broadcast::Receiver<FeedEvent> {
+    pub async fn subscribe(&self, route: &TenantRoute) -> FeedReceiver {
         let key = route.database_url.clone();
-        if let Some(sender) = self.feeds.read().await.get(&key) {
-            return sender.subscribe();
+        if let Some(store) = self.feeds.read().await.get(&key) {
+            return store.subscribe();
         }
         let mut feeds = self.feeds.write().await;
-        if let Some(sender) = feeds.get(&key) {
-            return sender.subscribe();
+        if let Some(store) = feeds.get(&key) {
+            return store.subscribe();
         }
-        let (sender, receiver) = broadcast::channel(1024);
-        feeds.insert(key, sender.clone());
+        let store = FeedStore::new(self.pools.clone(), route.clone());
+        feeds.insert(key, std::sync::Arc::clone(&store));
         // Capture the durable clock before returning the first receiver. Any
         // later Replica snapshot is necessarily at this revision or newer,
         // while the listener plus deliver_committed below closes the gap for commits
         // after it. Starting at retained_revision replayed the full 30-day log
         // into a brand-new connection, delaying current changes and potentially
         // overflowing the broadcast channel before subscriptions had opened.
+        let receiver;
         let initial_revision = match read_clock(&self.pools, route).await {
-            Ok(clock) => clock.revision,
+            Ok(clock) => {
+                store.set_initial_revision(clock.revision);
+                receiver = store.subscribe();
+                clock.revision
+            }
             Err(error) => {
-                let _ = sender.send(FeedEvent::Reset {
-                    reason: format!("change feed clock unavailable: {error}"),
-                });
+                receiver = store.subscribe();
+                store.reset(format!("change feed clock unavailable: {error}"), None);
                 0
             }
         };
@@ -153,7 +163,7 @@ impl ChangeFeedHub {
         tokio::spawn(gonvex_profiler::instrument(
             gonvex_profiler::TaskKind::Feed,
             async move {
-                run_feed(route, pools, sender, shutdown, initial_revision).await;
+                run_feed(route, pools, store, shutdown, initial_revision).await;
             },
         ));
         receiver
@@ -172,7 +182,7 @@ impl ChangeFeedHub {
             .and_then(|feeds| {
                 feeds
                     .get(database_url)
-                    .map(broadcast::Sender::receiver_count)
+                    .map(|store| store.receiver_count())
             })
             .unwrap_or(0)
     }
@@ -181,7 +191,7 @@ impl ChangeFeedHub {
 async fn run_feed(
     route: TenantRoute,
     pools: PoolRegistry,
-    sender: broadcast::Sender<FeedEvent>,
+    sender: std::sync::Arc<FeedStore>,
     mut shutdown: watch::Receiver<bool>,
     mut last_revision: u64,
 ) {
@@ -193,9 +203,7 @@ async fn run_feed(
         let mut listener = match pools.listener(&route.database_url).await {
             Ok(listener) => listener,
             Err(error) => {
-                let _ = sender.send(FeedEvent::Reset {
-                    reason: format!("change feed listener unavailable: {error}"),
-                });
+                sender.reset(format!("change feed listener unavailable: {error}"), None);
                 if wait_or_shutdown(&mut shutdown, Duration::from_secs(1)).await {
                     return;
                 }
@@ -206,9 +214,7 @@ async fn run_feed(
             .listen(gonvex_store::feed::CHANGE_FEED_CHANNEL)
             .await
         {
-            let _ = sender.send(FeedEvent::Reset {
-                reason: format!("change feed LISTEN failed: {error}"),
-            });
+            sender.reset(format!("change feed LISTEN failed: {error}"), None);
             if wait_or_shutdown(&mut shutdown, Duration::from_secs(1)).await {
                 return;
             }
@@ -230,9 +236,7 @@ async fn run_feed(
                 );
             }
             Err(error) => {
-                let _ = sender.send(FeedEvent::Reset {
-                    reason: format!("change feed startup recovery failed: {error}"),
-                });
+                sender.reset(format!("change feed startup recovery failed: {error}"), None);
                 continue;
             }
         }
@@ -305,9 +309,7 @@ async fn run_feed(
                     );
                 }
                 Err(error) => {
-                    let _ = sender.send(FeedEvent::Reset {
-                        reason: format!("change feed recovery failed: {error}"),
-                    });
+                    sender.reset(format!("change feed recovery failed: {error}"), None);
                     break;
                 }
             }
@@ -380,40 +382,31 @@ async fn deliver_committed(
     pools: &PoolRegistry,
     route: &TenantRoute,
     after: u64,
-    sender: &broadcast::Sender<FeedEvent>,
+    sender: &FeedStore,
 ) -> Result<u64, gonvex_store::DatabaseError> {
     let clock = read_clock(pools, route).await?;
     if after < clock.retained_revision {
-        let _ = sender.send(FeedEvent::Reset {
-            reason: "change feed cursor expired".to_owned(),
-        });
+        sender.reset("change feed cursor expired".to_owned(), Some(clock.revision));
         return Ok(clock.revision);
     }
     if clock.revision <= after {
         return Ok(clock.revision);
     }
     let changes = read_changes(pools, route, after, clock.revision).await?;
+    let epoch: std::sync::Arc<str> = std::sync::Arc::from(clock.epoch.as_str());
     let mut current_revision = 0;
     let mut batch = Vec::new();
     for change in changes {
         if current_revision != 0 && change.revision != current_revision {
             stamp_broadcast(&clock.epoch, current_revision);
-            let _ = sender.send(FeedEvent::Transaction {
-                database_epoch: clock.epoch.clone(),
-                revision: current_revision,
-                changes: std::sync::Arc::new(std::mem::take(&mut batch)),
-            });
+            sender.publish(&epoch, current_revision, std::mem::take(&mut batch));
         }
         current_revision = change.revision;
         batch.push(change);
     }
     if !batch.is_empty() {
         stamp_broadcast(&clock.epoch, current_revision);
-        let _ = sender.send(FeedEvent::Transaction {
-            database_epoch: clock.epoch,
-            revision: current_revision,
-            changes: std::sync::Arc::new(batch),
-        });
+        sender.publish(&epoch, current_revision, batch);
     }
     Ok(clock.revision)
 }
@@ -508,8 +501,8 @@ pub(crate) fn log_change_from_row(
         row_id: row.try_get("row_id")?,
         operation: row.try_get("operation")?,
         changed_columns,
-        old_value: json_text(row, "old_value")?,
-        new_value: json_text(row, "new_value")?,
+        old_value: std::sync::Arc::new(json_text(row, "old_value")?),
+        new_value: std::sync::Arc::new(json_text(row, "new_value")?),
         provenance: TransactionProvenance {
             root_command_id: row.try_get("root_command_id")?,
             root_channel: row.try_get("root_invocation_channel")?,

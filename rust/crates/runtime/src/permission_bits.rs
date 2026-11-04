@@ -473,7 +473,7 @@ impl Drop for PoisonOnExit {
 
 /// The only writer of one index: committed feed transactions, in order.
 async fn run_applier(
-    mut receiver: tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>,
+    mut receiver: crate::change_feed::FeedReceiver,
     index: SharedPermissions,
     source: PermissionGrantSource,
 ) {
@@ -525,8 +525,8 @@ mod tests {
             row_id: id.to_owned(),
             operation: "update".to_owned(),
             changed_columns: Vec::new(),
-            old_value: old,
-            new_value: new,
+            old_value: std::sync::Arc::new(old),
+            new_value: std::sync::Arc::new(new),
             provenance: Default::default(),
         }
     }

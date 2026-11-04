@@ -211,6 +211,17 @@ struct RuntimeManifestHealth {
     failed_projects: usize,
 }
 
+#[cfg(feature = "perf-fixture")]
+impl Runtime {
+    /// A receiver of `route`'s change feed, as a connection gets it (benches).
+    pub async fn perf_subscribe_change_feed(
+        &self,
+        route: &gonvex_store::TenantRoute,
+    ) -> change_feed::FeedReceiver {
+        self.inner.change_feeds.subscribe(route).await
+    }
+}
+
 impl Runtime {
     async fn provision_runtime_tenant(
         &self,
@@ -3725,7 +3736,7 @@ enum ScheduledTransport<T> {
 /// the socket gets the next priority turn.
 async fn next_socket_or_feed<S>(
     socket: &mut S,
-    receiver: &mut Option<broadcast::Receiver<change_feed::FeedEvent>>,
+    receiver: &mut Option<change_feed::FeedReceiver>,
     scheduler: &mut FeedFirstScheduler,
 ) -> ScheduledTransport<S::Item>
 where
@@ -3745,7 +3756,7 @@ where
                 ScheduledTransport::Socket(message)
             }
             event = next_feed_event(receiver) => {
-                let additional_ready = receiver.as_ref().map_or(0, broadcast::Receiver::len);
+                let additional_ready = receiver.as_ref().map_or(0, change_feed::FeedReceiver::len);
                 scheduler.selected_first_feed(additional_ready);
                 ScheduledTransport::Feed(event)
             }
@@ -3754,7 +3765,7 @@ where
         tokio::select! {
             biased;
             event = next_feed_event(receiver) => {
-                let additional_ready = receiver.as_ref().map_or(0, broadcast::Receiver::len);
+                let additional_ready = receiver.as_ref().map_or(0, change_feed::FeedReceiver::len);
                 scheduler.selected_first_feed(additional_ready);
                 ScheduledTransport::Feed(event)
             }
@@ -3767,7 +3778,7 @@ where
 }
 
 async fn next_feed_event(
-    receiver: &mut Option<broadcast::Receiver<change_feed::FeedEvent>>,
+    receiver: &mut Option<change_feed::FeedReceiver>,
 ) -> Result<change_feed::FeedEvent, broadcast::error::RecvError> {
     match receiver {
         Some(receiver) => receiver.recv().await,
@@ -6118,7 +6129,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
     #[tokio::test]
     async fn committed_feed_event_runs_between_back_to_back_socket_calls() {
         let (sender, receiver) = broadcast::channel(8);
-        let mut feed = Some(receiver);
+        let mut feed = Some(change_feed::FeedReceiver::from(receiver));
         let mut socket = futures_util::stream::iter(["call-one", "call-two"]);
         let mut scheduler = FeedFirstScheduler::default();
 
@@ -6142,7 +6153,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
     #[tokio::test]
     async fn feed_first_snapshot_is_bounded_under_continuous_feed_traffic() {
         let (sender, receiver) = broadcast::channel(8);
-        let mut feed = Some(receiver);
+        let mut feed = Some(change_feed::FeedReceiver::from(receiver));
         let mut socket = futures_util::stream::iter(["queued-call"]);
         let mut scheduler = FeedFirstScheduler::default();
 
@@ -6784,8 +6795,8 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 row_id: "member".to_owned(),
                 operation: "UPDATE".to_owned(),
                 changed_columns: changed_columns.into_iter().map(str::to_owned).collect(),
-                old_value: serde_json::json!({"id":"member","account_id":"account","status":"active"}),
-                new_value: serde_json::json!({"id":"member","account_id":"account","status":"revoked"}),
+                old_value: std::sync::Arc::new(serde_json::json!({"id":"member","account_id":"account","status":"active"})),
+                new_value: std::sync::Arc::new(serde_json::json!({"id":"member","account_id":"account","status":"revoked"})),
                 provenance: change_feed::TransactionProvenance::default(),
             }]),
         };

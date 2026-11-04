@@ -162,7 +162,7 @@ async fn a_slow_reader_gets_fewer_newer_batches_and_never_exceeds_the_cap() {
     let (mut socket, client) = slow_socket(Arc::clone(&release)).await;
     let watch = socket.watch();
     let (feed_tx, feed_rx) = tokio::sync::broadcast::channel::<FeedEvent>(4096);
-    let mut feed = Some(feed_rx);
+    let mut feed = Some(gonvex_runtime::change_feed::FeedReceiver::from(feed_rx));
     let mut pending = None;
     let hub = DeliveryHub::default();
     let mut batcher = ReplicaBatcher::with_config(BatchConfig::from_env());

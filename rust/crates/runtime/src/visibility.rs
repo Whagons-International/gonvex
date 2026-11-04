@@ -557,7 +557,7 @@ impl ParentAclRegistry {
     where
         S: FnOnce() -> SF,
         SF: std::future::Future<
-            Output = tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>,
+            Output = crate::change_feed::FeedReceiver,
         >,
         L: FnOnce(IndexShape) -> LF,
         LF: std::future::Future<Output = Result<IndexLoad, VisibilityError>>,
@@ -729,7 +729,7 @@ impl Drop for PoisonOnExit {
 }
 
 async fn run_applier(
-    mut receiver: tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>,
+    mut receiver: crate::change_feed::FeedReceiver,
     index: SharedIndex,
     shape: IndexShape,
 ) {
