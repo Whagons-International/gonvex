@@ -1790,6 +1790,9 @@ async fn websocket(
         return;
     }
 
+    // SessionReady is startup-only; do not retain its large enum in the socket loop.
+    drop(ready);
+
     // Discards the tenant scope after the session's own Member changed. The
     // caller then sends `membership_changed_frames`.
     macro_rules! discard_tenant_session {
@@ -1843,49 +1846,39 @@ async fn websocket(
         // Run before select: open completion and legacy page delivery both
         // continue the loop, and a quiet socket may never send another frame.
         if opening_cohort_dirty && tenant_session.is_some() {
-            // Cohort certification runs only after opens/delivery progress.
-            // Keep its epoch iterator and send state off every socket's future.
-            let snapshots_complete = pending_replica_opens.is_empty()
-                && replica_opens.is_empty()
-                && legacy_snapshot_delivery.is_empty()
-                && snapshot_delivery.is_empty();
-            let healthy = Box::pin(async {
-                let mut epochs = replicas
+            let mut epochs = replicas
+                .values()
+                .map(|s| s.cursor.epoch.as_str())
+                .chain(live_queries.values().map(|s| s.epoch.as_str()));
+            if let Some(epoch) = epochs.next() {
+                // Mixed database epochs cannot share a numeric certificate.
+                // Reconnect re-admits all subscriptions in the current epoch.
+                if epochs.any(|other| other != epoch) {
+                    return;
+                }
+            }
+            if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
+                pending_replica_opens.is_empty()
+                    && replica_opens.is_empty()
+                    && legacy_snapshot_delivery.is_empty()
+                    && snapshot_delivery.is_empty(),
+                replicas
                     .values()
-                    .map(|s| s.cursor.epoch.as_str())
-                    .chain(live_queries.values().map(|s| s.epoch.as_str()));
-                if let Some(epoch) = epochs.next() {
-                    // Mixed database epochs cannot share a numeric certificate.
-                    // Reconnect re-admits all subscriptions in the current epoch.
-                    if epochs.any(|other| other != epoch) {
-                        return false;
-                    }
+                    .map(|s| s.cursor.revision)
+                    .chain(live_queries.values().map(|s| s.computed_revision)),
+                sent_replica_revision,
+                opening_cohort_dirty,
+            ) {
+                if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
+                    .await
+                    .is_err()
+                {
+                    return;
                 }
-                if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
-                    snapshots_complete,
-                    replicas
-                        .values()
-                        .map(|s| s.cursor.revision)
-                        .chain(live_queries.values().map(|s| s.computed_revision)),
-                    sent_replica_revision,
-                    opening_cohort_dirty,
-                ) {
-                    if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
-                        .await
-                        .is_err()
-                    {
-                        return false;
-                    }
-                    if let ServerMessage::ReplicaWatermark { revision } = watermark {
-                        sent_replica_revision = revision;
-                        opening_cohort_dirty = false;
-                    }
+                if let ServerMessage::ReplicaWatermark { revision } = watermark {
+                    sent_replica_revision = revision;
+                    opening_cohort_dirty = false;
                 }
-                true
-            })
-            .await;
-            if !healthy {
-                return;
             }
         }
         let preparing_replicas = !replica_opens.is_empty();
@@ -2186,11 +2179,12 @@ async fn websocket(
                             "websocket feed apply started"
                         );
                         let reset = matches!(event, change_feed::FeedEvent::Reset { .. });
-                        let transaction_watermark = replica_watermark(&event);
+                        // Retain only the revision while applying the feed, not a full message enum.
+                        let transaction_watermark = feed_revision;
                         if let Some(session) = tenant_session.as_ref() {
                             if membership_affects(session, &event) || events.iter().any(|earlier| membership_affects(session, earlier)) {
                                 discard_tenant_session!();
-                                for message in membership_changed_frames(transaction_watermark) {
+                                for message in membership_changed_frames(transaction_watermark.map(|revision| ServerMessage::ReplicaWatermark { revision })) {
                                     if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                                 }
                                 continue;
@@ -2253,7 +2247,7 @@ async fn websocket(
                                     // Delivery coverage: a wakeup that adds no data item
                                     // (data only grows until the flush below).
                                     let noop = transaction_watermark.is_some() && batcher.data_items() <= items_before;
-                                    if let Some(ServerMessage::ReplicaWatermark { revision }) = transaction_watermark {
+                                    if let Some(revision) = transaction_watermark {
                                         batcher.watermark(socket.batch_mut(), tenant_id, &replicas, revision);
                                         sent_replica_revision = sent_replica_revision.max(revision);
                                     }
@@ -2321,11 +2315,10 @@ async fn websocket(
                                     // has been written, including the case
                                     // where this connection has no visible
                                     // subscription changes.
-                                    if let Some(watermark) = transaction_watermark {
+                                    if let Some(revision) = transaction_watermark {
+                                        let watermark = ServerMessage::ReplicaWatermark { revision };
                                         if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark).await.is_err() { return; }
-                                        if let ServerMessage::ReplicaWatermark { revision } = watermark {
-                                            sent_replica_revision = sent_replica_revision.max(revision);
-                                        }
+                                        sent_replica_revision = sent_replica_revision.max(revision);
                                     }
                                     if reset {
                                         opening_cohort_dirty = false;
