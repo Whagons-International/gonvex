@@ -75,6 +75,7 @@ const result = {
   latencyMs,
   steadyLatencyMs,
 };
+result.driverDiagnosticsByShard=parts.map(p=>({shard:p.shard,workerPid:p.workerPid,diagnostics:p.driverDiagnostics,pendingQualification:p.pendingQualification}));
 result.checkpointCostByShard=parts.map((p,shard)=>({shard,...p.checkpointCost}));
 result.checkpointCost=Object.fromEntries(['logicalBytes','peakLogicalBytesSum','users','windows','checkpointCpuSeconds','rowPoolCanonicalBytes','rowPoolAdditionalSerializationBytes'].map(k=>[k,parts.reduce((n,p)=>n+(p.checkpointCost?.[k]||0),0)]));
 // Generator self-cost and thin-client counters, per shard and summed.

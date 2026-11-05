@@ -17,7 +17,12 @@ pids=
 monitor=
 pinger=
 tunnels=
-cleanup() { kill -TERM $pids ${monitor:-} ${pinger:-} $tunnels 2>/dev/null || true; }
+cleanup() {
+ if [ -n "$pids" ] && [ -f "$LOAD_RESULT.workers.json" ]; then
+  "$node" "$bench/stop-workers.mjs" "$LOAD_RESULT.workers.json" "$LOAD_RESULT.stop.json" || true
+ else kill -TERM $pids 2>/dev/null || true; fi
+ kill -TERM ${monitor:-} ${pinger:-} $tunnels 2>/dev/null || true
+}
 # LOAD_TUNNEL_HOST: one SSH tunnel per shard opened from this host (ssh -L to the lab's
 # Unix sockets), each with its own loopback ports. A single reverse tunnel ends in one
 # sshd-session here, which macOS caps at 256 open files (~240 sockets); the arch3 sshd
@@ -64,6 +69,9 @@ while [ "$k" -lt "$shards" ]; do
  k=$((k+1))
 done
 printf '%s\n' "$pids" > "$LOAD_RESULT.pids"
+if [ "$script" = run.ts ]; then
+ "$node" --input-type=module -e 'import{writeFileSync}from"node:fs";const[out,base,...pids]=process.argv.slice(1);writeFileSync(out,JSON.stringify(pids.map((pid,k)=>({pid:Number(pid),partial:base+".shard-"+k+".partial.json"}))));' "$LOAD_RESULT.workers.json" "$LOAD_RESULT" $pids
+fi
 if [ "$(uname -s)" = Darwin ]; then
  python3 "$bench/mac-generator-monitor.py" "$LOAD_RESULT" > "$LOAD_RESULT.monitor.log" 2>&1 &
  monitor=$!

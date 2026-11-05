@@ -39,7 +39,7 @@
  * reported by the harness, so a protocol drift cannot pass silently.
  */
 import { randomUUID, createHash } from 'node:crypto';
-import { canonical, windowKey, integrity, validCursor, sha } from './thin-checkpoint.mjs';
+import { canonical, windowKey, integrity, validCursor, sha, WindowIntegrity, trustImmutableEntry } from './thin-checkpoint.mjs';
 
 const ZERO_DIGEST = 'xor1:' + '0'.repeat(64);
 const MAX_BATCH_OPENS = 256;
@@ -61,23 +61,34 @@ function deviceInfo() {
     hardwareConcurrency: n.hardwareConcurrency };
 }
 
-const freezeRow=value=>{if(value&&typeof value==='object'&&!Object.isFrozen(value)){for(const child of Object.values(value))freezeRow(child);Object.freeze(value);}return value;};
+const jsonKeys=new WeakMap();
+const sameJson=(a,b)=>{
+ if(a===b)return true;
+ if(a===null||b===null||typeof a!=='object'||typeof b!=='object')return false;
+ if(Array.isArray(a)){if(!Array.isArray(b)||a.length!==b.length)return false;for(let i=0;i<a.length;i++)if(!sameJson(a[i],b[i]))return false;return true;}
+ if(Array.isArray(b))return false;
+ const keys=jsonKeys.get(a)||Object.keys(a),other=Object.keys(b);if(keys.length!==other.length)return false;
+ for(let i=0;i<keys.length;i++){const key=keys[i];if(other[i]!==key){for(const k of keys)if(!Object.hasOwn(b,k)||!sameJson(a[k],b[k]))return false;return true;}if(!sameJson(a[key],b[key]))return false;}return true;
+};
+const freezeRow=value=>{if(value&&typeof value==='object'&&!jsonKeys.has(value)){const keys=Object.keys(value);jsonKeys.set(value,keys);for(const k of keys)freezeRow(value[k]);Object.freeze(value);}return value;};
 
 /** Process-wide intern table for immutable row values, reference counted. */
 export class RowPool {
-  constructor() { this.rows = new Map(); this.stats = { parsed: 0, shared: 0 }; }
+  constructor() { this.rows = new Map();this.identities=new Map(); this.stats = { parsed: 0, shared: 0,identityComparisons:0,identityHits:0,serializations:0 }; }
   /** `value`, when given, is the already parsed row (legacy JSON frames). */
-  acquire(canonical, value) {
+  acquire(canonical, value, serialized) {
     let entry = this.rows.get(canonical);
     if (entry) { entry.refs++; this.stats.shared++; return entry; }
     const row=freezeRow(value ?? JSON.parse(canonical));
-    entry = { canonical, value: row, serializedValue:JSON.stringify(row), refs: 1 };
+    entry = { canonical, canonicalBytes:Buffer.byteLength(canonical),value: row, serializedValue:serialized??JSON.stringify(row), refs: 1,pool:this };
+    const id=row?._id??row?.id;if(id!==undefined){entry.identity=typeof id+':'+id;const bucket=this.identities.get(entry.identity)||new Set();bucket.add(entry);this.identities.set(entry.identity,bucket);}
     this.stats.parsed++;
-    this.rows.set(canonical, entry);
+    trustImmutableEntry(entry);this.rows.set(canonical, entry);
     return entry;
   }
-  acquireValue(value) { return this.acquire(JSON.stringify(value), value); }
-  release(entry) { if (entry && --entry.refs === 0) this.rows.delete(entry.canonical); }
+  acquireValue(value) { const id=value?._id??value?.id;const bucket=id===undefined?undefined:this.identities.get(typeof id+':'+id);if(bucket)for(const e of bucket){this.stats.identityComparisons++;if(sameJson(e.value,value)){e.refs++;this.stats.shared++;this.stats.identityHits++;return e;}}this.stats.serializations++;const text=JSON.stringify(value);return this.acquire(text,value,text); }
+  retain(entry){if(entry.pool===this){entry.refs++;return entry;}return this.acquire(entry.canonical,entry.value);}
+  release(entry) { if(entry?.pool&&entry.pool!==this){entry.pool.release(entry);return;}if (entry && --entry.refs === 0){this.rows.delete(entry.canonical);const bucket=this.identities.get(entry.identity);if(bucket){bucket.delete(entry);if(!bucket.size)this.identities.delete(entry.identity);}} }
   get size() { return this.rows.size; }
 }
 
@@ -116,6 +127,7 @@ class Subscription {
     this.entity = ref.replica?.table; this.keyField = ref.replica?.key || '_id';
     this.key = keyOf(this.path, this.args);
     this.id = undefined; this.opening = false; this.isUpToDate = false; this.complete = false;
+    this.checkpointKey=windowKey(this.ref,this.args);this.rowChanges=new Map();this.checkpointReset=true;this.checkpointVersion=undefined;this.checksum=new WindowIntegrity(this.ref.replica?.columns);
     this.rows = new Map(); // row key -> pool entry (committed window)
     this.staging = undefined; // { snapshotId, rows: Map, truncated }
     this.listeners = new Set(); this.unsubscribeTimer = undefined;
@@ -123,9 +135,9 @@ class Subscription {
     this.readyCursor = undefined; this.digest = undefined; this.error = undefined;
     this.retryAttempt = 0; this.retryTimer = undefined; this.failedAt = undefined;
   }
-  setRow(id, entry) { const old = this.rows.get(id); if (old === entry) { this.client.pool.release(entry); return; } this.rows.set(id, entry); this.client.pool.release(old); this.version++; }
-  deleteRow(id) { const old = this.rows.get(id); if (!old) return; this.rows.delete(id); this.client.pool.release(old); this.version++; }
-  clearRows() { for (const entry of this.rows.values()) this.client.pool.release(entry); this.rows.clear(); this.version++; }
+  setRow(id, entry) { const old = this.rows.get(id); if (old === entry) { this.client.pool.release(entry); return; } this.rows.set(id, entry); this.client.pool.release(old);if(this.client.checkpointStore){this.checksum.set(id,entry);this.rowChanges.set(id,entry);} this.version++; }
+  deleteRow(id) { const old = this.rows.get(id); if (!old) return; this.rows.delete(id); this.client.pool.release(old);if(this.client.checkpointStore){this.checksum.delete(id);this.rowChanges.set(id,null);} this.version++; }
+  clearRows() { for (const entry of this.rows.values()) this.client.pool.release(entry); this.rows.clear();this.cachedRows=undefined;this.rowChanges.clear();this.checksum=new WindowIntegrity(this.ref.replica?.columns);this.checkpointReset=true; this.version++; }
   dropStaging() { if (!this.staging) return; for (const entry of this.staging.rows.values()) this.client.pool.release(entry); this.staging = undefined; }
   result() {
     if (this.cachedVersion !== this.version) { this.cachedRows = Array.from(this.rows.values(), e => e.value); this.cachedVersion = this.version; }
@@ -197,8 +209,8 @@ export class ThinClient {
   close() {
     this.manuallyClosed = true;
     clearTimeout(this.reconnectTimer); clearTimeout(this.openFlushTimer);
-    for (const sub of this.subscriptions.values()) { clearTimeout(sub.unsubscribeTimer); this.clearReplicaRetry(sub, true); sub.clearRows(); sub.dropStaging(); }
-    this.subscriptions.clear(); this.byId.clear(); this.pendingOpens.clear();
+    for (const sub of this.subscriptions.values()) { clearTimeout(sub.unsubscribeTimer); this.clearReplicaRetry(sub, true);if(this.checkpointStore&&!sub.checkpointConsistent)this.checkpointStore.invalidate(sub.checkpointKey); sub.clearRows(); sub.dropStaging(); }
+    this.subscriptions.clear();this.entityIndex=undefined; this.byId.clear(); this.pendingOpens.clear();
     for (const call of this.pending.values()) call.fail(new Error(`Client closed while waiting for ${call.kind} ${call.path}.`));
     this.pending.clear();
     try { this.socket?.close(); } catch {}
@@ -351,8 +363,8 @@ export class ThinClient {
   watchReplica(ref, args = {}) {
     const key = keyOf(ref.path, args);
     let sub = this.subscriptions.get(key);
-    if(this.checkpointStore&&sub&&windowKey(sub.ref,sub.args)!==windowKey(ref,args))throw Error('collection-contract-changed');
-    if (!sub) { sub = new Subscription(this, ref, args); this.subscriptions.set(key, sub);if(this.checkpointStore)this.restoreCheckpoint(sub); }
+    if(this.checkpointStore&&sub&&sub.checkpointKey!==windowKey(ref,args))throw Error('collection-contract-changed');
+    if (!sub) { sub = new Subscription(this, ref, args); this.subscriptions.set(key, sub);this.entityIndex=undefined;if(this.checkpointStore)this.restoreCheckpoint(sub); }
     const handlers = new Set();
     let started = false, releaseTimer;
     const listener = () => { for (const h of handlers) h(); };
@@ -410,9 +422,9 @@ export class ThinClient {
     sub.unsubscribeTimer = undefined;
     if (this.subscriptions.get(sub.key) !== sub || sub.listeners.size > 0) return;
     this.clearReplicaRetry(sub, true);
-    this.subscriptions.delete(sub.key); this.pendingOpens.delete(sub);
+    this.subscriptions.delete(sub.key);this.entityIndex=undefined; this.pendingOpens.delete(sub);
     if (sub.id) { this.byId.delete(sub.id); if (this.socket?.readyState === 1 && this.authReady) this.rawSend({ type: 'replica.close', id: sub.id }); }
-    sub.clearRows(); sub.dropStaging();
+    if(this.checkpointStore&&!sub.checkpointConsistent)this.checkpointStore.invalidate(sub.checkpointKey);sub.clearRows(); sub.dropStaging();
     this.drainDeferredWatermark();
   }
   reopenAll() {
@@ -431,7 +443,7 @@ export class ThinClient {
   onReplicaError(m) {
     const sub = this.byId.get(m.id);
     if (!sub) return;
-    if(this.checkpointStore){this.checkpointStore.invalidate(windowKey(sub.ref,sub.args));sub.cacheValidated=false;}
+    if(this.checkpointStore){this.checkpointStore.invalidate(sub.checkpointKey);sub.cacheValidated=false;}
     ThinClient.stats.replicaErrors++;
     ThinClient.stats.replicaEvents.push({type:'refused',at:now(),path:sub.path});
     sub.failedAt ??= now();
@@ -480,10 +492,10 @@ export class ThinClient {
   }
   restoreCheckpoint(sub){
     if(!this.cacheBinding)return;
-    const saved=this.checkpointStore.load(windowKey(sub.ref,sub.args),this.cacheBinding,this.pool);
+    const saved=this.checkpointStore.load(sub.checkpointKey,this.cacheBinding,this.pool);
     if(!saved)return;
-    sub.clearRows();sub.rows=saved.rows;sub.version++;sub.readyCursor=saved.cursor;sub.digest=saved.digest;sub.complete=true;sub.cacheValidated=true;sub.checkpointConsistent=true;sub.restored=true;
-    this.restoredWindows.set(windowKey(sub.ref,sub.args),{rows:saved.rows.size,cursor:{...saved.cursor},digest:saved.digest,membershipHash:sha(canonical([...saved.rows.keys()].sort()))});
+    sub.clearRows();sub.rows=saved.rows;sub.checksum=saved.state;sub.rowChanges.clear();sub.checkpointReset=false;sub.checkpointVersion=saved.version;sub.version++;sub.readyCursor=saved.cursor;sub.digest=saved.digest;sub.complete=true;sub.cacheValidated=true;sub.checkpointConsistent=true;sub.restored=true;
+    this.restoredWindows.set(sub.checkpointKey,{rows:saved.rows.size,cursor:{...saved.cursor},digest:saved.digest,membershipHash:sha(canonical([...saved.rows.keys()].sort()))});
     // Cached rows are never server-current until a fresh ready validates them.
     sub.isUpToDate=false;
   }
@@ -492,13 +504,13 @@ export class ThinClient {
   checkpointOpen(sub,force=false){
     const base={id:sub.id,path:sub.path,args:sub.args};
     if(!this.cacheBinding||!sub.complete||!sub.checkpointConsistent||!validCursor(sub.readyCursor))return {...base,digest:ZERO_DIGEST};
-    const actual=integrity(sub.rows,sub.ref.replica?.columns,'xor1');
+    const actual=sub.checksum.result('xor1',force||this.serverCapabilities.replicaResume!==1);
     if(!force&&this.serverCapabilities.replicaResume===1)return {...base,cursor:{...sub.readyCursor},digest:actual.digest};
     return {...base,cursor:{...sub.readyCursor},keys:[...sub.rows.keys()],hashes:actual.hashes,digest:actual.digest,fullIntegrity:true};
   }
   invalidateCheckpoint(sub,clear=false){
-    this.checkpointStore?.invalidate(windowKey(sub.ref,sub.args));this.checkpointDirty.add(sub);sub.checkpointConsistent=false;
-    if(clear){this.restoredWindows.delete(windowKey(sub.ref,sub.args));sub.dropStaging();sub.clearRows();sub.readyCursor=undefined;sub.digest=undefined;sub.complete=false;sub.cacheValidated=false;sub.restored=false;sub.isUpToDate=false;sub.notify();}
+    if(clear)this.checkpointStore?.invalidate(sub.checkpointKey);else this.checkpointStore?.suspend(sub.checkpointKey);this.checkpointDirty.add(sub);sub.checkpointConsistent=false;
+    if(clear){this.restoredWindows.delete(sub.checkpointKey);sub.dropStaging();sub.clearRows();sub.readyCursor=undefined;sub.digest=undefined;sub.complete=false;sub.cacheValidated=false;sub.restored=false;sub.isUpToDate=false;sub.notify();}
   }
   acceptCursor(sub,cursor){
     if(!validCursor(cursor))throw Error('invalid-checkpoint-cursor');
@@ -526,10 +538,10 @@ export class ThinClient {
     const rows=native?m.canonicalRows.map(x=>JSON.parse(x)):m.result;
     if(!Array.isArray(rows))throw Error('snapshot-page-rows');
     if(m.snapshotId!==undefined&&((m.last&&typeof m.digest!=='string')||(!m.last&&(rows.length===0||m.digest!==undefined))))throw Error('snapshot-page-final-digest');
-    const seen=new Set(st.rows.keys());
-    st.bytes=(st.bytes||0)+Buffer.byteLength(JSON.stringify(rows));
-    if((m.snapshotId!==undefined&&rows.length>512)||((st.meta.maxRows??sub.ref.replica?.maxRows)>0&&st.rows.size+rows.length>(st.meta.maxRows??sub.ref.replica?.maxRows))||((st.meta.maxBytes??sub.ref.replica?.maxBytes)>0&&st.bytes>(st.meta.maxBytes??sub.ref.replica?.maxBytes)))throw Error('snapshot-page-budget');
-    for(const row of rows){const id=row?.[st.key];if(!['string','number'].includes(typeof id)||seen.has(String(id)))throw Error('snapshot-page-key');seen.add(String(id));}
+    const seen=new Set();
+
+    if((m.snapshotId!==undefined&&rows.length>512)||((st.meta.maxRows??sub.ref.replica?.maxRows)>0&&st.rows.size+rows.length>(st.meta.maxRows??sub.ref.replica?.maxRows)))throw Error('snapshot-page-budget');
+    for(const row of rows){const id=row?.[st.key];if(!['string','number'].includes(typeof id)||st.rows.has(String(id))||seen.has(String(id)))throw Error('snapshot-page-key');seen.add(String(id));}
     st.sequence++;st.last=m.last;
     st.lastDigest=m.digest;
   }
@@ -540,7 +552,7 @@ export class ThinClient {
     if(st&&(!st.last||st.meta.cursor.epoch!==m.cursor.epoch||st.revision>m.cursor.revision))throw Error('incomplete-snapshot-ready');
     if(!st&&!sub.complete)throw Error('ready-without-complete-rows');
     const rows=st?st.rows:sub.rows;
-    const actual=integrity(rows,sub.ref.replica?.columns,m.digest?.startsWith('xor1:')?'xor1':'sha256');
+    const actual=(st?st.checksum:sub.checksum).result(m.digest?.startsWith('xor1:')?'xor1':'sha256',false);
     if(!m.digest||actual.digest!==m.digest)throw Error('ready-integrity-mismatch');
     if(st?.lastDigest&&st.lastDigest!==actual.digest)throw Error('snapshot-page-digest');
     if(st?.truncated||m.truncated){this.invalidateCheckpoint(sub);sub.cacheValidated=false;}
@@ -551,10 +563,10 @@ export class ThinClient {
     const windows=[];
     for(const sub of this.checkpointDirty){
       if(!sub.cacheValidated||!sub.checkpointConsistent||!sub.isUpToDate||!sub.complete||sub.opening||sub.staging||sub.error||!validCursor(sub.readyCursor))continue;
-      const mode=sub.digest?.startsWith('xor1:')?'xor1':'sha256';const actual=integrity(sub.rows,sub.ref.replica?.columns,mode);
-      windows.push({key:windowKey(sub.ref,sub.args),rows:sub.rows,pool:this.pool,keyField:sub.keyField,cursor:sub.readyCursor,hashes:actual.hashes,digest:actual.digest,mode,columns:sub.ref.replica?.columns,complete:true});
+      const mode=sub.digest?.startsWith('xor1:')?'xor1':'sha256';const actual=sub.checksum.result(mode,false);
+      windows.push({key:sub.checkpointKey,rows:sub.rows,pool:this.pool,keyField:sub.keyField,cursor:sub.readyCursor,baseVersion:sub.checkpointVersion,reset:sub.checkpointReset,changes:sub.rowChanges,digest:actual.digest,mode,columns:sub.ref.replica?.columns,complete:true});
     }
-    if(windows.length)this.checkpointStore.publish(windows);
+    if(windows.length){this.checkpointStore.publish(windows);const published=new Set(windows.map(w=>w.key));for(const sub of this.checkpointDirty)if(published.has(sub.checkpointKey)){sub.checkpointVersion=this.checkpointStore.versionFor(sub.checkpointKey);sub.rowChanges.clear();sub.checkpointReset=false;}}
     this.checkpointDirty.clear();
   }
 
@@ -713,7 +725,12 @@ export class ThinClient {
     this.applyWatermark(d.revision);
   }
   applyWatermark(revision) {
-    if(this.checkpointStore){for(const sub of this.subscriptions.values())if(sub.cacheValidated&&!sub.opening&&sub.isUpToDate&&sub.readyCursor&&revision>=sub.readyCursor.revision){sub.readyCursor={...sub.readyCursor,revision};sub.checkpointConsistent=true;this.checkpointDirty.add(sub);}this.flushCheckpoints(true);}
+    if(this.checkpointStore){const advances=new Map();
+     for(const sub of this.subscriptions.values())if(sub.cacheValidated&&!sub.opening&&sub.isUpToDate&&sub.readyCursor&&revision>=sub.readyCursor.revision&&(revision>sub.readyCursor.revision||!sub.checkpointConsistent)){
+      const cursor={epoch:sub.readyCursor.epoch,revision};sub.readyCursor=cursor;sub.checkpointConsistent=true;
+      if(sub.rowChanges.size||sub.checkpointReset||this.checkpointStore.invalid.has(sub.checkpointKey))this.checkpointDirty.add(sub);else{const group=advances.get(cursor.epoch)||{cursor,windows:[]};group.windows.push({key:sub.checkpointKey,version:sub.checkpointVersion});advances.set(cursor.epoch,group);}
+     }this.flushCheckpoints();for(const {windows,cursor}of advances.values())this.checkpointStore.advance(windows,cursor);
+    }
     this.processedWatermark = Math.max(this.processedWatermark, revision);
     for (const call of [...this.pending.values()]) {
       if (call.committedRevision === undefined || call.committedRevision > this.processedWatermark) continue;
@@ -724,9 +741,9 @@ export class ThinClient {
   onSnapshotStart(m) {
     const sub = this.byId.get(m.id);
     if (!sub) return;
-    if(this.checkpointStore){this.invalidateCheckpoint(sub);this.validateSnapshotStart(sub,m);this.restoredWindows.delete(windowKey(sub.ref,sub.args));sub.readyCursor=undefined;}
+    if(this.checkpointStore){this.invalidateCheckpoint(sub);this.validateSnapshotStart(sub,m);this.restoredWindows.delete(sub.checkpointKey);sub.readyCursor=undefined;}
     sub.dropStaging();
-    sub.staging = { sequence:0,last:false,meta:m,snapshotId: m.snapshotId, rows: new Map(), truncated: m.truncated === true, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
+    sub.staging = { checksum:new WindowIntegrity(sub.ref.replica?.columns),sequence:0,last:false,meta:m,snapshotId: m.snapshotId, rows: new Map(), truncated: m.truncated === true, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
   }
   onSnapshotPage(m) {
     ThinClient.stats.snapshotPages++;
@@ -738,7 +755,7 @@ export class ThinClient {
         const entry = this.pool.acquire(canonical);
         const id = String(entry.value[key]);
         const old = sub.staging.rows.get(id);
-        sub.staging.rows.set(id, entry); this.pool.release(old);
+        sub.staging.rows.set(id, entry);if(this.checkpointStore){sub.staging.checksum.set(id,entry);sub.staging.bytes=(sub.staging.bytes||0)+entry.canonicalBytes;const max=sub.staging.meta.maxBytes??sub.ref.replica?.maxBytes;if(max>0&&sub.staging.bytes>max)throw Error('snapshot-page-budget');} this.pool.release(old);
       }
       if (m.truncated) sub.staging.truncated = true;
     }
@@ -784,8 +801,8 @@ export class ThinClient {
     if(this.checkpointStore&&sub.staging&&(sub.staging.snapshotId!==m.snapshotId||m.sequence===0))throw Error('snapshot-page-restart');
     if (!sub.staging || sub.staging.snapshotId !== m.snapshotId || m.sequence === 0) {
       sub.dropStaging();
-      if(this.checkpointStore){this.invalidateCheckpoint(sub);this.validateSnapshotStart(sub,m);this.restoredWindows.delete(windowKey(sub.ref,sub.args));sub.readyCursor=undefined;}
-      sub.staging = { sequence:0,last:false,meta:m,snapshotId: m.snapshotId, rows: new Map(), truncated: m.truncated === true, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
+      if(this.checkpointStore){this.invalidateCheckpoint(sub);this.validateSnapshotStart(sub,m);this.restoredWindows.delete(sub.checkpointKey);sub.readyCursor=undefined;}
+      sub.staging = { checksum:new WindowIntegrity(sub.ref.replica?.columns),sequence:0,last:false,meta:m,snapshotId: m.snapshotId, rows: new Map(), truncated: m.truncated === true, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
     }
     if(this.checkpointStore)this.validatePage(sub,m,false);
     const key = sub.staging.key;
@@ -793,7 +810,7 @@ export class ThinClient {
       const entry = this.pool.acquireValue(row);
       const id = String(entry.value[key]);
       const old = sub.staging.rows.get(id);
-      sub.staging.rows.set(id, entry); this.pool.release(old);
+      sub.staging.rows.set(id, entry);if(this.checkpointStore){sub.staging.checksum.set(id,entry);sub.staging.bytes=(sub.staging.bytes||0)+entry.canonicalBytes;const max=sub.staging.meta.maxBytes??sub.ref.replica?.maxBytes;if(max>0&&sub.staging.bytes>max)throw Error('snapshot-page-budget');} this.pool.release(old);
     }
     if (m.truncated) sub.staging.truncated = true;
   }
@@ -804,7 +821,7 @@ export class ThinClient {
     let deferredCheckpoint=false;
     if (sub.staging) {
       // Activate the completed snapshot atomically.
-      const next = sub.staging.rows;sub.snapshotTruncated=sub.staging.truncated;
+      const next = sub.staging.rows;if(this.checkpointStore){sub.checksum=sub.staging.checksum;sub.rowChanges.clear();sub.checkpointReset=true;}sub.snapshotTruncated=sub.staging.truncated;
       const deferred = sub.staging.deferred, snapshotRevision = sub.staging.revision;deferredCheckpoint=this.checkpointStore&&deferred.some(op=>op.delta||op.revision>snapshotRevision); sub.staging = undefined;
       const old = sub.rows; sub.rows = next; for (const entry of old.values()) this.pool.release(entry);
       sub.version++;
@@ -851,11 +868,11 @@ export class ThinClient {
     // after activation (SDK deferSnapshotFrame); a change at or below the
     // snapshot's read revision is already contained in it.
     if(this.checkpointStore&&!validCursor(m.cursor))throw Error('transaction-without-cursor');
+    if(!this.entityIndex){this.entityIndex=new Map();for(const sub of this.subscriptions.values()){const list=this.entityIndex.get(sub.entity)||[];list.push(sub);this.entityIndex.set(sub.entity,list);}}
     const revision = m.cursor?.revision ?? Infinity;
     const changes = m.canonicalChanges ? m.canonicalChanges.map((canonical) => changeCache.get(canonical)) : (m.changes || []).map(changeOf);
     for (const change of changes) {
-      for (const sub of this.subscriptions.values()) {
-        if (sub.entity !== change.entity) continue;
+      for (const sub of this.entityIndex.get(change.entity)||[]) {
         if(this.checkpointStore&&sub.readyCursor&&sub.readyCursor.epoch!==m.cursor.epoch)throw Error('transaction-epoch-mismatch');
         if (sub.staging) {sub.staging.deferred.push({ revision, change });if(this.checkpointStore)continue;}
         if (revision <= (sub.readyCursor?.revision ?? 0)) continue;

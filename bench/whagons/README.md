@@ -373,8 +373,8 @@ apply independently to that wave and the steady plateau.
 SDK clients reuse the public `MemoryLocalReplicaStorage` across fresh client
 instances. Thin clients use a harness-owned `ThinCheckpointStore` in the same
 process. It owns separate principal/window memberships while reference counting
-shared immutable canonical row values. Store publication atomically replaces a
-complete checkpoint map; it makes no disk durability claim. The original
+shared immutable canonical row values. Store publication keeps changed records unusable until the complete synchronous
+transaction commits; it makes no disk durability claim. The original
 8-SDK/992-thin mix remains intact.
 
 Each new driver authenticates normally before restoring its own cache, bound to
@@ -436,3 +436,28 @@ an explicit artifact comparison lane; it grants no compatibility or release clai
 seconds. An independent supervisor can use the offered/attempted sign-in times
 and checkpoint failures to stop an invalid generator. It does not change the
 arrival schedule or exclude late starts from latency qualification.
+
+
+Checkpoint hashing maintains an incremental projected-row XOR per window. Ready
+frames compare the computed digest, changed rows update only their membership
+and hash, and metadata-only watermarks advance cursors without traversing rows.
+Fresh restores still independently scan and verify every stored member. Legacy
+SHA mode and `needHashes` still compute their complete ordered/hash inventories.
+Immutable value interning requires exact deep JSON equality; a matching row ID
+alone never authorizes reuse. Principal/window bindings remain separate.
+
+Worker results include Node event-loop delay, GC wall spans and explicit hash,
+row-visit, checkpoint-copy/delta and cursor-advance counters. Progress sampling
+uses atomic replacement. `shards.sh` starts real Node worker PIDs with the TSX
+loader, avoiding the CLI signal-forwarding intermediary. `stop-workers.mjs`
+coordinates SIGTERM, waits for each durable partial acknowledgement, then reaps
+only those workers. Partial results preserve errors, planned/attempted sign-ins,
+pending operations, incomplete-user counts, artifact pins and raw measurements.
+Use a fresh result directory; a missing worker receipt invalidates the run.
+
+The historical 1000-user attempt remains `INVALID_GENERATOR`. Driver replay and
+budget qualification are separate from runtime SLO qualification. Preserve all
+132 required intents, the offered burst timestamps and the eight actual SDK
+references; a replay using one captured principal is a full-payload driver stress
+case, not proof of the production tenant/permission mix. See
+[driver budget evidence](../../docs/performance/harness-driver-budget.md).

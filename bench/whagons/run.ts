@@ -1,12 +1,14 @@
 /** Local-only real SDK workload. Run inside an internal Docker network. */
 import { createRequire } from 'node:module';
 import { readFile, writeFile, appendFile, realpath } from 'node:fs/promises';
-import { writeFileSync, renameSync } from 'node:fs';
 import { shardEpoch } from './shard-epoch.mjs';
 import { qualifyExpanded, visibilityDelta, replicaLifecycle, sdkCacheEvidence } from './expanded-gate.mjs';
 import { mixedPlan, qualifyMixed } from './mixed-gate.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { monitorEventLoopDelay, PerformanceObserver } from 'node:perf_hooks';
+import { workerReceipt } from './worker-receipt.mjs';
+import { integrityWork } from './thin-checkpoint.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { loopback, quantiles, passRule } from './safety.mjs';
 import { memorySnapshotStaging } from './native-stage.mjs';
@@ -17,7 +19,7 @@ import { ThinClient, defaultPool as thinRowPool } from './thin-client.mjs';
 import { firstViewed, viewSetsFirstViewedAt, unmetTaskUpdate } from './task-expectations.mjs';
 
 async function main() {
- const harnessFiles=['run.ts','sdk-artifact.mjs','thin-client.mjs','thin-checkpoint.mjs','expanded-gate.mjs','mixed-gate.mjs','safety.mjs','native-stage.mjs','wire-record.mjs','shard-epoch.mjs','task-expectations.mjs'];
+ const harnessFiles=['run.ts','shards.sh','remote-shards.sh','stop-workers.mjs','worker-receipt.mjs','sdk-artifact.mjs','thin-client.mjs','thin-checkpoint.mjs','expanded-gate.mjs','mixed-gate.mjs','safety.mjs','native-stage.mjs','wire-record.mjs','shard-epoch.mjs','task-expectations.mjs'];
  const sourcePins=Object.fromEntries(await Promise.all(harnessFiles.map(async name=>[name,createHash('sha256').update(await readFile(new URL(name,import.meta.url))).digest('hex')])));
  const profileHash=createHash('sha256').update(JSON.stringify(sourcePins)).digest('hex');
  const app=process.env.WHAGONS_CHECKOUT!;
@@ -37,6 +39,7 @@ async function main() {
  const contract=executor.match(/clientContract: (\{[^}]+\})/);
  if(!contract)throw Error('Missing generated client contract');
  const localRuntime={clientContract:JSON.parse(contract[1])};
+ const artifactPins={harness:sourcePins,sdkEntry:selectedSdk.sha256,sdkSelection:selectedSdk,appManifest:createHash('sha256').update(await readFile(app+'/gonvex/_generated/manifest.json')).digest('hex'),appApi:createHash('sha256').update(await readFile(app+'/gonvex/_generated/api.ts')).digest('hex'),appContract:createHash('sha256').update(executor).digest('hex'),appOpens:process.env.LOAD_APP_OPENS?createHash('sha256').update(await readFile(process.env.LOAD_APP_OPENS.startsWith('/')?process.env.LOAD_APP_OPENS:new URL(process.env.LOAD_APP_OPENS,import.meta.url))).digest('hex'):null};
  const url=loopback(process.env.LOAD_URL||'http://127.0.0.1:8080').origin;
  const auth=loopback(process.env.LOAD_AUTH_URL||'http://127.0.0.1:9099').origin;
  const state=process.env.LOAD_STATE!;
@@ -210,7 +213,19 @@ async function main() {
  }
 
  let stopping=false;let aborted=false;let deadline=Infinity;let remaining=myTarget;
- process.on('SIGTERM',()=>{const plateauEnd=deadline;aborted=true;stopping=true;deadline=Date.now();const partial=(process.env.LOAD_RESULT||state+'.result')+'.partial.json';writeFileSync(partial+'.tmp',JSON.stringify({aborted:true,profileHash,targetUsers:myTarget,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),steadyStartMs:plateauEnd-seconds*1000,rawSamples:samples,rawPaths:perPath}));renameSync(partial+'.tmp',partial);});
+ let stopExtra=()=>({});
+ const stopMeasurement=()=>{
+  const plateauEnd=deadline;aborted=true;stopping=true;deadline=Date.now();
+  const partial=(process.env.LOAD_RESULT||state+'.result')+'.partial.json';
+  const receipt={aborted:true,stoppedAt:Date.now(),workerPid:process.pid,profileHash,shard,shards,signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,
+   targetUsers:myTarget,connectedUsers:users.length,errors,errorEvents,operationAttempts,replicaEvents:lifecycle.events,reloadEvents,permissionCycles,
+   artifactPins,sdkSelection:selectedSdk,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),
+   steadyStartMs:Number.isFinite(plateauEnd)?plateauEnd-seconds*1000:started+ramp*1000,steadyEndMs:Number.isFinite(plateauEnd)?plateauEnd:started+(ramp+seconds)*1000,
+   rawSamples:samples,rawPaths:perPath,...stopExtra()};
+  if(process.env.LOAD_PROGRESS)workerReceipt(process.env.LOAD_PROGRESS,{at:Date.now(),workerPid:process.pid,shard,signIns,stopping,checkpointFailures:ThinClient.stats.checkpointFailures},{durable:true});
+  workerReceipt(partial,receipt,{durable:true});
+ };
+ process.on('SIGTERM',stopMeasurement);process.on('SIGINT',stopMeasurement);
  let presenceV2Users=0;
  const collectionReadiness={readyAtTeardown:0,notReadyAtTeardown:0};
  const ready=()=>{if(--remaining!==0||deadline!==Infinity)return;
@@ -247,7 +262,15 @@ async function main() {
  }
  // Generator self-cost, so SDK and thin clients can be compared per user.
  const generatorCost={samples:[] as any[],peakRssBytes:0,peakHeapUsedBytes:0} as any;const cpuAtStart=process.cpuUsage();const wallAtStart=performance.now();
- const costTimer=setInterval(()=>{if(process.env.LOAD_PROGRESS){const p=process.env.LOAD_PROGRESS;writeFileSync(p+'.new',JSON.stringify({at:Date.now(),shard,signIns,stopping,checkpointFailures:ThinClient.stats.checkpointFailures}));renameSync(p+'.new',p);}const m=process.memoryUsage(),u=process.cpuUsage(cpuAtStart);generatorCost.peakRssBytes=Math.max(generatorCost.peakRssBytes,m.rss);generatorCost.peakHeapUsedBytes=Math.max(generatorCost.peakHeapUsedBytes,m.heapUsed);generatorCost.samples.push({at:Date.now(),rss:m.rss,heapUsed:m.heapUsed,cpuMs:(u.user+u.system)/1000,checkpointLogicalBytes:checkpointStores.reduce((n,s)=>n+s.stats().bytes,0),checkpointWindows:checkpointStores.reduce((n,s)=>n+s.stats().windows,0),checkpointCpuSeconds:thinDrivers.reduce((n,c)=>n+c.checkpointCpuUs/1e6,0)});},5000);costTimer.unref();
+ const eventLoop=monitorEventLoopDelay({resolution:10});eventLoop.enable();
+ const gcCost={count:0,wallMs:0,maxWallMs:0};const gcObserver=new PerformanceObserver(list=>{for(const e of list.getEntries()){gcCost.count++;gcCost.wallMs+=e.duration;gcCost.maxWallMs=Math.max(gcCost.maxWallMs,e.duration);}});gcObserver.observe({entryTypes:['gc']});
+ const driverDiagnostics=()=>({eventLoopDelayMs:{p95:eventLoop.percentile(95)/1e6,p99:eventLoop.percentile(99)/1e6,max:eventLoop.max/1e6},gc:{...gcCost},integrityWork:{...integrityWork}});
+ stopExtra=()=>{const u=process.cpuUsage(cpuAtStart),m=process.memoryUsage();return {presenceV2Users,collectionReadiness,visibilityChecks,snapshots,pendingQualification:{targetUsers:myTarget,notAttempted:myTarget-signIns.filter(x=>x.attemptedAt!==undefined).length,notAuthenticated:myTarget-signIns.filter(x=>x.authenticatedAt!==undefined).length,notFullyReadyEver:myTarget-signIns.filter(x=>x.readyAt!==undefined).length,pendingOperations:operationAttempts.filter(x=>!x.done).length},
+  taskExpectations:{...expectationStats,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},
+  schedule:{kind:scheduleStats.kind,fired:scheduleStats.fired,overflow:scheduleStats.overflow,skippedDuringReconnect:scheduleStats.skippedDuringReconnect,startLateMs:quantiles(scheduleStats.lateMs)},
+  generatorCost:{...generatorCost,cpuSeconds:(u.user+u.system)/1e6,wallSeconds:(performance.now()-wallAtStart)/1000,peakRssBytes:Math.max(generatorCost.peakRssBytes,m.rss),peakHeapUsedBytes:Math.max(generatorCost.peakHeapUsedBytes,m.heapUsed)},
+  driverDiagnostics:driverDiagnostics(),checkpointFailures:ThinClient.stats.checkpointFailures};};
+ const costTimer=setInterval(()=>{if(process.env.LOAD_PROGRESS){const p=process.env.LOAD_PROGRESS;workerReceipt(p,{at:Date.now(),workerPid:process.pid,shard,signIns,stopping,checkpointFailures:ThinClient.stats.checkpointFailures,driverDiagnostics:driverDiagnostics()});}const m=process.memoryUsage(),u=process.cpuUsage(cpuAtStart);generatorCost.peakRssBytes=Math.max(generatorCost.peakRssBytes,m.rss);generatorCost.peakHeapUsedBytes=Math.max(generatorCost.peakHeapUsedBytes,m.heapUsed);generatorCost.samples.push({at:Date.now(),rss:m.rss,heapUsed:m.heapUsed,cpuMs:(u.user+u.system)/1000,checkpointLogicalBytes:checkpointStores.reduce((n,s)=>n+s.stats().bytes,0),checkpointWindows:checkpointStores.reduce((n,s)=>n+s.stats().windows,0),checkpointCpuSeconds:thinDrivers.reduce((n,c)=>n+c.checkpointCpuUs/1e6,0)});},5000);costTimer.unref();
  const metricTimer=shard!==0?undefined:setInterval(()=>{void fetch(url+'/dev/metrics?project='+encodeURIComponent(projectId),{headers:{authorization:'Bearer '+admin}}).then(r=>r.json()).then(x=>appendFile((process.env.LOAD_RESULT||state)+'.metrics.jsonl',JSON.stringify({at:Date.now(),metrics:{websocket:{accounts:x.websocket?.accounts,connections:x.websocket?.connections,subscriptions:x.websocket?.subscriptions},database:x.database,queryAdmission:x.queryAdmission}})+'\n')).catch(error);},10000);
  const tenantCounts=new Map<string,number>();const ordinals=Array.from({length:target},(_,i)=>{const f=chooseTenant(i);const n=tenantCounts.get(f.tenant)||0;tenantCounts.set(f.tenant,n+1);return n;});
  // ---- Simulated users (load-realism audit 2026-11-03 plus Gabriel's direction:
@@ -539,9 +562,8 @@ async function main() {
  const lateSorted=scheduleStats.lateMs.sort((a,b)=>a-b);const schedule={kind:scheduleStats.kind,fired:scheduleStats.fired,overflow:scheduleStats.overflow,skippedDuringReconnect:scheduleStats.skippedDuringReconnect,startLateMs:quantiles(lateSorted)};
  for(const e of lifecycle.events)if(e.type==='refused')error(Error('Replica open refused: '+e.path),e.at);
  const deployReloadWindowMs=[deadline-seconds*1000+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000,deadline-seconds*1000+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000+5000];
- const artifactPins={harness:sourcePins,sdkEntry:selectedSdk.sha256,sdkSelection:selectedSdk,appManifest:createHash('sha256').update(await readFile(app+'/gonvex/_generated/manifest.json')).digest('hex'),appApi:createHash('sha256').update(await readFile(app+'/gonvex/_generated/api.ts')).digest('hex'),appContract:createHash('sha256').update(executor).digest('hex'),appOpens:process.env.LOAD_APP_OPENS?createHash('sha256').update(await readFile(process.env.LOAD_APP_OPENS.startsWith('/')?process.env.LOAD_APP_OPENS:new URL(process.env.LOAD_APP_OPENS,import.meta.url))).digest('hex'):null};
  const checkpointCost={kind:'process-local immutable row pool; per-user window membership',logicalBytes:checkpointStores.reduce((n,s)=>n+s.stats().bytes,0),peakLogicalBytesSum:checkpointStores.reduce((n,s)=>n+s.stats().peakBytes,0),users:checkpointStores.length,windows:checkpointStores.reduce((n,s)=>n+s.stats().windows,0),checkpointCpuSeconds:thinDrivers.reduce((n,c)=>n+c.checkpointCpuUs/1e6,0),rowPoolCanonicalBytes:[...thinRowPool.rows.values()].reduce((n,e)=>n+Buffer.byteLength(e.canonical),0),rowPoolAdditionalSerializationBytes:[...thinRowPool.rows.values()].reduce((n,e)=>n+(e.serializedValue!==e.canonical?Buffer.byteLength(e.serializedValue):0),0)};
- const result={checkpointFailures:thin?ThinClient.stats.checkpointFailures:[],checkpointCost,artifactPins,deployReloadWindowMs,reloadEvents,permissionCycles,operationAttempts,replicaEvents:lifecycle.events,signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,presenceV2Users,collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,reconnectWindowMs:process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?null:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
+ const result={driverDiagnostics:driverDiagnostics(),checkpointFailures:thin?ThinClient.stats.checkpointFailures:[],checkpointCost,artifactPins,deployReloadWindowMs,reloadEvents,permissionCycles,operationAttempts,replicaEvents:lifecycle.events,signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,presenceV2Users,collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,reconnectWindowMs:process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?null:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
  const steadyLatencyMs=Object.fromEntries(Object.keys(measurements).map(kind=>{const xs=(samples[kind]||[]).filter(x=>x.at>=deadline-seconds*1000&&x.at<deadline).map(x=>x.ms);return [kind,{samples:xs.length,...quantiles(xs)}];}));
  const phaseErrors=(start:number,end:number)=>Object.fromEntries([...new Set(errorEvents.filter(e=>e.at>=start&&e.at<end).map(e=>e.key))].map(key=>[key,errorEvents.filter(e=>e.key===key&&e.at>=start&&e.at<end).length]));
  const steadyErrors=phaseErrors(deadline-seconds*1000,deadline);
@@ -550,8 +572,8 @@ async function main() {
  {const rule=passRule({latencyMs:q,presenceV2Users,errors:steadyErrors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed&&ThinClient.stats.checkpointFailures.length===0&&visibilityChecks.mismatched===0&&expectationStats.undeliveredOps.size===0&&expectationStats.pendingSaveAtTeardown===0&&!operationAttempts.some(a=>!a.done)&&collectionReadiness.readyAtTeardown===myTarget,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
  if(mixed){const mixedQualification=qualifyMixed({started,signIns,samples,errors:errorEvents,retries:lifecycle.events,attempts:operationAttempts});Object.assign(result,{mixedQualification,clientSloPassed:result.clientSloPassed&&mixedQualification.every(w=>w.passed)});}
  if(expanded){const expandedQualification=qualifyExpanded({reloads:reloadEvents,targetUsers:myTarget,permissions:permissionCycles,samples,errors:errorEvents,attempts:operationAttempts,reloadWindow:deployReloadWindowMs});Object.assign(result,{expandedQualification,clientSloPassed:result.clientSloPassed&&expandedQualification.passed});}
- for(const store of checkpointStores)store.clear();
- console.log(JSON.stringify(result));await writeFile(process.env.LOAD_RESULT||state+'.result',JSON.stringify(result,null,2));
+ eventLoop.disable();gcObserver.disconnect();for(const store of checkpointStores)store.clear();
+ console.log(JSON.stringify(result));workerReceipt(process.env.LOAD_RESULT||state+'.result',result,{durable:true});
  process.exit(0);
 }
 main().catch(e=>{console.error(e);process.exit(1);});

@@ -90,6 +90,23 @@ test('installed SDK and cached thin fresh instances agree on rows, cursor/digest
   const lastSdk=await start(false),lastThin=await start(true);
   assert.deepEqual(lastSdk.w.localReplicaResult(),lastThin.w.localReplicaResult());
   assert.deepEqual(normalized(opens(lastSdk.socket)[0]),normalized(opens(lastThin.socket)[0]));
+  // Repeated real transport histories exercise incremental replacement, deletes,
+  // UTF-8 canonical hashing, and an equal-cursor ordered watermark on both models.
+  let expectedRows=finalRows;
+  for(let n=6;n<30;n++){
+   const id='row-'+(n%7),value={text:'é\u2028'+n,nested:[n,{z:2,a:1}]};
+   expectedRows=expectedRows.filter(r=>r.id!==id&&r.id!=='a');expectedRows.push({id,value});
+   for(const x of [lastSdk,lastThin]){
+    const open=opens(x.socket).at(-1).id;
+    if(n===6)x.socket.receive({type:'replica.ready',id:open,cursor:cursor(5),digest:digest(finalRows)});
+    x.socket.receive({type:'replica.batch',items:[{type:'replica.stream',id:open,stream:'loop'},{type:'replica.delta',id:'loop',cursor:cursor(n),upserts:[{id,value}],deleted:['a']},{type:'replica.ready',id:'loop',cursor:cursor(n),digest:digest(expectedRows)}],watermark:n});
+   }
+   await until(()=>lastSdk.w.status().isUpToDate&&lastSdk.w.localReplicaState()?.computedRevision===n);
+   assert.deepEqual(lastSdk.w.localReplicaResult(),lastThin.w.localReplicaResult());
+  }
+  for(const x of [lastSdk,lastThin])x.socket.receive({type:'replica.needHashes',id:opens(x.socket).at(-1).id});
+  await until(()=>opens(lastSdk.socket).length===2&&opens(lastThin.socket).length===2);
+  assert.deepEqual(normalized(opens(lastSdk.socket).at(-1)),normalized(opens(lastThin.socket).at(-1)));
 
  }finally{for(const c of clients)c.close();stores[1].clear();globalThis.WebSocket=Native;}
 });

@@ -144,3 +144,64 @@ test('canonical arguments are pinned before caller mutation and contract changes
  assert.throws(()=>warm.c.watchReplica({...ref,replica:{...ref.replica,maxRows:1}},{a:1,b:{z:2,y:3}}),/contract-changed/);
  warm.c.close();const other=await client(store,{args});assert.equal(other.sent.at(-1).opens[0].cursor,undefined);other.c.close();store.clear();
 });
+
+test('9k-row public windows checkpoint only changed membership and metadata-only watermarks do no row scans',async()=>{
+ const {integrityWork}=await import('./thin-checkpoint.mjs');
+ const store=new ThinCheckpointStore(),x=await client(store),rows=Array.from({length:9000},(_,i)=>({_id:String(i),name:'row-'+i}));
+ snapshot(x,rows);
+ // Keep 132 real collection windows open, as on the shipping first visit.
+ for(let i=1;i<132;i++){const w=x.c.watchReplica(ref,{window:i});w.onUpdate(()=>{});}
+ await tick();const opens=x.sent.filter(m=>m.type==='replica.openMany').flatMap(m=>m.opens);
+ for(const o of opens.slice(1)){
+  x.c.receive(JSON.stringify({type:'replica.snapshot',id:o.id,cursor:cursor(1),key:'_id',result:[]}));
+  x.c.receive(JSON.stringify({type:'replica.ready',id:o.id,cursor:cursor(1),digest:'xor1:'+'00'.repeat(32)}));
+ }
+ assert.equal(store.stats().windows,132);
+ const before={...integrityWork};
+ for(let revision=2;revision<=101;revision++)x.c.receive(JSON.stringify({type:'replica.watermark',revision}));
+ assert.equal(integrityWork.rowVisits,before.rowVisits);
+ assert.equal(integrityWork.checkpointCopiedRows,before.checkpointCopiedRows);
+ assert.equal(integrityWork.hashComputes,before.hashComputes);
+ assert.equal(integrityWork.cursorAdvances-before.cursorAdvances,13200);
+ const copied=integrityWork.checkpointCopiedRows,changed=integrityWork.checkpointDeltaRows;
+ // A delta's cursor already equals its ordered watermark. It must still commit.
+ x.c.receive(JSON.stringify({type:'replica.batch',items:[{type:'replica.stream',id:x.id,stream:'updates'},{type:'replica.delta',id:'updates',cursor:cursor(102),upserts:[{_id:'0',name:'changed'}],deleted:['1']}],watermark:102}));
+ assert.equal(store.stats().windows,132);
+ assert.equal(integrityWork.checkpointCopiedRows,copied);
+ assert.equal(integrityWork.checkpointDeltaRows-changed,2);
+ x.c.close();const warm=await client(store);
+ assert.deepEqual(warm.sent.at(-1).opens[0].cursor,cursor(102));
+ assert.equal(warm.w.localReplicaResult().length,8999);
+ assert.equal(warm.w.localReplicaResult().find(r=>r._id==='0').name,'changed');
+ assert.equal(warm.w.localReplicaResult().some(r=>r._id==='1'),false);
+ warm.c.close();store.clear();assert.equal(x.c.pool.size,0);
+});
+
+test('incremental records reject membership corruption and exact immutable interning keeps identity isolation',async()=>{
+ const shared=new RowPool(),store=new ThinCheckpointStore(),x=await client(store,{pool:shared});
+ const row={_id:'a',name:{nested:['é','\u2028',1]}};snapshot(x,[row]);
+ const entry=[...shared.rows.values()][0];
+ assert.throws(()=>{entry.canonical='poison';},TypeError);
+ assert.throws(()=>{entry.value.name.nested[0]='poison';},TypeError);
+ const equivalent=shared.acquireValue({name:{nested:['é','\u2028',1]},_id:'a'});
+ assert.equal(equivalent,entry);shared.release(equivalent);
+ const changed=shared.acquireValue({_id:'a',name:{nested:['é','\u2028',2]}});
+ assert.notEqual(changed,entry);shared.release(changed);
+ x.c.close();const otherStore=new ThinCheckpointStore();const other=await client(otherStore,{pool:shared,checkpointIdentity:'other-principal'});
+ assert.equal(other.w.localReplicaResult(),undefined);assert.equal(other.sent.at(-1).opens[0].cursor,undefined);
+ other.c.close();otherStore.clear();
+ // Preserve the correct membership key but insert a different, valid frozen row.
+ const record=[...store.windows.values()][0],wrong=shared.acquireValue({_id:'a',name:'corrupt-content'});
+ shared.release(record.rows.get('a'));record.rows.set('a',wrong);
+ await assert.rejects(()=>client(store,{pool:shared}),/checkpoint-integrity-mismatch/);
+ assert.equal(store.stats().windows,0);store.clear();assert.equal(shared.size,0);
+});
+
+test('fresh driver pools can incrementally replace one row without leaking old-pool retained membership',async()=>{
+ const store=new ThinCheckpointStore(),a=await client(store);snapshot(a,[{_id:'a',name:'A'},{_id:'b',name:'B'}]);a.c.close();
+ const b=await client(store);
+ b.c.receive(JSON.stringify({type:'replica.ready',id:b.id,cursor:cursor(1),digest:digest([{_id:'a',name:'A'},{_id:'b',name:'B'}])}));
+ b.c.receive(JSON.stringify({type:'replica.batch',items:[{type:'replica.stream',id:b.id,stream:'updates'},{type:'replica.delta',id:'updates',cursor:cursor(2),upserts:[{_id:'a',name:'new'}]}],watermark:2}));
+ b.c.close();const c=await client(store);assert.deepEqual(c.w.localReplicaResult(),[{_id:'b',name:'B'},{_id:'a',name:'new'}].sort((x,y)=>x._id.localeCompare(y._id)));
+ c.c.close();store.clear();for(const x of [a,b,c])assert.equal(x.c.pool.size,0);
+});
