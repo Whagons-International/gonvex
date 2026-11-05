@@ -755,6 +755,8 @@ export class GonvexClient {
   private readonly errorReporter: GonvexErrorReporter | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempt = 0;
+  private authRetryCount = 0;
+  private authRetryExhausted = false;
   private socketGeneration = Symbol();
   private authenticatedSocketGeneration: symbol | undefined;
   private manuallyClosed = false;
@@ -1898,6 +1900,7 @@ export class GonvexClient {
   authenticate(auth: GonvexClientAuth): Promise<void> {
     this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
     this.applyAuth(auth);
+    if (this.authRetryExhausted) return Promise.reject(new GonvexClientError("Authentication recovery paused. Retry or sign in again.", { code: "auth" }));
     this.authFetchGeneration = Symbol();
     const promise = new Promise<void>((resolve, reject) => {
       this.managedAuthAttempt = { ids: new Set(), resolve, reject };
@@ -1958,6 +1961,13 @@ export class GonvexClient {
   }
 
   private applyAuth(auth: GonvexClientAuth) {
+    if (this.authRetryExhausted && ((hasOwn(auth, "token") && auth.token !== this.auth.token)
+      || (hasOwn(auth, "tenant") && auth.tenant !== this.auth.tenant))) {
+      this.authRetryExhausted = false;
+      this.authRetryCount = 0;
+      this.reconnectAttempt = 0;
+    }
+
     this.publishTenantAdmission(undefined);
     this.flushTelemetry();
     if (this.publicTenant && (auth.token || auth.fetchToken || auth.identity || auth.tenant !== undefined && auth.tenant !== this.publicTenant || auth.project !== undefined && auth.project !== this.auth.project)) {
@@ -2012,7 +2022,7 @@ export class GonvexClient {
   }
 
   connect() {
-    if (this.updateRequired) return;
+    if (this.updateRequired || this.authRetryExhausted) return;
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
 
     this.flushTelemetry();
@@ -2037,7 +2047,6 @@ export class GonvexClient {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
       }
-      this.reconnectAttempt = 0;
       this.isWebSocketConnected = true;
       this.replica.setFreshness("verifying");
       this.hasEverConnected = true;
@@ -2240,7 +2249,12 @@ export class GonvexClient {
           this.sendAuth(true);
           return;
         }
-        if (message.type === "auth.result") this.activeAuthFrameId = message.id;
+        if (message.type === "auth.result") {
+          this.reconnectAttempt = 0;
+          this.authRetryCount = 0;
+          this.authRetryExhausted = false;
+          this.activeAuthFrameId = message.id;
+        }
         else this.activeAuthFrameId = undefined;
         if (message.type === "auth.result") this.flushPendingNativeErrors();
         if (message.type === "auth.result") this.presenceFeed.authenticated();
@@ -5049,7 +5063,11 @@ export class GonvexClient {
         if (kind === "action" && message.type === "action.error") {
           settle();
           this.emitTelemetryFromCall(kind, id, ref.path, "error", clientSentAtMs, message.trace, message.error);
-          reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: kind }));
+          if (message.code === "unauthenticated") {
+            this.quarantineReplicaScope();
+            this.notifyAuthError(message.error, true, message.code);
+          }
+          reject(new GonvexClientError(message.error, { code: message.code === "unauthenticated" ? "auth" : "server", path: ref.path, operation: kind }));
         }
       });
     });
@@ -5272,8 +5290,9 @@ export class GonvexClient {
   }
 
   private scheduleReconnect() {
-    if (this.manuallyClosed || this.reconnectTimer) return;
-    const delay = Math.min(250 * (2 ** this.reconnectAttempt), 5_000);
+    if (this.manuallyClosed || this.reconnectTimer || this.authRetryExhausted) return;
+    const baseDelay = Math.min(250 * (2 ** Math.min(this.reconnectAttempt, 5)), 5_000);
+    const delay = this.authRetryCount ? baseDelay * (0.75 + Math.random() * 0.5) : baseDelay;
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
@@ -5490,6 +5509,7 @@ export class GonvexClient {
   }
 
   private sendAuth(force: boolean, options: { useFetcher?: boolean } = {}) {
+    if (this.authRetryExhausted) return;
     this.flushTelemetry();
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
@@ -5602,6 +5622,19 @@ export class GonvexClient {
   }
 
   private retryTransientAuth() {
+    if (this.authRetryExhausted) return;
+    if (++this.authRetryCount > 6) {
+      this.authRetryExhausted = true;
+      this.authInFlight = false;
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+      if (this.authWatchdogTimer) clearTimeout(this.authWatchdogTimer);
+      this.authWatchdogTimer = undefined;
+      const message = "Could not restore your session. Retry or sign in again.";
+      this.cancelManagedAuthAttempt(message);
+      this.notifyAuthError(message, false, "auth_retry_exhausted");
+      return;
+    }
     this.authInFlight = true;
     if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
     this.replica.setFreshness("offline");
@@ -5615,6 +5648,8 @@ export class GonvexClient {
   }
 
   private notifyAuthError(error: string, definitive = false, code?: string) {
+    // Codes only: never include credentials or server messages containing user data.
+    if (definitive || code === "auth_retry_exhausted") console.warn("[gonvex] authentication recovery", { code, definitive });
     if (definitive) void this.localStorage?.saveSession?.(this.outboxScope, undefined).catch(() => undefined);
     for (const handler of Array.from(this.authErrorHandlers)) {
       handler(error, { definitive, code });

@@ -606,7 +606,7 @@ export type ServerMessage =
     retryable?: boolean;
   }
   | { type: "action.result"; id: string; path?: string; result: JsonValue; committedRevision?: number; trace?: MessageTrace }
-  | { type: "action.error"; id: string; path?: string; error: string; trace?: MessageTrace }
+  | { type: "action.error"; code?: string; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "client.updateRequired"; reason: string; contract: number }
   | { type: "system.reload"; reason: string; artifactHash?: string };
 

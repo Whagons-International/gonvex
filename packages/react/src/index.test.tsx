@@ -2474,3 +2474,30 @@ it('keeps an offline hook snapshot stable when only unrelated dependencies chang
   actAtPaint(()=>{token='tasks:2';client.updateReplica();});
   expect(result.current).not.toBe(first);expect(result.current.rows[0]!.value).toBe('tasks:2');
 });
+
+it('pauses provider refresh timers and forced token fetching after the auth retry budget is exhausted', async () => {
+  const client = new FakeGonvexClient();
+  const storageKey = 'gonvex-auth:https%3A%2F%2Fretry-pause.test:shop';
+  localStorage.setItem(storageKey, JSON.stringify({
+    accessToken: 'stale-access', expiresAt: Date.now() + 90_000,
+    refreshToken: 'stale-refresh', refreshExpiresAt: Date.now() + 3600_000,
+    account: { id: 'account', email: 'test@example.test', provider: 'password' },
+    tenants: [],
+  }));
+  let auth: ReturnType<typeof useGonvexAuth>;
+  function Consumer() { auth = useGonvexAuth(); return null; }
+  const rendered = render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://retry-pause.test" projectId="shop"><Consumer /></GonvexAuthProvider>);
+  await act(async () => { await Promise.resolve(); });
+  client.action.mockClear();
+  act(() => {
+    for (const handler of client.authErrorHandlers) handler('Retry or sign in again.', { definitive: false, code: 'auth_retry_exhausted' } as any);
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+  expect(client.action).not.toHaveBeenCalled();
+  await expect(auth!.fetchAccessToken!({ forceRefreshToken: true })).resolves.toBeNull();
+  expect(client.action).not.toHaveBeenCalled();
+  expect(auth!.sessionState).toBe('degraded');
+  expect(auth!.isLoading).toBe(false);
+  rendered.unmount();
+  localStorage.removeItem(storageKey);
+});

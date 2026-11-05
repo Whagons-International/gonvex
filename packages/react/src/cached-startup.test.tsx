@@ -154,3 +154,36 @@ it("signs out when a forced fresh credential is rejected again", async () => {
   expect(await storage.loadSession(owner)).toBeUndefined();
   expect(localStorage.getItem(storageKey)).toBeNull();
 });
+
+it('signing out on tenant A then opening tenant B with its stale session reaches signed-out recovery without a socket loop', async () => {
+  const { client, rendered } = await fixture();
+  const siblingSession = localStorage.getItem(storageKey)!;
+  await act(async () => { await currentAuth.signOut(); });
+  expect(localStorage.getItem(storageKey)).toBeNull();
+  rendered.unmount();
+  client.close();
+  // Sibling origins retain independent storage after tenant A logs out.
+  localStorage.setItem(storageKey, siblingSession);
+  const sibling = new GonvexClient(url, { project: 'project', role: 'control' });
+  clients.push(sibling);
+  const next = render(<GonvexAuthProvider client={sibling} runtimeUrl={runtimeUrl} projectId="project" initialTenantId={null}><CachedApp /></GonvexAuthProvider>);
+  await act(async () => { await Promise.resolve(); });
+  act(() => { vi.advanceTimersToNextFrame(); });
+  // Definitive revocation of B's stale canonical credential must clear both
+  // its session and the tenant hint before routing can offer sign-in/picker.
+  const socket = Socket.all.at(-1)!;
+  await act(async () => { socket.open(); await Promise.resolve(); });
+  const authFrame = socket.sent.find(frame => frame.type === 'auth');
+  expect(authFrame).toBeDefined();
+  await act(async () => {
+    socket.receive({ type: 'auth.error', id: authFrame.id, code: 'revoked', error: 'login was revoked' });
+    await Promise.resolve();
+    vi.advanceTimersToNextFrame();
+  });
+  expect(next.getByTestId('app').textContent).toBe('signedOut');
+  expect(localStorage.getItem(storageKey)).toBeNull();
+  expect(currentAuth.activeTenant).toBeNull();
+  const count = Socket.all.length;
+  await act(async () => { await vi.advanceTimersByTimeAsync(74_000); });
+  expect(Socket.all.length).toBeLessThanOrEqual(count + 1);
+});

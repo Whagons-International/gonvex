@@ -3264,7 +3264,7 @@ describe("GonvexClient", () => {
   });
 
   it("tracks connection state across connect, disconnect, and reconnect", () => {
-    const client = new GonvexClient("ws://runtime.test/ws");
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "project", role: "control" });
     expect(client.connectionState()).toMatchObject({
       isWebSocketConnected: false,
       hasEverConnected: false,
@@ -3293,7 +3293,10 @@ describe("GonvexClient", () => {
     });
 
     vi.advanceTimersByTime(250);
-    latestSocket().open();
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    expect(client.connectionState().connectionRetries).toBe(1);
+    secondSocket.receive({ type: "auth.result", id: JSON.parse(secondSocket.sent[0]).id, result: { projectId: "project", accountId: "", tenantId: "" } });
     expect(client.connectionState()).toMatchObject({
       isWebSocketConnected: true,
       connectionCount: 2,

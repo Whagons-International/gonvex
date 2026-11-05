@@ -741,3 +741,94 @@ async fn concurrent_signins_complete_with_two_sql_slots() {
     pools.close().await;
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn external_exchange_without_project_is_typed_unauthenticated() {
+    let (_data, database_url, _pools, _fixture) = sqlite_fixture("control").await;
+    let runtime = Runtime::new(test_config(database_url));
+    runtime.start().await.unwrap();
+    for project in ["", "missing-project"] {
+        let error = runtime
+            .execute_control_action(
+                &ControlConnection {
+                    project_id: project.into(),
+                    ..Default::default()
+                },
+                "control.auth.exchangeExternalToken",
+                &serde_json::json!({"provider":"firebase", "token":"not-a-real-token"}),
+                "missing-project-exchange",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ControlError::AuthenticationRequired),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejected_socket_auth_preserves_project_for_external_exchange() {
+    use futures_util::{SinkExt, StreamExt};
+    use gonvex_runtime::accept::{AcceptedSocket, TunedListener};
+    use tokio_tungstenite::tungstenite::Message;
+    let (_data, database_url, _pools, fixture) = sqlite_fixture("control").await;
+    let runtime = Runtime::new(test_config(database_url));
+    runtime.start().await.unwrap();
+    sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,status,auth_mode) VALUES('project','Project','active','firebase')")
+        .execute(&fixture).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = runtime.router();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            TunedListener::new(listener, Default::default()),
+            router.into_make_service_with_connect_info::<AcceptedSocket>(),
+        )
+        .await
+        .unwrap();
+    });
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+        .await
+        .unwrap();
+    let ready = socket.next().await.unwrap().unwrap();
+    assert!(ready.to_text().unwrap().contains("session.ready"));
+    for (project, expected_code, expected_error) in [
+        (
+            "project",
+            Value::Null,
+            "external identity provider is disabled",
+        ),
+        (
+            "missing-project",
+            serde_json::json!("unauthenticated"),
+            "authentication is required",
+        ),
+    ] {
+        socket.send(Message::text(serde_json::json!({"type":"auth","id":"rejected","project":project,"tenant":"tenant-b","token":"revoked-session"}).to_string())).await.unwrap();
+        let rejected: Value =
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(rejected["type"], "auth.error");
+        socket.send(Message::text(serde_json::json!({"type":"action.call","id":"exchange","path":"control.auth.exchangeExternalToken","scope":"control","idempotencyKey":"exchange","args":{"provider":"firebase","token":"test-token"}}).to_string())).await.unwrap();
+        let result: Value = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let result: Value =
+                    serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                if result["id"] == "exchange" {
+                    break result;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["type"], "action.error");
+        assert_eq!(result["code"], expected_code);
+        assert!(
+            result["error"].as_str().unwrap().contains(expected_error),
+            "{result}"
+        );
+    }
+    socket.close(None).await.unwrap();
+    server.abort();
+}

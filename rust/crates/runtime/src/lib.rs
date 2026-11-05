@@ -2806,9 +2806,19 @@ async fn websocket(
                         )),
                     )
                     .await;
-                    let Ok((mut response, authenticated_control)) = auth_result else {
+                    let Ok((mut response, mut authenticated_control)) = auth_result else {
                         break;
                     };
+                    if matches!(response, ServerMessage::AuthError { .. }) {
+                        // Preserve routing only. A rejected credential must revoke all
+                        // identity/tenant authority, but public auth recovery still needs
+                        // the project to exchange a fresh external credential.
+                        authenticated_control = rejected_auth_context(
+                            &connection_id,
+                            project.as_deref(),
+                            &control_connection,
+                        );
+                    }
                     // A new session scope: the client re-announces its state
                     // and re-subscribes after `auth.result`. Grace hides the
                     // gap for a same-tenant token refresh.
@@ -3493,6 +3503,11 @@ async fn websocket(
                                 trace,
                             },
                             Err(error) => ServerMessage::ActionError {
+                                code: matches!(
+                                    error,
+                                    control::ControlError::AuthenticationRequired
+                                )
+                                .then(|| "unauthenticated".to_owned()),
                                 id,
                                 path: Some(path),
                                 error: error.to_string(),
@@ -3509,6 +3524,7 @@ async fn websocket(
                                 trace,
                             },
                             Err(error) => ServerMessage::ActionError {
+                                code: None,
                                 id,
                                 path: Some(path),
                                 error: error.to_string(),
@@ -3517,6 +3533,7 @@ async fn websocket(
                         }
                     } else {
                         ServerMessage::ActionError {
+                            code: None,
                             id,
                             path: Some(path),
                             error: "authenticate with an active tenant before calling an Action"
@@ -4396,6 +4413,7 @@ fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
             })
             .collect(),
         ClientMessage::ActionCall { id, path, .. } => vec![ServerMessage::ActionError {
+            code: None,
             id,
             path: Some(path),
             error,
@@ -4458,6 +4476,34 @@ fn database_auth_error_code(error: &gonvex_store::DatabaseError) -> &'static str
         }
         DatabaseError::MemberNotFound(_) | DatabaseError::NoTenantMembership => "member_removed",
         _ => "transient",
+    }
+}
+
+fn rejected_auth_context(
+    connection_id: &str,
+    requested_project: Option<&str>,
+    previous: &control::ControlConnection,
+) -> control::ControlConnection {
+    control::ControlConnection {
+        connection_id: connection_id.to_owned(),
+        project_id: requested_project.unwrap_or(&previous.project_id).to_owned(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn rejected_auth_preserves_routing_without_authority() {
+    let previous = control::ControlConnection {
+        project_id: "project".into(),
+        auth_token: "rejected-secret".into(),
+        ..Default::default()
+    };
+    for project in [None, Some("other-project")] {
+        let next = rejected_auth_context("socket", project, &previous);
+        assert_eq!(next.project_id, project.unwrap_or("project"));
+        assert_eq!(next.connection_id, "socket");
+        assert!(next.identity.is_none() && next.tenant.is_none());
+        assert!(next.auth_token.is_empty() && next.impersonation_id.is_empty());
     }
 }
 
@@ -7091,6 +7137,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             trace: None,
         };
         let failed = ServerMessage::ActionError {
+            code: None,
             id: "action".to_owned(),
             path: Some("testing.invoke".to_owned()),
             error: "failed".to_owned(),
