@@ -1735,7 +1735,7 @@ async fn websocket(
     let mut sent_replica_revision = 0u64;
     let mut opening_cohort_dirty = false;
     // Removed and dropped subscriptions are freed on the offload pool.
-    let mut replicas = offload::RetiringMap::default();
+    let mut replicas = offload::RetiringMap::<String, replica::ReplicaSubscription>::default();
     let mut socket_opens = open_reasons::SocketOpens::default();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
     let open_progress = replica_opens.progress();
