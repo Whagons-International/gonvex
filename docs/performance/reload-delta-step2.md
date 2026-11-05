@@ -263,3 +263,57 @@ integration merge. Visibility/principal-change implementation files were
 not edited. Next evidence needed is the unblocked shipping capture and its
 actual mode/collection/cursor lifecycle, plus parent-owned full-runtime gate
 and a future separately admitted verification window for remaining checks.
+
+## Follow-up: deterministic permission race, source prepared
+
+Reviewed implementation baseline remains immutable at
+`cc91423b3a7a4616fa34517abbe4371887574fe1`. The follow-up adds only a
+`resume_permission_race` integration-test target and this report update;
+there is no runtime fix or refactor. **The new test has not been compiled or
+executed yet.** Source was prepared while the permission child owns the
+05:14–05:43 UTC reservation; no build/test job was started. Verification must
+wait for an explicit next lab grant, regardless of lock-file presence.
+
+The three cases separately revoke `members.see_all_spots`, soft-delete the
+member's `memberTeams` links, and downgrade the member's SQL role/permissions.
+Each establishes a server anchor and proves a preceding unchanged resume
+does zero whole-list evaluations. The original admitted session and request
+scope remain unchanged so this cannot pass by simply changing the locator.
+The test holds every real snapshot admission slot, polls the actual resume
+until the public queue count confirms it is waiting, commits the dependency
+write through the fixture's separate writer, then releases the permits.
+There are no sleep-based race windows or feed-applier sleeps in this target.
+
+It compares the queued result's complete messages and subscription presence
+with the same request through the authoritative SQL path. Revocation must
+produce only `needHashes`, without a stale `ready`, subscription or row
+payload. Then the existing SDK client model sends its keys/hashes: both
+paths' messages, subscription scope, resolved principal/fingerprint and
+revision must agree, and applying the response must leave exactly the fresh
+SQL row set with valid digest and every actually revoked row absent. A
+nonempty revoked set prevents a vacuous fixture pass. Because `needHashes`
+has no wire cursor, the test brackets the queued read with the unchanged
+post-commit DB revision and explicitly checks that revision on subsequent
+ready/subscription/oracle results. Admission permits and queue entries must
+be conserved after completion. One test binary serializes the three cases
+and avoids interference with the other tests' global counters/admission.
+
+A second, **during-read index-advancement** interleaving is not implemented:
+source inspection found no existing deterministic pause hook between the
+admitted read snapshot, resolved parent/index binding and final readiness
+check. Public admission permits stop before that interval; holding reader
+pool slots also stops before the SQL snapshot. No production hook, scheduler
+guess or timing sleep was added. The supported contract remains correctness
+at the transaction's read revision, with exact index-readiness guards before
+and after replay; it is not latest-permission-at-send-time atomicity. The
+socket's later feed/revalidation ordering is outside this offline test.
+The in-read race remains an explicit unexercised guarantee, not passed
+coverage.
+
+Two static cost limits also remain unmeasured: `remember` walks the whole
+entry map for expiry and may walk it again for LRU eviction under a global
+mutex; history `COUNT`/grouping can scan a large transaction before rejecting
+more than 4,096 rows. The retained/replayed-row cap does not bound that SQL
+scan's CPU. Eight-session results do not measure these saturated costs.
+No broad cache/log refactor was made; quantify them only in a later admitted
+window.

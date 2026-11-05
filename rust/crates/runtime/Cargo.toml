@@ -206,6 +206,10 @@ required-features = ["perf-fixture"]
 name = "resume_validation"
 required-features = ["perf-fixture"]
 
+[[test]]
+name = "resume_permission_race"
+required-features = ["perf-fixture"]
+
 [[bench]]
 name = "reload_trace"
 harness = false
