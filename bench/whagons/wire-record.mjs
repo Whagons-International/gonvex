@@ -14,11 +14,12 @@ const shape = (value, depth = 0) => {
   return value;
 };
 
-export function installWireRecorder(file, { full = false } = {}) {
-  if (!file) return;
+export function installWireRecorder(file, { full = false, observe } = {}) {
+  if (!file && !observe) return;
   const Native = globalThis.WebSocket;
   let next = 0;
-  const write = (record) => appendFileSync(file, JSON.stringify(record) + '\n');
+  const write = (record) => { if(file) appendFileSync(file, JSON.stringify(record) + '\n'); };
+  const frame = (socket, direction, data) => { if(!observe)return; try { const m=JSON.parse(typeof data==='string'?data:new TextDecoder().decode(data)); observe(socket,direction,m); } catch {} };
   const describe = (data) => {
     if (typeof data === 'string') { try { const m = JSON.parse(data); return { kind: 'text', bytes: data.length, message: full ? m : shape(m) }; } catch { return { kind: 'text', bytes: data.length }; } }
     const bytes = data.byteLength ?? data.length;
@@ -31,9 +32,9 @@ export function installWireRecorder(file, { full = false } = {}) {
       write({ at: Date.now(), socket, event: 'open-request', url: String(url), protocols: protocols ?? null });
       this.addEventListener('open', () => write({ at: Date.now(), socket, event: 'open', extensions: this.extensions, protocol: this.protocol }));
       this.addEventListener('close', (e) => write({ at: Date.now(), socket, event: 'close', code: e.code, reason: e.reason }));
-      this.addEventListener('message', (e) => write({ at: Date.now(), socket, event: 'recv', ...describe(e.data) }));
+      this.addEventListener('message', (e) => { frame(socket,'recv',e.data); if(file)write({ at: Date.now(), socket, event: 'recv', ...describe(e.data) }); });
       const send = this.send.bind(this);
-      this.send = (data) => { write({ at: Date.now(), socket, event: 'send', ...describe(data) }); return send(data); };
+      this.send = (data) => { frame(socket,'send',data); if(file)write({ at: Date.now(), socket, event: 'send', ...describe(data) }); return send(data); };
     }
   }
   globalThis.WebSocket = RecordedWebSocket;

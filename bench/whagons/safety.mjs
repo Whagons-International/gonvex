@@ -13,7 +13,7 @@ export function quantiles(values) {
 // kind has p95 < LOAD_P95_MS (500) and p99 < LOAD_P99_MS (1000), and failed
 // operations stay under LOAD_MAX_ERROR_RATE (1%) of all operations. The query
 // kind includes the initial task snapshot a user waits for after sign-in.
-export const GATED_KINDS = ['save', 'heartbeat', 'reducer', 'query', 'login', 'delivery', 'taskDelivery'];
+export const GATED_KINDS = ['save', 'heartbeat', 'reducer', 'query', 'login', 'delivery', 'taskDelivery', 'reconnect', 'cachedReload', 'permission', 'visibility'];
 export function passRule({ latencyMs, errors, connectedUsers, targetUsers, aborted, presenceV2Users }, env = process.env) {
   const p95 = Number(env.LOAD_P95_MS || 500), p99 = Number(env.LOAD_P99_MS || 1000);
   const maxErrorRate = Number(env.LOAD_MAX_ERROR_RATE || 0.01);
@@ -22,7 +22,7 @@ export function passRule({ latencyMs, errors, connectedUsers, targetUsers, abort
   const errorRate = operations ? failed / operations : 1;
   // Sign-in and the initial task load mostly precede the steady plateau; gate
   // them when present. Steady operations must have samples.
-  const optional = new Set(['query', 'login']);
+  const optional = new Set(['query', 'login', 'reconnect', 'cachedReload', 'permission', 'visibility']);
   if (targetUsers > 0 && presenceV2Users === targetUsers) optional.add('heartbeat');
   const slow = GATED_KINDS.filter(k => latencyMs[k]?.samples > 0
     ? latencyMs[k].p95 >= p95 || latencyMs[k].p99 >= p99

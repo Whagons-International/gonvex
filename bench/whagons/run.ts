@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { readFile, writeFile, appendFile, realpath } from 'node:fs/promises';
 import { writeFileSync, renameSync } from 'node:fs';
 import { shardEpoch } from './shard-epoch.mjs';
+import { qualifyExpanded, visibilityDelta, replicaLifecycle, cachedFullSet } from './expanded-gate.mjs';
 import { mixedPlan, qualifyMixed } from './mixed-gate.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -14,7 +15,9 @@ import { ThinClient, defaultPool as thinRowPool } from './thin-client.mjs';
 import { firstViewed, viewSetsFirstViewedAt, unmetTaskUpdate } from './task-expectations.mjs';
 
 async function main() {
- const profileHash=createHash('sha256').update((await Promise.all([process.argv[1],new URL('thin-client.mjs',import.meta.url)].map(name=>readFile(name)))).map(b=>b.toString()).join('\n')).digest('hex');
+ const harnessFiles=['run.ts','thin-client.mjs','expanded-gate.mjs','mixed-gate.mjs','safety.mjs','native-stage.mjs','wire-record.mjs','shard-epoch.mjs','task-expectations.mjs'];
+ const sourcePins=Object.fromEntries(await Promise.all(harnessFiles.map(async name=>[name,createHash('sha256').update(await readFile(new URL(name,import.meta.url))).digest('hex')])));
+ const profileHash=createHash('sha256').update(JSON.stringify(sourcePins)).digest('hex');
  const app=process.env.WHAGONS_CHECKOUT!;
  if(!app) throw Error('WHAGONS_CHECKOUT is required');
  const require=createRequire(app+'/package.json');
@@ -23,7 +26,7 @@ async function main() {
  const lock=await readFile(app+'/pnpm-lock.yaml','utf8');const patchLine=lock.split('\n').find(line=>line.trim().startsWith("'@gonvex/client@"+sdkPackage.version+"':"));
  const expectedPatch=patchLine?.trim().split(': ').at(-1);const sdkPath=await realpath(app+'/node_modules/@gonvex/client');
  if(expectedPatch&&/^[a-f0-9]{64}$/.test(expectedPatch)&&!sdkPath.includes('patch_hash='+expectedPatch))throw Error('Installed SDK patch must match the app lock');
- const {GonvexClient,control}=await import(pathToFileURL(require.resolve('@gonvex/client')).href);
+ const {GonvexClient,control,MemoryLocalReplicaStorage}=await import(pathToFileURL(require.resolve('@gonvex/client')).href);
  const {api}=await import(pathToFileURL(app+'/gonvex/_generated/api.ts').href);
  // Authoritative timing never executes local reducers. Read the generated contract
  // without requiring the ignored portable reducer bundles in a clean checkout.
@@ -43,7 +46,8 @@ async function main() {
  let project:any;
  let fixtures:any[]=[];
  let projectId='';
- installWireRecorder(process.env.LOAD_WIRE_RECORD,{full:process.env.LOAD_WIRE_RECORD_FULL==='true'});
+ const lifecycle=replicaLifecycle();
+ installWireRecorder(process.env.LOAD_WIRE_RECORD,{observe:lifecycle.frame,full:process.env.LOAD_WIRE_RECORD_FULL==='true'});
  // LOAD_CLIENT=thin drives the same workload through a protocol-level client
  // (thin-client.mjs) instead of the full SDK. It sends the same frames but
  // skips browser-side replica storage, so one process can hold many more users.
@@ -70,7 +74,7 @@ async function main() {
  const maxInFlightPerUser=Number(process.env.LOAD_MAX_INFLIGHT_PER_USER||16);
  const plannedStart=new AsyncLocalStorage<{at:number,used:boolean}>();
  const scheduleStats={kind:openLoop?'open':'closed',fired:0,overflow:0,skippedDuringReconnect:0,lateMs:[] as number[]};
- const client=(kind:string=clientKind)=>{if(kind==='thin'){const c=new ThinClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,nativeRows:nativeRequested,ackDelayMs:Number(process.env.LOAD_THIN_ACK_DELAY_MS||0),presenceV2});c.connect();return c;}const staging=sdkStaging?.client();const c=new GonvexClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,outbox:{enabled:false},...(staging?{nativeSnapshotStaging:staging.staging}:{})});c.connect();return c;};
+ const client=(kind:string=clientKind,storage?:any)=>{if(kind==='thin'){const c=new ThinClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,nativeRows:nativeRequested,ackDelayMs:Number(process.env.LOAD_THIN_ACK_DELAY_MS||0),presenceV2});c.connect();return c;}const staging=sdkStaging?.client();const c=new GonvexClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,outbox:{enabled:false},...(storage?{localReplica:{storage}}:{}),...(staging?{nativeSnapshotStaging:staging.staging}:{})});c.connect();return c;};
  let recordReducer:((path:string,ms:number,failed:boolean)=>void)|undefined;
  const reducer=async(c:any,ref:any,args:any)=>{const at=performance.now();try{const value=await c.reducer({...ref,localExecution:undefined},args,{offline:'reject'});recordReducer?.(ref.path,performance.now()-at,false);return value;}catch(e){recordReducer?.(ref.path,performance.now()-at,true);throw e;}};
  const identity=async(email:string)=>{
@@ -82,8 +86,8 @@ async function main() {
  // LOAD_PRESENCE_V2=1: behave like the presence-v2 app (Whagons perf/presence-v2): when the
  // runtime grants presence v2, no presence/support heartbeat Reducers; transitions are
  // presence.set and delivery is timed from the presence feed (presence.patch).
- const login=async(email:string,tenant?:string,kind:string=clientKind)=>{
-  const c=client(kind);
+ const login=async(email:string,tenant?:string,kind:string=clientKind,storage?:any)=>{
+  const c=client(kind,storage);
   try {
    const grant=await c.action(control.auth.exchangeExternalToken,{provider:'firebase',token:await identity(email),...(tenant?{tenantId:tenant}:{})});
    if(tenant) await c.authenticate({project:projectId,token:grant.accessToken,tenant});
@@ -171,7 +175,9 @@ async function main() {
  const shards=Number(process.env.LOAD_SHARDS||1),shard=Number(process.env.LOAD_SHARD||0);
  if(!Number.isSafeInteger(shards)||shards<1||!Number.isSafeInteger(shard)||shard<0||shard>=shards) throw Error('Invalid shard');
  const mine=(i:number)=>i%shards===shard;const myTarget=Array.from({length:target},(_,i)=>i).filter(mine).length;
- const measurements:any={save:[],heartbeat:[],reducer:[],query:[],initialLoad:[],reconnect:[],permission:[],visibility:[],delivery:[],taskDelivery:[],login:[]},errors:Record<string,number>={};
+ const expanded=process.env.LOAD_EXPANDED_GATE==='1';
+ const reloadEvents:any[]=[],permissionCycles:any[]=[];
+ const measurements:any={cachedReload:[],save:[],heartbeat:[],reducer:[],query:[],initialLoad:[],reconnect:[],permission:[],visibility:[],delivery:[],taskDelivery:[],login:[]},errors:Record<string,number>={};
  const samples:Record<string,{at:number,ms:number}[]>={};
  const sample=(kind:string,ms:number,at=Date.now()-ms)=>{measurements[kind].push(ms);(samples[kind]??=[]).push({at,ms});};
  const errorEvents:{at:number,key:string}[]=[]; const seenErrors=new WeakSet<object>();
@@ -244,7 +250,7 @@ async function main() {
  type Handle={i:number,email:string,member:string,tenant:string,tw:()=>any,admin:boolean,busy:boolean};
  const tenantUsers=new Map<string,Handle[]>();
  const approvalQueue=new Map<string,string[]>();
- const visibilityChecks={checked:0,converged:0,mismatched:0,noChange:0};
+ const visibilityChecks={checked:0,converged:0,mismatched:0,noChange:0,additions:0,removals:0};
  const pick=<T,>(xs:T[],r:()=>number)=>xs[Math.floor(r()*xs.length)];
  const reconnectAt=(fraction:number)=>deadline-seconds*1000*(1-fraction);
  const until=async(condition:()=>boolean,ms:number)=>{const end=Date.now()+ms;while(!condition()){if(Date.now()>end)return false;await pause(50);}return true;};
@@ -253,7 +259,7 @@ async function main() {
  const appOpens:{path:string,args:any}[]|undefined=process.env.LOAD_APP_OPENS?JSON.parse(await readFile(process.env.LOAD_APP_OPENS.startsWith('/')?process.env.LOAD_APP_OPENS:new URL(process.env.LOAD_APP_OPENS,import.meta.url),'utf8')).opens:undefined;
  const refFor=(path:string)=>{const dot=path.indexOf('.');const ns=(api as any)[path.slice(0,dot)];const r=ns?.[path.slice(dot+1)];const ref=typeof r==='function'?r():r;if(!ref?.path)throw new Error('LOAD_APP_OPENS: no replica reference for '+path);return ref;};
  const mergeOpens=(base:[any,any][],opens:{path:string,args:any}[],member:string):[any,any][]=>{const seen=new Set(base.map(([r,a])=>r.path+'\0'+JSON.stringify(a)));const out=[...base];for(const o of opens){const args=JSON.parse(JSON.stringify(o.args).split('"$member"').join(JSON.stringify(member)));const key=o.path+'\0'+JSON.stringify(args);if(seen.has(key))continue;seen.add(key);out.push([refFor(o.path),args]);}return out;};
- const watchAll=(c:any,refs:[any,any][],onUpdate=()=>{})=>{const ws=refs.map(([ref,args])=>{const w=c.watchReplica(ref,args);const stop=w.onUpdate(()=>{try{w.localReplicaResult();onUpdate();}catch(e){error(e);}});return {w,stop};});return {ready:()=>ws.every(x=>x.w.status().isUpToDate),close:()=>ws.forEach(x=>x.stop()),rows:(k:number)=>(ws[k].w.localReplicaResult()||[]) as any[]};};
+ const watchAll=(c:any,refs:[any,any][],onUpdate=()=>{})=>{const ws=refs.map(([ref,args])=>{const w=c.watchReplica(ref,args);const stop=w.onUpdate(()=>{try{w.localReplicaResult();onUpdate();}catch(e){error(e);}});return {w,stop};});return {ready:()=>ws.every(x=>x.w.status().isUpToDate&&x.w.localReplicaState()?.completeness==='complete'),close:()=>ws.forEach(x=>x.stop()),rows:(k:number)=>(ws[k].w.localReplicaResult()||[]) as any[]};};
  // The oracle: a fresh session computes the target's visible rows from scratch;
  // the target's long-lived replica (incrementally maintained) must converge to
  // exactly that set. A difference after 15 s is a leaked or missing row.
@@ -264,10 +270,11 @@ async function main() {
    fresh=await login(target.email,target.tenant,oracleKind);
    const fw=fresh.c.watchReplica(api.tasks.recentWorkspaceTasks,{});stop=fw.onUpdate(()=>{});
    const complete=(w:any)=>w.status().isUpToDate&&w.localReplicaState()?.completeness==='complete';
-   if(!await until(()=>complete(fw),60000)){error(new Error('Visibility oracle snapshot never completed'));return;}
+   if(!await until(()=>complete(fw),60000)){visibilityChecks.mismatched++;error(new Error('Visibility oracle snapshot never completed'));return;}
    const same=()=>{const a=ids(target.tw().localReplicaResult()||[]),b=ids(fw.localReplicaResult()||[]);return complete(target.tw())&&a.size===b.size&&[...a].every(x=>b.has(x));};
    if(await until(same,15000)){
     const after=ids(fw.localReplicaResult()||[]);
+    const delta=visibilityDelta(before,after);visibilityChecks.additions+=delta.additions;visibilityChecks.removals+=delta.removals;
     if(after.size===before.size&&[...after].every(x=>before.has(x)))visibilityChecks.noChange++;
     else{visibilityChecks.converged++;sample('visibility',Date.now()-changedAt,changedAt);}
    }else{
@@ -275,7 +282,7 @@ async function main() {
     visibilityChecks.mismatched++;
     error(new Error(`Visibility mismatch after 15 s: ${[...a].filter(x=>!b.has(x)).length} leaked, ${[...b].filter(x=>!a.has(x)).length} missing`));
    }
-  }catch(e){error(e);}
+  }catch(e){visibilityChecks.mismatched++;error(e);}
   finally{stop();fresh?.c.close();target.busy=false;}
  };
  const jobs=Array.from({length:target},(_,i)=>(async()=>{
@@ -291,7 +298,12 @@ async function main() {
   // A session: client, presence watch, metadata watches and the task replica.
   // The reconnect wave replaces it mid-run.
   let c:any,member='',tw:any,stopPresence=()=>{},stopTasks=()=>{},extras:any,refreshTimer:any;
-  const maybeInitialReady=()=>{if(signIn.readyAt===undefined&&extras?.ready()&&tw?.status().isUpToDate&&presenceReadyAt!==Infinity)signIn.readyAt=Date.now();};
+  let cachedWindows=0,loadedSnapshot:any,expectedCacheKeys:string[]=[];
+  const storage=expanded&&userKind(i,target)==='sdk'?new MemoryLocalReplicaStorage():undefined;
+  if(storage){const load=storage.load.bind(storage);storage.load=async(...args:any[])=>{const snap=await load(...args);loadedSnapshot=snap;cachedWindows=Object.keys(snap?.liveQueries||{}).length;return snap;};}
+  let reloadEvent:any;
+  const allReady=()=>extras?.ready()&&tw?.status().isUpToDate&&tw?.localReplicaState()?.completeness==='complete'&&presenceReadyAt!==Infinity;
+  const maybeInitialReady=()=>{if(reloadEvent&&reloadEvent.readyAt===undefined&&allReady()){reloadEvent.cachedFullSetVerified=cachedFullSet(loadedSnapshot,expectedCacheKeys);reloadEvent.cachedWindows=cachedWindows;reloadEvent.readyAt=Date.now();sample('cachedReload',reloadEvent.readyAt-reloadEvent.plannedAt,reloadEvent.plannedAt);}if(signIn.readyAt===undefined&&allReady())signIn.readyAt=Date.now();};
   // Runtime access tokens live 15 min (control.rs session_result): refresh 2 min
   // before expiry and re-authenticate the socket, as the SDK's session does.
   // Without it every session drops 15 min after sign-in.
@@ -300,7 +312,7 @@ async function main() {
   let initial=true,presenceReadyAt=Infinity,actionAt=Infinity,subscribedAt=Infinity;
   const seen=new Map<string,number>(),seenTasks=new Map<string,number>(),firstSeen=new Map<string,number>();
   const connect=async(kind:string)=>{
-   const session=await timed(kind,()=>login(email,f.tenant,userKind(i,target)));if(!session)return false;
+   const session=await timed(kind,()=>login(email,f.tenant,userKind(i,target),storage));if(!session)return false;
    if(kind==='login')signIn.authAt=Date.now();
    c=session.c;if(kind==='login'&&presenceV2&&c.presenceSupported?.())presenceV2Users++;member=session.grant.tenants.find((t:any)=>t.id===f.tenant)?.memberId;scheduleRefresh(session.grant);
    presenceReadyAt=Infinity;
@@ -309,13 +321,15 @@ async function main() {
    }catch(e){error(e);}});}else{
    const watch=c.watchReplica(api.presence.list,{});
    stopPresence=watch.onUpdate(()=>{try{
-    if(presenceReadyAt===Infinity){if(!watch.status().isUpToDate)return;presenceReadyAt=Date.now();maybeInitialReady();}
+    if(presenceReadyAt===Infinity){if(!watch.status().isUpToDate||watch.localReplicaState()?.completeness!=='complete')return;presenceReadyAt=Date.now();maybeInitialReady();}
     for(const row of watch.localReplicaResult()||[]){const ts=pending.get(row.userId);if(ts&&ts>=presenceReadyAt&&row.lastSeenAt>=ts&&seen.get(row.userId)!==row.lastSeenAt){seen.set(row.userId,row.lastSeenAt);sample('delivery',Date.now()-ts,ts);}}
    }catch(e){error(e);}});}
    // LOAD_APP_OPENS: also open the real web app's page-load collection set
    // (captured from the browser, app-opens-*.json), deduplicated by path+args.
    const baseRefs:[any,any][]=[api.workspaces.list,api.statuses.statuses,api.tags.tags,api.members.listMembers,api.members.listMemberTeams,api.taskResources.taskUsers,api.taskResources.taskTags,api.workspacePreferences.workspacePreferences].map(ref=>[ref,{}] as [any,any]);
-   extras=watchAll(c,appOpens?mergeOpens(baseRefs,appOpens,member):baseRefs,maybeInitialReady);
+   const refs=appOpens?mergeOpens(baseRefs,appOpens,member):baseRefs;
+   expectedCacheKeys=typeof c.replicaSignature==='function'?[...refs,[api.tasks.recentWorkspaceTasks,{}],...(!(presenceV2&&c.presenceSupported?.())?[[api.presence.list,{}]]:[])].map(([ref,args])=>c.replicaSignature(ref,args)):[];
+   extras=watchAll(c,refs,maybeInitialReady);
    const w=c.watchReplica(api.tasks.recentWorkspaceTasks,{});const q0=performance.now();let first=true;
    stopTasks=w.onUpdate(()=>{try{maybeInitialReady();
     if(first&&w.status().isUpToDate&&w.localReplicaState()?.completeness==='complete'){first=false;sample(kind==='login'?'initialLoad':'reconnect',performance.now()-q0);if(initial){initial=false;subscribedAt=Date.now();actionAt=Date.now()+think();}snapshots.push({received:(w.localReplicaResult()||[]).length,kind});}
@@ -412,6 +426,29 @@ async function main() {
    else{const t=pick(mine.filter(r=>before.has(r._id)&&r.spotId),random);if(!t||!f.spotChildren)return;v=await timed('permission',()=>reducer(c,api.tasks.setSpot,{taskId:t._id,spotId:pick(f.spotChildren as string[],random)}));}
    if(v!==undefined)await verifyVisibility(target,Date.now(),before);
   };
+  // One explicit share/revoke cycle per shard, using ordinary app reducers.
+  // Failure to find a genuinely hidden row is a missing case, never a pass.
+  let permissionCycleDone=false;
+  const permissionCycle=async()=>{
+   const target=others().find(h=>!h.busy);if(!target)return;
+   const before=ids(target.tw().localReplicaResult()||[]);
+   const row=rows().find(r=>!before.has(r._id)&&r.statusId!==f.completedStatusId);if(!row)return;
+   permissionCycleDone=true;
+   const cycle:any={user:target.i,row:row._id,at:Date.now(),additions:0,removals:0};permissionCycles.push(cycle);
+   try{
+    const at=Date.now();const share=await reducer(c,api.taskResources.shareTask,{taskId:row._id,sharedToUserId:target.member});
+    if(typeof share!=='string')throw Error('Share did not return a revoke identifier');
+    await verifyVisibility(target,at,before);
+    const granted=ids(target.tw().localReplicaResult()||[]);
+    cycle.granted=granted.has(row._id);cycle.grantMs=Date.now()-at;cycle.additions=visibilityDelta(before,granted).additions;
+    await pause(10000);
+    const revokedAt=Date.now();await reducer(c,api.taskResources.revokeShare,{id:share});
+    await verifyVisibility(target,revokedAt,granted);
+    const after=ids(target.tw().localReplicaResult()||[]);
+    cycle.oldRowRemoved=!after.has(row._id);cycle.revoked=cycle.oldRowRemoved;cycle.revokeMs=Date.now()-revokedAt;cycle.removals=visibilityDelta(granted,after).removals;
+    if(!cycle.granted||!cycle.oldRowRemoved)throw Error('Share/revoke old-row oracle failed');
+   }catch(e){cycle.error=String(e);error(e,cycle.at);}
+  };
   // One reorganization per generator process: reassign ~50 tasks to one member
   // and move that member to another team.
   const reorg=async()=>{
@@ -429,6 +466,8 @@ async function main() {
   const reloadsPerHour=Number(process.env.LOAD_RELOADS_PER_USER_HOUR ?? 0);
   if(!Number.isFinite(reloadsPerHour)||reloadsPerHour<0)throw Error('Invalid reload rate');
   const reloadPeriod=reloadsPerHour>0?3600000/reloadsPerHour:Infinity;
+  let deployReloadDone=false;
+  const deployReloadAt=()=>reconnectAt(0)+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000;
   let reconnectTime=process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?Date.now()+random()*reloadPeriod:(random()<.3?reconnectAt(.5)+random()*10000:Infinity);
   // Open loop: the next action is planned from the previous plan, not from
   // when the previous action finished, so a slow server cannot lower load.
@@ -445,7 +484,14 @@ async function main() {
   while(!stopping&&Date.now()<deadline){
    maybeInitialReady();
    if(openLoop&&!initial&&!foregroundTimer)armForeground();
-   if(Date.now()>=reconnectTime&&!reconnecting&&!initial){reconnecting=true;reconnectTime+=reloadPeriod;await Promise.all([...periodicPending,...foregroundPending]);disconnect();const connected=await connect('reconnect');reconnecting=false;if(!connected)break;}
+   if(expanded&&!deployReloadDone&&Date.now()>=deployReloadAt()&&!reconnecting&&!initial){
+    deployReloadDone=true;reconnecting=true;
+    reloadEvent={user:i,plannedAt:deployReloadAt(),attemptedAt:Date.now(),cacheSupported:!!storage,cachedWindows:0};reloadEvents.push(reloadEvent);
+    cachedWindows=0;loadedSnapshot=undefined;
+    await Promise.all([...periodicPending,...foregroundPending]);disconnect();tw=undefined;extras=undefined;
+    if(!await connect('reconnect'))reloadEvent.error='reload login failed';reconnecting=false;
+   }else if(Date.now()>=reconnectTime&&!reconnecting&&!initial){reconnecting=true;reconnectTime+=reloadPeriod;await Promise.all([...periodicPending,...foregroundPending]);disconnect();const connected=await connect('reconnect');reconnecting=false;if(!connected)break;}
+   else if(expanded&&admin&&!initial&&!permissionCycleDone&&Date.now()>=reconnectAt(0)+30000&&(tenantUsers.get(f.tenant)||[]).find(h=>h.admin)===handle){await permissionCycle();}
    else if(admin&&!initial&&!reorgDone&&shard===0&&Date.now()>=reconnectAt(.3)&&(tenantUsers.get(f.tenant)||[]).find(h=>h.admin)===handle){reorgDone=true;await reorg();}
    else if(admin&&!initial&&Date.now()>=permissionAt){await changePermission();permissionAt=Date.now()+(120+random()*180)*1000;}
    else if(!openLoop&&!initial&&Date.now()>=actionAt){await act();actionAt=Date.now()+think();}
@@ -484,14 +530,18 @@ async function main() {
  if(!measurements.delivery.length) error(new Error('No update delivery samples'));
  clearInterval(costTimer);{const u=process.cpuUsage(cpuAtStart);Object.assign(generatorCost,{cpuSeconds:(u.user+u.system)/1e6,wallSeconds:(performance.now()-wallAtStart)/1000});}
  const lateSorted=scheduleStats.lateMs.sort((a,b)=>a-b);const schedule={kind:scheduleStats.kind,fired:scheduleStats.fired,overflow:scheduleStats.overflow,skippedDuringReconnect:scheduleStats.skippedDuringReconnect,startLateMs:quantiles(lateSorted)};
- const result={operationAttempts,replicaEvents:thin?ThinClient.stats.replicaEvents:[],signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,presenceV2Users,collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,reconnectWindowMs:process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?null:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
+ for(const e of lifecycle.events)if(e.type==='refused')error(Error('Replica open refused: '+e.path),e.at);
+ const deployReloadWindowMs=[deadline-seconds*1000+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000,deadline-seconds*1000+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000+5000];
+ const artifactPins={harness:sourcePins,sdkEntry:createHash('sha256').update(await readFile(require.resolve('@gonvex/client'))).digest('hex'),appManifest:createHash('sha256').update(await readFile(app+'/gonvex/_generated/manifest.json')).digest('hex'),appApi:createHash('sha256').update(await readFile(app+'/gonvex/_generated/api.ts')).digest('hex'),appContract:createHash('sha256').update(executor).digest('hex'),appOpens:process.env.LOAD_APP_OPENS?createHash('sha256').update(await readFile(process.env.LOAD_APP_OPENS.startsWith('/')?process.env.LOAD_APP_OPENS:new URL(process.env.LOAD_APP_OPENS,import.meta.url))).digest('hex'):null};
+ const result={artifactPins,deployReloadWindowMs,reloadEvents,permissionCycles,operationAttempts,replicaEvents:lifecycle.events,signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,presenceV2Users,collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,reconnectWindowMs:process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?null:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
  const steadyLatencyMs=Object.fromEntries(Object.keys(measurements).map(kind=>{const xs=(samples[kind]||[]).filter(x=>x.at>=deadline-seconds*1000&&x.at<deadline).map(x=>x.ms);return [kind,{samples:xs.length,...quantiles(xs)}];}));
  const phaseErrors=(start:number,end:number)=>Object.fromEntries([...new Set(errorEvents.filter(e=>e.at>=start&&e.at<end).map(e=>e.key))].map(key=>[key,errorEvents.filter(e=>e.key===key&&e.at>=start&&e.at<end).length]));
  const steadyErrors=phaseErrors(deadline-seconds*1000,deadline);
  Object.assign(result,{steadyErrors,rampErrors:phaseErrors(started,deadline-seconds*1000),steadyLatencyMs,qualificationLatencyScope:'steady plateau; operations started with all users connected'});
  const q:any=steadyLatencyMs;
- {const rule=passRule({latencyMs:q,presenceV2Users,errors:steadyErrors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed&&visibilityChecks.mismatched===0&&collectionReadiness.readyAtTeardown===myTarget,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
- if(mixed){const mixedQualification=qualifyMixed({started,signIns,samples,errors:errorEvents,retries:thin?ThinClient.stats.replicaEvents:[],attempts:operationAttempts});Object.assign(result,{mixedQualification,clientSloPassed:result.clientSloPassed&&mixedQualification.every(w=>w.passed)});}
+ {const rule=passRule({latencyMs:q,presenceV2Users,errors:steadyErrors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed&&visibilityChecks.mismatched===0&&expectationStats.undeliveredOps.size===0&&expectationStats.pendingSaveAtTeardown===0&&!operationAttempts.some(a=>!a.done)&&collectionReadiness.readyAtTeardown===myTarget,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
+ if(mixed){const mixedQualification=qualifyMixed({started,signIns,samples,errors:errorEvents,retries:lifecycle.events,attempts:operationAttempts});Object.assign(result,{mixedQualification,clientSloPassed:result.clientSloPassed&&mixedQualification.every(w=>w.passed)});}
+ if(expanded){const expandedQualification=qualifyExpanded({reloads:reloadEvents,targetUsers:myTarget,permissions:permissionCycles,samples,errors:errorEvents,attempts:operationAttempts,reloadWindow:deployReloadWindowMs});Object.assign(result,{expandedQualification,clientSloPassed:result.clientSloPassed&&expandedQualification.passed});}
  console.log(JSON.stringify(result));await writeFile(process.env.LOAD_RESULT||state+'.result',JSON.stringify(result,null,2));
  process.exit(0);
 }

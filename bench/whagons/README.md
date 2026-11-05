@@ -358,3 +358,45 @@ pass the same p95<500ms,p99<1s,<1% limits, plus common plateau qualification;
 no averaging away burst failures. Pure90s/pure900s comparisons are supplemental.
 The final app open set must be recaptured against the matching shipping module
 and actual patched SDK; old captured130-open set is not final qualification.
+
+## Expanded harness (qualification pending)
+
+`LOAD_EXPANDED_GATE=1` adds a deploy-refresh wave at the common plateau start
+plus 120 seconds (`LOAD_DEPLOY_RELOAD_OFFSET_SECONDS`). Every already offered
+user refreshes; the original mixed sign-in schedule and hourly reloads remain.
+Refresh latency starts at the offered time, includes outstanding work, and ends
+only when **all** metadata/task collections are complete/current and presence
+is ready. Late completions and pending operations remain in the five-second
+start window. The normal p95 <500 ms, p99 <1000 ms and error rate <1% rules
+apply independently to that wave and the steady plateau.
+
+SDK clients reuse the public `MemoryLocalReplicaStorage` across fresh client
+instances. This exercises SDK cache hydration and cursor/digest negotiation;
+it measures no disk durability or browser startup. The result records windows
+actually loaded by the new SDK. Thin clients still open cold, so the usual
+8-SDK/992-thin profile **cannot qualify an all-user cached refresh**. No cold
+open is labeled cached. A full supported cached driver remains required.
+
+An elected admin in each represented tenant/shard attempts an ordinary app
+share/revoke cycle after 30 seconds of steady load. The chosen task must be
+invisible before the share. A fresh SDK visibility oracle follows each change;
+the report keeps additions, removals, convergence latency and whether that old
+row disappeared after revoke. Missing/effectively no-op cycles do not qualify.
+General permission changes and exact task row-set oracles remain active.
+
+The transport observer records real SDK and thin refused-open/retry/recovery
+frames without changing their retry implementations. `replica.needHashes`
+never clears a refusal. Refusals remain errors after recovery. Histogram
+qualification also fails on any task delivery leak/missing row or unfinished
+operation, including one originating outside the steady plateau.
+
+`expandedQualification` deliberately remains false until the current SQLite
+schema/module/app-open pairing, complete permission-provider coverage and an
+actually negotiated starter SDK/network pipeline have evidence. This branch
+supplies none of those capabilities. A private starter fixture is insufficient.
+Runtime restart storms belong in a separately labeled stress result.
+
+Each result hashes all harness runtime helper sources, the installed SDK entry,
+generated app manifest/API/contract and the collection fixture. A measured run
+also needs external runtime binary, full SDK artifact/patch, schema and source
+pins; the JS entry hash alone is not a full artifact qualification.

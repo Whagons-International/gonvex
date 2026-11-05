@@ -29,3 +29,22 @@ test('merged common plateau excludes ramp errors and samples but retains them se
     r = JSON.parse(readFileSync(out)); assert.equal(r.clientSloPassed, false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('merged result rejects artifact drift and ramp-origin delivery loss even with fast steady samples',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'gv-merge-guards-'));
+ try{
+  const out=join(dir,'result');
+  const base={targetUsers:1,connectedUsers:1,steadyStartMs:1000,steadyEndMs:2000,errorEvents:[],errors:{},artifactPins:{sdk:'same'},collectionReadiness:{readyAtTeardown:1},visibilityChecks:{mismatched:0},client:{kind:'thin'},rawSamples:Object.fromEntries(['save','heartbeat','reducer','delivery','taskDelivery'].map(k=>[k,[{at:1200,ms:20}]]))};
+  for(const fault of ['none','artifact','missing','pending']){
+   for(let k=0;k<2;k++){
+    const p=structuredClone(base);
+    if(k===1&&fault==='artifact')p.artifactPins.sdk='other';
+    if(k===1&&fault==='missing')p.taskExpectations={undeliveredOps:1};
+    if(k===1&&fault==='pending')p.operationAttempts=[{at:10,done:false}];
+    writeFileSync(`${out}.shard-${k}`,JSON.stringify(p));
+   }
+   execFileSync(process.execPath,[new URL('./merge-shards.mjs',import.meta.url).pathname,out,'2']);
+   assert.equal(JSON.parse(readFileSync(out)).clientSloPassed,fault==='none',fault);
+  }
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});

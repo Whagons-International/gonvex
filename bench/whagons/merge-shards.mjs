@@ -3,6 +3,7 @@
 // whole run, steadyLatencyMs only operations that started on the plateau when
 // every shard had all its users connected.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { qualifyExpanded } from './expanded-gate.mjs';
 import { qualifyMixed } from './mixed-gate.mjs';
 import { quantiles, passRule } from './safety.mjs';
 
@@ -50,6 +51,8 @@ const steadyErrors = phaseErrors(steadyStartMs, steadyEndMs);
 const result = {
   ...Object.fromEntries(Object.entries(first).filter(([k]) => !['rawSamples', 'rawPaths', 'shard', 'snapshots'].includes(k))),
   shards: count,
+  reloadEvents: parts.flatMap(p=>p.reloadEvents||[]),
+  permissionCycles: parts.flatMap(p=>p.permissionCycles||[]),
   signIns: parts.flatMap(p=>p.signIns||[]),
   operationAttempts: parts.flatMap(p=>p.operationAttempts||[]),
   replicaEvents: parts.flatMap(p=>p.replicaEvents||[]),
@@ -88,12 +91,18 @@ if (parts.some(p => p.taskExpectations)) {
   }
   result.taskExpectations = t;
 }
+const artifactMismatch=parts.some(p=>JSON.stringify(p.artifactPins)!==JSON.stringify(first.artifactPins));
+if(artifactMismatch)errors['shards ran different artifacts']=1;
 const rule = passRule({ ...result, errors: parts.every(p => p.errorEvents) ? steadyErrors : errors, latencyMs: steadyLatencyMs });
-Object.assign(result, { clientSloPassed: rule.passed && !(result.visibilityChecks.mismatched > 0) && (!first.collectionReadiness || result.collectionReadiness.readyAtTeardown === result.targetUsers), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
+Object.assign(result, { clientSloPassed: rule.passed && !artifactMismatch && !(result.visibilityChecks.mismatched > 0) && !(result.taskExpectations?.undeliveredOps > 0) && !(result.taskExpectations?.pendingSaveAtTeardown > 0) && !result.operationAttempts.some(a=>!a.done) && (!first.collectionReadiness || result.collectionReadiness.readyAtTeardown === result.targetUsers), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
 if (result.signinSchedule === 'mixed-v1') {
   if (parts.some(p=>p.scheduleStartedMs!==first.scheduleStartedMs)) errors['mixed schedule epoch mismatch']=1;
   result.mixedQualification=qualifyMixed({started:first.scheduleStartedMs,signIns:result.signIns,samples,errors:errorEvents,retries:result.replicaEvents,attempts:result.operationAttempts});
   result.clientSloPassed=result.clientSloPassed&&!partial&&!errors['mixed schedule epoch mismatch']&&result.mixedQualification.every(w=>w.passed);
+}
+if(parts.some(p=>p.expandedQualification)){
+ result.expandedQualification=qualifyExpanded({reloads:result.reloadEvents,targetUsers:result.targetUsers,permissions:result.permissionCycles,samples,errors:errorEvents,attempts:result.operationAttempts,reloadWindow:result.deployReloadWindowMs});
+ result.clientSloPassed=result.clientSloPassed&&result.expandedQualification.passed;
 }
 writeFileSync(partial ? out + '.partial.json' : out, JSON.stringify(result, null, 2));
 console.log(JSON.stringify({ merged: parts.length, of: count, connectedUsers: result.connectedUsers, passed: result.clientSloPassed }));
