@@ -1,0 +1,14 @@
+Running as unit: gonvex-reload-generators3-phase-07f247828f1a.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T04:47:48.679580+00:00", "attempt": "45ee33444971475c8462fef6d743b924", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-generators3-phase-07f247828f1a.service", "event": "wait-start", "kind": "typecheck", "pid": 679965, "schema": "coach.resources.v1", "start_ticks": "1733553", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-generators3-phase-07f247828f1a.service", "why": "reload docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T04:47:48.679760+00:00", "attempt": "45ee33444971475c8462fef6d743b924", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-generators3-phase-07f247828f1a.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "typecheck", "outcome": "admitted", "pid": 679965, "position": 0, "schema": "coach.resources.v1", "start_ticks": "1733553", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-generators3-phase-07f247828f1a.service", "why": "reload docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+$ fumadocs-mdx && next typegen && tsc --noEmit
+[MDX] generated files in 6.433913000000018ms
+[MDX] generated files in 6.826855999999964ms
+Generating route types...
+✓ Types generated successfully
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 2417592, "exit_code": 0, "io_source": "unavailable", "memory_peak": 377225216, "wall_seconds": 1.395}, "arbitration": "kernel-v1", "at": "2026-11-05T04:47:50.081331+00:00", "attempt": "45ee33444971475c8462fef6d743b924", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-generators3-phase-07f247828f1a.service", "event": "lease-release", "exit_code": 0, "kind": "typecheck", "pid": 679965, "schema": "coach.resources.v1", "start_ticks": "1733553", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-generators3-phase-07f247828f1a.service", "why": "reload docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 1.546s
+             CPU time consumed: 2.536s
+                   Memory peak: 359.7M (swap: 0B)

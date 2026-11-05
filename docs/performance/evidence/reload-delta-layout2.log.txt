@@ -1,0 +1,60 @@
+Running as unit: gonvex-reload-future-layout2-phase-6a410c704381.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T04:58:55.941755+00:00", "attempt": "116dbe7add994db6a75bf17e664e5895", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-future-layout2-phase-6a410c704381.service", "event": "wait-start", "kind": "build", "pid": 825083, "schema": "coach.resources.v1", "start_ticks": "1800280", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-future-layout2-phase-6a410c704381.service", "why": "reload future layout target /mnt/data/work/gonvex-open-cost/target"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T04:58:55.941947+00:00", "attempt": "116dbe7add994db6a75bf17e664e5895", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-future-layout2-phase-6a410c704381.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "build", "outcome": "admitted", "pid": 825083, "position": 0, "schema": "coach.resources.v1", "start_ticks": "1800280", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-future-layout2-phase-6a410c704381.service", "why": "reload future layout target /mnt/data/work/gonvex-open-cost/target"}
+warning: use of deprecated associated function `core::num::<impl usize>::max_value`: replaced by the `MAX` associated constant on this type
+   --> vendor/serde_json/src/lexical/math.rs:458:33
+    |
+458 |             .map_or_else(usize::max_value, |v| v - nlz)
+    |                                 ^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: `serde_json` (lib) generated 1 warning
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/module-host/src/session.rs:127:14
+    |
+127 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+127 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+127 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    |
+
+warning: `gonvex-module-host` (lib) generated 1 warning (run `cargo fix --lib -p gonvex-module-host` to apply 1 suggestion)
+    Checking gonvex-runtime v0.1.0 (/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a/rust/crates/runtime)
+error[E0080]: index out of bounds: the length is 1 but the index is 29664
+    --> crates/runtime/src/lib.rs:7269:19
+     |
+7269 |     const _: u8 = [0u8][size6(websocket)];
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `connection_future_sizes::_` failed here
+
+error[E0080]: index out of bounds: the length is 1 but the index is 240
+    --> crates/runtime/src/lib.rs:7270:19
+     |
+7270 |     const _: u8 = [0u8][size4(next_socket_or_feed::<WebSocket>)];
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `connection_future_sizes::_` failed here
+
+error[E0080]: index out of bounds: the length is 1 but the index is 7904
+    --> crates/runtime/src/lib.rs:7271:19
+     |
+7271 |     const _: u8 = [0u8][size2(revalidate_connection)];
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `connection_future_sizes::_` failed here
+
+error[E0080]: index out of bounds: the length is 1 but the index is 120
+    --> crates/runtime/src/lib.rs:7272:19
+     |
+7272 |     const _: u8 = [0u8][size1(next_feed_event)];
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `connection_future_sizes::_` failed here
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `gonvex-runtime` (lib test) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 29234169, "exit_code": 101, "io_source": "unavailable", "memory_peak": 2118242304, "wall_seconds": 15.001}, "arbitration": "kernel-v1", "at": "2026-11-05T04:59:10.958858+00:00", "attempt": "116dbe7add994db6a75bf17e664e5895", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-future-layout2-phase-6a410c704381.service", "event": "lease-release", "exit_code": 101, "kind": "build", "pid": 825083, "schema": "coach.resources.v1", "start_ticks": "1800280", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-future-layout2-phase-6a410c704381.service", "why": "reload future layout target /mnt/data/work/gonvex-open-cost/target"}
+          Finished with result: exit-code
+Main processes terminated with: code=exited, status=101/n/a
+               Service runtime: 15.162s
+             CPU time consumed: 29.354s
+                   Memory peak: 1.9G (swap: 0B)

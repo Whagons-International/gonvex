@@ -201,3 +201,12 @@ required-features = ["perf-fixture"]
 [[test]]
 name = "redeploy_cache"
 required-features = ["perf-fixture"]
+
+[[test]]
+name = "resume_validation"
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "reload_trace"
+harness = false
+required-features = ["perf-fixture"]

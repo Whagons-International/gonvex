@@ -15,6 +15,8 @@
 pub(crate) mod fanout;
 #[path = "replica_mask.rs"]
 mod mask;
+#[path = "replica_resume.rs"]
+pub(crate) mod resume;
 pub use fanout::stats as fanout_stats;
 pub use fanout::wake_skips;
 pub use fanout::{
@@ -296,6 +298,7 @@ struct CollectionRead {
     permit: crate::offload::SnapshotPermit,
     /// Snapshot-active gauge, held as long as the permit.
     _active: gonvex_profiler::GaugeGuard,
+    module_identity: Option<(u64, String)>,
 }
 
 // Small and normal application collections can carry their integrity map with
@@ -386,6 +389,16 @@ impl Runtime {
         self.inner.principal_cache.set_enabled(enabled);
     }
 
+    #[cfg(feature = "perf-fixture")]
+    pub fn resume_validation_stats(&self) -> (usize, usize) {
+        self.inner.resume_validation.stats()
+    }
+
+    #[cfg(feature = "perf-fixture")]
+    pub fn clear_resume_validation(&self) {
+        self.inner.resume_validation.clear();
+    }
+
     /// Counters and size of the shared snapshot cache.
     pub fn snapshot_cache_stats(&self) -> crate::snapshot_cache::CacheStats {
         self.inner.snapshot_cache.stats()
@@ -473,6 +486,45 @@ impl Runtime {
             &module.schema,
         );
         let project = module.project_id.clone();
+        let module_identity = (module.generation, module.artifact_hash.clone());
+        let validation_locator = (use_cache && !sum && self.inner.resume_validation.enabled())
+            .then(|| {
+                resume::key(
+                    session,
+                    &request,
+                    &module,
+                    &definition,
+                    &directive.visibility_scope,
+                    sum,
+                )
+            });
+        if use_cache
+            && visibility.version == Some(2)
+            && request.cursor.is_some()
+            && !request.full_integrity
+            && request.hashes.is_empty()
+            && request
+                .digest
+                .as_deref()
+                .is_some_and(|d| d.starts_with("xor1:") || sum)
+        {
+            if let Some(locator) = &validation_locator {
+                if let Some(opened) = Box::pin(resume::try_open(
+                    self,
+                    session,
+                    &request,
+                    &definition,
+                    &visibility,
+                    locator,
+                    &module_identity,
+                    &directive.visibility_scope,
+                ))
+                .await?
+                {
+                    return Ok(opened);
+                }
+            }
+        }
         drop(module);
         // An entry depends only on the arguments its equality filters read:
         // key it by those, so arguments the collection ignores (per-member
@@ -559,6 +611,7 @@ impl Runtime {
                     resolved,
                     permit,
                     _active,
+                    module_identity: _,
                 } = read;
                 transaction.commit().await?;
                 drop((permit, _active));
@@ -676,7 +729,10 @@ impl Runtime {
                         // row images cannot say what the client holds.
                         tracing::debug!(target: "gonvex_runtime::replica", path = %request.path, "resume reconciles: visibility inputs changed since the cursor");
                         read.transaction.commit().await?;
-                        crate::open_reasons::add(crate::open_reasons::Reason::NeedHashesResumeDependency, 1);
+                        crate::open_reasons::add(
+                            crate::open_reasons::Reason::NeedHashesResumeDependency,
+                            1,
+                        );
                         return Ok(need_hashes(&request));
                     }
                     // The current aggregate verifies the client's claim. It
@@ -749,7 +805,10 @@ impl Runtime {
                         || request.digest.as_deref() != Some(prior.digest().as_str())
                     {
                         tracing::debug!(target: "gonvex_runtime::replica", path = %request.path, "resume reconciles: client digest does not match the log");
-                        crate::open_reasons::add(crate::open_reasons::Reason::NeedHashesResumeDigest, 1);
+                        crate::open_reasons::add(
+                            crate::open_reasons::Reason::NeedHashesResumeDigest,
+                            1,
+                        );
                         return Ok(need_hashes(&request));
                     }
                     if !upserts.is_empty()
@@ -787,7 +846,10 @@ impl Runtime {
                         .await?;
                     read.transaction.commit().await?;
                     if request.digest.as_deref() != Some(hashes_digest(&hashes).as_str()) {
-                        crate::open_reasons::add(crate::open_reasons::Reason::NeedHashesResumeWholeSet, 1);
+                        crate::open_reasons::add(
+                            crate::open_reasons::Reason::NeedHashesResumeWholeSet,
+                            1,
+                        );
                         return Ok(need_hashes(&request));
                     }
                 }
@@ -849,6 +911,19 @@ impl Runtime {
             self.inner
                 .snapshot_cache
                 .observe_skipped(&cache_key, window.rows);
+        }
+        if use_cache && read.module_identity.as_ref() == Some(&module_identity) {
+            if let Some(locator) = validation_locator {
+                self.inner.resume_validation.remember(
+                    resume::epoch_key(&locator, &cursor.epoch),
+                    resume::Anchor {
+                        cursor: cursor.clone(),
+                        digest: digest.clone(),
+                        window: window.clone(),
+                        fingerprint: resume::fingerprint(&read.resolved).into(),
+                    },
+                );
+            }
         }
         messages.push(replica_ready(
             &request.id,
@@ -1216,6 +1291,9 @@ impl Runtime {
             resolved,
             permit,
             _active: active,
+            module_identity: module
+                .as_ref()
+                .map(|m| (m.generation, m.artifact_hash.clone())),
         })
     }
 
