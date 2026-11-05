@@ -52,7 +52,7 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
     input: entryFile, cwd: root, platform: "browser", tsconfig: false, transform: { inject: runtimeGlobals },
     // These declarations describe server entry points. Their definitions and
     // schema construction are unnecessary when only Reducer exports are used.
-    treeshake: { manualPureFunctions: ["action", "internalReducer", "query", "internalQuery", "liveQuery", "replicaCollection", "visibility", "cron", "tenantCron", "schema"] },
+    treeshake: { manualPureFunctions: ["action", "internalReducer", "query", "internalQuery", "liveQuery", "replicaCollection", "permissionPrimitives", "visibility", "cron", "tenantCron", "schema"] },
     resolve: { conditionNames: ["browser", "import", "default"], mainFields: ["browser", "module", "main"] },
   });
   let localCode: string;
@@ -71,7 +71,7 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
     });
     await writeFile(lazyEntry, `${runtimeWrapper}\nexport const localReducers = {${loaders.join(',')}};`);
     const lazyBundle = await rolldown({ input: lazyEntry, cwd: root, platform: 'browser', tsconfig: false, transform: { inject: runtimeGlobals },
-      treeshake: { manualPureFunctions: ['action', 'internalReducer', 'query', 'internalQuery', 'liveQuery', 'replicaCollection', 'visibility', 'cron', 'tenantCron', 'schema'] },
+      treeshake: { manualPureFunctions: ['action', 'internalReducer', 'query', 'internalQuery', 'liveQuery', 'replicaCollection', 'permissionPrimitives', 'visibility', 'cron', 'tenantCron', 'schema'] },
       resolve: { conditionNames: ['browser', 'import', 'default'], mainFields: ['browser', 'module', 'main'] },
     });
     let web;

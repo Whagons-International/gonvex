@@ -466,3 +466,164 @@ pub async fn seal(tx: &mut TenantTransaction, scope: i64) -> Result<(), Database
     }
     result
 }
+
+fn local_row_guards(scope: i64, table: &str) -> Result<Vec<(String, String)>, DatabaseError> {
+    if scope <= 0 || table.is_empty() || table.starts_with("_gonvex_") {
+        return Err(invalid("invalid local permission source table"));
+    }
+    let table = crate::rows::quote_identifier(table);
+    Ok(["INSERT", "UPDATE", "DELETE"].into_iter().map(|op| {
+        let name = format!("_gonvex_permission_binding_{scope}_{}", op.to_ascii_lowercase());
+        let sql = format!("CREATE TRIGGER {name} AFTER {op} ON {table} BEGIN UPDATE _gonvex_permission_scopes SET phase='building',change_serial=change_serial+1 WHERE scope_id={scope}; UPDATE _gonvex_permission_sources SET complete=0 WHERE scope_id={scope} AND kind='row'; END");
+        (name, sql)
+    }).collect())
+}
+
+/// Explicit OWN fixture setup, never provisioning or a runtime read migration.
+/// Every actual source-row write invalidates readiness/row-source receipts in
+/// the same transaction; all declared row sources must then be replaced/sealed.
+/// This conservative guard also covers projection/filter/order-only writes.
+pub async fn bind_local_rows(tx: &mut TenantTransaction, scope: i64) -> Result<(), DatabaseError> {
+    let result = async {
+        writer(tx).await?;
+        let table = state(tx.transaction(), scope).await?.table;
+        for (name, sql) in local_row_guards(scope, &table)? {
+            let actual: Option<String> = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+            )
+            .bind(name)
+            .fetch_optional(&mut **tx.transaction())
+            .await?;
+            if let Some(actual) = actual {
+                if actual != sql {
+                    return Err(invalid("local row guard changed"));
+                }
+            } else {
+                sqlx::raw_sql(&sql).execute(&mut **tx.transaction()).await?;
+            }
+        }
+        verify_local_rows(tx.transaction(), scope, &table).await
+    }
+    .await;
+    if result.is_err() {
+        tx.mark_failed("local source-row binding failed");
+    }
+    result
+}
+
+/// Verify exact guard SQL in the SAME snapshot as the served row/index read.
+/// Missing/replaced guards fail closed. This does not infer row atoms from an
+/// arbitrary application model: the explicit normalized writer still owns them.
+pub async fn verify_local_rows(
+    connection: &mut SqliteConnection,
+    scope: i64,
+    table: &str,
+) -> Result<(), DatabaseError> {
+    require_local(connection).await?;
+    for (name, expected) in local_row_guards(scope, table)? {
+        let actual: Option<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1 AND tbl_name=?2",
+        )
+        .bind(name)
+        .bind(table)
+        .fetch_optional(&mut *connection)
+        .await?;
+        if actual.as_deref() != Some(expected.as_str()) {
+            return Err(invalid(
+                "local permission source-row guard missing or changed",
+            ));
+        }
+    }
+    let sources: i64 = sqlx::query_scalar("SELECT count(*) FROM _gonvex_permission_sources s JOIN _gonvex_permission_scopes p ON p.scope_id=s.scope_id AND p.generation=s.generation WHERE s.scope_id=?1 AND s.kind='row'")
+        .bind(scope).fetch_one(connection).await?;
+    if sources == 0 {
+        return Err(invalid(
+            "local row binding needs a declared normalized row source",
+        ));
+    }
+    Ok(())
+}
+
+fn local_source_guards(
+    scope: i64,
+    table: &str,
+    source: &str,
+    kind: &str,
+) -> Result<Vec<(String, String)>, DatabaseError> {
+    if scope <= 0
+        || source.is_empty()
+        || table.is_empty()
+        || table.starts_with("_gonvex_")
+        || !matches!(kind, "grant" | "row" | "membership")
+    {
+        return Err(invalid("invalid local permission source guard"));
+    }
+    let table = crate::rows::quote_identifier(table);
+    let encoded = source
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let source = format!("'{}'", source.replace('\'', "''"));
+    Ok(["INSERT","UPDATE","DELETE"].into_iter().map(|op|{
+        let name=format!("_gonvex_permission_src_{scope}_{encoded}_{kind}_{}",op.to_ascii_lowercase());
+        let sql=format!("CREATE TRIGGER {name} AFTER {op} ON {table} BEGIN UPDATE _gonvex_permission_scopes SET phase='building',change_serial=change_serial+1 WHERE scope_id={scope}; UPDATE _gonvex_permission_sources SET complete=0 WHERE scope_id={scope} AND kind='{kind}' AND source_id={source}; END");
+        (name,sql)
+    }).collect())
+}
+/// Explicit local source-table binding, including authoritative identity/grant
+/// inputs. Whole source rebuild is required after ANY write, OLD or NEW key.
+pub async fn bind_local_source(
+    tx: &mut TenantTransaction,
+    scope: i64,
+    table: &str,
+    source: &str,
+    kind: &str,
+) -> Result<(), DatabaseError> {
+    let result = async {
+        writer(tx).await?;
+        for (name, sql) in local_source_guards(scope, table, source, kind)? {
+            let actual: Option<String> = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+            )
+            .bind(&name)
+            .fetch_optional(&mut **tx.transaction())
+            .await?;
+            if let Some(actual) = actual {
+                if actual != sql {
+                    return Err(invalid("local source guard changed"));
+                }
+            } else {
+                sqlx::raw_sql(&sql).execute(&mut **tx.transaction()).await?;
+            }
+        }
+        verify_local_source(tx.transaction(), scope, table, source, kind).await
+    }
+    .await;
+    if result.is_err() {
+        tx.mark_failed("local source guard binding failed");
+    }
+    result
+}
+pub async fn verify_local_source(
+    connection: &mut SqliteConnection,
+    scope: i64,
+    table: &str,
+    source: &str,
+    kind: &str,
+) -> Result<(), DatabaseError> {
+    require_local(connection).await?;
+    for (name, expected) in local_source_guards(scope, table, source, kind)? {
+        let actual: Option<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1 AND tbl_name=?2",
+        )
+        .bind(name)
+        .bind(table)
+        .fetch_optional(&mut *connection)
+        .await?;
+        if actual.as_deref() != Some(expected.as_str()) {
+            return Err(invalid("local source guard missing or changed"));
+        }
+    }
+    Ok(())
+}

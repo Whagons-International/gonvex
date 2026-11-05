@@ -276,8 +276,7 @@ impl Drop for Environment {
 
 #[tokio::test]
 async fn normalized_sql_diff_preserves_overlap_negative_flips_and_rollback() {
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = ENV.lock().unwrap();
+    let _guard = super::LOCAL_TEST_ENV.lock().unwrap();
     let _environment = Environment(std::env::var_os("GONVEX_PERMISSION_PRIMITIVES_LOCAL"));
     std::env::set_var("GONVEX_PERMISSION_PRIMITIVES_LOCAL", "1");
     std::fs::create_dir_all(indexes::LOCAL_FIXTURE_ROOT).unwrap();
@@ -363,6 +362,7 @@ async fn normalized_sql_diff_preserves_overlap_negative_flips_and_rollback() {
     let binding = NormalizedBinding {
         scope_id,
         required_generation: 1,
+        authority: Vec::new(),
         scope,
         universe: "all-tasks".into(),
         expression,

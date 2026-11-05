@@ -1,3 +1,6 @@
+import type { PermissionPrimitiveManifest } from "./permission-primitives.js";
+export type { PermissionPrimitiveManifest } from "./permission-primitives.js";
+
 // Manifest shapes for the language-neutral TypeScript module pipeline.
 
 export type FunctionKind = "query" | "reducer" | "action";
@@ -285,6 +288,7 @@ export type ModuleArtifact = {
   crons?: ModuleCron[];
   invitationAcceptanceReducer?: string;
   permissionGrants?: PermissionGrantSource;
+  permissionPrimitives?: PermissionPrimitiveManifest;
 };
 
 /** Backs `ctx.permissions`: rows of `table` grant `member` a `permission` in `scope`. */

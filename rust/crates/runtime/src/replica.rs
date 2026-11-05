@@ -15,6 +15,9 @@
 pub(crate) mod fanout;
 #[path = "replica_mask.rs"]
 mod mask;
+#[cfg(feature = "permission-primitives")]
+#[path = "replica_permission.rs"]
+pub(crate) mod permission;
 pub use fanout::stats as fanout_stats;
 pub use fanout::wake_skips;
 pub use fanout::{

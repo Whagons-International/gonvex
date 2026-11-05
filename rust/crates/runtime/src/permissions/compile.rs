@@ -4,7 +4,7 @@
 use super::model::{Atom, InvalidPrimitive};
 
 #[derive(Clone, Debug)]
-pub(super) enum Expr {
+pub(crate) enum Expr {
     Deny,
     SlotAny(String),
     HasAtom(Atom),
@@ -20,12 +20,12 @@ pub(super) enum Expr {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum Binding {
+pub(crate) enum Binding {
     Text(String),
     Blob(Vec<u8>),
 }
 
-pub(super) struct CompiledSet {
+pub(crate) struct CompiledSet {
     pub sql: String,
     /// Parameters 1..=4 are scope_id, table_id, index generation, admitted
     /// exact-set ID. Additional parameters are opaque slot/atom values.
@@ -35,7 +35,7 @@ pub(super) struct CompiledSet {
 /// `universe` names the finite allowed row-key relation supplied by the trusted
 /// policy binder. Ordering, row projection and keyset pagination must be added
 /// AFTER this set's deduplication by the eventual replica query adapter.
-pub(super) fn compile(universe: &str, expression: &Expr) -> Result<CompiledSet, InvalidPrimitive> {
+pub(crate) fn compile(universe: &str, expression: &Expr) -> Result<CompiledSet, InvalidPrimitive> {
     if universe.is_empty() {
         return Err(InvalidPrimitive::EmptyIdentity);
     }
@@ -122,7 +122,7 @@ pub(super) fn compile(universe: &str, expression: &Expr) -> Result<CompiledSet, 
 /// Bind a policy version to the exact compiled normalized expression/universe,
 /// rather than trusting a mutable role label or caller-chosen version string.
 /// Compiler changes conservatively require a new binding/backfill identity.
-pub(super) fn policy_version(
+pub(crate) fn policy_version(
     universe: &str,
     expression: &Expr,
 ) -> Result<String, InvalidPrimitive> {
@@ -146,6 +146,31 @@ pub(super) fn policy_version(
             }
         }
     }
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Full source-bound authority is separate from the mathematical set SQL.
+/// Empty authority preserves only the old private normalized-fixture format.
+pub(crate) fn policy_version_with_authority(
+    universe: &str,
+    expression: &Expr,
+    authority: &[u8],
+) -> Result<String, InvalidPrimitive> {
+    let policy = policy_version(universe, expression)?;
+    if authority.is_empty() {
+        return Ok(policy);
+    }
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"gonvex-source-policy-v1");
+    hash.update((policy.len() as u64).to_be_bytes());
+    hash.update(policy.as_bytes());
+    hash.update((authority.len() as u64).to_be_bytes());
+    hash.update(authority);
     Ok(hash
         .finalize()
         .iter()

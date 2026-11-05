@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 /// Trusted routing identity, never supplied by a client. Epoch alone does not
 /// identify a database: independently created/copied files may share an epoch.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct PermissionScope {
+pub(crate) struct PermissionScope {
     pub project: String,
     pub database_instance: String,
     pub tenant: String,
@@ -55,16 +55,19 @@ impl PermissionScope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Atom {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Atom {
     pub namespace: String,
+    /// TEXT scalar resource: blank is an exact value, distinct from NULL.
+    /// Member/row identities are validated separately at their bindings.
     pub resource: String,
     /// User-specific atoms remain distinct even when the shared roles agree.
     pub principal: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum InvalidPrimitive {
+pub(crate) enum InvalidPrimitive {
     EmptyIdentity,
     EmptyConjunction,
     WrongUniverse,
@@ -79,10 +82,7 @@ fn field(out: &mut Vec<u8>, value: &[u8]) {
 
 impl Atom {
     pub fn canonical(&self) -> Result<Vec<u8>, InvalidPrimitive> {
-        if self.namespace.is_empty()
-            || self.resource.is_empty()
-            || self.principal.as_ref().is_some_and(String::is_empty)
-        {
+        if self.namespace.is_empty() || self.principal.as_ref().is_some_and(String::is_empty) {
             return Err(InvalidPrimitive::EmptyIdentity);
         }
         let mut out = Vec::new();
@@ -100,7 +100,7 @@ impl Atom {
 /// It is not a role hash, nor a hash of currently visible row IDs. Revision
 /// belongs in the snapshot/delivery key, not this stable permission-set key.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ExactPermissionSet {
+pub(crate) struct ExactPermissionSet {
     pub canonical: Vec<u8>,
     pub digest: [u8; 32],
 }
@@ -137,7 +137,7 @@ impl ExactPermissionSet {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum IndexPhase {
+pub(crate) enum IndexPhase {
     Backfilling,
     Ready,
     Failed,
@@ -146,7 +146,7 @@ pub(super) enum IndexPhase {
 /// Read from the index metadata inside the SAME SQLite snapshot as admission
 /// and row selection. This value alone is not an executable read capability.
 #[derive(Clone, Debug)]
-pub(super) struct IndexWatermark {
+pub(crate) struct IndexWatermark {
     pub scope: PermissionScope,
     pub generation: u64,
     pub phase: IndexPhase,
@@ -250,5 +250,29 @@ mod tests {
             watermark.check(&scope, 1, 9),
             Err(InvalidPrimitive::IndexNotReady)
         );
+    }
+}
+
+#[cfg(test)]
+mod scalar_tests {
+    use super::*;
+    #[test]
+    fn blank_resource_is_exact_and_not_a_missing_identity() {
+        let blank = Atom {
+            namespace: "owner".into(),
+            resource: String::new(),
+            principal: None,
+        };
+        let space = Atom {
+            resource: " ".into(),
+            ..blank.clone()
+        };
+        assert_ne!(blank.canonical().unwrap(), space.canonical().unwrap());
+        assert!(Atom {
+            namespace: String::new(),
+            ..blank
+        }
+        .canonical()
+        .is_err());
     }
 }

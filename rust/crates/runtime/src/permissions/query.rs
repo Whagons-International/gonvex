@@ -9,7 +9,7 @@ use super::{
 };
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum Error {
+pub(crate) enum Error {
     #[error("unsupported or unready permission primitive: {0}")]
     Rejected(&'static str),
     #[error(transparent)]
@@ -19,16 +19,19 @@ pub(super) enum Error {
 }
 
 #[derive(Clone)]
-pub(super) struct NormalizedBinding {
+pub(crate) struct NormalizedBinding {
     pub scope_id: i64,
     pub required_generation: i64,
     pub scope: PermissionScope,
     pub universe: String,
     pub expression: Expr,
+    /// Empty only for explicit legacy normalized test fixtures. Source-bound
+    /// programs pin complete signed manifest, module and source schema authority.
+    pub authority: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ReadIdentity {
+pub(crate) struct ReadIdentity {
     pub exact: ExactPermissionSet,
     pub generation: i64,
     pub change_serial: i64,
@@ -36,7 +39,7 @@ pub(super) struct ReadIdentity {
     pub principal: String,
 }
 
-pub(super) struct Prepared {
+pub(crate) struct Prepared {
     pub compiled: CompiledSet,
     pub identity: ReadIdentity,
     pub scope_id: i64,
@@ -45,11 +48,23 @@ pub(super) struct Prepared {
 
 /// Must be called inside the SAME transaction used to execute `compiled`.
 /// Allowing pending is confined to the writer's post-batch differential read.
-pub(super) async fn prepare(
+pub(crate) async fn prepare(
     tx: &mut TenantTransaction,
     session: &TenantSession,
     binding: &NormalizedBinding,
     writer_pending: bool,
+) -> Result<Prepared, Error> {
+    prepare_projection(tx, session, binding, writer_pending, "keys-binary-v1").await
+}
+
+/// Caller must derive `projection` from the validated collection AND physical
+/// source schema in this transaction. Never accepts a client projection label.
+pub(crate) async fn prepare_projection(
+    tx: &mut TenantTransaction,
+    session: &TenantSession,
+    binding: &NormalizedBinding,
+    writer_pending: bool,
+    projection: &str,
 ) -> Result<Prepared, Error> {
     if session.is_anonymous() || session.developer_session.is_some() {
         return Err(Error::Rejected(
@@ -65,13 +80,15 @@ pub(super) async fn prepare(
             "scope or supported equality semantics mismatch",
         ));
     }
-    let policy = compile::policy_version(&binding.universe, &binding.expression)
-        .map_err(|_| Error::Rejected("unsupported normalized policy"))?;
-    if binding.scope.policy_version != policy
-        || binding.scope.projection_version != "keys-binary-v1"
-    {
+    let policy = compile::policy_version_with_authority(
+        &binding.universe,
+        &binding.expression,
+        &binding.authority,
+    )
+    .map_err(|_| Error::Rejected("unsupported normalized policy"))?;
+    if binding.scope.policy_version != policy || binding.scope.projection_version != projection {
         return Err(Error::Rejected(
-            "policy identity or key-only projection binding mismatch",
+            "policy identity or validated projection binding mismatch",
         ));
     }
     let actual = indexes::require_local(tx.transaction()).await?;
@@ -115,7 +132,7 @@ pub(super) async fn prepare(
     // Identity comes from the authoritative membership row in this snapshot,
     // never a client argument, role label or cached session Member value.
     let principal: String =
-        sqlx::query_scalar("SELECT id FROM members WHERE account_id=?1 AND status='active'")
+        sqlx::query_scalar("SELECT id FROM members WHERE account_id=?1 AND status='active' AND typeof(id)='text' AND id<>'' AND instr(id,char(0))=0")
             .bind(&session.identity.account.id)
             .fetch_optional(&mut **tx.transaction())
             .await?
@@ -140,7 +157,7 @@ pub(super) async fn prepare(
     })
 }
 
-pub(super) fn bind<'q>(
+pub(crate) fn bind<'q>(
     prepared: &'q Prepared,
     sql: &'q str,
 ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
@@ -161,7 +178,7 @@ pub(super) fn bind<'q>(
 /// Returned keys are binary-ordered/deduplicated normalized relation IDs only.
 /// Collection projection, arbitrary value ordering, windows and live delivery
 /// are deliberately not claimed by this initial internal read path.
-pub(super) async fn select_keys(
+pub(crate) async fn select_keys(
     tx: &mut TenantTransaction,
     session: &TenantSession,
     binding: &NormalizedBinding,

@@ -5,12 +5,16 @@
 //! application bindings and ordered live delivery remain gated. V2 is default.
 #![allow(dead_code)]
 
-mod compile;
+pub(crate) mod compile;
 mod delivery;
 mod diff;
-mod model;
-mod query;
+pub(crate) mod model;
+pub(crate) mod query;
 mod roles;
+pub(crate) mod source;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) static LOCAL_TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
