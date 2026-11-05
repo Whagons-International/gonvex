@@ -723,6 +723,11 @@ export class GonvexClient {
   private hasAuthoritativeReplicaScope = false;
   private replicaDefinitionEpoch?: string;
   private replicaReady: Promise<void> = Promise.resolve();
+  private hydratedReplicaReady?: Promise<void>;
+  private readonly replicaOpenHydrations = new Map<ReplicaSubscription, {
+    current: () => boolean; task: Promise<void>;
+  }>();
+  private readonly replicaOpenOwners = new WeakMap<ReplicaSubscription, () => boolean>();
   private localSessionRestore: Promise<void> = Promise.resolve();
   private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
   private readonly localSessionHandlers = new Set<() => void>();
@@ -2507,6 +2512,7 @@ export class GonvexClient {
       this.replicaOpenFlushTimer = undefined;
     }
     this.pendingReplicaOpens.clear();
+    this.replicaOpenHydrations.clear();
     if (this.querySubscribeFlushTimer) {
       clearTimeout(this.querySubscribeFlushTimer);
       this.querySubscribeFlushTimer = undefined;
@@ -3923,13 +3929,44 @@ export class GonvexClient {
     // server rejection that is nevertheless transient and must not become a
     // fatal React snapshot error. The directive handlers resume every retained
     // subscription once the scope is active.
-    if (!this.ownsReplicaSubscription(subscription) || this.authInFlight || !this.hasAuthoritativeReplicaScope
+    if (!this.ownsReplicaSubscription(subscription) || !this.isWebSocketConnected
+      || this.authInFlight || !this.hasAuthoritativeReplicaScope
       || subscription.listeners.size === 0 || subscription.opening) return;
+    const ready = this.replicaReady;
+    const owner = this.capturePublicationOwner();
+    const id = subscription.id, verification = subscription.verificationGeneration;
+    const authFrame = this.activeAuthFrameId, pendingAuth = this.latestAuthFrameId;
+    const current = () => owner() && this.replicaReady === ready
+      && this.activeAuthFrameId === authFrame && this.latestAuthFrameId === pendingAuth
+      && this.ownsReplicaSubscription(subscription) && subscription.id === id
+      && subscription.verificationGeneration === verification;
+    if (this.hydratedReplicaReady !== ready) {
+      const previous = this.replicaOpenHydrations.get(subscription);
+      if (previous?.current()) return;
+      const pending = { current, task: Promise.resolve() };
+      this.replicaOpenHydrations.set(subscription, pending);
+      // Only collection opens wait here. In particular, control RPCs and
+      // outbox journal admission must progress while durable rows hydrate.
+      pending.task = ready.then(() => {
+        if (this.replicaOpenHydrations.get(subscription) !== pending) return;
+        this.replicaOpenHydrations.delete(subscription);
+        if (current()) this.sendReplicaOpen(subscription);
+      }, () => {
+        if (this.replicaOpenHydrations.get(subscription) === pending) {
+          this.replicaOpenHydrations.delete(subscription);
+        }
+        // The scope activation owner reports failure; never send a cold open
+        // on behalf of a failed or superseded durable activation.
+      }).catch(error => {
+        if (current()) this.rejectReplicaDirective(error);
+      });
+      return;
+    }
     const requestScope = this.replicaScope;
     subscription.scope = requestScope;
     subscription.opening = true;
     subscription.socketGeneration = this.socketGeneration;
-    const open = this.replicaOpenRequest(subscription);
+    this.replicaOpenOwners.set(subscription, current);
     if (this.serverCapabilities.replicaBatch === 1) {
       this.pendingReplicaOpens.add(subscription);
       if (!this.replicaOpenFlushTimer) {
@@ -3937,7 +3974,7 @@ export class GonvexClient {
       }
       return;
     }
-    this.send({ type: "replica.open", ...open });
+    this.send({ type: "replica.open", ...this.replicaOpenRequest(subscription) });
   }
 
   private replicaOpenRequest(subscription: ReplicaSubscription): ReplicaOpenRequest {
@@ -3972,22 +4009,25 @@ export class GonvexClient {
     this.replicaOpenFlushTimer = undefined;
     const subscriptions = Array.from(this.pendingReplicaOpens);
     this.pendingReplicaOpens.clear();
-    if (this.authInFlight || !this.hasAuthoritativeReplicaScope) {
-      for (const subscription of subscriptions) {
+    const canFlush = (subscription: ReplicaSubscription) =>
+      this.replicaOpenOwners.get(subscription)?.() === true
+      && this.isWebSocketConnected && !this.authInFlight && this.hasAuthoritativeReplicaScope
+      && this.hydratedReplicaReady === this.replicaReady
+      && subscription.scope === this.replicaScope
+      && subscription.socketGeneration === this.socketGeneration
+      && subscription.opening && subscription.listeners.size > 0;
+    for (const subscription of subscriptions) {
+      if (!canFlush(subscription)) {
         subscription.opening = false;
         subscription.socketGeneration = undefined;
       }
-      return;
     }
-    const opens = subscriptions
-      .filter((subscription) => (
-        subscription.opening
-        && subscription.listeners.size > 0
-        && this.replicaSubscriptions.get(subscription.key) === subscription
-      ))
-      .map((subscription) => this.replicaOpenRequest(subscription));
-    for (let offset = 0; offset < opens.length; offset += maxReplicaBatchOpens) {
-      this.send({ type: "replica.openMany", opens: opens.slice(offset, offset + maxReplicaBatchOpens) });
+    for (let offset = 0; offset < subscriptions.length; offset += maxReplicaBatchOpens) {
+      // Recheck per frame too: a transport callback can retire the owner
+      // synchronously while the previous batch is sent.
+      const opens = subscriptions.slice(offset, offset + maxReplicaBatchOpens)
+        .filter(canFlush).map(subscription => this.replicaOpenRequest(subscription));
+      if (opens.length) this.send({ type: "replica.openMany", opens });
     }
   }
 
@@ -4002,6 +4042,7 @@ export class GonvexClient {
       latest.unsubscribeTimer = undefined;
       this.clearReplicaRetry(latest);
       this.pendingReplicaOpens.delete(latest);
+      this.replicaOpenHydrations.delete(latest);
       latest.verificationGeneration = Symbol();
       this.replicaSubscriptions.delete(key);
       this.discardSnapshotPages(latest);
@@ -4083,8 +4124,13 @@ export class GonvexClient {
   // await replicaReady still see the rejection; the stored promise itself must
   // not surface as an unhandled rejection that kills Node processes.
   private setReplicaReady(ready: Promise<void>) {
+    if (this.replicaReady === ready) return;
     this.replicaReady = ready;
-    ready.catch(() => undefined);
+    this.hydratedReplicaReady = undefined;
+    this.replicaOpenHydrations.clear();
+    void ready.then(() => {
+      if (this.replicaReady === ready) this.hydratedReplicaReady = ready;
+    }, () => undefined);
   }
 
   // Outbox restore awaits replicaReady, so it rejects the same way.
