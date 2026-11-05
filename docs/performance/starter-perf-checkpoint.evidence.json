@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "branch": "t3/sqlite-starter-perf",
+  "sourceCommit": "94bd1c154afef94fd4939871fa765010f9defea1",
+  "base": "3a984045b48fbca04f62ba1e2ed8fec2ed54139b",
+  "implementation": {
+    "diagnostics": "6fab66646280fe73edd7dae7f680fbbeac97b14c",
+    "boundedSqlBatches": "b42414c0",
+    "A": "3c78a683",
+    "C": "c5ca685f",
+    "browserRunnerHook": "b7d14a66420c2890c8c1e5cfb2b71b5f3b94533c",
+    "futureBounds": "bc526fbd2a8aa5e808348f25e1caac3a15606655",
+    "fixedCodecWorkspace": "42b872cac7103b78840ee6225a93d8a278765a48",
+    "B": "NOT_IMPLEMENTED_NO_BROAD_SHAPE_VALIDATION_PROOF; all20fullscans retained"
+  },
+  "testCounts": {
+    "runtimeOn": {
+      "pass": 435,
+      "fail": 0,
+      "ignored": 11
+    },
+    "runtimeOff": {
+      "pass": 399,
+      "fail": 0,
+      "ignored": 8
+    },
+    "focusedSdk": {
+      "pass": 60,
+      "fail": 0
+    },
+    "liveRuntimeNode": {
+      "pass": 1,
+      "modes": [
+        "old-client",
+        "bootstrap",
+        "old-server",
+        "revoke-before-piece"
+      ],
+      "retentionAndNormalXorResume": true
+    }
+  },
+  "cycles": {
+    "base": "3a984045b48fbca04f62ba1e2ed8fec2ed54139b",
+    "before": [
+      "packages/local-runtime/src/portable.ts -> packages/local-runtime/src/read-view.ts",
+      "packages/local-runtime/src/read-view.ts -> packages/local-runtime/src/portable.ts"
+    ],
+    "after": [
+      "packages/local-runtime/src/portable.ts -> packages/local-runtime/src/read-view.ts",
+      "packages/local-runtime/src/read-view.ts -> packages/local-runtime/src/portable.ts"
+    ],
+    "newCyclicRuntimeEdges": [],
+    "method": "TypeScript AST import/export/dynamic-import graph over JS/TS, type-only edges excluded"
+  },
+  "future": {
+    "beforeBytes": 32128,
+    "afterBytes": 25600,
+    "unchangedOptimizedLimitBytes": 28672,
+    "diagnosis": "/mnt/data/work/gonvex-starter-perf/websocket-layout.txt",
+    "compilerTypeDump": "/mnt/data/work/gonvex-starter-perf/logs/type-layout.log",
+    "ineffectiveColdBoxingDiscarded": true
+  },
+  "preserved": {
+    "freshSqlOfferCountAndDigestBeforeAnyOfferOrPayload": true,
+    "everyPieceFreshNativePrincipalAuthoritySerialWriterOrderedEnqueue": true,
+    "finalNormalV2SqlAndServerXorAnchor": true,
+    "forgedWrongKeyAndSameAtomsRowScopeRevokeAssertionsUnchanged": true,
+    "rawHashGetAuthority": false,
+    "sourceShapeScansMemoized": false,
+    "fullTableRamCopyAdded": false
+  },
+  "defaultOff": true,
+  "fullWhagonsQualified": false,
+  "fullProviderIntegrated": false,
+  "shippingOverlayComposed": false,
+  "oneThousandUsersQualified": false,
+  "browserOriginalCommit": "269dfbab7d7cd726fc879572c36ebe64b2be67d2",
+  "browserConsumedCommit": "94bd1c15",
+  "browserEngineIndexedDbQualified": true,
+  "browserLocalIndexedDbQualified": false,
+  "nativeBrowserPerformanceMeasured": false,
+  "results": "/mnt/data/work/gonvex-starter-perf/results.json",
+  "runtimeSha256": "bd490fdcdc6ce3bd8c9bdb5f859e4b72158ee6adcd4328fdebeb76ee02a858de",
+  "runtimeRustTree": "03c5d39a9ec2f8226c2cdfc9e9bffed72322d227",
+  "clientPackageVersion": "0.5.2-starter-perf.0",
+  "clientPackageSha256": "74c10308b7c19402dabfff15aef1d1cbc708221124998439928ec93a481de415",
+  "runtimeAllRequiredExit0": true,
+  "browserStageCodecHashes": {
+    "starter-bootstrap.js": "15fee03012dd7be6fb8a06b7d6288c89c6850f7e0d18e5d12714834d26aaab2d",
+    "starter-browser.js": "bb51b29f1e0c8deadcfc6ab9a52aa959a8dca90a8302a95c718ece98995214fb"
+  },
+  "cheapStarterGoalAchieved": false
+}
