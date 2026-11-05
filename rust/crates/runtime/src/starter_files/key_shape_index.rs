@@ -711,7 +711,48 @@ mod tests {
                     .unwrap();
             }
         }
-        let output = serde_json::json!({"build":build,"emptyIndex":empty,"table":before_table,"plans":plans,"lookupPairs":pairs,"writes":writes,"qualification":"9003 rows/400-byte body; original full covering-PK predicate forced for matched paired control after adding native partial index; no expression rewrite. 20 semantic checks per pair, native trace counters actual. Bulk 9003-row writes alternate with/without native partial index under rollback savepoints, no permission/capture triggers in this isolated kernel. dbstat is allocated logical SQLite page bytes (includes uncommitted write pages), not fsync/WAL write amplification. Module benchmark separately includes all authority/normal-v2/SDK work."});
+        // One invalid BLOB sorts after every valid TEXT key in the old PK
+        // control: measure the negative (reject) result, not just empty index.
+        sqlx::query("INSERT INTO tasks VALUES(X'00','invalid','outside')")
+            .execute(&mut **tx.transaction())
+            .await
+            .unwrap();
+        let invalid_size = stats(&mut tx, &proof.name).await;
+        let old_env = std::env::var_os("STARTER_SCHEMA_PROFILE");
+        std::env::set_var("STARTER_SCHEMA_PROFILE", "1");
+        let mut invalid_pairs = Vec::new();
+        for pair in 0..12 {
+            for indexed in if pair % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                schema_profile::reset();
+                let probe = schema_profile::Probe::install(&mut tx)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let start = std::time::Instant::now();
+                let c = cpu();
+                for _ in 0..20 {
+                    let _leaf = probe.leaf(3);
+                    let v: i64 = sqlx::query_scalar(if indexed { &new } else { &old })
+                        .fetch_one(&mut **tx.transaction())
+                        .await
+                        .unwrap();
+                    assert_eq!(v, 1);
+                }
+                invalid_pairs.push(serde_json::json!({"pair":pair,"indexed":indexed,"cpuNs":cpu()-c,"wallNs":start.elapsed().as_nanos(),"profile":schema_profile::snapshot()}));
+                drop(probe);
+            }
+        }
+        if let Some(v) = old_env {
+            std::env::set_var("STARTER_SCHEMA_PROFILE", v)
+        } else {
+            std::env::remove_var("STARTER_SCHEMA_PROFILE")
+        };
+        schema_profile::reset();
+        let output = serde_json::json!({"build":build,"emptyIndex":empty,"table":before_table,"plans":plans,"lookupPairs":pairs,"invalidLookupPairs":invalid_pairs,"invalidIndex":invalid_size,"invalidPhysicalRows":9004,"writes":writes,"qualification":"9003 rows/400-byte body; original full covering-PK predicate forced for matched paired control after adding native partial index; no expression rewrite. 20 semantic checks per pair, native trace counters actual. Bulk 9003-row writes alternate with/without native partial index under rollback savepoints, no permission/capture triggers in this isolated kernel. dbstat is allocated logical SQLite page bytes (includes uncommitted write pages), not fsync/WAL write amplification. Module benchmark separately includes all authority/normal-v2/SDK work."});
         std::fs::write(
             std::env::var("STARTER_KEY_INDEX_KERNEL").unwrap(),
             serde_json::to_vec_pretty(&output).unwrap(),
