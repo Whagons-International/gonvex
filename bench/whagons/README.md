@@ -316,17 +316,21 @@ Second lab on one host: `LOAD_PREFIX` and `LOAD_COMPOSE_PROJECT` rename the
 containers, volume, network and compose project; `LOAD_COMPOSE_OVERRIDE` adds a
 compose file (for example host library mounts for host-built binaries).
 
-Revised gate6 baseline (runtime commit `7d01af5b`, harness committed separately):
-`LOAD_USERS=1000 LOAD_RAMP_SECONDS=900 LOAD_SECONDS=300 LOAD_MIX=production
+Corrected gate6 baseline (Gabriel, superseding the 15-minute ramp; runtime commit `7d01af5b`, harness committed separately):
+`LOAD_USERS=1000 LOAD_RAMP_SECONDS=90 LOAD_SECONDS=300 LOAD_MIX=production
 LOAD_APP_OPENS=app-opens-7d97617cf.json LOAD_RELOADS_PER_USER_HOUR=1`.
 The reload rate replaces the legacy 30%-in-10-seconds reconnect stress wave.
 Each user has a uniformly phased 1-hour reload period, starting after login:
 about 0.278 page loads/s across 1,000 users. Reloads reopen the full captured
 collection set cold (conservative relative to the browser's warm cursors).
-Gate the common steady plateau separately from the 15-minute ramp, retain all
+Gate the common steady plateau separately from the 90-second sign-in burst, retain all
 ramp errors/latencies, and require every user's collection set current at teardown.
 Three quiet runs, a plateau crossing :00, and oracle/leak checks remain required.
 A runtime restart with simultaneous reconnects is a separate, non-gating stress case.
+A 900-second sign-in ramp is optional supplemental evidence only; it cannot qualify
+the release. The gating sign-in burst stays at 1,000 users in 90 seconds.
+The sign-in optimization objective is 60–80 CPU-ms/user (prior first visit about
+1.5 CPU-s/user); queue bounds alone cannot meet it.
 
 Thin replica errors follow the SDK's per-subscription exponential retry (250 ms,
 doubling to 5 seconds), with 80–100% jitter to disperse failures. There is at most

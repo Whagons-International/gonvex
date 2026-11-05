@@ -1437,3 +1437,17 @@ steady heartbeat histogram). Qualification now exempts that empty kind **only
 when presenceV2Users equals targetUsers**. Presence delivery, reducers, saves,
 task delivery, error rate and connections remain gated. Mixed/legacy clients
 still require heartbeat samples. Focused tests: **29/29 Node**, **5/5 Python**.
+
+
+### Gabriel correction: gate remains a 90-second burst
+
+Supersedes Step 17's initial 900-second ramp decision before any measurement
+started: **1,000 sign-ins / 90 seconds**, real app collection set, production mix,
+1 vCPU / 2 GiB; 300-second steady plateau with one uniformly phased
+reload/user/hour. Keep SDK retries, collection readiness, separate ramp/plateau
+results and negotiated presence-v2 qualification. Runtime baseline stays
+**7d01af5b**, exact binary SHA-256 unchanged. A 900-second ramp is supplemental,
+NON-GATING only. Sign-in objective: 60–80 CPU-ms/user vs prior ~1.5 CPU-s/user.
+One retry-enabled burst baseline is useful; do not repeat already-known collapse
+without new evidence. Final qualification still requires three quiet runs plus
+:00 and oracle/leak checks on the eventual candidate. No release freeze yet.
