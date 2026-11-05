@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { rolldown, type OutputChunk, type RolldownPlugin } from "rolldown";
 import { parseAst } from "rolldown/parseAst";
 import { projectLocalSchema } from "./local-bindings.js";
+import { compilePermissionPrimitives, type PermissionPrimitiveManifest } from "./permission-primitives.js";
 
 import type {
   ActionCapabilities,
@@ -84,6 +85,7 @@ const visibilityDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-
 const visibilityRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*visibility\s*\(/gi;
 const cronDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=;]+)?=\s*(cron|tenantCron)\s*\(/gi;
 const cronRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*(cron|tenantCron)\s*\(/gi;
+const permissionPrimitivePattern = /export\s+(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*(?::[^=;]+)?=\s*permissionPrimitives\s*\(/g;
 const permissionGrantsPattern = /\bpermissionGrants\s*\(/g;
 const invitationAcceptancePattern = /\binvitationAcceptance\s*\(\s*(["'`])([^"'`]+)\1\s*\)/g;
 const identifierPattern = /[A-Za-z_$][A-Za-z0-9_$]*/y;
@@ -134,6 +136,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   const crons: ModuleCron[] = [];
   let invitationAcceptanceReducer = "";
   let grantSource: PermissionGrantSource | undefined;
+  let primitiveSource: PermissionPrimitiveManifest | undefined;
   for (const file of sources) {
     const contents = await readFile(file);
     files[projectPath(options.root, file)] = contents.toString("base64");
@@ -147,6 +150,10 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     for (const plan of parseVisibilityDefinitions(contents.toString("utf8"))) {
       if (visibilityPlans[plan.table]) throw new Error(`duplicate visibility plan for table ${JSON.stringify(plan.table)}`);
       visibilityPlans[plan.table] = plan;
+    }
+    for (const declared of parsePermissionPrimitives(contents.toString("utf8"))) {
+      if (primitiveSource) throw new Error("module declares more than one permissionPrimitives program");
+      primitiveSource = declared;
     }
     crons.push(...parseCronDefinitions(contents.toString("utf8")));
     for (const declared of parsePermissionGrants(contents.toString("utf8"))) {
@@ -222,6 +229,13 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     if (!Number.isSafeInteger(contract.version) || contract.version < 1 || (contract.offlineMaxAgeMs !== null && (!Number.isSafeInteger(contract.offlineMaxAgeMs) || contract.offlineMaxAgeMs <= 0))) throw new Error("Invalid client-contract.json");
     files["client-contract.json"] = bytes.toString("base64");
   }
+  if (primitiveSource) {
+    const declaration = primitiveSource.declaration as { collections: Record<string, { table: string; key: string }> };
+    for (const [path, collection] of Object.entries(declaration.collections)) {
+      const target = functions[path];
+      if (!target || target.kind !== "query" || target.delivery !== "replica" || target.replica?.table !== collection.table || target.replica?.key !== collection.key) throw new Error(`permissionPrimitives: ${path} must bind its real replica table/key`);
+    }
+  }
   const sortedFiles = sortedRecord(files);
   const sortedFunctions = sortedRecord(functions);
   const reducerBundle = options.split
@@ -246,6 +260,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       reducerBundle,
       invitationAcceptanceReducer,
       permissionGrants: grantSource,
+      permissionPrimitives: primitiveSource,
     }),
     entrypoint: entrypoint.projectPath,
     functions: sortedFunctions,
@@ -256,7 +271,22 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     ...(sortedCrons.length > 0 ? { crons: sortedCrons } : {}),
     ...(invitationAcceptanceReducer ? { invitationAcceptanceReducer } : {}),
     ...(grantSource ? { permissionGrants: grantSource } : {}),
+    ...(primitiveSource ? { permissionPrimitives: primitiveSource } : {}),
   };
+}
+
+function parsePermissionPrimitives(source: string): PermissionPrimitiveManifest[] {
+  const programs: PermissionPrimitiveManifest[] = [];
+  permissionPrimitivePattern.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = permissionPrimitivePattern.exec(source)) !== null) {
+    const openParen = match.index + match[0].length - 1;
+    const call = readCallArguments(source, openParen);
+    permissionPrimitivePattern.lastIndex = Math.max(call.end, openParen + 1);
+    if (call.args.length !== 1 || call.args[0]?.value === undefined) throw new Error("permissionPrimitives requires one literal source program");
+    programs.push(compilePermissionPrimitives(call.args[0].value));
+  }
+  return programs;
 }
 
 const sqlIdentifier = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
@@ -662,6 +692,7 @@ function artifactHash(input: {
   reducerBundle?: ModuleReducerBundle;
   invitationAcceptanceReducer?: string;
   permissionGrants?: PermissionGrantSource;
+  permissionPrimitives?: PermissionPrimitiveManifest;
 }) {
   const contract = {
     generation: moduleArtifactGeneration,
@@ -675,6 +706,7 @@ function artifactHash(input: {
     invitationAcceptanceReducer: input.invitationAcceptanceReducer ?? "",
     // Only modules that declare it hash it: earlier artifact hashes are unchanged.
     ...(input.permissionGrants ? { permissionGrants: input.permissionGrants } : {}),
+    ...(input.permissionPrimitives ? { permissionPrimitives: input.permissionPrimitives } : {}),
     // Present only for split artifacts, so unsplit artifact hashes are unchanged.
     ...(input.reducerBundle ? {
       reducerBundle: {

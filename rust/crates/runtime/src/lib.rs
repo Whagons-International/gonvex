@@ -38,6 +38,8 @@ mod operations;
 mod operator_data;
 #[cfg(feature = "perf-fixture")]
 pub mod perf_fixture;
+#[cfg(feature = "permission-primitives")]
+mod permissions;
 pub mod presence;
 pub mod profiling;
 pub mod public_functions;
@@ -5338,6 +5340,8 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 #[cfg(test)]
 mod tests {
     mod action_depth;
+    #[cfg(feature = "permission-primitives")]
+    mod permission_replica;
     mod receipt_guarantee_tests;
     #[tokio::test]
     async fn native_snapshot_socket_backpressures_until_durable_ack() {

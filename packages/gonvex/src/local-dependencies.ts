@@ -113,7 +113,7 @@ const readHelpers: Record<string, { argument: number; path: string[]; operation:
 };
 
 const databaseMethods = new Set(["select", "insert", "update", "delete", "deleteMany", "query"]);
-const nonExecutedDefinitions = new Set(["action", "query", "internalQuery", "liveQuery", "replicaCollection", "visibility", "cron", "tenantCron"]);
+const nonExecutedDefinitions = new Set(["action", "query", "internalQuery", "liveQuery", "replicaCollection", "permissionPrimitives", "visibility", "cron", "tenantCron"]);
 const arrayCallbacks = new Set(["map", "flatMap", "forEach", "filter", "some", "every", "find", "findIndex", "reduce"]);
 
 // The compiler API is loaded on demand; every helper below runs after it is set.

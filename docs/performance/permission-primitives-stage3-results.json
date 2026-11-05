@@ -1,0 +1,150 @@
+{
+  "stage": "3-local-source-bound-snapshot",
+  "localSourceCheckpoint": "bd8720dadea70d1a2c00a632cb547b9053e06eff",
+  "previousPushedHead": "68987788ca04738cb0c2470e448aa39dad796886",
+  "window": {
+    "owner": "permission-primitives-stage3-t3-39f509f6",
+    "purpose": "admitted SDK+CLI pairing and local source/Replica SQL verification",
+    "claimed_at": "2026-11-05T07:00:03.824533+00:00",
+    "hard_end": "2026-11-05T07:30:03.824533+00:00",
+    "checkout": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6"
+  },
+  "release": {
+    "owner": "permission-primitives-stage3-t3-39f509f6",
+    "releasedAt": "2026-11-05T07:16:55.391865+00:00",
+    "clean": true,
+    "unitInactive": true,
+    "allKnownOwnPIDsGone": true,
+    "rustResult": "INCOMPLETE/environment IO blocked",
+    "wrapperExit": 143,
+    "cargoDirectExit": null
+  },
+  "checks": {
+    "sdk-build": {
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "--filter",
+        "@gonvex/module-sdk",
+        "build"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T07:00:23.915083+00:00",
+      "end": "2026-11-05T07:00:25.147071+00:00",
+      "exit": 1
+    },
+    "sdk-build-2": {
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "--filter",
+        "@gonvex/module-sdk",
+        "build"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T07:01:01.240127+00:00",
+      "end": "2026-11-05T07:01:05.634387+00:00",
+      "exit": 0
+    },
+    "cli-build": {
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "--filter",
+        "@gonvex/cli",
+        "build"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T07:01:39.742615+00:00",
+      "end": "2026-11-05T07:01:48.583962+00:00",
+      "exit": 0
+    },
+    "js-focused": {
+      "command": [
+        "node",
+        "--test",
+        "packages/module-sdk/test/permission-primitives.test.mjs",
+        "packages/gonvex/test/permission-primitives.test.mjs"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T07:02:04.934821+00:00",
+      "end": "2026-11-05T07:02:05.769258+00:00",
+      "exit": 1
+    },
+    "js-focused-2": {
+      "command": [
+        "node",
+        "--test",
+        "packages/module-sdk/test/permission-primitives.test.mjs",
+        "packages/gonvex/test/permission-primitives.test.mjs"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T07:02:20.040827+00:00",
+      "end": "2026-11-05T07:02:22.622284+00:00",
+      "exit": 0
+    },
+    "package-pair": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-permission-stage3/package-pair.py"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T07:03:47.421749+00:00",
+      "end": "2026-11-05T07:04:23.909331+00:00",
+      "exit": 0
+    }
+  },
+  "focusedJSTests": {
+    "passed": 5,
+    "failed": 0,
+    "firstFailure": "fixture absolute entrypoint corrected to project-relative path"
+  },
+  "rust": {
+    "status": "INCOMPLETE/environment IO blocked",
+    "command": [
+      "cargo",
+      "check",
+      "--offline",
+      "-p",
+      "gonvex-runtime",
+      "-p",
+      "gonvex-store",
+      "--features",
+      "permission-primitives",
+      "--tests"
+    ],
+    "compilerDiagnostics": false,
+    "rawLogBytes": 0,
+    "wrapperExit": 143,
+    "cargoDirectExit": null,
+    "cancelledByParent": true
+  },
+  "unperformed": [
+    "feature-off Rust checks/tests",
+    "feature-on runtime/store tests",
+    "real local source normalizer/SQL snapshot oracle execution",
+    "full SDK/CLI regression suite",
+    "generators for this stage",
+    "cycle comparison for this stage",
+    "query/write/disk/memory benchmarks",
+    "production-copy differential"
+  ],
+  "pair": {
+    "sdkVersion": "0.5.2-permission-stage3.202611050700",
+    "sdkTarball": "/mnt/data/work/gonvex-permission-stage3/artifacts/gonvex-module-sdk-0.5.2-permission-stage3.202611050700.tgz",
+    "sdkSHA256": "3d45a19d0934e30921bde295f5807d7f6f557f134ac792ba3a7be408897d3c44",
+    "cliEntrypoint": "/mnt/data/work/gonvex-permission-stage3/artifacts/cli-dist/index.js",
+    "sourceFingerprint": "91067d45d9e480292a94e479e64477785547d33c8ae7ab5956e974e75017139a",
+    "matchingFrozenCommit": "bd8720dadea70d1a2c00a632cb547b9053e06eff",
+    "sourceMatchVerified": true,
+    "sourceCommittedAtBuild": false,
+    "artifactRebuiltAfterCommit": false,
+    "sequence": "Built from dirty source fingerprint; matching local checkpoint commit frozen and verified afterward. Rust checks pending; not pushed.",
+    "cliOverlayApprovedByParent": true
+  },
+  "liveServingEnabled": false,
+  "pushed": false,
+  "productionDumpRead": false,
+  "toolingNote": "First SDK command bootstrapped pnpm through Corepack in owned /mnt cache and failed because tsc dependency link was absent. Later phases disabled Corepack network and reused cached project dependencies read-only. No project dependency installation.",
+  "privacy": "All executed tests synthetic; no customer rows/dumps/registry read or logged."
+}

@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "declaration": {
+    "version": 1,
+    "atoms": {},
+    "providers": {
+      "self": {
+        "adapter": "relational-v1",
+        "version": "fixture-self-v1",
+        "sources": [
+          {
+            "id": "identity",
+            "kind": "grant",
+            "from": {
+              "table": "members",
+              "key": "id",
+              "as": "member"
+            },
+            "joins": [],
+            "where": [
+              {
+                "op": "textEq",
+                "left": {
+                  "field": {
+                    "alias": "member",
+                    "column": "status"
+                  },
+                  "type": "text",
+                  "onNull": "reject"
+                },
+                "right": {
+                  "literal": "active"
+                }
+              }
+            ],
+            "target": {
+              "kind": "member",
+              "id": {
+                "field": {
+                  "alias": "member",
+                  "column": "id"
+                },
+                "type": "text",
+                "onNull": "reject"
+              }
+            },
+            "atoms": [
+              {
+                "namespace": "memberIdentity",
+                "resource": {
+                  "field": {
+                    "alias": "member",
+                    "column": "id"
+                  },
+                  "type": "text",
+                  "onNull": "reject"
+                }
+              }
+            ]
+          },
+          {
+            "id": "owners",
+            "kind": "row",
+            "from": {
+              "table": "owned",
+              "key": "_id",
+              "as": "row"
+            },
+            "joins": [],
+            "where": [],
+            "table": "owned",
+            "key": {
+              "field": {
+                "alias": "row",
+                "column": "_id"
+              },
+              "type": "text",
+              "onNull": "reject"
+            },
+            "universe": "owned",
+            "atoms": [
+              {
+                "slot": "self",
+                "atom": {
+                  "namespace": "memberIdentity",
+                  "resource": {
+                    "field": {
+                      "alias": "row",
+                      "column": "owner"
+                    },
+                    "type": "text",
+                    "onNull": "omitFact"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "collections": {
+      "owned.list": {
+        "provider": "self",
+        "table": "owned",
+        "key": "_id",
+        "universe": "owned",
+        "policy": {
+          "op": "slot",
+          "slot": "self"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "self": [
+      {
+        "source": "identity",
+        "table": "members",
+        "key": "id",
+        "alias": "member",
+        "columns": [
+          "id",
+          "status"
+        ],
+        "images": "oldAndNew"
+      },
+      {
+        "source": "owners",
+        "table": "owned",
+        "key": "_id",
+        "alias": "row",
+        "columns": [
+          "_id",
+          "owner"
+        ],
+        "images": "oldAndNew"
+      }
+    ]
+  }
+}

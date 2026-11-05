@@ -1,0 +1,25 @@
+{
+  "cargo_normal_trees_identical": true,
+  "sha256": "56d0dcc6c4e8ecd4688e06a7a6522bed455e2d10a474355b46a419cb5b22ad57",
+  "dependency_declarations_unchanged": true,
+  "new_normal_module_edges": {
+    "model": [],
+    "compile": [
+      "model"
+    ],
+    "query": [
+      "compile",
+      "model"
+    ],
+    "diff": [
+      "query"
+    ],
+    "roles": [
+      "model"
+    ],
+    "delivery": [
+      "query"
+    ]
+  },
+  "new_normal_module_cycles": 0
+}
