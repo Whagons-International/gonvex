@@ -53,3 +53,39 @@ The final gate still requires the current SQLite physical/module/runtime pairing
 complete permission-provider coverage and an implemented, negotiated starter
 client handoff. PG compatibility receipts, including 1051, do not satisfy those
 requirements and were not installed here.
+
+
+## Offered-load result
+
+Measured harness head `c1c8a1f4` attempted the one historical mixed-1k case.
+The supervisor stopped it at the first 75-user burst because the generator
+missed the offered window: all 75 attempted, but seven started after 185 seconds.
+Arrival lateness p95 was 1,412.33 ms and p99 1,959.67 ms. Across the last worker
+receipts, 226/1000 users attempted, 209 authenticated and 104 had full collection
+readiness. Only two of the planned eight target SDK users had arrived; both
+authenticated and neither was fully ready before the stop.
+
+This is an **invalid generator / unqualified baseline**, not a backend capacity
+point. The completed auth subset in that burst (63/75) already had planned-to-auth
+p95 11,158.67 ms and p99 12,548.67 ms. Burst readiness had no completed samples.
+Later bursts, the steady plateau and deploy cached-refresh wave were not reached.
+Only one SIGTERM worker partial result survived, so no total error-rate claim
+is possible. All eight atomic scheduling receipts and the runtime profiles,
+admission queues and cgroup samples were retained. The other source/data/SDK
+prerequisites above passed; no compatibility blocker was invented to skip load.
+
+The sampled runtime averaged 0.228 CPU cores, other owned lane processes 1.376.
+The two-CPU parent reported throttling in 1,498/2,139 periods, compared with
+45/1,879 for the one-CPU runtime child. There were 500 snapshot-permit waiters,
+two active snapshots, and snapshot permit-wait p99 of 1,503.93 ms. These are
+concurrent wall-span statistics, not independent CPU costs. Peak runtime memory
+was 1,527,676,928 bytes and aggregate memory 5,366,124,544 bytes; neither cgroup
+recorded an OOM. This establishes generator pressure and real admission backlog,
+without isolating the runtime's capacity with a properly provisioned generator.
+
+No isolated snapshot CPU estimate, cached-wave CPU cost, steady per-delivery CPU
+estimate or 5k extrapolation follows from this interrupted case. A useful next
+run needs independently qualified generator capacity while preserving the
+arrival schedule, all 132 required intents, rows and runtime caps. No follow-up
+load was started. The final current SQLite/full-provider/starter gate remains
+blocked, independently of this historical attempt.
