@@ -45,6 +45,7 @@ test('paired PG extension preserves baseline closure and actual generated SQL ex
     const {buildModuleArtifact,moduleManifestFunctions}=await import(new URL('module-artifact.js',cli));
     const {localBindings}=await import(new URL('local-bindings.js',cli));
     const module=await buildModuleArtifact({root,backendDir:join(root,'gonvex'),files:[file],migrations:[]});
+    assert.equal(module.visibility.items.where.operator,'inSet');
     const functions=moduleManifestFunctions(module);
     const generated=await localBindings(root,{module,functions});
     for(const [name,body] of Object.entries(generated))await writeFile(join(root,'gonvex',name),body);
@@ -84,5 +85,5 @@ test('paired PG extension preserves baseline closure and actual generated SQL ex
     }
   }
   const extension=await import(pathToFileURL(join(pairedSDK,'dist','permission-primitives.js')));
-  assert.throws(()=>extension.permissionPrimitives({callback:()=>true}),/literal JSON/);
+  assert.throws(()=>extension.permissionPrimitives({version:1,callback:()=>true}),/literal JSON/);
 });

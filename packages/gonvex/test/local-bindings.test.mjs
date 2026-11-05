@@ -67,8 +67,11 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   const context = await browser.newContext({offline:true});
   const page = await context.newPage();
   const requests = [];
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
   page.on('request', request=>requests.push(request.url()));
   await page.addScriptTag({content:code});
+  assert.deepEqual(pageErrors, [], 'generated browser bundle must initialize');
   const response=await page.evaluate(async hash=>SharedExecutor.localRuntime.create().execute('rename',{id:'t',title:'changed'},{scope:'scope',tables:{tasks:{complete:true,rows:[{_id:'t',title:'old'}]}}},{scope:'scope',commandId:'intent',now:1,artifactHash:hash,identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}}}),module.hash);
   assert.equal(response.patches[0].fields.title,'changed');
   const suite = JSON.parse(await readFile(new URL('../../module-sdk/runtime-contract/vectors.json', import.meta.url)));

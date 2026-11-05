@@ -1,0 +1,332 @@
+{
+  "qualification": "PG codegen/synthetic SQL only; full policy/production-data differential incomplete",
+  "checks": {
+    "cli-tests5": {
+      "command": [
+        "env",
+        "PLAYWRIGHT_BROWSERS_PATH=/home/gabriel/.cache/ms-playwright",
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/cli-tests.py"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:31:58.880356+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:32:13.715157+00:00"
+    },
+    "pgcompat-oracle2": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/pgcompat-tests.py"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:24:16.636676+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:24:22.345083+00:00"
+    },
+    "app-pg-reducer-oracle2": {
+      "command": [
+        "node",
+        "scripts/permission-primitives/pg-compatibility.mjs",
+        "/mnt/data/work/gonvex-cli-schema/original-pg-app/gonvex/_generated",
+        "gonvex/_generated",
+        "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/packages/gonvex/node_modules/@electric-sql/pglite/dist/index.js",
+        "/mnt/data/work/gonvex-cli-schema/app-source-schema.json"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:31:40.749701+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:31:44.562104+00:00"
+    },
+    "original-pg-app-codegen2": {
+      "command": [
+        "node",
+        "/mnt/data/work/gonvex-app-permission-verify/virtual-store/@gonvex+cli@0.5.2-staging.31_patch_hash=dbb4b7c91dd17556b4ed68dbe00d7a951ea06683c609a86a932809e5580169fa_react@19.2.7/node_modules/@gonvex/cli/dist/index.js",
+        "codegen"
+      ],
+      "cwd": "/mnt/data/work/gonvex-cli-schema/original-pg-app",
+      "start": "2026-11-05T10:31:08.251700+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:31:22.098841+00:00"
+    },
+    "framework-dashboard": {
+      "command": [
+        "node",
+        "packages/gonvex/dist/index.js",
+        "codegen",
+        "--project",
+        "apps/dashboard",
+        "--project-id",
+        "d49bf233-9a6e-419e-8aef-1778dba8cef7"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:34:19.943773+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:34:20.056253+00:00"
+    },
+    "framework-template": {
+      "command": [
+        "node",
+        "packages/gonvex/dist/index.js",
+        "codegen",
+        "--project",
+        "templates/vite-react",
+        "--project-id",
+        "701afa6f-0a89-404f-afa8-30c314981ad3"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:34:20.380076+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:34:20.486749+00:00"
+    },
+    "framework-docs": {
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "--filter",
+        "@gonvex/docs",
+        "typecheck"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:33:31.349265+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:33:33.243813+00:00"
+    },
+    "framework-cycles": {
+      "command": [
+        "node",
+        "/mnt/data/work/gonvex-permission-stage3-resume/cycles.mjs"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:33:29.182108+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:33:30.897281+00:00"
+    },
+    "app-final-cycles": {
+      "command": [
+        "node",
+        "/mnt/data/work/gonvex-cli-schema/app-cycles.mjs"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:32:59.363230+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:33:28.773493+00:00"
+    },
+    "app-declaration-types": {
+      "command": [
+        "node",
+        "/home/gabriel/.cache/node/corepack/v1/pnpm/11.8.0/bin/pnpm.cjs",
+        "--config.manage-package-manager-versions=false",
+        "--config.package-manager-strict=false",
+        "--config.verify-deps-before-run=false",
+        "exec",
+        "tsc",
+        "--ignoreConfig",
+        "--noEmit",
+        "--skipLibCheck",
+        "--module",
+        "esnext",
+        "--moduleResolution",
+        "bundler",
+        "--target",
+        "es2022",
+        "gonvex/module/permission-primitives/selfOwned.generated.ts",
+        "gonvex/module/permission-primitives/taskSources.ts"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:33:36.203772+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:33:36.738864+00:00"
+    },
+    "app-v2-types": {
+      "command": [
+        "node",
+        "/home/gabriel/.cache/node/corepack/v1/pnpm/11.8.0/bin/pnpm.cjs",
+        "--config.manage-package-manager-versions=false",
+        "--config.package-manager-strict=false",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "gonvex:v2:typecheck"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:33:43.271656+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:33:45.335239+00:00"
+    },
+    "app-v2-compatibility": {
+      "command": [
+        "node",
+        "/home/gabriel/.cache/node/corepack/v1/pnpm/11.8.0/bin/pnpm.cjs",
+        "--config.manage-package-manager-versions=false",
+        "--config.package-manager-strict=false",
+        "--config.verify-deps-before-run=false",
+        "exec",
+        "vitest",
+        "run",
+        "--config",
+        "vitest.gonvex.config.ts",
+        "--configLoader",
+        "runner",
+        "--maxWorkers=1",
+        "gonvex/module/permission-primitives/selfOwnedCompatibility.test.ts"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:33:37.136881+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:33:42.918517+00:00"
+    },
+    "app-architecture": {
+      "command": [
+        "node",
+        "/home/gabriel/.cache/node/corepack/v1/pnpm/11.8.0/bin/pnpm.cjs",
+        "--config.manage-package-manager-versions=false",
+        "--config.package-manager-strict=false",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "arch:check"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:33:45.665853+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:33:48.100516+00:00"
+    },
+    "app-gap-tests": {
+      "command": [
+        "node",
+        "--test",
+        "scripts/permission-primitives/policy-gaps.test.mjs"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:32:58.946542+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:32:59.026547+00:00"
+    }
+  },
+  "pairingSHA256": "4585556e20bb88e5c20d68d253ffc0a4c1e04fa080dbede27b56ddaf68dc5a98",
+  "v2MetadataPreservation": {
+    "v2VisibilityPlans": 342,
+    "replicaDefinitions": 812,
+    "visibilityUnchanged": true,
+    "replicaDefinitionsUnchanged": true,
+    "baselineSource": "814415ca0b060c7513eca3c7ab6db17fe15304ab",
+    "baselineSDK": "0.5.2-staging.31 published frozen-lock SRI",
+    "baselineCLI": "0.5.2-staging.31 patch dbb4b7c91dd17556b4ed68dbe00d7a951ea06683c609a86a932809e5580169fa",
+    "baselineManifestSHA256": "874e538738677d611fd4817207a2e35588a7368d40cce77108fca9b1ba57286c",
+    "candidateManifestSHA256": "7ff219bb112f2b716b70106e716259fa0da5fcdfc6bfdc48b6acac0fc420fd0f",
+    "qualification": "metadata parity; not every-user row differential"
+  },
+  "caps": {
+    "cli-tests5": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-cli-tests5.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "pgcompat-oracle2": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-pgcompat-oracle2.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "app-pg-reducer-oracle2": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-app-pg-reducer-oracle2.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "original-pg-app-codegen2": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-original-pg-app-codegen2.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "framework-dashboard": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-framework-dashboard.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "framework-template": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-framework-template.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "framework-docs": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-framework-docs.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "framework-cycles": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-framework-cycles.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "app-final-cycles": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-app-final-cycles.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "app-declaration-types": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-app-declaration-types.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "app-v2-types": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-app-v2-types.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "app-v2-compatibility": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-app-v2-compatibility.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "app-architecture": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-app-architecture.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "app-gap-tests": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-app-gap-tests.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    }
+  },
+  "performance": "not measured; concurrent autonomous host lanes"
+}
