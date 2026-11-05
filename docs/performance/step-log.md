@@ -1395,3 +1395,26 @@ table), a likely trigger; not traced.
 **Generator gap:** the thin client does not retry `replica.error` (the SDK retries with 250 ms ×
 2ⁿ backoff up to 5 s, `packages/client/src/index.ts` scheduleReplicaRetry), so a shed subscription
 stays failed; the 1.05 M error count is error notifications, not retries.
+
+### Step 17 preparation: retrying harness, realistic ramp; unchanged gate6 runtime
+
+Runtime baseline remains **7d01af5b**, binary SHA-256
+`d8283384ed1df4ddff65c46fed0e31075a8a0978fc9ade608d8cac9d597d5f32`
+(`lab-5k/bin-gate6/gonvex-runtime`, identical to Step 16's recorded binary).
+Harness retry commit **8f92ee58** adds the SDK failed-open lifecycle plus bounded
+80–100% jitter on 250 ms doubling to 5 s, separate failure/retry/recovery counters,
+and cleanup tests. No runtime/app/protocol change.
+
+Revised baseline: 1,000 users across **900 s**, then **300 s plateau**; production
+mix/skew and the real app collection set; 1 reload/user/hour uniformly phased
+(0.278 reload/s at 1k), replacing the prior 30% simultaneous reconnect wave.
+Cold snapshots on reload conservatively exceed warm cursor reload cost. Separate
+ramp and common-plateau latency/error scopes; all errors retained; repeated watcher
+notifications of one error object counted once. Record collections ready at
+teardown in addition to authenticated users. Three quiet runs plus :00 plateau,
+oracle and leak checks remain required. Runtime-restart storm is NON-GATING.
+
+Lab order authorized by parent: existing heap-growth recovery → short open-cost
+window → short reopen window → baseline. Honor current LAB_RUN_ACTIVE owner;
+no builds/measurements overlap, no runtime merges during the series. Heap
+ba54cee4 tests are unverified; do not integrate it on prior wrapper exit status.

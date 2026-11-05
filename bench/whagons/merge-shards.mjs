@@ -38,6 +38,14 @@ const sampleCounts = () => Object.fromEntries([...new Set(parts.flatMap(p => Obj
 const latencyMs = partial ? sampleCounts() : scope(() => true);
 const steadyLatencyMs = partial ? sampleCounts() : scope(x => x.at >= steadyStartMs && x.at < steadyEndMs);
 const first = parts[0] || {};
+const errorEvents = parts.flatMap(p => p.errorEvents || []);
+const phaseErrors = (start, end) => {
+  const out = {};
+  for (const e of errorEvents) if (e.at >= start && e.at < end) out[e.key] = (out[e.key] || 0) + 1;
+  return out;
+};
+const steadyErrors = phaseErrors(steadyStartMs, steadyEndMs);
+
 const result = {
   ...Object.fromEntries(Object.entries(first).filter(([k]) => !['rawSamples', 'rawPaths', 'shard', 'snapshots'].includes(k))),
   shards: count,
@@ -49,7 +57,12 @@ const result = {
   snapshots: parts.flatMap(p => p.snapshots || []),
   visibilityChecks: parts.reduce((a, p) => { for (const [k, v] of Object.entries(p.visibilityChecks || {})) a[k] = (a[k] || 0) + v; return a; }, {}),
   pathLatencyMs: Object.fromEntries(Object.entries(paths).map(([k, p]) => [k, { samples: p.durations.length, errors: p.errors, ...quantiles(p.durations) }])),
+  collectionReadiness: parts.reduce((a,p)=>{for(const [k,v] of Object.entries(p.collectionReadiness||{}))a[k]=(a[k]||0)+v;return a;},{}),
   errors,
+  errorEvents,
+  steadyErrors,
+  rampErrors: phaseErrors(-Infinity, steadyStartMs),
+  rampLatencyMs: scope(x => x.at < steadyStartMs),
   latencyMs,
   steadyLatencyMs,
 };
@@ -70,7 +83,7 @@ if (parts.some(p => p.taskExpectations)) {
   }
   result.taskExpectations = t;
 }
-const rule = passRule({ ...result, latencyMs: steadyLatencyMs });
-Object.assign(result, { clientSloPassed: rule.passed && !(result.visibilityChecks.mismatched > 0), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
+const rule = passRule({ ...result, errors: parts.every(p => p.errorEvents) ? steadyErrors : errors, latencyMs: steadyLatencyMs });
+Object.assign(result, { clientSloPassed: rule.passed && !(result.visibilityChecks.mismatched > 0) && (!first.collectionReadiness || result.collectionReadiness.readyAtTeardown === result.targetUsers), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
 writeFileSync(partial ? out + '.partial.json' : out, JSON.stringify(result, null, 2));
 console.log(JSON.stringify({ merged: parts.length, of: count, connectedUsers: result.connectedUsers, passed: result.clientSloPassed }));

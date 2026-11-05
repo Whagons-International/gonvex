@@ -171,7 +171,8 @@ async function main() {
  const measurements:any={save:[],heartbeat:[],reducer:[],query:[],initialLoad:[],reconnect:[],permission:[],visibility:[],delivery:[],taskDelivery:[],login:[]},errors:Record<string,number>={};
  const samples:Record<string,{at:number,ms:number}[]>={};
  const sample=(kind:string,ms:number,at=Date.now()-ms)=>{measurements[kind].push(ms);(samples[kind]??=[]).push({at,ms});};
- const error=(e:any)=>{const key=String(e?.message||e).slice(0,240);errors[key]=(errors[key]||0)+1;};
+ const errorEvents:{at:number,key:string}[]=[]; const seenErrors=new WeakSet<object>();
+ const error=(e:any)=>{if(e&&typeof e==='object'){if(seenErrors.has(e))return;seenErrors.add(e);}const key=String(e?.message||e).slice(0,240);errors[key]=(errors[key]||0)+1;errorEvents.push({at:Date.now(),key});};
  // The first measurement an action takes starts at its planned time (open loop).
  const startTime=()=>{const p=plannedStart.getStore();if(p&&!p.used){p.used=true;return p.at;}return performance.now();};
  const timed=async(kind:string,fn:()=>Promise<any>)=>{const t=startTime();try{const v=await fn();sample(kind,performance.now()-t);return v;}catch(e){error(e);return undefined;}};
@@ -187,6 +188,7 @@ async function main() {
  const undelivered:any[]=[];const expectationStats={ops:0,failedSaves:0,lateDelivered:0,pendingSaveAtTeardown:0,ownTaskViews:0,undeliveredOps:new Set<string>()};
  const started=Date.now();let stopping=false;let aborted=false;let deadline=Infinity;let remaining=myTarget;
  process.on('SIGTERM',()=>{const plateauEnd=deadline;aborted=true;stopping=true;deadline=Date.now();const partial=(process.env.LOAD_RESULT||state+'.result')+'.partial.json';writeFileSync(partial+'.tmp',JSON.stringify({aborted:true,profileHash,targetUsers:myTarget,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),steadyStartMs:plateauEnd-seconds*1000,rawSamples:samples,rawPaths:perPath}));renameSync(partial+'.tmp',partial);});
+ const collectionReadiness={readyAtTeardown:0,notReadyAtTeardown:0};
  const ready=()=>{if(--remaining===0&&deadline===Infinity)deadline=Date.now()+seconds*1000;};
  // A user that never finishes connecting must not hold the plateau forever: start it
  // ramp + 120 s after launch anyway and count the users still missing.
@@ -401,8 +403,12 @@ async function main() {
    if(team&&!extras.rows(4).some((r:any)=>r.memberId===target.member&&r.teamId===team&&!r.deletedAt))await timed('permission',()=>reducer(c,api.members.addMemberTeam,{memberId:target.member,teamId:team,roleKey:'member'}));
    await verifyVisibility(target,at,before);
   };
-  // Reconnect wave: ~30% of users reconnect within 10 s, mid-plateau.
-  const reconnectTime=random()<.3?reconnectAt(.5)+random()*10000:Infinity;
+  // Opt-in realistic reload rate replaces the legacy stress wave. Uniform phases
+  // keep offered page loads independent of server response times.
+  const reloadsPerHour=Number(process.env.LOAD_RELOADS_PER_USER_HOUR ?? 0);
+  if(!Number.isFinite(reloadsPerHour)||reloadsPerHour<0)throw Error('Invalid reload rate');
+  const reloadPeriod=reloadsPerHour>0?3600000/reloadsPerHour:Infinity;
+  let reconnectTime=process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?Date.now()+random()*reloadPeriod:(random()<.3?reconnectAt(.5)+random()*10000:Infinity);
   // Open loop: the next action is planned from the previous plan, not from
   // when the previous action finished, so a slow server cannot lower load.
   let foregroundTimer:ReturnType<typeof setTimeout>|undefined,foregroundInFlight=0;const foregroundPending=new Set<Promise<unknown>>();
@@ -417,7 +423,7 @@ async function main() {
   const armForeground=()=>{if(stopping||Date.now()>=deadline)return;if(!foregroundArmed){foregroundArmed=true;if(actionAt<Date.now())actionAt=Date.now();}const due=actionAt;foregroundTimer=setTimeout(()=>{actionAt=due+think();fireForeground(due);armForeground();},Math.max(0,due-Date.now()));};
   while(!stopping&&Date.now()<deadline){
    if(openLoop&&!initial&&!foregroundTimer)armForeground();
-   if(Date.now()>=reconnectTime&&!reconnecting&&!initial){reconnecting=true;await Promise.all([...periodicPending,...foregroundPending]);disconnect();const connected=await connect('reconnect');reconnecting=false;if(!connected)break;}
+   if(Date.now()>=reconnectTime&&!reconnecting&&!initial){reconnecting=true;reconnectTime+=reloadPeriod;await Promise.all([...periodicPending,...foregroundPending]);disconnect();const connected=await connect('reconnect');reconnecting=false;if(!connected)break;}
    else if(admin&&!initial&&!reorgDone&&shard===0&&Date.now()>=reconnectAt(.3)&&(tenantUsers.get(f.tenant)||[]).find(h=>h.admin)===handle){reorgDone=true;await reorg();}
    else if(admin&&!initial&&Date.now()>=permissionAt){await changePermission();permissionAt=Date.now()+(120+random()*180)*1000;}
    else if(!openLoop&&!initial&&Date.now()>=actionAt){await act();actionAt=Date.now()+think();}
@@ -444,6 +450,7 @@ async function main() {
    if(op.state==='pending'){expectationStats.pendingSaveAtTeardown++;error(new Error('Task update save still pending at teardown'));continue;}
    expectationStats.undeliveredOps.add(key+'@'+op.at);error(new Error('Task update was not delivered before teardown'));
    if(undelivered.length<2000)undelivered.push({tenant:f.tenant,task:id,observer:member,observerUser:i,by:op.by,path:op.path,args:op.args,at:op.at,savedAt:op.savedAt,checkedAt:Date.now(),expect:op.matches.toString().slice(0,160),row:{name:row.name,statusId:row.statusId,priorityId:row.priorityId,dueDate:row.dueDate,spotId:row.spotId,firstViewedAt:row.firstViewedAt,updatedAt:row.updatedAt,createdBy:row.createdBy,description:String(row.description??'').slice(0,48)}});}
+  if(extras.ready()&&tw.status().isUpToDate)collectionReadiness.readyAtTeardown++;else collectionReadiness.notReadyAtTeardown++;
   if(!extras.ready())error(new Error('Metadata subscription never became current'));
   disconnect();
  })().catch(e=>{error(e);ready();}));
@@ -455,11 +462,13 @@ async function main() {
  if(!measurements.delivery.length) error(new Error('No update delivery samples'));
  clearInterval(costTimer);{const u=process.cpuUsage(cpuAtStart);Object.assign(generatorCost,{cpuSeconds:(u.user+u.system)/1e6,wallSeconds:(performance.now()-wallAtStart)/1000});}
  const lateSorted=scheduleStats.lateMs.sort((a,b)=>a-b);const schedule={kind:scheduleStats.kind,fired:scheduleStats.fired,overflow:scheduleStats.overflow,skippedDuringReconnect:scheduleStats.skippedDuringReconnect,startLateMs:quantiles(lateSorted)};
- const result={taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,snapshots,visibilityChecks,reconnectWindowMs:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
+ const result={collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,reconnectWindowMs:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
  const steadyLatencyMs=Object.fromEntries(Object.keys(measurements).map(kind=>{const xs=(samples[kind]||[]).filter(x=>x.at>=deadline-seconds*1000&&x.at<deadline).map(x=>x.ms);return [kind,{samples:xs.length,...quantiles(xs)}];}));
- Object.assign(result,{steadyLatencyMs,qualificationLatencyScope:'steady plateau; operations started with all users connected'});
+ const phaseErrors=(start:number,end:number)=>Object.fromEntries([...new Set(errorEvents.filter(e=>e.at>=start&&e.at<end).map(e=>e.key))].map(key=>[key,errorEvents.filter(e=>e.key===key&&e.at>=start&&e.at<end).length]));
+ const steadyErrors=phaseErrors(deadline-seconds*1000,deadline);
+ Object.assign(result,{steadyErrors,rampErrors:phaseErrors(started,deadline-seconds*1000),steadyLatencyMs,qualificationLatencyScope:'steady plateau; operations started with all users connected'});
  const q:any=steadyLatencyMs;
- {const rule=passRule({latencyMs:q,errors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed&&visibilityChecks.mismatched===0,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
+ {const rule=passRule({latencyMs:q,errors:steadyErrors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed&&visibilityChecks.mismatched===0&&collectionReadiness.readyAtTeardown===myTarget,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
  console.log(JSON.stringify(result));await writeFile(process.env.LOAD_RESULT||state+'.result',JSON.stringify(result,null,2));
  process.exit(0);
 }
