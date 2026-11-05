@@ -1845,6 +1845,10 @@ async fn websocket(
         if opening_cohort_dirty && tenant_session.is_some() {
             // Cohort certification runs only after opens/delivery progress.
             // Keep its epoch iterator and send state off every socket's future.
+            let snapshots_complete = pending_replica_opens.is_empty()
+                && replica_opens.is_empty()
+                && legacy_snapshot_delivery.is_empty()
+                && snapshot_delivery.is_empty();
             let healthy = Box::pin(async {
                 let mut epochs = replicas
                     .values()
@@ -1858,10 +1862,7 @@ async fn websocket(
                     }
                 }
                 if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
-                    pending_replica_opens.is_empty()
-                        && replica_opens.is_empty()
-                        && legacy_snapshot_delivery.is_empty()
-                        && snapshot_delivery.is_empty(),
+                    snapshots_complete,
                     replicas
                         .values()
                         .map(|s| s.cursor.revision)
