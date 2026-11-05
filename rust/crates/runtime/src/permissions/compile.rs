@@ -57,7 +57,12 @@ pub(crate) fn compile(universe: &str, expression: &Expr) -> Result<CompiledSet, 
                         return Err(InvalidPrimitive::EmptyIdentity);
                     }
                     let slot = self.bind(Binding::Text(slot.clone()));
-                    format!("SELECT ra.row_key FROM _gonvex_permission_row_atoms ra JOIN _gonvex_permission_set_atoms pa ON pa.scope_id=ra.scope_id AND pa.atom_id=ra.atom_id AND pa.generation=ra.generation JOIN universe u ON u.row_key=ra.row_key WHERE ra.scope_id=?1 AND ra.table_id=?2 AND ra.generation=?3 AND pa.set_id=?4 AND ra.slot={slot}")
+                    // Membership in the finite universe is a semijoin. IN gives
+                    // SQLite a keyed ephemeral lookup instead of nested scans of
+                    // two DISTINCT-backed views when estimates are too small.
+                    // Row keys are non-null BINARY text; final DISTINCT preserves
+                    // the existing support/set semantics. SQL policy hashes change.
+                    format!("SELECT ra.row_key FROM _gonvex_permission_row_atoms ra JOIN _gonvex_permission_set_atoms pa ON pa.scope_id=ra.scope_id AND pa.atom_id=ra.atom_id AND pa.generation=ra.generation WHERE ra.row_key IN (SELECT row_key FROM universe) AND ra.scope_id=?1 AND ra.table_id=?2 AND ra.generation=?3 AND pa.set_id=?4 AND ra.slot={slot}")
                 }
                 Expr::HasAtom(atom) => {
                     let atom = self.bind(Binding::Blob(atom.canonical()?));
@@ -202,5 +207,77 @@ mod tests {
             compile("tenant-tasks", &Expr::All(vec![])),
             Err(InvalidPrimitive::EmptyConjunction)
         ));
+    }
+    #[tokio::test]
+    async fn finite_universe_overlap_and_negative_sets_stay_linear_in_sql_work() {
+        use sqlx::{Connection, Row};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let mut db = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../store/src/permission_indexes/schema.sql"
+        )))
+        .execute(&mut db)
+        .await
+        .unwrap();
+        sqlx::raw_sql("INSERT INTO _gonvex_permission_atoms VALUES(1,1,1,X'01'); INSERT INTO _gonvex_permission_supports VALUES(1,1,'first','member','alice',1),(1,1,'overlap','member','alice',1);
+        WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO _gonvex_permission_row_supports SELECT 1,1,'rows','tasks',CASE WHEN x<=9000 THEN 'allowed' ELSE 'foreign' END,printf('k%05d',x) FROM n;
+        INSERT INTO _gonvex_permission_row_atom_supports SELECT scope_id,generation,'primary',table_id,row_key,'read',1 FROM _gonvex_permission_row_supports;
+        INSERT INTO _gonvex_permission_row_atom_supports SELECT scope_id,generation,'backup',table_id,row_key,'read',1 FROM _gonvex_permission_row_supports WHERE row_key<='k00100';
+        INSERT INTO _gonvex_permission_row_atom_supports SELECT scope_id,generation,'negative',table_id,row_key,'blocked',1 FROM _gonvex_permission_row_supports WHERE cast(substr(row_key,2) AS INTEGER)%3=0;").execute(&mut db).await.unwrap();
+        let compiled = compile(
+            "allowed",
+            &Expr::Subtract {
+                universe: "allowed".into(),
+                allow: Box::new(Expr::SlotAny("read".into())),
+                remove: Box::new(Expr::SlotAny("blocked".into())),
+            },
+        )
+        .unwrap();
+        // An instruction budget, not noisy host wall time. The former nested
+        // scan exceeds this by two orders of magnitude at 9k row roots.
+        let steps = Arc::new(AtomicUsize::new(0));
+        let counter = steps.clone();
+        db.lock_handle()
+            .await
+            .unwrap()
+            .set_progress_handler(1000, move || {
+                counter.fetch_add(1000, Ordering::Relaxed) < 5_000_000
+            });
+        let mut query = sqlx::query(&compiled.sql)
+            .bind(1i64)
+            .bind("tasks")
+            .bind(1i64)
+            .bind("alice");
+        for value in &compiled.extra_bindings {
+            query = match value {
+                Binding::Text(s) => query.bind(s),
+                Binding::Blob(b) => query.bind(b),
+            };
+        }
+        let rows = query
+            .fetch_all(&mut db)
+            .await
+            .expect("finite-universe SQL exceeded linear work budget");
+        db.lock_handle().await.unwrap().remove_progress_handler();
+        let mut actual = rows
+            .iter()
+            .map(|r| r.get::<String, _>(0))
+            .collect::<Vec<_>>();
+        actual.sort();
+        let expected = (1..=9000)
+            .filter(|n| n % 3 != 0)
+            .map(|n| format!("k{n:05}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, expected,
+            "overlaps, negative branches or foreign universe changed authority"
+        );
+        assert!(steps.load(Ordering::Relaxed) < 5_000_000);
     }
 }
