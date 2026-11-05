@@ -46,6 +46,7 @@ async fn fixture() -> Fixture {
     Fixture::build(o).await.unwrap()
 }
 #[tokio::test]
+#[ignore = "explicit ownership measurement: requires an owned GONVEX_PERF_FIXTURE_DIR and resource caps"]
 async fn queue_origin_probe() {
     gonvex_profiler::set_enabled(true);
     let f = fixture().await;
@@ -155,6 +156,7 @@ impl Drop for Held {
     }
 }
 #[tokio::test]
+#[ignore = "explicit ownership measurement: requires an owned GONVEX_PERF_FIXTURE_DIR and resource caps"]
 async fn queue_result_cancel_probe() {
     gonvex_profiler::set_enabled(true);
     let f = fixture().await;
