@@ -495,6 +495,23 @@ pub fn index_columns(
 }
 
 impl ParentAclRegistry {
+    /// (indexes, projected rows) held by the registry (`/dev/metrics`
+    /// `memory.parentAcl`). Fixed per tenant and module: ~62 MiB sampled in
+    /// the perf/heap-growth lab, the second largest owner after the module.
+    pub(crate) fn totals(&self) -> (usize, usize) {
+        let indexes = self.indexes.lock().unwrap_or_else(|error| error.into_inner());
+        let rows = indexes
+            .values()
+            .map(|entry| {
+                entry
+                    .index
+                    .read()
+                    .map_or(0, |index| index.row_count())
+            })
+            .sum();
+        (indexes.len(), rows)
+    }
+
     /// Prepare every index the given plans bind, before the caller begins its
     /// snapshot transaction. Each missing or poisoned index is loaded in its
     /// own short transaction after its applier subscribed to the feed.

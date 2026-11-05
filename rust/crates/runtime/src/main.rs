@@ -85,10 +85,12 @@ fn register_allocator_info() {
     #[cfg(feature = "jemalloc-prof")]
     gonvex_runtime::heap_stats::set_allocator_info("jemalloc", || {
         let _ = tikv_jemalloc_ctl::epoch::advance();
+        // SAFETY: NUL-terminated mallctl names of size_t statistics.
+        let read = |name: &[u8]| unsafe { tikv_jemalloc_ctl::raw::read::<usize>(name) }.unwrap_or(0);
         serde_json::json!({
-            "allocatedBytes": tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0),
-            "residentBytes": tikv_jemalloc_ctl::stats::resident::read().unwrap_or(0),
-            "retainedBytes": tikv_jemalloc_ctl::stats::retained::read().unwrap_or(0),
+            "allocatedBytes": read(b"stats.allocated\0"),
+            "residentBytes": read(b"stats.resident\0"),
+            "retainedBytes": read(b"stats.retained\0"),
         })
     });
     #[cfg(all(feature = "system-alloc", not(feature = "jemalloc-prof")))]

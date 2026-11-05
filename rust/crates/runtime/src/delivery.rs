@@ -35,8 +35,27 @@ use crate::replica::ReplicaSubscription;
 /// Most variants (distinct contents) kept for one (revision, item) key. More
 /// than this means the content differs per connection; those encode privately.
 const MAX_VARIANTS: usize = 16;
-/// Encoded bytes a tenant's memo keeps (texts, compressed forms and frames).
+/// Estimated bytes a tenant's memo keeps (texts, compressed forms and the
+/// messages kept to compare variants).
 const MAX_MEMO_BYTES: usize = 8 << 20;
+
+/// How long a memoized item stays (`GONVEX_DELIVERY_MEMO_SECS`, default 30;
+/// 0 keeps items until the byte budget evicts them, as before). An item is
+/// shared while the tenant's connections push the same revision, which takes
+/// milliseconds to seconds; a connection that comes later encodes it again.
+/// Without an age bound a quiet tenant's memo filled its budget over hours
+/// and then stayed full (perf/heap-growth: 6 -> 19 MiB in 25 min at 30 users,
+/// one memo per tenant).
+fn memo_ttl() -> Option<Duration> {
+    static TTL: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        let seconds = std::env::var("GONVEX_DELIVERY_MEMO_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(30);
+        (seconds > 0).then(|| Duration::from_secs(seconds))
+    })
+}
 
 /// Batching knobs (`GONVEX_REPLICA_BATCH_TICK_MS`, default 50;
 /// `GONVEX_REPLICA_BATCH_IDLE_MS`, default 1000; `GONVEX_REPLICA_BATCH_MAX_BYTES`,
@@ -82,6 +101,21 @@ pub struct DeliveryHub {
 }
 
 impl DeliveryHub {
+    /// (tenant memos, memoized keys, estimated bytes, items expired by age)
+    /// over every tenant (`/dev/metrics` `memory.deliveryMemo`).
+    pub fn memo_totals(&self) -> (usize, usize, usize, u64) {
+        let tenants = self.tenants.lock().unwrap();
+        tenants.values().fold((0, 0, 0, 0), |(count, keys, bytes, expired), frames| {
+            let memo = frames.memo.lock().unwrap();
+            (
+                count + 1,
+                keys + memo.entries.len(),
+                bytes + memo.bytes,
+                expired + frames.expired.load(Ordering::Relaxed),
+            )
+        })
+    }
+
     pub fn tenant(&self, tenant_id: &str) -> Arc<TenantFrames> {
         let mut tenants = self.tenants.lock().unwrap();
         if let Some(frames) = tenants.get(tenant_id) {
@@ -117,8 +151,33 @@ struct Variant {
 #[derive(Default)]
 struct Memo {
     entries: crate::fast_hash::FastMap<ItemKey, Vec<Variant>>,
-    order: VecDeque<ItemKey>,
+    /// Keys in insertion order, with when they were first memoized.
+    order: VecDeque<(ItemKey, Instant)>,
     bytes: usize,
+}
+
+impl Memo {
+    /// Drops the oldest keys while the memo is over its budget or they are
+    /// older than the TTL. Returns how many keys aged out.
+    fn prune(&mut self) -> u64 {
+        self.prune_at(memo_ttl(), Instant::now())
+    }
+
+    fn prune_at(&mut self, ttl: Option<Duration>, now: Instant) -> u64 {
+        let mut expired = 0;
+        while let Some((_, at)) = self.order.front() {
+            let aged = ttl.is_some_and(|ttl| now.saturating_duration_since(*at) > ttl);
+            if !aged && self.bytes <= MAX_MEMO_BYTES {
+                break;
+            }
+            let (oldest, _) = self.order.pop_front().expect("front exists");
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.bytes -= evicted.iter().map(|variant| variant.bytes).sum::<usize>();
+            }
+            expired += u64::from(aged);
+        }
+        expired
+    }
 }
 
 /// Counters of one tenant memo (benchmarks and dashboards).
@@ -140,6 +199,7 @@ pub struct TenantFrames {
     encodes: AtomicU64,
     private_encodes: AtomicU64,
     encoded_bytes: AtomicU64,
+    expired: AtomicU64,
 }
 
 impl TenantFrames {
@@ -161,7 +221,9 @@ impl TenantFrames {
     /// messages of the same revision and item share one `SharedText`.
     fn item(&self, key: ItemKey, message: ServerMessage) -> Result<Arc<SharedText>, DeliveryError> {
         {
-            let memo = self.memo.lock().unwrap();
+            let mut memo = self.memo.lock().unwrap();
+            let expired = memo.prune();
+            self.expired.fetch_add(expired, Ordering::Relaxed);
             if let Some(variants) = memo.entries.get(&key) {
                 if let Some(variant) = variants.iter().find(|variant| variant.message == message) {
                     self.hits.fetch_add(1, Ordering::Relaxed);
@@ -186,8 +248,11 @@ impl TenantFrames {
             return Ok(text);
         }
         self.encodes.fetch_add(1, Ordering::Relaxed);
-        // The compressed forms (about a third of the text) come later; count them now.
-        let bytes = text.len() * 2 + 256;
+        // The compressed forms (about a third of the text) come later; count
+        // them now. The kept `message` (row values as `Value` trees, compared
+        // with later variants) holds about 2.5x the text: heap profile of
+        // `prewarm` in perf/heap-growth (12 MiB of messages vs 5 MiB of texts).
+        let bytes = text.len() * 4 + 256;
         let first = variants.is_empty();
         variants.push(Variant {
             message,
@@ -196,16 +261,10 @@ impl TenantFrames {
         });
         memo.bytes += bytes;
         if first {
-            memo.order.push_back(key);
+            memo.order.push_back((key, Instant::now()));
         }
-        while memo.bytes > MAX_MEMO_BYTES {
-            let Some(oldest) = memo.order.pop_front() else {
-                break;
-            };
-            if let Some(evicted) = memo.entries.remove(&oldest) {
-                memo.bytes -= evicted.iter().map(|variant| variant.bytes).sum::<usize>();
-            }
-        }
+        let expired = memo.prune();
+        self.expired.fetch_add(expired, Ordering::Relaxed);
         Ok(text)
     }
 }
@@ -1093,5 +1152,50 @@ mod tests {
         batcher.take_frame(&mut batch, None).unwrap();
         batcher.watermark(&mut batch, "t", &replicas, 10);
         assert!(!batcher.call_waiting(), "every waiting call was covered");
+    }
+
+    #[test]
+    fn memoized_items_age_out_after_the_ttl() {
+        let frames = TenantFrames::default();
+        let message = |revision: u64| {
+            (
+                ItemKey {
+                    revision,
+                    native: false,
+                    kind: ItemKind::Transaction,
+                },
+                ServerMessage::AuthResult {
+                    id: format!("r{revision}"),
+                    result: serde_json::json!({"rows": [revision]}),
+                },
+            )
+        };
+        let (key, item) = message(1);
+        let first = frames.item(key.clone(), item.clone()).unwrap();
+        // Within the TTL the same item is shared.
+        let again = frames.item(key, item).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        assert_eq!(frames.stats().hits, 1);
+        let (key, item) = message(2);
+        frames.item(key, item).unwrap();
+        let ttl = Duration::from_secs(30);
+        let mut memo = frames.memo.lock().unwrap();
+        let first_at = memo.order.front().unwrap().1;
+        // Nothing is older than the TTL yet.
+        assert_eq!(memo.prune_at(Some(ttl), first_at + ttl), 0);
+        assert_eq!(memo.entries.len(), 2);
+        // Past it, both keys age out and their bytes are released.
+        let later = memo.order.back().unwrap().1 + ttl + Duration::from_secs(1);
+        assert_eq!(memo.prune_at(Some(ttl), later), 2);
+        assert!(memo.entries.is_empty() && memo.order.is_empty());
+        assert_eq!(memo.bytes, 0);
+        // A TTL of 0 (None) keeps items until the byte budget evicts them.
+        drop(memo);
+        let (key, item) = message(3);
+        frames.item(key, item).unwrap();
+        let mut memo = frames.memo.lock().unwrap();
+        let far = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(memo.prune_at(None, far), 0);
+        assert_eq!(memo.entries.len(), 1);
     }
 }

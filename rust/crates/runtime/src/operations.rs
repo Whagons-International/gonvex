@@ -1642,6 +1642,8 @@ fn memory_json(runtime: &Runtime) -> Value {
     } else {
         Vec::new()
     };
+    let memo = runtime.inner.delivery.memo_totals();
+    let parent_acl = runtime.inner.parent_acl.totals();
     json!({
         "sqliteUsedBytes": gonvex_store::sqlite_memory_used(),
         "sqliteBudgetMiB": gonvex_store::sqlite_cache_budget_mib(),
@@ -1658,6 +1660,8 @@ fn memory_json(runtime: &Runtime) -> Value {
         "replicaOpens": crate::open_reasons::json(),
         "principalCache": runtime.principal_cache_stats(),
         "allocator": crate::heap_stats::json(),
+        "deliveryMemo": {"tenants": memo.0, "keys": memo.1, "estimatedBytes": memo.2, "expired": memo.3},
+        "parentAcl": {"indexes": parent_acl.0, "rows": parent_acl.1},
         "v8": {"isolates": isolates, "totalHeapBytes": v8[0], "usedHeapBytes": v8[1],
             "physicalBytes": v8[2], "externalBytes": v8[3], "mallocedBytes": v8[4]},
     })

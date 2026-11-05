@@ -108,6 +108,11 @@ impl Default for ParentAclIndex {
 }
 
 impl ParentAclIndex {
+    /// Projected rows held (diagnostics).
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows.values().map(BTreeMap::len).sum()
+    }
+
     /// A unique-key index whose key is the row id.
     pub fn from_snapshot(revision: u64, rows: BTreeMap<String, Value>) -> Self {
         Self::from_rows(
