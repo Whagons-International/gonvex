@@ -1342,7 +1342,7 @@ Vite (e2e mode) + headless Chromium against the lab runtime through the proxy so
 | first visit (sign-in, /welcome, /workspace/all), ×3 | 177–178 | 1.49–1.52 s | 177–178 / 726–1,580 ms |
 | warm reload of /workspace/all, ×3 | 130 | 0.72–0.79 s | 130 / 1,278–1,337 ms |
 
-126 of the 130 reload opens are argument-less whole-collection `__local.*` collections; 4 take
+126 of the 130 reload opens are argument-less; only 40 are `__local.*` collections. Four take
 one argument (userId = member id, workspaceId 'all', associableType 'task'); 89 of 130 carry a
 resume cursor. The lab thin and SDK users open 9 collections at sign-in (8 metadata +
 recentWorkspaceTasks) plus ≈ 8 per detail window: **the gate so far modelled ≈ 1/15 of a real
@@ -1509,7 +1509,9 @@ Integrated verification (final results recorded below):
   Logs and direct exit file are under `/mnt/data/work/gonvex-gate6-baseline/`.
   This was integration validation, not a full-app measurement.
 
-### Shipping collection recapture status: NOT VERIFIED
+### Shipping collection recapture status at Step18: NOT VERIFIED
+
+Historical status below; successful later observation is recorded in Step19.
 
 Isolated app worktree **37ca8278b** (`perf/gate6-capture-sqlite`) used actual
 published **0.5.2-sqlite.1** dependencies and the app's matching patch (SHA-256
@@ -1547,3 +1549,59 @@ Actual cache/output/checkouts use `/mnt/data` with headroom checks; only helper
 bookkeeping build-dir uses existing `/home/gabriel/work` paths. Compile caps were
 not changed. Next explicit lab handoff is to `perf/reload-delta`, sourced from
 **e5812dfb**; no heap or permission integration is authorized yet.
+
+
+## Step19: shipping capture and authorized reload integration (2026-11-05 UTC)
+
+Successful capture supersedes Step18's auth-blocked status. Full evidence and
+source pins: [shipping SQLite.1 observation](shipping-sqlite1-capture.md).
+The actual published patched SDK and matching shipping module on unchanged7d01af5b
+observed132 unique path+args in both cold routes. Warm startup130 (89cursor/41cold)
+settled at131 (90cursor/41cold). Normal signin redirect opened125 before the first
+task-window result;31 pre-grid behavior is not established. Staging814415ca0 live
+counts remain unverified. Old177–178 first-visit attempts are not an old unique
+count. Step16's126 argument-less opens are corrected to40 local paths, not126.
+
+Auth failure was the app's enforced unverified-email policy cancelling an earlier
+identity generation, not an SDK/runtime mismatch. The explicitly approved normal
+emulator VERIFY_EMAIL flow in the owned clone changed emailVerified false→true
+at05:43:43.632301 UTC; no bypass or direct credential metadata modification.
+All41 missing warm cursors were read before durable hydration despite same-scope
+persisted cursor+hash records (37empty/4nonempty). Per-path timings are committed;
+SDK ordering fix remains separately pending Gabriel approval. No SDK/app edit.
+
+Capture own tabs, servers, forwarders and containers stopped; own lock released
+06:03:37.314890 UTC. Fresh20minute integration slot claimed06:04:21 UTC,
+hard end06:24:21. Separate harness-only immutable observed132-list commit
+**1df392e8** does not silently change the generator default or claim staging parity.
+Only exact reviewed runtime batch **387ce467838ab3b29dd0c317625d0403105cca00**
+merged, as **44a0908efbe58c7f4bc002c51cd5161358d3fe28**. No permission/heap merge.
+
+Preserved7d standalone SHA256 remains
+`d8283384ed1df4ddff65c46fed0e31075a8a0978fc9ade608d8cac9d597d5f32`.
+The exact prior e581 runtime lib-test executable was copied before rebuild to
+`/mnt/data/work/gonvex-gate6-baseline/before-e581/gonvex-runtime-lib-tests`,
+SHA256 `4a6b9f20299974dd07279a9c2b8e07be3962f7fe3f1217c6cd2400451747b074`.
+It is a test executable, not an e581 standalone service binary.
+
+Integrated validation results follow. No live load/capacity win, expanded mixed
+gate pass or release freeze is claimed. Known optimized WebSocket future budget
+failure29,664>28,672 remains unchanged and explicitly documented in the merged
+reload evidence; exact e581 produced the same size. This is not a fully green
+optimized runtime suite.
+
+
+Validation on source44a0908e, all direct exits0:
+- `cargo test --locked -p gonvex-runtime --features perf-fixture --test resume_validation --test resume_permission_race --test resume_log_only --test principal_cache_oracle --test snapshot_cache_oracle`: five test binaries passed; queued-revoke test includes3 deterministic cases. Principal and snapshot tests compare against SQLite oracles.
+- `cargo test --locked -p gonvex-runtime --lib`: **398 passed,0 failed,8 ignored**, debug/default features. Optimized/feature-specific future-budget failure above was not rerun or waived.
+- `cargo clippy --locked -p gonvex-runtime --lib -- -W clippy::redundant_clone`: exit0 with warnings; no lint-budget or source cleanup changes.
+- `pnpm --filter @gonvex/docs typecheck`: metadata generation/typecheck exit0, no tracked generated diff; existing installed deps, own/mnt caches, no install.
+- `node --test bench/whagons/*.test.mjs`:34passed; `python3 bench/whagons/summary.test.py`:5passed; `node --experimental-strip-types --check bench/whagons/run.ts`:pass.
+- Static relative harness runtime-import graph05e85737 versus44a0908e:12modules,15edges,0cycles on both. No SDK/application JavaScript changes or other codegen/i18n input changed.
+- Immutable fixture check:132 distinct path+args,41local, member placeholders preserved. No default gate workload silently changed.
+
+Evidence: `evidence/reload-integrated-validation.json` contains log paths,
+SHA256s and direct exits; `evidence/reload-integrated-import-cycles.json` records
+the graph comparison. Actual target/cache/output paths were/mnt, headroom passed,
+resource admission/compile wrappers unchanged. The last heavy unit exited at
+06:13:35 UTC. Only perf/integrate-5k is pushed; no PR/CI/deployment/staging load.
