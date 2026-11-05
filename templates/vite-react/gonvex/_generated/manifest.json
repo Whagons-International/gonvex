@@ -1,6 +1,6 @@
 {
-  "project": "701afa6f-0a89-404f-afa8-30c314981ad3",
-  "generatedAt": "2026-11-02T23:18:52.008Z",
+  "project": "my-vite-app",
+  "generatedAt": "2026-11-05T21:55:54.191Z",
   "functions": {
     "messages.agentInvoke": {
       "kind": "action",
