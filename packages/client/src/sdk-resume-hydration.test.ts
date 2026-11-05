@@ -223,3 +223,66 @@ it("does not use a superseded hydration completion as the latest readiness certi
   expect(f.opens()).toEqual([]);
   expect(f.state.replicaOpenHydrations.size).toBe(0);
 });
+
+it("constructs once when a current activation promise is already resolved", async () => {
+  const f = await fixture(false);
+  f.release.resolve(); await f.state.replicaReady;
+  // Marking an already-resolved activation still installs its certificate
+  // before its waiter retries; repeating the same promise is a no-op.
+  const ready = Promise.resolve();
+  f.state.setReplicaReady(ready); f.state.setReplicaReady(ready);
+  const construct = vi.spyOn(f.state, "replicaOpenRequest");
+  f.state.sendReplicaOpen(f.subscriptions[0]);
+  await f.waiting();
+  expect(f.state.hydratedReplicaReady).toBe(ready);
+  expect(f.state.replicaOpenHydrations.size).toBe(0);
+  expect(construct).toHaveBeenCalledTimes(1);
+  expect(f.opens()).toHaveLength(1);
+});
+
+it("keeps public control RPC send progress while rows and tenant authentication wait", async () => {
+  const f = await fixture(false);
+  f.state.sendReplicaOpen(f.subscriptions[0]);
+  const waiting = f.waiting();
+  f.state.authInFlight = true;
+  f.state.sendNow = vi.fn();
+  f.state.sendOneShotQuery({ id: "bootstrap", path: "control.auth.exchange", args: {},
+    scope: "control", authorization: "public" });
+  expect(f.state.sendNow).toHaveBeenCalledWith({ type: "query.call", id: "bootstrap",
+    path: "control.auth.exchange", args: {}, scope: "control" });
+  expect(f.opens()).toEqual([]);
+  f.release.resolve(); await waiting;
+  expect(f.opens()).toEqual([]);
+});
+
+it("rechecks ownership on the second frame and releases its unsent opening marker", async () => {
+  const f = await fixture(true, 257);
+  for (const subscription of f.subscriptions) f.state.sendReplicaOpen(subscription);
+  const waiting = f.waiting(); f.release.resolve(); await waiting;
+  f.state.send.mockImplementationOnce(() => { f.state.activeAuthFrameId = "replacement"; });
+  f.flush();
+  expect(f.state.send).toHaveBeenCalledTimes(1);
+  expect(f.opens()).toHaveLength(256);
+  expect(f.subscriptions[256]).toMatchObject({ opening: false, socketGeneration: undefined });
+});
+
+it("does not send or clear a replacement batch from an older flush continuation", async () => {
+  const f = await fixture(true, 257);
+  for (const subscription of f.subscriptions) f.state.sendReplicaOpen(subscription);
+  const waiting = f.waiting(); f.release.resolve(); await waiting;
+  vi.clearAllTimers();
+  const last = f.subscriptions[256]!;
+  f.state.send.mockImplementationOnce(() => {
+    f.state.activeAuthFrameId = "replacement";
+    last.opening = false;
+    f.state.sendReplicaOpen(last);
+  });
+  f.state.flushReplicaOpens();
+  expect(f.state.send).toHaveBeenCalledTimes(1);
+  expect(last.opening).toBe(true);
+  expect(f.state.pendingReplicaOpens.has(last)).toBe(true);
+  f.state.flushReplicaOpens();
+  expect(f.state.send).toHaveBeenCalledTimes(2);
+  expect(f.opens()).toHaveLength(257);
+  expect(f.opens().filter((open: any) => open.id === last.id)).toHaveLength(1);
+});

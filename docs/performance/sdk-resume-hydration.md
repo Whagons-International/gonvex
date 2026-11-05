@@ -87,3 +87,28 @@ path/args/scope/generation and preserving the shipping collection set. Until
 then, no claim that the actual shipping cursor issue is fixed. No packaging,
 SDK installation into the app, endpoint, browser, staging/production access or
 application feature change was performed by this source-preparation step.
+
+## Source follow-up before the verification grant
+
+The initial `replicaReady` is a resolved placeholder. Its initial hydrated
+marker now refers to that same placeholder, avoiding an unmarked fulfilled
+promise in the field initialization. Construction always replaces it through
+`setReplicaReady` with the unauthorized initial scope activation before the
+client is exposed. The sole assignment enabling authoritative scope is in
+`activateReplicaDirective`, immediately followed synchronously by
+`setReplicaReady(activateScope(...))`. All later readiness assignments use
+that setter. Its fulfillment callback is registered before open waiters;
+reusing the same promise is a no-op. A prepared regression covers opening
+immediately after installing an already-resolved promise, repeated setter
+calls, exactly one construction/send and zero remaining waiters.
+
+Additional prepared tests exercise the public-control RPC send bypass while
+both auth and row hydration are held, plus 257 opens split across two frames.
+A first-frame transport callback changes auth ownership: the old second
+frame must not construct/send, and must release its unsent opening marker.
+If that callback instead queues a replacement attempt, the old flush must
+neither send it nor clear its pending/opening ownership. Per-attempt owners
+are captured when the flush begins and rechecked against the current weak-map
+owner per frame. This small source correction addresses that discovered
+unsent-marker case; it has not yet been executed. No build/test/packaging or
+new lab claim occurred during heap's reservation.
