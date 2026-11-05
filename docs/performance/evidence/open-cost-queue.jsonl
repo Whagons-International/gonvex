@@ -1,0 +1,5 @@
+{"name":"app_queue/bound","values":{"cold":false,"sameKey":false,"waiting":4096,"refused":904,"admissionWaiting":[4096,0],"allocatedBytes":92176192,"liveBytes":52367904,"peakLiveBytes":52381733}}
+{"name":"app_queue/bound","values":{"cold":true,"sameKey":false,"waiting":5000,"refused":0,"admissionWaiting":[17,0],"allocatedBytes":92554801,"liveBytes":63189961,"peakLiveBytes":63191271}}
+{"name":"app_queue/bound","values":{"cold":false,"sameKey":false,"waiting":256,"refused":4744,"admissionWaiting":[256,0],"allocatedBytes":91684672,"liveBytes":3830301,"peakLiveBytes":3844130}}
+{"name":"app_queue/bound","values":{"cold":true,"sameKey":false,"waiting":5000,"refused":0,"admissionWaiting":[17,0],"allocatedBytes":92554953,"liveBytes":63189665,"peakLiveBytes":63190975}}
+{"name":"app_queue/bound","values":{"cold":true,"sameKey":true,"waiting":5000,"refused":0,"admissionWaiting":[1,0],"allocatedBytes":90330703,"liveBytes":62581326,"peakLiveBytes":62582632}}
