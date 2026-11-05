@@ -631,6 +631,50 @@ async fn run_offline() {
                 json!({"opens":specs.len(),"cursorReload":phase=="reload"}),
             );
         }
+        if env("BENCH_ORACLE", 0) == 1 {
+            let rows = |messages: &[ServerMessage]| {
+                let mut rows: Vec<_> = messages
+                    .iter()
+                    .flat_map(|m| match m {
+                        ServerMessage::ReplicaSnapshot { result, .. } => result
+                            .iter()
+                            .map(|r| serde_json::to_string(&r.to_value()).unwrap())
+                            .collect(),
+                        _ => Vec::new(),
+                    })
+                    .collect();
+                rows.sort();
+                rows
+            };
+            for spec in &specs {
+                let path = spec["path"].as_str().unwrap();
+                let args: Value = serde_json::from_str(
+                    &serde_json::to_string(&spec["args"])
+                        .unwrap()
+                        .replace("$member", &session.member.id),
+                )
+                .unwrap();
+                let cached = fixture
+                    .runtime
+                    .open_replica(&session, request(path, args.clone(), None))
+                    .await
+                    .unwrap();
+                let fresh = fixture
+                    .runtime
+                    .open_replica_fresh(&session, request(path, args, None))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    rows(&cached.messages),
+                    rows(&fresh.messages),
+                    "{label} {path}: SQL oracle mismatch"
+                );
+            }
+            record(
+                &format!("offline/{label}/oracle"),
+                json!({"exactRowComparisons":specs.len()}),
+            );
+        }
     }
     fixture.shutdown().await;
 }
