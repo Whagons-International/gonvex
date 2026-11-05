@@ -718,6 +718,12 @@ impl Stmt<'_> {
     ) -> Result<(), String> {
         match (kind, self.column_type(index)) {
             (_, ffi::SQLITE_NULL) => out.extend_from_slice(b"null"),
+            (JsonKind::TimestampMicros, ffi::SQLITE_INTEGER) => {
+                write_str(out, &crate::timestamp_micros::encode(self.int64(index))?)
+            }
+            (JsonKind::TimestampMicros, _) => {
+                return Err("TIMESTAMP_MICROS requires INTEGER storage or NULL".into())
+            }
             (JsonKind::Boolean, ffi::SQLITE_INTEGER) => {
                 out.extend_from_slice(if self.int64(index) != 0 {
                     b"true"

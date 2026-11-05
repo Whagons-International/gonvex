@@ -48,6 +48,8 @@ impl Parameter {
     pub(crate) fn column(value: &Value, kind: JsonKind) -> Result<Self, String> {
         match (kind, value) {
             (_, Value::Null) => Ok(Self::Null),
+            (JsonKind::TimestampMicros, Value::String(value)) => Ok(Self::Integer(gonvex_store::timestamp_micros::parse_rfc3339(value)?)),
+            (JsonKind::TimestampMicros, _) => Err("typed TIMESTAMP_MICROS parameter needs RFC3339 text or NULL; numeric units are not inferred".into()),
             (JsonKind::Json, value) => Ok(Self::Json(value.to_string())),
             (JsonKind::Boolean, Value::Bool(value)) => Ok(Self::Integer(i64::from(*value))),
             _ => Self::scalar(value),
@@ -270,5 +272,46 @@ mod tests {
                 .iter()
                 .all(|row| row.try_get::<String, _>("v").unwrap() == "seed"));
         }
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+    #[test]
+    fn timestamp_binds_are_explicit_and_existing_scalar_numeric_units_do_not_change() {
+        assert_eq!(
+            Parameter::column(
+                &serde_json::json!("1969-12-31T23:59:59.999999Z"),
+                JsonKind::TimestampMicros
+            )
+            .unwrap(),
+            Parameter::Integer(-1)
+        );
+        assert_eq!(
+            Parameter::column(&Value::Null, JsonKind::TimestampMicros).unwrap(),
+            Parameter::Null
+        );
+        for raw in [
+            serde_json::json!(1),
+            serde_json::json!(1.0),
+            serde_json::json!(true),
+            serde_json::json!("1970-01-01T00:00:00.1234567Z"),
+        ] {
+            assert!(Parameter::column(&raw, JsonKind::TimestampMicros).is_err());
+        }
+        let raw = serde_json::json!(1794000000123i64);
+        assert_eq!(
+            Parameter::scalar(&raw).unwrap(),
+            Parameter::Integer(1794000000123)
+        );
+        assert_eq!(
+            Parameter::column(&raw, JsonKind::Integer).unwrap(),
+            Parameter::Integer(1794000000123)
+        );
+        assert_eq!(
+            Parameter::scalar(&serde_json::json!("1970-01-01T00:00:00Z")).unwrap(),
+            Parameter::Text("1970-01-01T00:00:00Z".into())
+        );
     }
 }

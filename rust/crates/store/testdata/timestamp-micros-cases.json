@@ -1,0 +1,106 @@
+{
+  "format": "synthetic-original-chrono-timestamp-cases-v1",
+  "sourceCandidate": "3438d803a7db8deaf1c7229be5c74544b10c9952",
+  "cases": [
+    {
+      "id": "synthetic-00",
+      "micros": "-1000001",
+      "wire": "1969-12-31T23:59:58.999999Z"
+    },
+    {
+      "id": "synthetic-01",
+      "micros": "-1000000",
+      "wire": "1969-12-31T23:59:59Z"
+    },
+    {
+      "id": "synthetic-02",
+      "micros": "-999999",
+      "wire": "1969-12-31T23:59:59.000001Z"
+    },
+    {
+      "id": "synthetic-03",
+      "micros": "-1001",
+      "wire": "1969-12-31T23:59:59.998999Z"
+    },
+    {
+      "id": "synthetic-04",
+      "micros": "-1000",
+      "wire": "1969-12-31T23:59:59.999Z"
+    },
+    {
+      "id": "synthetic-05",
+      "micros": "-999",
+      "wire": "1969-12-31T23:59:59.999001Z"
+    },
+    {
+      "id": "synthetic-06",
+      "micros": "-1",
+      "wire": "1969-12-31T23:59:59.999999Z"
+    },
+    {
+      "id": "synthetic-07",
+      "micros": "0",
+      "wire": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": "synthetic-08",
+      "micros": "1",
+      "wire": "1970-01-01T00:00:00.000001Z"
+    },
+    {
+      "id": "synthetic-09",
+      "micros": "999",
+      "wire": "1970-01-01T00:00:00.000999Z"
+    },
+    {
+      "id": "synthetic-10",
+      "micros": "1000",
+      "wire": "1970-01-01T00:00:00.001Z"
+    },
+    {
+      "id": "synthetic-11",
+      "micros": "1001",
+      "wire": "1970-01-01T00:00:00.001001Z"
+    },
+    {
+      "id": "synthetic-12",
+      "micros": "1999",
+      "wire": "1970-01-01T00:00:00.001999Z"
+    },
+    {
+      "id": "synthetic-13",
+      "micros": "2000",
+      "wire": "1970-01-01T00:00:00.002Z"
+    },
+    {
+      "id": "synthetic-14",
+      "micros": "86399999999",
+      "wire": "1970-01-01T23:59:59.999999Z"
+    },
+    {
+      "id": "synthetic-15",
+      "micros": "86400000001",
+      "wire": "1970-01-02T00:00:00.000001Z"
+    },
+    {
+      "id": "synthetic-16",
+      "micros": "1700000000123000",
+      "wire": "2023-11-14T22:13:20.123Z"
+    },
+    {
+      "id": "synthetic-17",
+      "micros": "1700000000123456",
+      "wire": "2023-11-14T22:13:20.123456Z"
+    },
+    {
+      "id": "synthetic-18",
+      "micros": "253402300799999000",
+      "wire": "9999-12-31T23:59:59.999Z"
+    },
+    {
+      "id": "synthetic-19",
+      "micros": "253402300799999999",
+      "wire": "9999-12-31T23:59:59.999999Z"
+    }
+  ]
+}

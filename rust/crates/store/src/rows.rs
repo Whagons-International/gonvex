@@ -11,6 +11,7 @@ use crate::DatabaseError;
 /// How a column is encoded as JSON.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JsonKind {
+    TimestampMicros,
     Json,
     Boolean,
     Integer,
@@ -21,7 +22,9 @@ pub enum JsonKind {
 impl JsonKind {
     pub fn from_declared(declared: &str) -> Self {
         let declared = declared.to_ascii_uppercase();
-        if declared.contains("JSON") {
+        if declared.trim() == crate::timestamp_micros::DECLARED_TYPE {
+            Self::TimestampMicros
+        } else if declared.contains("JSON") {
             Self::Json
         } else if declared.contains("BOOL") {
             Self::Boolean
@@ -82,6 +85,7 @@ pub fn quote_identifier(name: &str) -> String {
 /// One column's JSON expression for `json_object`, e.g. `json(r."meta")`.
 pub fn json_value_expr(qualified: &str, kind: JsonKind) -> String {
     match kind {
+        JsonKind::TimestampMicros => format!("{}({qualified})",crate::timestamp_micros::ENCODER_FUNCTION),
         JsonKind::Json => format!(
             "CASE WHEN {qualified} IS NULL THEN NULL WHEN json_valid({qualified}) THEN json({qualified}) ELSE {qualified} END"
         ),
@@ -166,6 +170,14 @@ pub fn decode_value(value: SqliteValueRef<'_>, kind: JsonKind) -> Result<Value, 
     let real = || sqlx::Value::try_decode::<f64>(&owned).map_err(decode_error);
     let text = || sqlx::Value::try_decode::<String>(&owned).map_err(decode_error);
     Ok(match (kind, storage.as_str()) {
+        (JsonKind::TimestampMicros, "INTEGER") => Value::String(
+            crate::timestamp_micros::encode(integer()?).map_err(DatabaseError::Decode)?,
+        ),
+        (JsonKind::TimestampMicros, _) => {
+            return Err(DatabaseError::Decode(
+                "TIMESTAMP_MICROS requires INTEGER storage or NULL".into(),
+            ))
+        }
         (JsonKind::Boolean, "INTEGER") => Value::Bool(integer()? != 0),
         (JsonKind::Boolean, "REAL") => Value::Bool(real()? != 0.0),
         (JsonKind::Json, "TEXT") => {

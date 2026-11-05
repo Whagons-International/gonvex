@@ -40,6 +40,7 @@ pub use sync_barrier::WAL_SYNCS;
 pub mod feed;
 mod registry;
 pub mod rows;
+pub mod timestamp_micros;
 pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{

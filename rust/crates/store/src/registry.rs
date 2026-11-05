@@ -535,6 +535,9 @@ impl PoolRegistry {
     pub fn with_durability(limits: PoolLimits, durability: Durability) -> Self {
         let limits = limits.bounded();
         apply_cache_budget();
+        #[cfg(feature = "timestamp-micros")]
+        crate::timestamp_micros::install();
+        #[cfg(not(feature = "timestamp-micros"))]
         crate::statement_profile::install();
         crate::reader_priority::install();
         Self {

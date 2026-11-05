@@ -1,0 +1,827 @@
+{
+  "format": "synthetic-postgres-timestamp-oracle-v1",
+  "sourceCandidate": "3438d803a7db8deaf1c7229be5c74544b10c9952",
+  "cases": [
+    {
+      "id": "synthetic-00",
+      "micros": "-1000001",
+      "wire": "1969-12-31T23:59:58.999999Z"
+    },
+    {
+      "id": "synthetic-01",
+      "micros": "-1000000",
+      "wire": "1969-12-31T23:59:59Z"
+    },
+    {
+      "id": "synthetic-02",
+      "micros": "-999999",
+      "wire": "1969-12-31T23:59:59.000001Z"
+    },
+    {
+      "id": "synthetic-03",
+      "micros": "-1001",
+      "wire": "1969-12-31T23:59:59.998999Z"
+    },
+    {
+      "id": "synthetic-04",
+      "micros": "-1000",
+      "wire": "1969-12-31T23:59:59.999Z"
+    },
+    {
+      "id": "synthetic-05",
+      "micros": "-999",
+      "wire": "1969-12-31T23:59:59.999001Z"
+    },
+    {
+      "id": "synthetic-06",
+      "micros": "-1",
+      "wire": "1969-12-31T23:59:59.999999Z"
+    },
+    {
+      "id": "synthetic-07",
+      "micros": "0",
+      "wire": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": "synthetic-08",
+      "micros": "1",
+      "wire": "1970-01-01T00:00:00.000001Z"
+    },
+    {
+      "id": "synthetic-09",
+      "micros": "999",
+      "wire": "1970-01-01T00:00:00.000999Z"
+    },
+    {
+      "id": "synthetic-10",
+      "micros": "1000",
+      "wire": "1970-01-01T00:00:00.001Z"
+    },
+    {
+      "id": "synthetic-11",
+      "micros": "1001",
+      "wire": "1970-01-01T00:00:00.001001Z"
+    },
+    {
+      "id": "synthetic-12",
+      "micros": "1999",
+      "wire": "1970-01-01T00:00:00.001999Z"
+    },
+    {
+      "id": "synthetic-13",
+      "micros": "2000",
+      "wire": "1970-01-01T00:00:00.002Z"
+    },
+    {
+      "id": "synthetic-14",
+      "micros": "86399999999",
+      "wire": "1970-01-01T23:59:59.999999Z"
+    },
+    {
+      "id": "synthetic-15",
+      "micros": "86400000001",
+      "wire": "1970-01-02T00:00:00.000001Z"
+    },
+    {
+      "id": "synthetic-16",
+      "micros": "1700000000123000",
+      "wire": "2023-11-14T22:13:20.123Z"
+    },
+    {
+      "id": "synthetic-17",
+      "micros": "1700000000123456",
+      "wire": "2023-11-14T22:13:20.123456Z"
+    },
+    {
+      "id": "synthetic-18",
+      "micros": "253402300799999000",
+      "wire": "9999-12-31T23:59:59.999Z"
+    },
+    {
+      "id": "synthetic-19",
+      "micros": "253402300799999999",
+      "wire": "9999-12-31T23:59:59.999999Z"
+    }
+  ],
+  "queries": [
+    {
+      "aligned": false,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": "=",
+      "expectedIds": [
+        "synthetic-06"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-07",
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-06",
+        "synthetic-07",
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": "=",
+      "expectedIds": [
+        "synthetic-07"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-07",
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06",
+        "synthetic-07"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": "=",
+      "expectedIds": [
+        "synthetic-08"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06",
+        "synthetic-07"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06",
+        "synthetic-07",
+        "synthetic-08"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": "=",
+      "expectedIds": [
+        "synthetic-11"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06",
+        "synthetic-07",
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06",
+        "synthetic-07",
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": "=",
+      "expectedIds": [
+        "synthetic-17"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06",
+        "synthetic-07",
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "aligned": false,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06",
+        "synthetic-07",
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": "=",
+      "expectedIds": []
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-07",
+        "synthetic-10",
+        "synthetic-13",
+        "synthetic-16",
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-07",
+        "synthetic-10",
+        "synthetic-13",
+        "synthetic-16",
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1969-12-31T23:59:59.999999Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": "=",
+      "expectedIds": [
+        "synthetic-07"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-10",
+        "synthetic-13",
+        "synthetic-16",
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-07",
+        "synthetic-10",
+        "synthetic-13",
+        "synthetic-16",
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04",
+        "synthetic-07"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": "=",
+      "expectedIds": []
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-10",
+        "synthetic-13",
+        "synthetic-16",
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04",
+        "synthetic-07"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-10",
+        "synthetic-13",
+        "synthetic-16",
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.000001Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04",
+        "synthetic-07"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": "=",
+      "expectedIds": []
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-13",
+        "synthetic-16",
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04",
+        "synthetic-07",
+        "synthetic-10"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-13",
+        "synthetic-16",
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "1970-01-01T00:00:00.001001Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04",
+        "synthetic-07",
+        "synthetic-10"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": "=",
+      "expectedIds": []
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": ">",
+      "expectedIds": [
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": "<",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04",
+        "synthetic-07",
+        "synthetic-10",
+        "synthetic-13",
+        "synthetic-16"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": ">=",
+      "expectedIds": [
+        "synthetic-18"
+      ]
+    },
+    {
+      "aligned": true,
+      "cutoffWire": "2023-11-14T22:13:20.123456Z",
+      "operator": "<=",
+      "expectedIds": [
+        "synthetic-01",
+        "synthetic-04",
+        "synthetic-07",
+        "synthetic-10",
+        "synthetic-13",
+        "synthetic-16"
+      ]
+    }
+  ],
+  "orders": [
+    {
+      "direction": "ASC",
+      "limit": 1,
+      "expectedIds": [
+        "synthetic-null"
+      ]
+    },
+    {
+      "direction": "ASC",
+      "limit": 3,
+      "expectedIds": [
+        "synthetic-null",
+        "synthetic-00",
+        "synthetic-01"
+      ]
+    },
+    {
+      "direction": "ASC",
+      "limit": 21,
+      "expectedIds": [
+        "synthetic-null",
+        "synthetic-00",
+        "synthetic-01",
+        "synthetic-02",
+        "synthetic-03",
+        "synthetic-04",
+        "synthetic-05",
+        "synthetic-06",
+        "synthetic-07",
+        "synthetic-08",
+        "synthetic-09",
+        "synthetic-10",
+        "synthetic-11",
+        "synthetic-12",
+        "synthetic-13",
+        "synthetic-14",
+        "synthetic-15",
+        "synthetic-16",
+        "synthetic-17",
+        "synthetic-18",
+        "synthetic-19"
+      ]
+    },
+    {
+      "direction": "DESC",
+      "limit": 1,
+      "expectedIds": [
+        "synthetic-19"
+      ]
+    },
+    {
+      "direction": "DESC",
+      "limit": 3,
+      "expectedIds": [
+        "synthetic-19",
+        "synthetic-18",
+        "synthetic-17"
+      ]
+    },
+    {
+      "direction": "DESC",
+      "limit": 21,
+      "expectedIds": [
+        "synthetic-19",
+        "synthetic-18",
+        "synthetic-17",
+        "synthetic-16",
+        "synthetic-15",
+        "synthetic-14",
+        "synthetic-13",
+        "synthetic-12",
+        "synthetic-11",
+        "synthetic-10",
+        "synthetic-09",
+        "synthetic-08",
+        "synthetic-07",
+        "synthetic-06",
+        "synthetic-05",
+        "synthetic-04",
+        "synthetic-03",
+        "synthetic-02",
+        "synthetic-01",
+        "synthetic-00",
+        "synthetic-null"
+      ]
+    }
+  ],
+  "nullIds": [
+    "synthetic-null"
+  ],
+  "postgresClockProperties": {
+    "transactionStartStable": true,
+    "savepointsPreserveStart": true,
+    "clockTimestampRealtime": true
+  },
+  "qualification": "SYNTHETIC; not all app routes, production data, or above-six-digit rounding"
+}

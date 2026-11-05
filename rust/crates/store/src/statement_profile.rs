@@ -64,7 +64,7 @@ unsafe extern "C" fn entry_point(
     ffi::SQLITE_OK
 }
 
-unsafe extern "C" fn on_trace(
+pub(crate) unsafe extern "C" fn on_trace(
     _kind: c_uint,
     _context: *mut c_void,
     statement: *mut c_void,

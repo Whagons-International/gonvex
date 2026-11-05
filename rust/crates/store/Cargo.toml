@@ -6,7 +6,9 @@ license.workspace = true
 
 [features]
 default = []
-permission-primitives = []
+permission-primitives = ["timestamp-micros"]
+# Explicit experimental microsecond physical schema; default builds add no clock trace.
+timestamp-micros = []
 
 [dependencies]
 gonvex-profiler = { path = "../profiler" }

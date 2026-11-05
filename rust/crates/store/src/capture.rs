@@ -231,9 +231,15 @@ unsafe extern "C" fn transaction_rollback(context: *mut c_void) {
         .clear();
 }
 
-fn cell_json(cell: &Cell, kind: JsonKind) -> Value {
-    match (cell, kind) {
+fn cell_json(cell: &Cell, kind: JsonKind) -> Result<Value, String> {
+    Ok(match (cell, kind) {
         (Cell::Null, _) => Value::Null,
+        (Cell::Integer(value), JsonKind::TimestampMicros) => {
+            Value::String(crate::timestamp_micros::encode(*value)?)
+        }
+        (_, JsonKind::TimestampMicros) => {
+            return Err("TIMESTAMP_MICROS requires INTEGER storage or NULL".into())
+        }
         (Cell::Integer(value), JsonKind::Boolean) => Value::Bool(*value != 0),
         (Cell::Real(value), JsonKind::Boolean) => Value::Bool(*value != 0.0),
         (Cell::Text(text), JsonKind::Json) => {
@@ -247,16 +253,16 @@ fn cell_json(cell: &Cell, kind: JsonKind) -> Value {
         (Cell::Blob(bytes), _) => {
             Value::String(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
         }
-    }
+    })
 }
 
-fn image(shape: &TableShape, cells: &[Cell]) -> Value {
+fn image(shape: &TableShape, cells: &[Cell]) -> Result<Value, String> {
     let mut object = Map::new();
     for (index, (name, kind)) in shape.columns.iter().enumerate() {
         let cell = cells.get(index).unwrap_or(&Cell::Null);
-        object.insert(name.clone(), cell_json(cell, *kind));
+        object.insert(name.clone(), cell_json(cell, *kind)?);
     }
-    Value::Object(object)
+    Ok(Value::Object(object))
 }
 
 /// `gonvex_capture(table, rowid, op)`: `[old, new, changed]` JSON for the
@@ -300,8 +306,24 @@ unsafe extern "C" fn capture_function(
         };
         events.remove(position)
     };
-    let old = event.old.as_deref().map(|cells| image(&shape, cells));
-    let new = event.new.as_deref().map(|cells| image(&shape, cells));
+    let old = match event
+        .old
+        .as_deref()
+        .map(|cells| image(&shape, cells))
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(message) => return fail(&message),
+    };
+    let new = match event
+        .new
+        .as_deref()
+        .map(|cells| image(&shape, cells))
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(message) => return fail(&message),
+    };
     let changed = match (&event.old, &event.new) {
         (Some(old), Some(new)) => {
             let names = shape
