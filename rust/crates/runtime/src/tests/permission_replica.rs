@@ -1,5 +1,5 @@
 //! OWN local fixture only; no runtime.start(), V8 host or network endpoint.
-//! Source-prepared Stage 3 regression. Not yet compiled/executed.
+//! Feature-gated source/index/cold-snapshot regressions with the v2 oracle.
 use super::config;
 use crate::{
     modules::{FunctionDefinition, ProjectModule, ReplicaCollectionDefinition},
@@ -665,6 +665,208 @@ async fn signed_relational_source_identity_grant_serves_real_sql_snapshot() {
         .await;
     assert!(runtime
         .rebuild_local_source_permission_snapshot(&session, &registration)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "The process environment must remain exclusively owned across this whole isolated test, including awaits; the existing fixture tests share this lock."
+)]
+async fn signed_group_sources_match_v2_overlaps_negatives_and_transaction_changes() {
+    let _guard = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let _environment = Environment(std::env::var_os("GONVEX_PERMISSION_PRIMITIVES_LOCAL"));
+    std::env::set_var("GONVEX_PERMISSION_PRIMITIVES_LOCAL", "1");
+    std::fs::create_dir_all(indexes::LOCAL_FIXTURE_ROOT).unwrap();
+    let dir = tempfile::tempdir_in(indexes::LOCAL_FIXTURE_ROOT).unwrap();
+    let runtime = Runtime::new(config(false));
+    runtime.set_snapshot_cache_enabled(false);
+    runtime.set_principal_cache_enabled(false);
+    let url = gonvex_store::database_url(&dir.path().join("source.db"));
+    let control = ControlPlane::connect(
+        &gonvex_store::database_url(&dir.path().join("control.db")),
+        runtime.inner.pools.clone(),
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+    *runtime.inner.control_plane.write().await = Some(control);
+    let mut tx = gonvex_store::begin_transaction(&runtime.inner.pools, &url, false)
+        .await
+        .unwrap();
+    sqlx::raw_sql(gonvex_store::feed::SYNC_INFRASTRUCTURE_SQL)
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE TABLE members(id TEXT PRIMARY KEY,account_id TEXT UNIQUE,status TEXT,role TEXT,permissions JSON); INSERT INTO members VALUES('alice','account','active','member','{}'),('bob','other-account','active','member','{}'); CREATE TABLE owned(_id TEXT PRIMARY KEY,title TEXT,rank INTEGER,payload JSON,enabled BOOLEAN); INSERT INTO owned VALUES('a','first',1,'null',1),('b','second',2,'{}',0),('c','third',3,'[]',1); CREATE TABLE directGrants(_id TEXT PRIMARY KEY,memberId TEXT,taskId TEXT,deletedAt INTEGER); INSERT INTO directGrants VALUES('direct-a','alice','a',NULL),('alternate-a','alice','a',NULL); CREATE TABLE teamGrants(_id TEXT PRIMARY KEY,teamId TEXT,taskId TEXT,deletedAt INTEGER); INSERT INTO teamGrants VALUES('blue-b','blue','b',NULL),('red-b','red','b',NULL),('blue-c','blue','c',NULL); CREATE TABLE memberTeams(_id TEXT PRIMARY KEY,memberId TEXT,teamId TEXT,deletedAt INTEGER); INSERT INTO memberTeams VALUES('blue-alice','alice','blue',NULL),('red-alice','alice','red',NULL); CREATE TABLE otherTeams(_id TEXT PRIMARY KEY,memberId TEXT,teamId TEXT,deletedAt INTEGER); INSERT INTO otherTeams VALUES('other-red-bob','bob','red',NULL); CREATE TABLE denyGrants(_id TEXT PRIMARY KEY,memberId TEXT,taskId TEXT,deletedAt INTEGER)")
+        .execute(&mut **tx.transaction()).await.unwrap();
+    tx.commit().await.unwrap();
+    let definition:ReplicaCollectionDefinition=serde_json::from_value(json!({"table":"owned","key":"_id","columns":["_id","title","rank","payload","enabled"],"orderBy":"rank","orderDirection":"asc","mode":"window","maxRows":2,"maxBytes":400,"retentionMs":0})).unwrap();
+    let plan=serde_json::from_value(json!({"version":2,"table":"owned","key":"_id","permissionTables":["directGrants","teamGrants","memberTeams","denyGrants"],"sets":{
+        "direct":{"kind":"grant","table":"directGrants","select":"taskId","joins":[],"where":[{"table":"directGrants","column":"memberId","context":"member.id"},{"table":"directGrants","column":"deletedAt","value":{"literal":null}}]},
+        "teams":{"kind":"grant","table":"teamGrants","select":"taskId","joins":[{"table":"memberTeams","leftColumn":"teamId","rightColumn":"teamId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"},{"table":"memberTeams","column":"deletedAt","value":{"literal":null}},{"table":"teamGrants","column":"deletedAt","value":{"literal":null}}]},
+        "removed":{"kind":"grant","table":"denyGrants","select":"taskId","joins":[],"where":[{"table":"denyGrants","column":"memberId","context":"member.id"},{"table":"denyGrants","column":"deletedAt","value":{"literal":null}}]}
+    },"where":{"operator":"and","children":[{"operator":"or","children":[{"operator":"inSet","column":"_id","set":"direct"},{"operator":"inSet","column":"_id","set":"teams"}]},{"operator":"not","children":[{"operator":"inSet","column":"_id","set":"removed"}]}]}})).unwrap();
+    let module = ProjectModule {
+        project_id: "source-fixture".into(),
+        generation: 1,
+        artifact_hash: "signed-source-fixture".into(),
+        client_contract: None,
+        functions: BTreeMap::from([(
+            "owned.list".into(),
+            FunctionDefinition {
+                kind: "query".into(),
+                internal: false,
+                public: false,
+                delivery: "replica".into(),
+                action_profile: String::new(),
+                action_capabilities: Value::Null,
+                replica: Some(definition),
+                dependencies: Value::Null,
+                live_query_plan: None,
+                interactive: false,
+                classification: String::new(),
+                description: String::new(),
+                tags: vec![],
+                confirmation: String::new(),
+                args_schema: Value::Null,
+                result_schema: Value::Null,
+                profile_slot: 0,
+            },
+        )]),
+        manifest_functions: json!({}),
+        replica_epochs: Arc::default(),
+        schema: json!({}),
+        visibility: BTreeMap::from([("owned".into(), plan)]),
+        permission_grants: None,
+        invitation_acceptance_reducer: String::new(),
+        migrations: vec![],
+        crons: vec![],
+    };
+    let manifest: Value =
+        serde_json::from_str(include_str!("../../testdata/permission-source-groups.json")).unwrap();
+    runtime
+        .inner
+        .modules
+        .install_permission_fixture_manifest(module.clone(), manifest.clone())
+        .await;
+    let mut session = TenantSession::anonymous(TenantRoute {
+        project_id: "source-fixture".into(),
+        tenant_id: "source-tenant".into(),
+        database_url: url.clone(),
+    });
+    session.identity.account.id = "account".into();
+    session.member.id = "alice".into();
+    session.member.role = "member".into();
+    let registration = runtime
+        .install_local_source_permission_snapshot(&session, "owned.list")
+        .await
+        .unwrap();
+    let initial = compare(
+        &runtime,
+        &session,
+        &registration,
+        request("owned.list", Value::Null),
+    )
+    .await;
+    assert_eq!(initial.window.rows, 2);
+    // A namespaced membership must never grant atoms from another namespace.
+    let mut bob = session.clone();
+    bob.identity.account.id = "other-account".into();
+    bob.member.id = "bob".into();
+    assert_eq!(
+        compare(
+            &runtime,
+            &bob,
+            &registration,
+            request("owned.list", Value::Null)
+        )
+        .await
+        .window
+        .rows,
+        0
+    );
+    for (statement, rows) in [
+        ("UPDATE directGrants SET deletedAt=1 WHERE _id='direct-a'",2),
+        ("DELETE FROM directGrants WHERE _id='alternate-a'",2),
+        ("UPDATE memberTeams SET deletedAt=2 WHERE _id='blue-alice'",1),
+        ("UPDATE teamGrants SET deletedAt=3 WHERE _id='red-b'",0),
+        ("UPDATE teamGrants SET deletedAt=NULL WHERE _id='red-b'",1),
+        // A negative flip adds no new positive atom; it must still remove b.
+        ("INSERT INTO denyGrants VALUES('remove-b','alice','b',NULL)",0),
+        ("DELETE FROM denyGrants",1),
+        // Row and grant retarget in the same TX; old/NEW source closure matters.
+        ("UPDATE owned SET _id='new-b' WHERE _id='b'; UPDATE teamGrants SET taskId='new-b' WHERE _id='red-b'",1),
+    ] {
+        let mut tx = gonvex_store::begin_transaction(&runtime.inner.pools, &url, false).await.unwrap();
+        sqlx::raw_sql(statement).execute(&mut **tx.transaction()).await.unwrap();
+        tx.commit().await.unwrap();
+        assert!(runtime.open_local_permission_snapshot(&registration,&session,request("owned.list",Value::Null)).await.is_err(),"mutation must invalidate old authority before disclosure");
+        runtime.rebuild_local_source_permission_snapshot(&session,&registration).await.unwrap();
+        assert_eq!(compare(&runtime,&session,&registration,request("owned.list",Value::Null)).await.window.rows,rows);
+    }
+    let before = compare(
+        &runtime,
+        &session,
+        &registration,
+        request("owned.list", Value::Null),
+    )
+    .await;
+    let mut tx = gonvex_store::begin_transaction(&runtime.inner.pools, &url, false)
+        .await
+        .unwrap();
+    sqlx::raw_sql("INSERT INTO owned VALUES('ungranted','new row',4,'null',0)")
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    runtime
+        .rebuild_local_source_permission_snapshot(&session, &registration)
+        .await
+        .unwrap();
+    let after = compare(
+        &runtime,
+        &session,
+        &registration,
+        request("owned.list", Value::Null),
+    )
+    .await;
+    assert_eq!(
+        before.identity.exact, after.identity.exact,
+        "row-only mutations cannot change principal atom set"
+    );
+    // Rollback preserves both source rows and ready index authority.
+    let mut tx = gonvex_store::begin_transaction(&runtime.inner.pools, &url, false)
+        .await
+        .unwrap();
+    sqlx::raw_sql("DELETE FROM memberTeams; DELETE FROM teamGrants")
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    compare(
+        &runtime,
+        &session,
+        &registration,
+        request("owned.list", Value::Null),
+    )
+    .await;
+    // A non-TEXT projected member is rejected; failure remains unready/atomic.
+    let mut tx = gonvex_store::begin_transaction(&runtime.inner.pools, &url, false)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memberTeams SET memberId=X'01' WHERE _id='red-alice'")
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(runtime
+        .rebuild_local_source_permission_snapshot(&session, &registration)
+        .await
+        .is_err());
+    assert!(runtime
+        .open_local_permission_snapshot(&registration, &session, request("owned.list", Value::Null))
         .await
         .is_err());
 }

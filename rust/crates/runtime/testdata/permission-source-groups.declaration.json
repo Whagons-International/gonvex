@@ -1,0 +1,295 @@
+{
+  "version": 1,
+  "atoms": {},
+  "providers": {
+    "groups": {
+      "adapter": "relational-v1",
+      "version": "test-groups-v1",
+      "sources": [
+        {
+          "id": "direct",
+          "kind": "grant",
+          "from": {
+            "table": "directGrants",
+            "key": "_id",
+            "as": "source"
+          },
+          "joins": [],
+          "where": [
+            {
+              "op": "isNull",
+              "field": {
+                "alias": "source",
+                "column": "deletedAt"
+              }
+            }
+          ],
+          "target": {
+            "kind": "member",
+            "id": {
+              "field": {
+                "alias": "source",
+                "column": "memberId"
+              },
+              "type": "text",
+              "onNull": "omitFact"
+            }
+          },
+          "atoms": [
+            {
+              "namespace": "task.read",
+              "resource": {
+                "field": {
+                  "alias": "source",
+                  "column": "taskId"
+                },
+                "type": "text",
+                "onNull": "omitFact"
+              }
+            }
+          ]
+        },
+        {
+          "id": "teams",
+          "kind": "grant",
+          "from": {
+            "table": "teamGrants",
+            "key": "_id",
+            "as": "source"
+          },
+          "joins": [],
+          "where": [
+            {
+              "op": "isNull",
+              "field": {
+                "alias": "source",
+                "column": "deletedAt"
+              }
+            }
+          ],
+          "target": {
+            "kind": "group",
+            "namespace": "whagons.team",
+            "id": {
+              "field": {
+                "alias": "source",
+                "column": "teamId"
+              },
+              "type": "text",
+              "onNull": "omitFact"
+            }
+          },
+          "atoms": [
+            {
+              "namespace": "task.read",
+              "resource": {
+                "field": {
+                  "alias": "source",
+                  "column": "taskId"
+                },
+                "type": "text",
+                "onNull": "omitFact"
+              }
+            }
+          ]
+        },
+        {
+          "id": "deny",
+          "kind": "grant",
+          "from": {
+            "table": "denyGrants",
+            "key": "_id",
+            "as": "source"
+          },
+          "joins": [],
+          "where": [
+            {
+              "op": "isNull",
+              "field": {
+                "alias": "source",
+                "column": "deletedAt"
+              }
+            }
+          ],
+          "target": {
+            "kind": "member",
+            "id": {
+              "field": {
+                "alias": "source",
+                "column": "memberId"
+              },
+              "type": "text",
+              "onNull": "omitFact"
+            }
+          },
+          "atoms": [
+            {
+              "namespace": "task.localRemoval",
+              "resource": {
+                "field": {
+                  "alias": "source",
+                  "column": "taskId"
+                },
+                "type": "text",
+                "onNull": "omitFact"
+              }
+            }
+          ]
+        },
+        {
+          "id": "memberships",
+          "kind": "membership",
+          "from": {
+            "table": "memberTeams",
+            "key": "_id",
+            "as": "source"
+          },
+          "joins": [],
+          "where": [
+            {
+              "op": "isNull",
+              "field": {
+                "alias": "source",
+                "column": "deletedAt"
+              }
+            }
+          ],
+          "group": {
+            "namespace": "whagons.team",
+            "id": {
+              "field": {
+                "alias": "source",
+                "column": "teamId"
+              },
+              "type": "text",
+              "onNull": "omitFact"
+            }
+          },
+          "member": {
+            "kind": "member",
+            "id": {
+              "field": {
+                "alias": "source",
+                "column": "memberId"
+              },
+              "type": "text",
+              "onNull": "omitFact"
+            }
+          }
+        },
+        {
+          "id": "otherNamespace",
+          "kind": "membership",
+          "from": {
+            "table": "otherTeams",
+            "key": "_id",
+            "as": "source"
+          },
+          "joins": [],
+          "where": [
+            {
+              "op": "isNull",
+              "field": {
+                "alias": "source",
+                "column": "deletedAt"
+              }
+            }
+          ],
+          "group": {
+            "namespace": "other.team",
+            "id": {
+              "field": {
+                "alias": "source",
+                "column": "teamId"
+              },
+              "type": "text",
+              "onNull": "omitFact"
+            }
+          },
+          "member": {
+            "kind": "member",
+            "id": {
+              "field": {
+                "alias": "source",
+                "column": "memberId"
+              },
+              "type": "text",
+              "onNull": "omitFact"
+            }
+          }
+        },
+        {
+          "id": "rows",
+          "kind": "row",
+          "from": {
+            "table": "owned",
+            "key": "_id",
+            "as": "source"
+          },
+          "joins": [],
+          "where": [],
+          "table": "owned",
+          "key": {
+            "field": {
+              "alias": "source",
+              "column": "_id"
+            },
+            "type": "text",
+            "onNull": "reject"
+          },
+          "universe": "owned",
+          "atoms": [
+            {
+              "slot": "read",
+              "atom": {
+                "namespace": "task.read",
+                "resource": {
+                  "field": {
+                    "alias": "source",
+                    "column": "_id"
+                  },
+                  "type": "text",
+                  "onNull": "reject"
+                }
+              }
+            },
+            {
+              "slot": "remove",
+              "atom": {
+                "namespace": "task.localRemoval",
+                "resource": {
+                  "field": {
+                    "alias": "source",
+                    "column": "_id"
+                  },
+                  "type": "text",
+                  "onNull": "reject"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "collections": {
+    "owned.list": {
+      "provider": "groups",
+      "table": "owned",
+      "key": "_id",
+      "universe": "owned",
+      "policy": {
+        "op": "except",
+        "universe": "owned",
+        "allow": {
+          "op": "slot",
+          "slot": "read"
+        },
+        "remove": {
+          "op": "slot",
+          "slot": "remove"
+        }
+      }
+    }
+  }
+}

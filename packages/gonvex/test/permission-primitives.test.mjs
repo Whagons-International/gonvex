@@ -10,6 +10,14 @@ test('literal source binding derives the exact runtime old/new dependency certif
   const staged=structuredClone(fixture.declaration); staged.collections={};
   assert.deepEqual(compilePermissionPrimitives(staged).declaration.collections,{});
 });
+test('namespaced group fixture preserves membership and typed NULL dependencies',async()=>{
+  const declaration=JSON.parse(await readFile(new URL('../../../rust/crates/runtime/testdata/permission-source-groups.declaration.json',import.meta.url),'utf8'));
+  const expected=JSON.parse(await readFile(new URL('../../../rust/crates/runtime/testdata/permission-source-groups.json',import.meta.url),'utf8'));
+  assert.deepEqual(JSON.parse(JSON.stringify(compilePermissionPrimitives(declaration))),expected);
+  const memberships=expected.dependencies.groups.filter(x=>x.source==='memberships');
+  assert.deepEqual(memberships,[{source:'memberships',table:'memberTeams',key:'_id',alias:'source',columns:['_id','deletedAt','memberId','teamId'],images:'oldAndNew'}]);
+  assert.equal(expected.declaration.providers.groups.sources.find(x=>x.id==='teams').target.namespace,'whagons.team');
+});
 test('unknown/coercing/unbound source inputs and opaque policies reject',()=>{
   const cases=[
     x=>x.providers.self.adapter='callback',

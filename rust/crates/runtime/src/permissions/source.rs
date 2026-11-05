@@ -1,5 +1,6 @@
-//! First relational source adapter: plain TEXT owner rows and persisted-member
-//! grants, no joins/roles/parent/JSON coercion. Explicit LOCAL rebuild only.
+//! Relational source adapter: exact TEXT projections, member/namespaced-group
+//! grants and memberships, typed NULL tests. No joins/roles/parent/JSON coercion.
+//! Explicit LOCAL rebuild only.
 //! A source is replaced as a complete logical batch; this is not an incremental
 //! occurrence/candidate implementation and does not publish a live feed.
 use super::{
@@ -183,6 +184,60 @@ enum Filter {
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum Subject {
     Member { id: Text },
+    Group { namespace: String, id: Text },
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Group {
+    namespace: String,
+    id: Text,
+}
+fn group_id(namespace: &str, id: &str) -> Result<String, Error> {
+    if namespace.is_empty() || namespace.contains('\0') || id.is_empty() || id.contains('\0') {
+        return Err(reject());
+    }
+    // An injective tuple encoding: different namespaces cannot alias, including
+    // namespaces/IDs containing punctuation or JSON-escaped Unicode.
+    serde_json::to_string(&(namespace, id)).map_err(|_| reject())
+}
+impl Subject {
+    fn validate(&self, table: &Table, columns: &mut BTreeSet<String>) -> Result<(), Error> {
+        match self {
+            Self::Member { id } => id.validate(table, columns),
+            Self::Group { namespace, id } => {
+                group_id(namespace, "validation")?;
+                id.validate(table, columns)
+            }
+        }
+    }
+    fn read(&self, row: &sqlx::sqlite::SqliteRow) -> Result<Option<indexes::Subject>, Error> {
+        let (id, namespace) = match self {
+            Self::Member { id } => (id, None),
+            Self::Group { namespace, id } => (id, Some(namespace)),
+        };
+        let Some(id) = id.read(row)? else {
+            return Ok(None);
+        };
+        if id.is_empty() || id.contains('\0') {
+            return Err(reject());
+        }
+        Ok(Some(match namespace {
+            None => indexes::Subject::Member(id),
+            Some(namespace) => indexes::Subject::Group(group_id(namespace, &id)?),
+        }))
+    }
+}
+impl Group {
+    fn validate(&self, table: &Table, columns: &mut BTreeSet<String>) -> Result<(), Error> {
+        group_id(&self.namespace, "validation")?;
+        self.id.validate(table, columns)
+    }
+    fn read(&self, row: &sqlx::sqlite::SqliteRow) -> Result<Option<String>, Error> {
+        self.id
+            .read(row)?
+            .map(|id| group_id(&self.namespace, &id))
+            .transpose()
+    }
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -210,10 +265,23 @@ pub(crate) struct Rows {
     universe: String,
     atoms: Vec<RowAtom>,
 }
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Membership {
+    id: String,
+    kind: String,
+    from: Table,
+    joins: Vec<Value>,
+    #[serde(rename = "where")]
+    filters: Vec<Filter>,
+    group: Group,
+    member: Subject,
+}
 #[derive(Clone)]
 pub(crate) enum Source {
     Grant(Grant),
     Rows(Rows),
+    Membership(Membership),
 }
 impl Text {
     fn validate(&self, table: &Table, columns: &mut BTreeSet<String>) -> Result<(), Error> {
@@ -291,48 +359,43 @@ impl Source {
         match self {
             Self::Grant(x) => &x.id,
             Self::Rows(x) => &x.id,
+            Self::Membership(x) => &x.id,
         }
     }
     pub fn kind(&self) -> &str {
         match self {
             Self::Grant(_) => "grant",
             Self::Rows(_) => "row",
+            Self::Membership(_) => "membership",
         }
     }
     fn table(&self) -> &Table {
         match self {
             Self::Grant(x) => &x.from,
             Self::Rows(x) => &x.from,
+            Self::Membership(x) => &x.from,
         }
     }
     fn filters(&self) -> &[Filter] {
         match self {
             Self::Grant(x) => &x.filters,
             Self::Rows(x) => &x.filters,
+            Self::Membership(x) => &x.filters,
         }
     }
     pub fn source_table(&self) -> &str {
         &self.table().table
     }
-    fn dependency(&self) -> Result<Dependency, Error> {
+    fn text_columns(&self) -> Result<BTreeSet<String>, Error> {
         let table = self.table();
         quote(&table.table)?;
         quote(&table.key)?;
         quote(&table.alias)?;
         let mut columns = BTreeSet::from([table.key.clone()]);
         for filter in self.filters() {
-            match filter {
-                Filter::IsNull { field } | Filter::IsNotNull { field } => {
-                    if field.alias != table.alias {
-                        return Err(reject());
-                    }
-                    quote(&field.column)?;
-                    columns.insert(field.column.clone());
-                }
-                Filter::TextEq { left, right } => {
-                    left.validate(table, &mut columns)?;
-                    right.validate(table, &mut columns)?;
-                }
+            if let Filter::TextEq { left, right } = filter {
+                left.validate(table, &mut columns)?;
+                right.validate(table, &mut columns)?;
             }
         }
         match self {
@@ -340,8 +403,7 @@ impl Source {
                 if x.kind != "grant" || !x.joins.is_empty() {
                     return Err(reject());
                 }
-                let Subject::Member { id } = &x.target;
-                id.validate(table, &mut columns)?;
+                x.target.validate(table, &mut columns)?;
                 for atom in &x.atoms {
                     atom.validate(table, &mut columns)?;
                 }
@@ -358,6 +420,27 @@ impl Source {
                     }
                     atom.atom.validate(table, &mut columns)?;
                 }
+            }
+            Self::Membership(x) => {
+                if x.kind != "membership" || !x.joins.is_empty() {
+                    return Err(reject());
+                }
+                x.group.validate(table, &mut columns)?;
+                x.member.validate(table, &mut columns)?;
+            }
+        }
+        Ok(columns)
+    }
+    fn dependency(&self) -> Result<Dependency, Error> {
+        let table = self.table();
+        let mut columns = self.text_columns()?;
+        for filter in self.filters() {
+            if let Filter::IsNull { field } | Filter::IsNotNull { field } = filter {
+                if field.alias != table.alias {
+                    return Err(reject());
+                }
+                quote(&field.column)?;
+                columns.insert(field.column.clone());
             }
         }
         Ok(Dependency {
@@ -394,11 +477,12 @@ impl Source {
         {
             return Err(reject());
         }
+        let text_columns = self.text_columns()?;
         for column in &dependency.columns {
-            if !declared
-                .iter()
-                .any(|c| c.name == *column && c.declared.eq_ignore_ascii_case("TEXT"))
-            {
+            if !declared.iter().any(|c| {
+                c.name == *column
+                    && (!text_columns.contains(column) || c.declared.eq_ignore_ascii_case("TEXT"))
+            }) {
                 return Err(reject());
             }
         }
@@ -426,8 +510,7 @@ impl Source {
                 return Err(reject());
             }
         }
-        let invalid = dependency
-            .columns
+        let invalid = text_columns
             .iter()
             .map(|c| {
                 Ok(format!(
@@ -488,18 +571,14 @@ impl Source {
         match self {
             Self::Grant(source) => {
                 let mut facts = Vec::new();
-                let Subject::Member { id } = &source.target;
                 for row in rows {
-                    let Some(target) = id.read(&row)? else {
+                    let Some(target) = source.target.read(&row)? else {
                         continue;
                     };
-                    if target.is_empty() || target.contains('\0') {
-                        return Err(reject());
-                    }
                     for atom in &source.atoms {
                         if let Some(atom) = atom.read(&row)? {
                             facts.push(indexes::GrantFact {
-                                target: indexes::Subject::Member(target.clone()),
+                                target: target.clone(),
                                 atom,
                             });
                         }
@@ -532,6 +611,22 @@ impl Source {
                     });
                 }
                 Ok(indexes::SourceChange::Rows {
+                    source: source.id.clone(),
+                    facts,
+                })
+            }
+            Self::Membership(source) => {
+                let mut facts = Vec::new();
+                for row in rows {
+                    let Some(group) = source.group.read(&row)? else {
+                        continue;
+                    };
+                    let Some(member) = source.member.read(&row)? else {
+                        continue;
+                    };
+                    facts.push(indexes::MembershipFact { group, member });
+                }
+                Ok(indexes::SourceChange::Memberships {
                     source: source.id.clone(),
                     facts,
                 })
@@ -586,6 +681,9 @@ impl Manifest {
                 Some("row") => {
                     Source::Rows(serde_json::from_value(value.clone()).map_err(|_| reject())?)
                 }
+                Some("membership") => {
+                    Source::Membership(serde_json::from_value(value.clone()).map_err(|_| reject())?)
+                }
                 _ => return Err(reject()),
             };
             if source.id().is_empty() || !ids.insert(source.id().to_owned()) {
@@ -593,7 +691,7 @@ impl Manifest {
             }
             dependencies.push(source.dependency()?);
             let needed = match &source {
-                Source::Grant(_) => true,
+                Source::Grant(_) | Source::Membership(_) => true,
                 Source::Rows(row) => {
                     let needed =
                         row.table == collection.table && row.universe == collection.universe;
