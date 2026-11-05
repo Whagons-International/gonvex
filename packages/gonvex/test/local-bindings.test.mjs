@@ -62,7 +62,7 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   const output = await build({input:join(root,'gonvex','local-executor.ts'),platform:'browser',write:false,output:{format:'iife',name:'SharedExecutor',codeSplitting:false}});
   const code = output.output.find(chunk=>chunk.type==='chunk').code;
   assert.doesNotMatch(code,/PGlite|new Worker|WebAssembly\.instantiate/);
-  const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
+  const browser = await chromium.launch({headless:true,args:['--no-sandbox','--disable-gpu']});
   t.after(()=>browser.close());
   const context = await browser.newContext({offline:true});
   const page = await context.newPage();
