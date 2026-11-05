@@ -212,22 +212,88 @@ production tenants without their row distribution and realistic 1k measurements.
 The 1k baseline remains the source of capacity evidence; this branch is not merged
 into its unchanged runtime during the gate series.
 
-## Verification status
+## Verification status (2026-11-05 deferred grant)
 
-`09799a27`: targeted `cargo test -p gonvex-runtime --lib -- heap_stats snapshot_cache`
-passed 6 tests (396 total discovered) before the provider failure. Both fix binaries
-built successfully at `ba54cee4`. A later lib-test attempt in `lab-hg/t2.log`
-failed to compile the metrics JSON macro. Its wrapper nevertheless reported exit 0;
-that wrapper status is not a test pass. Recovered historical activity shows a
-subsequent targeted run after fixing the macro and removing test-util dependence:
-`cargo test --offline -p gonvex-runtime --lib -- delivery:: heap_stats snapshot_cache registry_tests`
-reported 38 passed, 0 failed before the fix commit. That command also piped
-output, so its test-result text is evidence, not its shell exit status. Full
-runtime/perf-fixture/oracle tests remain pending a coordinated build window
-after the gate series; the new run will capture cargo exit directly.
-No additional build or test is allowed during exclusive measurements.
+**Full validation is incomplete. No integration merge is authorized.** Runtime
+source remains `ba54cee4` on the older `636e3c45` base; no newer integration
+changes were merged and no runtime/compiler/allocator changes were made in this
+validation window. No new load or soak ran. The lock was claimed at 06:15:53 UTC
+and explicitly extended through 06:45:53 UTC; all jobs are bounded before that
+cutoff. The test target is private `/mnt/data/work/gonvex-heap-validation-target`.
+The copied cache took 7m05s; compile caps remained unchanged. Every heavy phase
+passed `build-headroom` and ran through `coach-resources`.
 
-No new workloads are scheduled by this report. Integration holds the queued
-validation window after open-cost, reopen and its realistic mixed-load series
-(15-minute background with simultaneous bursts). The parent coordinates any
-further heap soak. Current evidence is not full validation or merge approval.
+The actual command was:
+
+```sh
+cargo test --offline --locked -p gonvex-runtime --features perf-fixture --lib --tests -- --test-threads=1
+```
+
+Output went directly to a log and cargo's exit was captured in a separate file,
+without a filter/tee pipeline. Attempts were retained separately:
+
+1. The original hard timeout fired at 06:35:07 during compilation. Process-tree
+   exit **124**, cargo exit unavailable, no tests executed. This is incomplete,
+   not a pass or a baseline failure.
+2. The resumed full command compiled and returned actual cargo exit **101**:
+   **390 passed, 1 failed, 7 ignored** in the library. The failure was
+   `action_calls::fetch_tests::a_body_timeout_is_reported_as_a_timeout_not_a_decode_failure`:
+   its 200 ms request timed out at `.send().await.unwrap()`, before the body
+   assertion. Cargo stopped before integration tests.
+3. The full command was repeated with `--no-fail-fast` so that the earlier
+   failure could not prevent the integration oracles from running. Results
+   below include only completed suites; the first failure is not erased.
+
+| Completed suite | Passed | Failed | Ignored |
+| --- | ---: | ---: | ---: |
+| runtime library | 391 | 0 | 7 |
+| runtime binary | 1 | 0 | 0 |
+| auth_contract | 4 | 0 | 0 |
+| burst_control | 1 | 0 | 0 |
+| call_watermark_latency | 1 | 0 | 0 |
+| class_sharing_oracle | 2 | 0 | 0 |
+| conn_idle | 3 | 0 | 0 |
+| delivery_oracle | 1 | 0 | 0 |
+| feed_backlog | 1 | 0 | 0 |
+| membership_projection | 1 | 0 | 0 |
+| offload_equivalence | 1 | 0 | 0 |
+| operator_contract | 2 | 0 | 0 |
+| perf_fixture_smoke | 1 | 0 | 0 |
+| presence_v2 | 9 | 0 | 0 |
+| principal_cache_oracle | 1 | 0 | 0 |
+
+Attempt 3 process-tree exit: **124**; actual cargo exit:
+**unavailable (interrupted)**.
+Last incomplete suite: **raw_rows_oracle**. Integration suites without a
+completed result: `raw_rows_oracle`, `redeploy_cache`, `replica_state`, `resume_log_only`, `slow_reader_delivery`, `snapshot_cache_oracle`, `targeted_wake`, `visibility_fanout`.
+A partial result is not a full-suite pass. The seven ignored library tests are
+three bridge benchmarks and four tests requiring parent-owned native-exit,
+authenticated SDK/browser/storage or process-crash coordinators; no ignore was
+added by this patch.
+
+The HTTP-timeout failure was checked independently using an immutable
+`git archive 636e3c45` and a separate private reflinked target. The exact test
+passed with actual cargo exit **0** (394 filtered tests). `action_calls.rs` is
+byte-identical between the base and heap branch. Therefore the original failure
+was **not reproduced as a baseline failure**; its cause remains unproven.
+The repeat library run passing does not justify silently waiving the failed
+attempt. Baseline source was not edited, and the baseline was not merged.
+
+The docs generator command `pnpm --filter @gonvex/docs typecheck` passed with
+actual exit **0** (`fumadocs-mdx`, Next route types, TypeScript). It produced no
+tracked generated-file changes. No Gonvex function/schema, template API or i18n
+source changed; CI/package-script inspection found no other applicable standalone
+generator for this Rust/report diff. A conservative `crate::` module-reference
+SCC comparison against `636e3c45` found unchanged cycles; the only added library
+edge is `operations -> heap_stats`, and `heap_stats` has no outgoing crate edges.
+The binary also calls that leaf module. No JavaScript runtime files changed.
+This graph comparison includes test code and is not full Rust name resolution;
+the leaf's one-way imports also establish that it adds no runtime cycle.
+The new module's format check and branch whitespace check passed.
+
+Evidence is under `/mnt/data/work/gonvex-heap-evidence/validation/`:
+`runtime-full.log`, each attempt's separate status/log, `baseline-timeout-test.log`,
+`baseline-proof.json`, `docs-typecheck.log`, `cycle-comparison.json` and
+`validation-summary.json`. Historical targeted output before `ba54cee4` reported
+38 passed; the new full-run evidence above supersedes any earlier pending or
+wrapper-only validation claim. **Total RSS improvement remains unproven.**
