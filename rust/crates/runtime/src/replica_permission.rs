@@ -678,3 +678,17 @@ impl Runtime {
 #[cfg(feature = "starter-files")]
 #[path = "starter_files/adapter.rs"]
 pub(crate) mod starter_adapter;
+
+/// Read-only adapter boundary for independently compiled, fresh validated scans.
+/// Caller owns the SAME transaction for certificate validation and this visit.
+/// This wrapper grants no readiness, provider completeness or authority itself.
+#[cfg(feature = "permission-primitives")]
+pub(crate) async fn visit_indexed_collection_window(
+    tx: &mut TenantTransaction,
+    definition: &ReplicaCollectionDefinition,
+    prepared: &query::Prepared,
+    args: &Value,
+    visit: impl FnMut(ScannedRow) -> Result<(), ReplicaError>,
+) -> Result<ReplicaWindow, LocalSnapshotError> {
+    scan_local_window(tx, definition, prepared, args, visit).await
+}
