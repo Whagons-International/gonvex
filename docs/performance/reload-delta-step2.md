@@ -245,8 +245,10 @@ jobs stopped. No further heavy verification is authorized in this window.
   admission and permit recovery. Unit tests cover TTL, zero limits, byte
   eviction, truncated/boundary rejection and older-completion ordering.
   Native sum128 optimization, arbitrary trailing-log corruption and a real
-  concurrent permission/multi-session race were not demonstrated by these
-  focused tests; no such coverage is claimed.
+  concurrent permission/multi-session race were not demonstrated by those
+  original focused tests. The later queued-permission regression below adds
+  the specific admission/write interleaving; broader race coverage is not
+  claimed.
 - `pnpm --config.verify-deps-before-run=false --filter @gonvex/docs typecheck`:
   docs metadata generators, route type generation and TypeScript all passed;
   [output](evidence/reload-delta-generators3.log.txt). No tracked generator
@@ -264,15 +266,16 @@ not edited. Next evidence needed is the unblocked shipping capture and its
 actual mode/collection/cursor lifecycle, plus parent-owned full-runtime gate
 and a future separately admitted verification window for remaining checks.
 
-## Follow-up: deterministic permission race, source prepared
+## Follow-up: deterministic permission race, verified
 
 Reviewed implementation baseline remains immutable at
 `cc91423b3a7a4616fa34517abbe4371887574fe1`. The follow-up adds only a
-`resume_permission_race` integration-test target and this report update;
-there is no runtime fix or refactor. **The new test has not been compiled or
-executed yet.** Source was prepared while the permission child owns the
-05:14–05:43 UTC reservation; no build/test job was started. Verification must
-wait for an explicit next lab grant, regardless of lock-file presence.
+`resume_permission_race` integration-test target and report/evidence updates;
+there is no runtime fix or refactor. Test source was committed separately as
+`00158274846ce2db912539ee5ad59d25eff9a862`, initially without execution while
+the permission child owned the lab. After that owner explicitly released
+and parent granted the next window, **all three cases passed** on that exact
+source, direct Cargo exit 0. No inference from an absent lock was used.
 
 The three cases separately revoke `members.see_all_spots`, soft-delete the
 member's `memberTeams` links, and downgrade the member's SQL role/permissions.
@@ -317,3 +320,33 @@ more than 4,096 rows. The retained/replayed-row cap does not bound that SQL
 scan's CPU. Eight-session results do not measure these saturated costs.
 No broad cache/log refactor was made; quantify them only in a later admitted
 window.
+
+Verification command, using the existing optimized target and unchanged
+compile slots/profile/RUSTFLAGS:
+
+```sh
+cd rust
+CARGO_TARGET_DIR=/mnt/data/work/gonvex-open-cost/target \
+GONVEX_PERF_FIXTURE_DIR=/mnt/data/work/gonvex-open-cost/fixture \
+GONVEX_DB_MAX_OPEN_CONNS=2 GONVEX_REPLICA_SNAPSHOT_CONCURRENCY=2 \
+cargo test --locked -p gonvex-runtime --release --features perf-fixture \
+  --test resume_permission_race -- --nocapture
+```
+
+The one test runs three cases serially: see-all-spots revoked 247 actual
+rows, team membership revoked 308, member role/permissions revoked 301;
+each writer advanced revision 1 → 2. All exact response, principal,
+subscription/revision, SDK-model digest and fresh SQL row comparisons passed.
+Compilation took 65 seconds, execution 0.45 seconds. This is a correctness
+test, not a timing benchmark. [Full output](evidence/reload-delta-race-test.log.txt)
+and the [run record](evidence/reload-delta-race-run.json) preserve the result.
+
+Before the heavy phase, build-headroom passed on the actual `/mnt/data`
+target. A new resource unit requested 6 GiB / 2 CPUs, explicit 200% CPU quota;
+the existing compile wrapper/caps stayed unchanged. The job exited 0, no
+matching unit remained, and the exact owned reservation was removed at
+05:37:13 UTC (claimed 05:35:17, deadline 05:50:17). No further tests, full
+suite, LTO measurement or generator rerun was needed: no runtime or generator
+input changed. Touched-source formatting and diff whitespace checks passed.
+Nothing was merged into integration; parent review/authorization remains
+required.
