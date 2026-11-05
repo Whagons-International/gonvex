@@ -447,24 +447,69 @@ async fn scan_local_window(
         )
         .unwrap();
     }
-    let mut query = query::bind(prepared, &sql);
-    for parameter in values {
-        query = parameter.bind(query);
-    }
-    // SQLx streams through this snapshot's connection. Do not collect the full
-    // projection before byte admission; a byte budget can stop at the next row.
-    let mut stream = query.fetch(&mut **tx.transaction());
     let mut collector = WindowCollector::new(definition);
-    while let Some(row) = stream.try_next().await? {
-        if collector.window.rows.is_multiple_of(32) {
-            tokio::task::yield_now().await;
+    // Use the normal replica's bounded batches on this SAME transaction. This
+    // changes only transport from SQLite, not SQL, bind types or admission.
+    // The direct stream currently supports scalar/TEXT binds. Binary atom
+    // literals retain the original SQLx path, never a coercion to TEXT.
+    if prepared
+        .compiled
+        .extra_bindings
+        .iter()
+        .all(|b| matches!(b, crate::permissions::compile::Binding::Text(_)))
+    {
+        use gonvex_store::direct::OwnedBind;
+        let mut binds = vec![
+            OwnedBind::Integer(prepared.scope_id),
+            OwnedBind::Text(prepared.table.clone()),
+            OwnedBind::Integer(prepared.identity.generation),
+            OwnedBind::Text(prepared.identity.principal.clone()),
+        ];
+        for binding in &prepared.compiled.extra_bindings {
+            match binding {
+                crate::permissions::compile::Binding::Text(value) => {
+                    binds.push(OwnedBind::Text(value.clone()))
+                }
+                crate::permissions::compile::Binding::Blob(_) => unreachable!("checked above"),
+            }
         }
-        let json: String = row.try_get(0)?;
-        if !collector.push(&json, &mut visit)? {
-            break;
+        binds.extend(
+            values
+                .into_iter()
+                .map(crate::sql_parameters::Parameter::into_owned_bind),
+        );
+        let mut stream = tx.stream_json_rows(sql, binds).await?;
+        'batches: while let Some(batch) = stream.next_batch().await {
+            let batch = batch?;
+            for row in batch.rows() {
+                if collector.window.rows.is_multiple_of(32) {
+                    tokio::task::yield_now().await;
+                }
+                let text = std::str::from_utf8(row)
+                    .map_err(|e| ReplicaError::InvalidIdentifier(e.to_string()))?;
+                if !collector.push(text, &mut visit)? {
+                    break 'batches;
+                }
+            }
         }
+        drop(stream);
+    } else {
+        let mut query = query::bind(prepared, &sql);
+        for parameter in values {
+            query = parameter.bind(query);
+        }
+        let mut stream = query.fetch(&mut **tx.transaction());
+        while let Some(row) = stream.try_next().await? {
+            if collector.window.rows.is_multiple_of(32) {
+                tokio::task::yield_now().await;
+            }
+            let json: String = row.try_get(0)?;
+            if !collector.push(&json, &mut visit)? {
+                break;
+            }
+        }
+        drop(stream);
     }
-    drop(stream);
     #[cfg(feature = "starter-files")]
     crate::starter_files::diagnostics::add(
         crate::starter_files::diagnostics::Site::SqlRows,
