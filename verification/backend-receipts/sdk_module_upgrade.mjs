@@ -83,7 +83,7 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 let context, page, lastState;
 const errors = [];
 async function launch() {
-  context = await chromium.launchPersistentContext(join(output, 'profile'), { headless: true, args: ['--no-sandbox'] });
+  context = await chromium.launchPersistentContext(join(output, 'profile'), { headless: true, args: ['--no-sandbox', '--disable-gpu'] });
   page = context.pages()[0]; page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin); await page.addScriptTag({ url: origin + '/fixture.js' });
 }
