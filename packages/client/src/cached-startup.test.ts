@@ -471,6 +471,12 @@ it('bounds auth recovery even when every replacement transport opens successfull
   await vi.advanceTimersByTimeAsync(60_000);
   expect(Socket.all).toHaveLength(count);
   expect(errors).toHaveBeenCalledWith(expect.any(String), { definitive: false, code: 'auth_retry_exhausted' });
+  const sent = socket.sent.length;
+  client.setAuth({ token: 'opaque-session' });
+  client.connect();
+  await expect(client.authenticate(auth)).rejects.toMatchObject({ code: 'auth' });
+  expect(socket.sent).toHaveLength(sent);
+
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
