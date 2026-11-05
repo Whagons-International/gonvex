@@ -17,6 +17,10 @@
 //! * `login/<kind>/{miss,hit}`: the 11 cold-login collections.
 //! * `detail/<kind>/{miss,hit}`: the 8 collections of one task detail window
 //!   (keyed entries built inside the open's read, then hits).
+//! * `app_local/`: first and repeated whole-table opens for the fixture's
+//!   17 visibility tables (a subset of the real app's collection set).
+//! * `app_queue/`: hold all admission slots, attempt 5,000 real opens and
+//!   report refused opens, waiting futures and retained/peak allocator bytes.
 //! * `feed/burst_<n>`: every member connected with the 10 login collections;
 //!   one transaction updating `n` tasks applied to every connection
 //!   (`apply_feed_event`, no encoding).
@@ -276,7 +280,9 @@ async fn run() {
         "fixture ({tasks} tasks, {members} members) ready in {:.1}s",
         started.elapsed().as_secs_f64()
     );
-    if enabled("app_local/") || enabled("app_queue/") {
+    if std::env::var("BENCH_FILTER")
+        .is_ok_and(|filter| filter.contains("app_local/") || filter.contains("app_queue/"))
+    {
         let paths = fixture.install_local_collections().await.unwrap();
         let session = fixture.session(
             TENANT,
