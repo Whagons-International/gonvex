@@ -1,6 +1,6 @@
 {
   "project": "701afa6f-0a89-404f-afa8-30c314981ad3",
-  "generatedAt": "2026-11-02T23:18:52.008Z",
+  "generatedAt": "2026-11-05T17:41:16.201Z",
   "functions": {
     "messages.agentInvoke": {
       "kind": "action",

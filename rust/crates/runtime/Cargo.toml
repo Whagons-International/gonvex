@@ -7,6 +7,10 @@ license.workspace = true
 # Unsigned Firebase Auth Emulator tokens never enter release binaries.
 [features]
 default = []
+# Exact-set disk backend and opt-in guarded bootstrap transport; default off.
+starter-files = ["permission-primitives", "dep:flate2"]
+# Internal indexed permission primitives; no automatic app binding; v2 default.
+permission-primitives = ["gonvex-store/permission-primitives"]
 test-firebase-auth-emulator = []
 # Heap profiling builds: use the system allocator instead of mimalloc.
 system-alloc = []
@@ -20,6 +24,7 @@ duckdb = ["dep:duckdb", "dep:calamine"]
 perf-fixture = ["gonvex-websocket/perf-fixture"]
 
 [dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"], optional = true }
 gonvex-profiler = { path = "../profiler" }
 # Process allocator: lower fragmentation under bursty multi-threaded snapshot
 # work, and freed memory is returned to the OS promptly.

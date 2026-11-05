@@ -38,6 +38,8 @@ mod operations;
 mod operator_data;
 #[cfg(feature = "perf-fixture")]
 pub mod perf_fixture;
+#[cfg(feature = "permission-primitives")]
+mod permissions;
 pub mod presence;
 pub mod profiling;
 pub mod public_functions;
@@ -55,6 +57,8 @@ pub mod snapshot_cache;
 mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
+#[cfg(feature = "starter-files")]
+mod starter_files;
 // Kept for the Verus proof and benchmark in verification/; unused by the SQLite store.
 pub mod permission_bits;
 pub mod principal_cache;
@@ -135,6 +139,8 @@ struct RuntimeInner {
     parent_acl: visibility::ParentAclRegistry,
     snapshot_cache: snapshot_cache::SnapshotCache,
     resume_validation: replica::resume::ValidationCache,
+    #[cfg(feature = "starter-files")]
+    starter_transport: replica::permission::transport::Registry,
     principal_cache: principal_cache::PrincipalCache,
     delivery: delivery::DeliveryHub,
     permissions: permission_bits::PermissionRegistry,
@@ -331,6 +337,8 @@ impl Runtime {
                 parent_acl: visibility::ParentAclRegistry::default(),
                 snapshot_cache: snapshot_cache::SnapshotCache::default(),
                 resume_validation: replica::resume::ValidationCache::default(),
+                #[cfg(feature = "starter-files")]
+                starter_transport: Default::default(),
                 principal_cache: principal_cache::PrincipalCache::default(),
                 delivery: delivery::DeliveryHub::default(),
                 permissions: permission_bits::PermissionRegistry::default(),
@@ -1738,6 +1746,8 @@ async fn websocket(
     let mut replicas = offload::RetiringMap::default();
     let mut socket_opens = open_reasons::SocketOpens::default();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
+    #[cfg(feature = "starter-files")]
+    let mut starter_connection = replica::permission::transport::Connection::default();
     let open_progress = replica_opens.progress();
     // Retain at most one decoded, transport-size-bounded frame. While it waits
     // for preparation capacity, stop reading further frames (TCP backpressure).
@@ -1760,6 +1770,7 @@ async fn websocket(
         tenant: None,
         replica: None,
         capabilities: Some(ServerCapabilities {
+            replica_starter_files: starter_transport_enabled().then_some(1),
             replica_no_old_values: Some(1),
             replica_field_patches: Some(1),
             replica_snapshot_pages: Some(1),
@@ -1794,6 +1805,8 @@ async fn websocket(
     // caller then sends `membership_changed_frames`.
     macro_rules! discard_tenant_session {
         () => {{
+            #[cfg(feature = "starter-files")]
+            starter_connection.retire();
             replicas.clear();
             row_patches.clear();
             batcher.clear_bindings();
@@ -1826,6 +1839,31 @@ async fn websocket(
     }
 
     loop {
+        #[cfg(feature = "starter-files")]
+        {
+            for (id, offer_id, request) in starter_connection.expired() {
+                let fallback = ServerMessage::ReplicaStarterFallback {
+                    id,
+                    offer_id: Some(offer_id),
+                    reason: "expired".into(),
+                };
+                if send_connection_json(&mut snapshot_delivery, &mut socket, &fallback)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                pending_replica_opens.push_back(request);
+            }
+            while let Some(frame) = starter_connection.pop() {
+                if send_connection_json(&mut snapshot_delivery, &mut socket, &frame)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
         runtime
             .inner
             .auth_revalidation
@@ -1939,6 +1977,17 @@ async fn websocket(
                 runtime.inner.metrics.activity(
                     &connection_id, "Replica Collection opened", Some(&request.path),
                 );
+                #[cfg(feature = "starter-files")]
+                if let Some(session)=tenant_session.as_ref() {
+                    // The bounded channel enqueue is inside the fresh writer lease;
+                    // network delivery happens after the database lease releases.
+                    let (connection,result)=replica::permission::transport::prepare_offloaded(runtime.clone(),std::mem::take(&mut starter_connection),session.clone(),request.clone(),replica_sum_digest_enabled).await;
+                    starter_connection=connection;
+                    match result {
+                        Ok(true)=>continue,
+                        _=>{starter_connection.close(&request.id);}
+                    }
+                }
                 if let Some(response) = enqueue_replica_open(
                     &runtime, tenant_session.as_ref(), request,
                     replica_sum_digest_enabled, &mut replica_opens,
@@ -2652,6 +2701,8 @@ async fn websocket(
                     tenant,
                     ..
                 }) if token.trim().starts_with(service_principal::TOKEN_PREFIX) => {
+                    #[cfg(feature = "starter-files")]
+                    starter_connection.retire();
                     let service_auth = tokio::time::timeout_at(
                         if pending_connection.is_some() {
                             auth_deadline
@@ -2716,6 +2767,8 @@ async fn websocket(
                     device,
                     capabilities,
                 }) => {
+                    #[cfg(feature = "starter-files")]
+                    starter_connection.retire();
                     service_grant = None;
                     let tenant = control_auth_tenant(control_only, capabilities.as_ref(), tenant);
                     let auth_result = tokio::time::timeout_at(
@@ -2844,6 +2897,23 @@ async fn websocket(
                     replica_native_rows_enabled =
                         snapshot_delivery::negotiated(capabilities.as_ref());
                     snapshot_delivery.set_native(replica_native_rows_enabled);
+                    #[cfg(feature = "starter-files")]
+                    {
+                        starter_connection.negotiated = starter_transport_enabled()
+                            && capabilities.as_ref().and_then(|c| c.replica_starter_files)
+                                == Some(1)
+                            && starter_connection.bind_auth(&authenticated_control);
+                        if let ServerMessage::AuthResult {
+                            result: serde_json::Value::Object(result),
+                            ..
+                        } = &mut response
+                        {
+                            result.insert(
+                                "replicaStarterFiles".into(),
+                                serde_json::json!(starter_connection.negotiated),
+                            );
+                        }
+                    }
                     replica_sum_digest_enabled =
                         capabilities.as_ref().and_then(|c| c.replica_set_digest) == Some(1);
                     if !replica_sum_digest_enabled {
@@ -3595,7 +3665,164 @@ async fn websocket(
                         }
                     }
                 }
+                Ok(ClientMessage::ReplicaStarterPiece {
+                    id,
+                    offer_id,
+                    index,
+                }) => {
+                    #[cfg(feature = "starter-files")]
+                    {
+                        let request = starter_connection.fallback_request(&id);
+                        let result = if let Some(session) = tenant_session.as_ref() {
+                            {
+                                let (connection, result) =
+                                    replica::permission::transport::piece_offloaded(
+                                        runtime.clone(),
+                                        std::mem::take(&mut starter_connection),
+                                        session.clone(),
+                                        id.clone(),
+                                        offer_id.clone(),
+                                        index,
+                                    )
+                                    .await;
+                                starter_connection = connection;
+                                result
+                            }
+                        } else {
+                            Err(replica::permission::LocalSnapshotError::Rejected(
+                                "tenant session required",
+                            ))
+                        };
+                        if result.is_err() {
+                            starter_connection.close(&id);
+                            let fallback = ServerMessage::ReplicaStarterFallback {
+                                id: id.clone(),
+                                offer_id: Some(offer_id),
+                                reason: "authority-or-piece-invalid".into(),
+                            };
+                            if send_connection_json(&mut snapshot_delivery, &mut socket, &fallback)
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                            if let Some(request) = request {
+                                pending_replica_opens.push_back(request);
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "starter-files"))]
+                    {
+                        let _ = (offer_id, index);
+                        let response = ServerMessage::ReplicaError {
+                            id,
+                            path: None,
+                            error: "starter transport unavailable".into(),
+                        };
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                Ok(ClientMessage::ReplicaStarterCommit {
+                    id,
+                    offer_id,
+                    cursor,
+                    digest,
+                }) => {
+                    #[cfg(feature = "starter-files")]
+                    {
+                        let request = starter_connection.fallback_request(&id);
+                        let result = if let Some(session) = tenant_session.as_ref() {
+                            {
+                                let (connection, result) =
+                                    replica::permission::transport::commit_offloaded(
+                                        runtime.clone(),
+                                        std::mem::take(&mut starter_connection),
+                                        session.clone(),
+                                        id.clone(),
+                                        offer_id.clone(),
+                                        cursor.clone(),
+                                        digest.clone(),
+                                    )
+                                    .await;
+                                starter_connection = connection;
+                                result
+                            }
+                        } else {
+                            Err(replica::permission::LocalSnapshotError::Rejected(
+                                "tenant session required",
+                            ))
+                        };
+                        match result {
+                            Ok(subscription) => {
+                                replicas.insert(id, subscription);
+                                wake_dirty = true;
+                            }
+                            Err(_) => {
+                                starter_connection.close(&id);
+                                let fallback = ServerMessage::ReplicaStarterFallback {
+                                    id: id.clone(),
+                                    offer_id: Some(offer_id),
+                                    reason: "authority-or-commit-invalid".into(),
+                                };
+                                if send_connection_json(
+                                    &mut snapshot_delivery,
+                                    &mut socket,
+                                    &fallback,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    return;
+                                }
+                                if let Some(request) = request {
+                                    pending_replica_opens.push_back(request);
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "starter-files"))]
+                    {
+                        let _ = (offer_id, cursor, digest);
+                        let response = ServerMessage::ReplicaError {
+                            id,
+                            path: None,
+                            error: "starter transport unavailable".into(),
+                        };
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                Ok(ClientMessage::ReplicaStarterCancel { id, offer_id }) => {
+                    #[cfg(feature = "starter-files")]
+                    if let Some(request) = starter_connection.cancel(&id, &offer_id) {
+                        let fallback = ServerMessage::ReplicaStarterFallback {
+                            id,
+                            offer_id: Some(offer_id),
+                            reason: "cancelled".into(),
+                        };
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &fallback)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        pending_replica_opens.push_back(request);
+                    }
+                    #[cfg(not(feature = "starter-files"))]
+                    let _ = (id, offer_id);
+                }
                 Ok(ClientMessage::ReplicaClose { id }) => {
+                    #[cfg(feature = "starter-files")]
+                    starter_connection.close(&id);
                     open_reasons::add(open_reasons::Reason::Close, 1);
                     replica_opens.remove(&id);
                     legacy_snapshot_delivery.remove(&id);
@@ -5057,6 +5284,11 @@ fn replica_open_request_bytes(request: &ReplicaOpenRequest) -> usize {
     })
 }
 
+fn starter_transport_enabled() -> bool {
+    cfg!(feature = "starter-files")
+        && std::env::var("GONVEX_STARTER_BOOTSTRAP").is_ok_and(|s| s == "1")
+}
+
 async fn enqueue_replica_open(
     runtime: &Runtime,
     session: Option<&TenantSession>,
@@ -5099,6 +5331,12 @@ async fn enqueue_replica_open(
             .open_replica_negotiated(&owned_session, owned_request.clone(), sum_enabled)
             .await
             .map(|opened| {
+                #[cfg(feature = "starter-files")]
+                owned_runtime.schedule_starter_after_normal_snapshot(
+                    &owned_session,
+                    &owned_request,
+                    &opened,
+                );
                 let subscription = opened
                     .subscription
                     .map(|subscription| (subscription.id.clone(), subscription));
@@ -5338,7 +5576,15 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 #[cfg(test)]
 mod tests {
     mod action_depth;
+    #[cfg(feature = "permission-primitives")]
+    mod permission_replica;
     mod receipt_guarantee_tests;
+    #[cfg(feature = "starter-files")]
+    #[path = "../starter_files/runtime_tests.rs"]
+    mod starter_runtime;
+    #[cfg(all(feature = "starter-files", feature = "perf-fixture"))]
+    #[path = "../starter_files/wire_tests.rs"]
+    mod starter_wire;
     #[tokio::test]
     async fn native_snapshot_socket_backpressures_until_durable_ack() {
         use futures_util::{SinkExt, StreamExt};
@@ -6206,6 +6452,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
 
     fn replica_open_request(id: &str) -> ReplicaOpenRequest {
         ReplicaOpenRequest {
+            starter: None,
             id: id.to_owned(),
             path: format!("settings.{id}"),
             args: serde_json::json!({}),

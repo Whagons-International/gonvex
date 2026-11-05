@@ -240,6 +240,8 @@ pub struct BrowserTelemetryInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_starter_files: Option<u8>,
     /// Applies replica transactions from its local base, without old row images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_no_old_values: Option<u8>,
@@ -355,6 +357,8 @@ pub struct ReducerCallRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplicaOpenRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter: Option<StarterRequest>,
     pub id: String,
     pub path: String,
     #[serde(default)]
@@ -370,6 +374,49 @@ pub struct ReplicaOpenRequest {
     pub digest: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub full_integrity: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StarterRequest {
+    pub version: u8,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StarterPiece {
+    pub index: u32,
+    pub hash: String,
+    pub raw_hash: String,
+    pub compressed: bool,
+    pub bytes: u32,
+    pub raw_bytes: u32,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StarterOffer {
+    pub id: String,
+    pub offer_id: String,
+    pub version: u8,
+    pub expires_at: u64,
+    pub cursor: ReplicaCursor,
+    pub key: String,
+    pub path: String,
+    pub scope: String,
+    pub visibility_scope: String,
+    pub order_by: String,
+    pub order_direction: String,
+    pub mode: String,
+    pub max_rows: usize,
+    pub max_bytes: i64,
+    pub truncated: bool,
+    pub digest: String,
+    pub rows: u64,
+    pub format: u32,
+    pub encoding: String,
+    pub serialized_definition: String,
+    pub args: Value,
+    pub column_types: BTreeMap<String, String>,
+    pub pieces: Vec<StarterPiece>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -443,6 +490,27 @@ pub enum ClientMessage {
     },
     #[serde(rename = "replica.open")]
     ReplicaOpen(ReplicaOpenRequest),
+    #[serde(rename = "replica.starterPiece")]
+    ReplicaStarterPiece {
+        id: String,
+        #[serde(rename = "offerId")]
+        offer_id: String,
+        index: u32,
+    },
+    #[serde(rename = "replica.starterCommit")]
+    ReplicaStarterCommit {
+        id: String,
+        #[serde(rename = "offerId")]
+        offer_id: String,
+        cursor: ReplicaCursor,
+        digest: String,
+    },
+    #[serde(rename = "replica.starterCancel")]
+    ReplicaStarterCancel {
+        id: String,
+        #[serde(rename = "offerId")]
+        offer_id: String,
+    },
     #[serde(rename = "replica.openMany")]
     ReplicaOpenMany { opens: Vec<ReplicaOpenRequest> },
     #[serde(rename = "replica.close")]
@@ -567,6 +635,8 @@ pub struct PerformanceTelemetryEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_starter_files: Option<u8>,
     /// Omits old row images only when the client also advertises version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_no_old_values: Option<u8>,
@@ -805,6 +875,23 @@ pub enum ServerMessage {
     },
     #[serde(rename = "replica.watermark")]
     ReplicaWatermark { revision: u64 },
+    #[serde(rename = "replica.starterOffer")]
+    ReplicaStarterOffer(StarterOffer),
+    #[serde(rename = "replica.starterPiece")]
+    ReplicaStarterPiece {
+        id: String,
+        #[serde(rename = "offerId")]
+        offer_id: String,
+        index: u32,
+        data: String,
+    },
+    #[serde(rename = "replica.starterFallback")]
+    ReplicaStarterFallback {
+        id: String,
+        #[serde(rename = "offerId", skip_serializing_if = "Option::is_none")]
+        offer_id: Option<String>,
+        reason: String,
+    },
     #[serde(rename = "replica.snapshot")]
     ReplicaSnapshot {
         id: String,

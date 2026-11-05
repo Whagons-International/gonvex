@@ -1,3 +1,5 @@
+export { permissionPrimitives } from "./permission-primitives.js";
+export type { PermissionPrimitiveDeclaration, PermissionSourceBinding, PermissionExpression, PermissionField, PermissionText, PermissionTable, PermissionFilter, PermissionJoin, PermissionAtomProjection, PermissionSubjectProjection, PermissionRoleScope } from "./permission-primitives.js";
 import { reducerExecutionContext } from "./reducer-execution.js";
 export { selectRows, selectFirst, getRow, dataValue, dataValues, existingDataTables, existsDataRows, selectDataBatch, summarizeRows, compileDataRead, orderedDataRead, matchesDataPredicate, lockData } from './data.js';
 export { insertDataRows, updateDataRows, deleteDataRows, deleteDataWhere, updateDataWhere, applyDataWrites } from './data-write.js';

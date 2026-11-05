@@ -1,3 +1,4 @@
+import type { StarterPromotionGuard } from "./local-replica.js";
 import { Dexie, type Table, type Collection, type Transaction } from "dexie";
 import { versionedIndexedDB } from './indexeddb-version.js';
 import { assertReplicaSequence, readReplicaSequence } from './indexeddb-sequence.js';
@@ -84,16 +85,26 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     }
   }
 
-  private async commit(scope: string, run: (sequence: number) => Promise<void>): Promise<ReplicaStorageCommit> {
+  private async commit(scope: string, run: (sequence: number) => Promise<void>, guard?: StarterPromotionGuard): Promise<ReplicaStorageCommit> {
+    const current=()=>!guard || (!guard.signal.aborted && guard.isCurrent());
+    if(!current())throw new Error("starter-promotion-retired");
     await this.initialize();
-    const receipt = await this.database.transaction('rw', this.database.entities, this.database.windows, this.database.members, this.database.meta, async () => {
-      const sequence = await this.nextSequence(scope);
-      const receipt: ReplicaStorageCommit = { scope, previousSequence: sequence - 1, sequence,
-        changes: { sequence, entities: Object.create(null), windows: Object.create(null) } };
-      this.commits.set(Dexie.currentTransaction!, receipt);
-      await run(sequence);
-      return receipt;
-    });
+    let abort:(()=>void)|undefined;
+    let receipt:ReplicaStorageCommit;
+    try {
+      receipt = await this.database.transaction('rw', this.database.entities, this.database.windows, this.database.members, this.database.meta, async () => {
+        const tx=Dexie.currentTransaction!;
+        if(guard){abort=()=>{try{tx.abort();}catch{/* already committed */}};guard.signal.addEventListener("abort",abort,{once:true});}
+        if(!current()){tx.abort();throw new Error("starter-promotion-retired");}
+        const sequence = await this.nextSequence(scope);
+        const receipt: ReplicaStorageCommit = { scope, previousSequence: sequence - 1, sequence,
+          changes: { sequence, entities: Object.create(null), windows: Object.create(null) } };
+        this.commits.set(tx, receipt);
+        await run(sequence);
+        if(!current()){tx.abort();throw new Error("starter-promotion-retired");}
+        return receipt;
+      });
+    } finally {if(guard && abort)guard.signal.removeEventListener("abort",abort);}
     this.channel?.postMessage({ scope });
     this.scheduleCleanup(scope);
     return receipt;
@@ -777,6 +788,10 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     return receipt;
   }
 
+  async promoteStarterWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope, projection: readonly ReplicaRow[], guard: StarterPromotionGuard): Promise<ReplicaStorageCommit> {
+    return this.replaceWindow(window,snapshot,scope,projection,{removedIDs:[],starterGuard:guard});
+  }
+
   async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?:readonly ReplicaRow[], context?: ReplicaWindowWriteContext): Promise<ReplicaStorageCommit> {
     const normalizedScope = normalizeScope(scope);
     return this.commit(normalizedScope, async sequence => {
@@ -797,7 +812,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       await this.writeWindows(normalizedScope,[window],sequence);
       await this.captureRows(normalizedScope, window.entity, context?.removedIDs ?? []);
       await this.saveCursor(normalizedScope,snapshot.cursor);
-    });
+    }, context?.starterGuard);
   }
 
   async applyWindowDelta(window: ReplicaWindow, delta: ReplicaWindowDelta, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<ReplicaStorageCommit> {

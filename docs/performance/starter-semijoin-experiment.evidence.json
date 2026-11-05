@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "base": "73a72db9912e5c6dbfd23b6a884b930c7549a56b",
+  "branch": "t3/sqlite-starter-semijoin",
+  "sourceCommit": "aca96df44d641924b727d1d651308787b109e58c",
+  "decision": "REJECTED_NO_USEFUL_EXECUTION_WIN; production compiler restored byte-for-byte",
+  "candidateCommit": "a6e2fbd394d4eec158400e4881a4b3a8143a249f",
+  "pairedCandidateCommit": "b0f1a7f50f7cc5927402d3cb59b92d3c4087334b",
+  "revertCommit": "aca96df4",
+  "compilerRestoredSha256": "8007355cf16e1c2cf75273b83feb5d6ed49b34855b6fbbf40a8a22392680b8a2",
+  "finalTestCounts": {
+    "runtimeOn": [
+      435,
+      0,
+      11
+    ],
+    "runtimeOff": [
+      399,
+      0,
+      8
+    ],
+    "liveNodeFourModes": true,
+    "candidateNewOracles": 2,
+    "candidatePermissionOracles": 19,
+    "candidateStarterRegressions": 25
+  },
+  "cycles": {
+    "base": "73a72db9912e5c6dbfd23b6a884b930c7549a56b",
+    "before": [
+      "packages/local-runtime/src/portable.ts -> packages/local-runtime/src/read-view.ts",
+      "packages/local-runtime/src/read-view.ts -> packages/local-runtime/src/portable.ts"
+    ],
+    "after": [
+      "packages/local-runtime/src/portable.ts -> packages/local-runtime/src/read-view.ts",
+      "packages/local-runtime/src/read-view.ts -> packages/local-runtime/src/portable.ts"
+    ],
+    "newCyclicRuntimeEdges": [],
+    "method": "TypeScript AST import/export/dynamic-import graph over JS/TS, type-only edges excluded"
+  },
+  "preserved": {
+    "freshOfferSqlCountDigest": true,
+    "everyPieceFreshPrincipalSourceSerialWriterBarrier": true,
+    "finalNormalV2SqlServerXorAnchor": true,
+    "shapeScanRetained": true,
+    "permissionSerialUsedAsBroadShapeToken": false,
+    "distinctViewsReplacedWithRawTables": false,
+    "authorityMemoOrElisionAdded": false,
+    "oldWrongKeyAndPrepieceRevokeAssertionsWeakened": false,
+    "sourceClientProtocolStoreFullProviderChanges": false
+  },
+  "candidatePolicyIdentity": {
+    "accepted73SingleSlotHash": "c9cc51b5900a3519992e5b0dda0aa6d73130be0a2ce4326e7024785fa46c4895",
+    "newHashDiffered": true,
+    "oldReadyBindingRejected": true,
+    "reinstallRollbackNotPublished": true,
+    "committedFreshScopeWorked": true
+  },
+  "remainingFixedCost": "Fresh normalized offerSQL43\u201347ms; finalnormalSQL22\u201325ms; fullshape23\u201325ms; sourcechecks~7ms; accepted cheap-starter CPU/latency goal remains unmet.",
+  "nextDataBackedProposal": "Split/measure fresh source_schema physical admission, DDL/column metadata and fullkeyshape SELECT with statement/VM counts; if metadata IPC dominates, evaluate consolidating actual-TX schema/guard/readiness reads without memoization, fullscan or membership-proof elision. No benefit claimed.",
+  "results": "/mnt/data/work/gonvex-starter-semijoin/results.json",
+  "pairedCpuMediansMs": [
+    {
+      "join": 51.705508,
+      "semi": 51.7779395
+    },
+    {
+      "join": 55.1902245,
+      "semi": 54.9918755
+    }
+  ]
+}

@@ -15,8 +15,13 @@
 pub(crate) mod fanout;
 #[path = "replica_mask.rs"]
 mod mask;
+#[path = "open_admission.rs"]
+pub(crate) mod open_admission;
 #[path = "replica_resume.rs"]
 pub(crate) mod resume;
+#[cfg(feature = "permission-primitives")]
+#[path = "replica_permission.rs"]
+pub(crate) mod permission;
 pub use fanout::stats as fanout_stats;
 pub use fanout::wake_skips;
 pub use fanout::{
@@ -526,6 +531,10 @@ impl Runtime {
             }
         }
         drop(module);
+        // Cover cache single-flight before its first await, including keyed
+        // misses, disabled-cache scans and rebuild fallback. A successful
+        // validated resume above never needs this guard or a full-list scan.
+        let _open = self.inner.snapshot_cache.open_admission.try_acquire()?;
         // An entry depends only on the arguments its equality filters read:
         // key it by those, so arguments the collection ignores (per-member
         // values, client-side options) never split one entry into many.

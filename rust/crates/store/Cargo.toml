@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+permission-primitives = []
+
 [dependencies]
 gonvex-profiler = { path = "../profiler" }
 # Same library sqlx links; used only to read result-column declared types.

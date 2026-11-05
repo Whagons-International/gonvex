@@ -1,0 +1,38 @@
+{
+  "default-tests": [
+    {
+      "status": "ok",
+      "passed": 396,
+      "failed": 0,
+      "ignored": 8
+    },
+    {
+      "status": "ok",
+      "passed": 44,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "enabled-tests": [
+    {
+      "status": "ok",
+      "passed": 402,
+      "failed": 0,
+      "ignored": 8
+    },
+    {
+      "status": "ok",
+      "passed": 44,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "targeted-final": [
+    {
+      "status": "ok",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    }
+  ]
+}

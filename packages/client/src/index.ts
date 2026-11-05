@@ -18,6 +18,8 @@ import type {
   ReplicaOpenRequest,
   ReducerErrorClass,
 } from "@gonvex/protocol";
+import { StarterStage, StarterBudget, type StarterInflater } from "./starter-bootstrap.js";
+export type { StarterInflater } from "./starter-bootstrap.js";
 import { SnapshotPageStager, type SnapshotPage } from "./snapshot-pages.js";
 import { applyReplicaHashDelta, replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 import type { LocalExecution, LocalSnapshot, LocalTransactionResult } from "@gonvex/local-runtime";
@@ -167,6 +169,7 @@ export type ReplicaMessage =
       | "replica.error";
   }>
   | ReplicaReadyMessage;
+type StarterWire = Extract<ServerMessage, {type:"replica.starterOffer"|"replica.starterPiece"|"replica.starterFallback"}>;
 export type ReplicaSubscriptionHandler = (message: ReplicaMessage) => void;
 type WatchUpdateHandler = () => void;
 type TelemetryHandler = (event: GonvexTelemetryEvent) => void;
@@ -197,6 +200,7 @@ type ReplicaSubscription = {
   path: string;
   entity: string;
   columns?: readonly string[];
+  starterDefinition?: FunctionReference["replica"];
   args: JsonValue;
   listeners: Set<ReplicaSubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
@@ -209,6 +213,11 @@ type ReplicaSubscription = {
   readyCursor?: ReplicaCursor;
   retiredEpochs: Set<string>;
   snapshotPages?: SnapshotPageStager;
+  starterStage?: StarterStage;
+  starterAbort?: AbortController;
+  starterTimer?: ReturnType<typeof setTimeout>;
+  starterAuth?: string;
+  starterFailed?: boolean;
   lastMessage?: ReplicaMessage;
   socketGeneration?: symbol;
   opening: boolean;
@@ -537,6 +546,9 @@ export type GonvexClientAuth = {
 };
 
 export type GonvexClientOptions = GonvexClientAuth & {
+  /** Experimental Node-tested bootstrap; no capability without a bounded codec. */
+  replicaStarterFiles?: boolean;
+  starterInflater?: StarterInflater;
   /** Disable negotiated snapshot paging for a runtime rollback. Defaults to true. */
   replicaSnapshotPages?: boolean;
   /** Opt into bounded connection-local field patches. Defaults to false. */
@@ -653,6 +665,9 @@ export class GonvexClient {
   private replicaOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
+  private readonly starterInflater?: StarterInflater;
+  private readonly starterBudget = new StarterBudget();
+  private starterNegotiated = false;
   private readonly presenceFeed = new PresenceFeed({
     supported: () => this.serverCapabilities.presence === 1,
     canSend: () => !!this.activeAuthFrameId && this.socket?.readyState === WebSocket.OPEN,
@@ -723,6 +738,13 @@ export class GonvexClient {
   private hasAuthoritativeReplicaScope = false;
   private replicaDefinitionEpoch?: string;
   private replicaReady: Promise<void> = Promise.resolve();
+  // The initial promise has no durable activation to await. Construction
+  // replaces it via setReplicaReady before authoritative scopes are possible.
+  private hydratedReplicaReady: Promise<void> | undefined = this.replicaReady;
+  private readonly replicaOpenHydrations = new Map<ReplicaSubscription, {
+    current: () => boolean; task: Promise<void>;
+  }>();
+  private readonly replicaOpenOwners = new WeakMap<ReplicaSubscription, () => boolean>();
   private localSessionRestore: Promise<void> = Promise.resolve();
   private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
   private readonly localSessionHandlers = new Set<() => void>();
@@ -808,6 +830,7 @@ export class GonvexClient {
     this.querySubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.querySubscriptionRetentionMs,
     );
+    this.starterInflater = options.replicaStarterFiles === true ? options.starterInflater : undefined;
     this.replicaSnapshotPagesEnabled = options.replicaSnapshotPages !== false;
     this.replicaFieldPatchesEnabled = options.replicaFieldPatches === true;
     this.replicaSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
@@ -1789,6 +1812,9 @@ export class GonvexClient {
   }
 
   /** Metadata advertised by the runtime in its latest session.ready frame. */
+  /** Logical staging charges, not a JS heap/RSS hard limit. */
+  starterBootstrapStats() { return { ...this.starterBudget.usage(), decoderAvailable: this.starterInflater !== undefined, negotiated: this.starterNegotiated }; }
+
   serverInfo(): Readonly<ServerCapabilities> {
     return { ...this.serverCapabilities };
   }
@@ -1832,6 +1858,7 @@ export class GonvexClient {
       this.authFetchGeneration = Symbol();
       return;
     }
+    this.retireStarterStages();
     this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
     this.applyAuth(auth);
     // The caller owns auth now: a token fetch still in flight from the
@@ -1896,6 +1923,7 @@ export class GonvexClient {
    * provider rather than calling this method directly.
    */
   authenticate(auth: GonvexClientAuth): Promise<void> {
+    this.retireStarterStages();
     this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
     this.applyAuth(auth);
     this.authFetchGeneration = Symbol();
@@ -2256,6 +2284,7 @@ export class GonvexClient {
             && message.result.subscriptionsPreserved === true;
           this.authenticatedSocketGeneration = this.socketGeneration;
           this.lastOnlineAtMs = Date.now();
+          this.starterNegotiated = typeof message.result === "object" && message.result !== null && !Array.isArray(message.result) && message.result.replicaStarterFiles === true;
           this.activeArtifactHashValue = artifactHashFromAuthResult(message.result) ?? this.activeArtifactHashValue;
           const developerSessionToken = developerSessionTokenFromAuthResult(message.result);
           if (developerSessionToken) {
@@ -2507,6 +2536,7 @@ export class GonvexClient {
       this.replicaOpenFlushTimer = undefined;
     }
     this.pendingReplicaOpens.clear();
+    this.replicaOpenHydrations.clear();
     if (this.querySubscribeFlushTimer) {
       clearTimeout(this.querySubscribeFlushTimer);
       this.querySubscribeFlushTimer = undefined;
@@ -3055,6 +3085,7 @@ export class GonvexClient {
       path: ref.path,
       entity: ref.replica?.table ?? ref.live?.entity ?? ref.path,
       columns: ref.replica?.columns,
+      starterDefinition: ref.replica ? structuredClone(ref.replica) : undefined,
       args,
       listeners: new Set([onMessage]),
       scope: this.replicaScope,
@@ -3076,7 +3107,7 @@ export class GonvexClient {
       this.enqueueReplicaFrame(async () => {
         if (!this.ownsReplicaSubscription(subscription) || verificationGeneration !== subscription.verificationGeneration
           || socketGeneration !== this.socketGeneration || !this.isWebSocketConnected) return;
-        await this.handleReplicaMessage(subscription, message as ReplicaMessage | SnapshotPage, scope);
+        await this.handleReplicaMessage(subscription, message as ReplicaMessage | SnapshotPage | StarterWire, scope);
       });
     });
     this.startReplica(subscription);
@@ -3334,8 +3365,69 @@ export class GonvexClient {
     return !this.manuallyClosed && this.replicaSubscriptions.get(subscription.key) === subscription;
   }
 
-  private async handleReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage | SnapshotPage, scope = this.replicaScope, verifiedSnapshot = false) {
+  private async handleReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage | SnapshotPage | StarterWire, scope = this.replicaScope, verifiedSnapshot = false, starterPromotion?: {signal:AbortSignal;isCurrent:()=>boolean}) {
     if (scope !== this.replicaScope || (subscription.scope !== undefined && subscription.scope !== scope)) return;
+    if (message.type === "replica.starterOffer" || message.type === "replica.starterPiece" || message.type === "replica.starterFallback" || subscription.starterStage) {
+      const stage = subscription.starterStage;
+      const owner = subscription.verificationGeneration;
+      const auth = this.latestAuthFrameId;
+      const currentOwner = () => this.ownsReplicaSubscription(subscription) && scope === this.replicaScope
+        && subscription.socketGeneration === this.socketGeneration && owner === subscription.verificationGeneration
+        && auth === this.latestAuthFrameId && !this.authInFlight;
+      try {
+        if (!currentOwner()) { this.discardSnapshotPages(subscription); return; }
+        if (message.type === "replica.starterFallback") { this.discardSnapshotPages(subscription); subscription.starterFailed = true; return; }
+        if (message.type === "replica.starterOffer") {
+          if (!this.starterInflater || !this.starterNegotiated || this.serverCapabilities.replicaStarterFiles !== 1 || !subscription.opening
+            || subscription.starterFailed || stage || message.path !== subscription.path || message.visibilityScope !== scope
+            || Object.keys(subscription.args as object).length !== 0 || (subscription.columns && (Object.keys(message.columnTypes).length !== subscription.columns.length || subscription.columns.some(k => !Object.hasOwn(message.columnTypes,k))))) throw new Error("starter-not-negotiated");
+          const pinned = subscription.starterDefinition;
+          const definition = JSON.parse(message.serializedDefinition);
+          definition.maxRows ??= 0; definition.maxBytes ??= 0;
+          if(!pinned || message.args === null || Array.isArray(message.args) || typeof message.args!=="object" || Object.keys(message.args).length || definition.table!==subscription.entity || definition.key!==pinned.key || message.key!==pinned.key
+            || definition.orderBy!==message.orderBy || definition.orderDirection!==message.orderDirection || definition.mode!==message.mode || definition.maxRows!==message.maxRows || definition.maxBytes!==message.maxBytes
+            || !Array.isArray(definition.columns) || definition.columns.length!==Object.keys(message.columnTypes).length || definition.columns.some((k:string)=>!Object.hasOwn(message.columnTypes,k))
+            || Object.entries(pinned).some(([k,v])=>["orderBy","orderDirection","mode","maxRows","maxBytes"].includes(k) && v!==undefined && definition[k]!==v)) throw new Error("starter-definition-mismatch");
+          subscription.starterStage = new StarterStage(message,this.starterInflater,this.starterBudget);subscription.starterAuth = auth;
+          subscription.starterAbort=new AbortController();
+          subscription.starterTimer=setTimeout(()=>{if(subscription.starterStage && currentOwner()){const offerId=subscription.starterStage.offer.offerId;this.discardSnapshotPages(subscription);subscription.starterFailed=true;this.send({type:"replica.starterCancel",id:subscription.id,offerId});}},Math.min(60_000,Math.max(1,message.expiresAt-Date.now())));
+          const index=subscription.starterStage.nextIndex();
+          if(index === undefined) {const commit=await subscription.starterStage.seal();if(currentOwner())this.send(commit);}
+          else this.send({type:"replica.starterPiece",id:subscription.id,offerId:message.offerId,index});
+          return;
+        }
+        if (!stage || subscription.starterAuth !== auth) throw new Error("starter-owner-retired");
+        if (message.type === "replica.starterPiece") {
+          await stage.piece(message);if(!currentOwner() || subscription.starterStage!==stage)return;
+          const index=stage.nextIndex();
+          if(index===undefined) {const commit=await stage.seal();if(currentOwner() && subscription.starterStage===stage)this.send(commit);}
+          else this.send({type:"replica.starterPiece",id:subscription.id,offerId:stage.offer.offerId,index});
+          return;
+        }
+        if (message.type === "replica.delta") {stage.delta(message);return;}
+        if (message.type === "replica.ready") {
+          const snapshot=await stage.promote(message);
+          if(!currentOwner() || subscription.starterStage!==stage)return;
+          const controller=subscription.starterAbort!;
+          subscription.starterStage=undefined;
+          try {
+            await this.handleReplicaMessage(subscription,snapshot,scope,true,{signal:controller.signal,isCurrent:()=>currentOwner() && subscription.starterAbort===controller});
+            if(currentOwner() && !controller.signal.aborted) await this.handleReplicaMessage(subscription,message,scope);
+          } finally {stage.dispose();if(subscription.starterTimer)clearTimeout(subscription.starterTimer);subscription.starterTimer=undefined;}
+
+          return;
+        }
+        // A normal snapshot is an explicit fallback. Discard the uncommitted
+        // stage before entering the normal handler; it never touched storage.
+        this.discardSnapshotPages(subscription);
+      } catch {
+        const failed=subscription.starterStage;
+        const offerId=failed?.offer.offerId ?? stage?.offer.offerId ?? (message.type==="replica.starterOffer"?message.offerId:undefined);
+        this.discardSnapshotPages(subscription);subscription.starterFailed=true;
+        if(currentOwner() && offerId) this.send({type:"replica.starterCancel",id:subscription.id,offerId});
+        return;
+      }
+    }
     if (message.type === "replica.snapshotPage") {
       if (!this.ownsReplicaSubscription(subscription) || !this.replicaSnapshotPagesEnabled
         || this.serverCapabilities.replicaSnapshotPages !== 1 || !subscription.opening
@@ -3411,7 +3503,8 @@ export class GonvexClient {
         hashes,
         scope,
       };
-      await this.replica.replaceWindow(window);
+      if(starterPromotion) await this.replica.promoteStarterWindow(window,starterPromotion.signal,starterPromotion.isCurrent);
+      else await this.replica.replaceWindow(window);
       if (scope !== this.replicaScope || generation !== subscription.verificationGeneration || this.manuallyClosed) return;
       this.clearReplicaRetry(subscription, true);
       subscription.opening = false;
@@ -3560,6 +3653,11 @@ export class GonvexClient {
   }
 
   private discardSnapshotPages(subscription: ReplicaSubscription) {
+    subscription.starterStage?.dispose();
+    subscription.starterStage = undefined;
+    subscription.starterAbort?.abort();subscription.starterAbort=undefined;
+    if(subscription.starterTimer)clearTimeout(subscription.starterTimer);subscription.starterTimer=undefined;
+    subscription.starterAuth = undefined;
     subscription.snapshotPages = undefined;
     this.snapshotPageSubscriptions.delete(subscription);
   }
@@ -3923,13 +4021,44 @@ export class GonvexClient {
     // server rejection that is nevertheless transient and must not become a
     // fatal React snapshot error. The directive handlers resume every retained
     // subscription once the scope is active.
-    if (!this.ownsReplicaSubscription(subscription) || this.authInFlight || !this.hasAuthoritativeReplicaScope
+    if (!this.ownsReplicaSubscription(subscription) || !this.isWebSocketConnected
+      || this.authInFlight || !this.hasAuthoritativeReplicaScope
       || subscription.listeners.size === 0 || subscription.opening) return;
+    const ready = this.replicaReady;
+    const owner = this.capturePublicationOwner();
+    const id = subscription.id, verification = subscription.verificationGeneration;
+    const authFrame = this.activeAuthFrameId, pendingAuth = this.latestAuthFrameId;
+    const current = () => owner() && this.replicaReady === ready
+      && this.activeAuthFrameId === authFrame && this.latestAuthFrameId === pendingAuth
+      && this.ownsReplicaSubscription(subscription) && subscription.id === id
+      && subscription.verificationGeneration === verification;
+    if (this.hydratedReplicaReady !== ready) {
+      const previous = this.replicaOpenHydrations.get(subscription);
+      if (previous?.current()) return;
+      const pending = { current, task: Promise.resolve() };
+      this.replicaOpenHydrations.set(subscription, pending);
+      // Only collection opens wait here. In particular, control RPCs and
+      // outbox journal admission must progress while durable rows hydrate.
+      pending.task = ready.then(() => {
+        if (this.replicaOpenHydrations.get(subscription) !== pending) return;
+        this.replicaOpenHydrations.delete(subscription);
+        if (current()) this.sendReplicaOpen(subscription);
+      }, () => {
+        if (this.replicaOpenHydrations.get(subscription) === pending) {
+          this.replicaOpenHydrations.delete(subscription);
+        }
+        // The scope activation owner reports failure; never send a cold open
+        // on behalf of a failed or superseded durable activation.
+      }).catch(error => {
+        if (current()) this.rejectReplicaDirective(error);
+      });
+      return;
+    }
     const requestScope = this.replicaScope;
     subscription.scope = requestScope;
     subscription.opening = true;
     subscription.socketGeneration = this.socketGeneration;
-    const open = this.replicaOpenRequest(subscription);
+    this.replicaOpenOwners.set(subscription, current);
     if (this.serverCapabilities.replicaBatch === 1) {
       this.pendingReplicaOpens.add(subscription);
       if (!this.replicaOpenFlushTimer) {
@@ -3937,7 +4066,7 @@ export class GonvexClient {
       }
       return;
     }
-    this.send({ type: "replica.open", ...open });
+    this.send({ type: "replica.open", ...this.replicaOpenRequest(subscription) });
   }
 
   private replicaOpenRequest(subscription: ReplicaSubscription): ReplicaOpenRequest {
@@ -3965,6 +4094,7 @@ export class GonvexClient {
       digest: this.serverCapabilities.replicaResume === 1
         ? window?.aggregateDigest ?? replicaAggregateDigest({}) : undefined,
       fullIntegrity: fullIntegrity || undefined,
+      starter: !cursor && !subscription.starterFailed && this.starterInflater && this.replica.starterPromotionSupported() && this.starterNegotiated && this.serverCapabilities.replicaStarterFiles === 1 ? { version: 1 } : undefined,
     };
   }
 
@@ -3972,22 +4102,31 @@ export class GonvexClient {
     this.replicaOpenFlushTimer = undefined;
     const subscriptions = Array.from(this.pendingReplicaOpens);
     this.pendingReplicaOpens.clear();
-    if (this.authInFlight || !this.hasAuthoritativeReplicaScope) {
-      for (const subscription of subscriptions) {
-        subscription.opening = false;
-        subscription.socketGeneration = undefined;
+    const owners = new Map(subscriptions.map(subscription =>
+      [subscription, this.replicaOpenOwners.get(subscription)] as const));
+    const canFlush = (subscription: ReplicaSubscription) =>
+      this.replicaOpenOwners.get(subscription) === owners.get(subscription)
+      && owners.get(subscription)?.() === true
+      && this.isWebSocketConnected && !this.authInFlight && this.hasAuthoritativeReplicaScope
+      && this.hydratedReplicaReady === this.replicaReady
+      && subscription.scope === this.replicaScope
+      && subscription.socketGeneration === this.socketGeneration
+      && subscription.opening && subscription.listeners.size > 0;
+    const release = (subscription: ReplicaSubscription) => {
+      // A reentrant send may already have queued a replacement preparation.
+      if (this.replicaOpenOwners.get(subscription) !== owners.get(subscription)) return;
+      subscription.opening = false;
+      subscription.socketGeneration = undefined;
+    };
+    for (let offset = 0; offset < subscriptions.length; offset += maxReplicaBatchOpens) {
+      // Recheck per frame too: a transport callback can retire the owner
+      // synchronously while the previous batch is sent.
+      const opens: ReplicaOpenRequest[] = [];
+      for (const subscription of subscriptions.slice(offset, offset + maxReplicaBatchOpens)) {
+        if (canFlush(subscription)) opens.push(this.replicaOpenRequest(subscription));
+        else release(subscription);
       }
-      return;
-    }
-    const opens = subscriptions
-      .filter((subscription) => (
-        subscription.opening
-        && subscription.listeners.size > 0
-        && this.replicaSubscriptions.get(subscription.key) === subscription
-      ))
-      .map((subscription) => this.replicaOpenRequest(subscription));
-    for (let offset = 0; offset < opens.length; offset += maxReplicaBatchOpens) {
-      this.send({ type: "replica.openMany", opens: opens.slice(offset, offset + maxReplicaBatchOpens) });
+      if (opens.length) this.send({ type: "replica.openMany", opens });
     }
   }
 
@@ -4002,6 +4141,7 @@ export class GonvexClient {
       latest.unsubscribeTimer = undefined;
       this.clearReplicaRetry(latest);
       this.pendingReplicaOpens.delete(latest);
+      this.replicaOpenHydrations.delete(latest);
       latest.verificationGeneration = Symbol();
       this.replicaSubscriptions.delete(key);
       this.discardSnapshotPages(latest);
@@ -4083,8 +4223,13 @@ export class GonvexClient {
   // await replicaReady still see the rejection; the stored promise itself must
   // not surface as an unhandled rejection that kills Node processes.
   private setReplicaReady(ready: Promise<void>) {
+    if (this.replicaReady === ready) return;
     this.replicaReady = ready;
-    ready.catch(() => undefined);
+    this.hydratedReplicaReady = undefined;
+    this.replicaOpenHydrations.clear();
+    void ready.then(() => {
+      if (this.replicaReady === ready) this.hydratedReplicaReady = ready;
+    }, () => undefined);
   }
 
   // Outbox restore awaits replicaReady, so it rejects the same way.
@@ -5350,7 +5495,7 @@ export class GonvexClient {
         this.enqueueReplicaFrame(async () => {
           if (!this.ownsReplicaSubscription(subscription) || verificationGeneration !== subscription.verificationGeneration
             || socketGeneration !== this.socketGeneration || !this.isWebSocketConnected) return;
-          await this.handleReplicaMessage(subscription, message as ReplicaMessage | SnapshotPage, scope);
+          await this.handleReplicaMessage(subscription, message as ReplicaMessage | SnapshotPage | StarterWire, scope);
         });
       });
     }
@@ -5492,6 +5637,7 @@ export class GonvexClient {
   private sendAuth(force: boolean, options: { useFetcher?: boolean } = {}) {
     this.flushTelemetry();
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
+    this.retireStarterStages();
     this.authInFlight = true;
     this.authRetriedAfterError = false;
     this.authRefreshedToken = undefined;
@@ -5504,7 +5650,17 @@ export class GonvexClient {
     this.sendAuthFrame();
   }
 
+  private retireStarterStages() {
+    for(const subscription of this.replicaSubscriptions.values()) {
+      if(!subscription.starterAbort)continue;
+      this.discardSnapshotPages(subscription);subscription.starterFailed=true;
+      subscription.opening=false;subscription.socketGeneration=undefined;
+    }
+    this.starterNegotiated=false;
+  }
+
   private sendAuthFrame() {
+    this.retireStarterStages();
     const id = randomID();
     this.latestAuthFrameId = id;
     this.managedAuthAttempt?.ids.add(id);
@@ -5518,7 +5674,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 },
+		capabilities: { replicaStarterFiles: this.starterInflater && this.replica.starterPromotionSupported() ? 1 : undefined, replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 },
     });
   }
 
