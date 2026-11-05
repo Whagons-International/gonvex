@@ -1418,3 +1418,13 @@ Lab order authorized by parent: existing heap-growth recovery → short open-cos
 window → short reopen window → baseline. Honor current LAB_RUN_ACTIVE owner;
 no builds/measurements overlap, no runtime merges during the series. Heap
 ba54cee4 tests are unverified; do not integrate it on prior wrapper exit status.
+
+Harness follow-up **e242abe6** covers retry resumption when a listener returns
+inside retention. Focused verification: `node --test bench/whagons/*.test.mjs`
+**28/28**, `python3 bench/whagons/summary.test.py` **5/5**, and
+`node --experimental-strip-types --check bench/whagons/run.ts` pass. Realistic
+reloads have no legacy midpoint-wave exemption in capacity connection checks.
+Baseline runner prepared at `/mnt/data/work/gonvex-gate6-baseline/case.sh`:
+atomic exclusive lock, pre-run pinned-core quiet check, resource/headroom gate,
+per-case data under `/mnt/data`, unchanged gate6 binaries. Not launched while
+heap holds its recovered reservation (expected end 03:41 UTC).

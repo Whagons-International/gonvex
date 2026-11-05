@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 class Qualification(unittest.TestCase):
-    def summarize(self, flags=None, telemetry=True, stopped=False):
+    def summarize(self, flags=None, telemetry=True, stopped=False, dip=False):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             case = root / 'case'
@@ -26,11 +26,11 @@ class Qualification(unittest.TestCase):
             }))
             if telemetry:
                 host, metrics = [], []
-                for seconds in [0, 179]:
+                for seconds in ([0, 95, 179] if dip else [0, 179]):
                     at = start / 1000 + seconds
                     host.append({'at': at, 'memory_full_avg10': 0,
                                  **{name: 'user_usec 1\nsystem_usec 1\n1024' for name in ['runtime', 'generator']}})
-                    metrics.append({'at': at * 1000, 'metrics': {'websocket': {'accounts': 1}, 'database': {'waitCount': 1, 'waitDurationMs': 1}}})
+                    metrics.append({'at': at * 1000, 'metrics': {'websocket': {'accounts': 0 if dip and seconds == 95 else 1}, 'database': {'waitCount': 1, 'waitDurationMs': 1}}})
                 for path, rows in [(case / 'host.jsonl', host), (root / 'case.json.metrics.jsonl', metrics)]:
                     path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
             output = io.StringIO()
@@ -49,6 +49,10 @@ class Qualification(unittest.TestCase):
         for flags in [{'partial': True}, {'aborted': True}, {'steadyEndMs': 1700000010000}]:
             with self.subTest(flags=flags):
                 self.assertFalse(self.summarize(flags))
+
+    def test_realistic_reloads_have_no_stress_wave_connection_exemption(self):
+        self.assertTrue(self.summarize(dip=True))  # legacy midpoint wave
+        self.assertFalse(self.summarize({'reloadsPerUserHour': '1'}, dip=True))
 
     def test_memory_pressure_stop_never_passes(self):
         self.assertFalse(self.summarize(stopped=True))

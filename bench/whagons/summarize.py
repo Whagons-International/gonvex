@@ -107,6 +107,8 @@ for phase in sys.argv[2:]:
             # Older results lack the window; the wave starts at the plateau midpoint.
             middle = (r.get('steadyStartMs', 0) + r.get('steadyEndMs', 0)) / 2
             window = r.get('reconnectWindowMs') or [middle, middle + 10000]
+            if r.get('reloadsPerUserHour') is not None:
+                window = [float('inf'), float('inf')]  # no stress-wave exemption for realistic reloads
             outside = [x['metrics']['websocket']['accounts'] for x in metrics
                        if not window[0] <= x['at'] <= window[1] + 30000]
             stats['fullyConnectedSampleShare'] = sum(x >= target_users for x in steady) / len(steady)
