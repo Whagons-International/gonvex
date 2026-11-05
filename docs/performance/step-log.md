@@ -1364,3 +1364,34 @@ Gate6 status: builds (normal + frame-pointer, `lab-5k/bin-gate6`, `bin-gate6-fp`
 **no gate case run yet** (host load 20–66 from other projects for most of the afternoon). Planned
 series (`lab-5k-new/chain-gate6m.sh`): 100-user app-set smoke → oracle on/off → production 1k with
 `LOAD_APP_OPENS` until 3 clean runs (host busy ≤ 4.0/16) → :00 window with the app set.
+
+### Step 16 results (after the reboot): gate6 on 7d01af5b with the real app collection set: FAIL
+
+Lab back up cleanly after the reboot (base services of both labs restarted; no stale lock). The
+quiet-host gate now judges contamination by foreign CPU on the runtime's pinned core (cpus 7,15)
+instead of whole-host load, since other projects keep the host at load 4–10.
+
+| case | users | errors | oracle | result |
+|---|---:|---:|---|---|
+| g6-100-app-smoke (app set) | 100/100 | 1.29 % (3 known addMemberTeam) | 0 mismatched | save p95/p99 966 / 6,348 ms, 0.38 cores (thin 100 users: ≈ 0.08), host busy 7/16 |
+| g6-oracle-100 (thin) | 100/100 | 0.10 % | 23 / 0 / {} | PASS |
+| g6-oracle-100-nobatch (thin) | 100/100 | 0.10 % | 23 / 0 / {} | latency FAIL (as on c834535b) |
+| **g6-1k-app-1 (production, app set)** | **758/1,000** | **100 %** | – | **collapse during the 90 s sign-in ramp**; series stopped |
+
+g6-1k-app-1, ramp (the runtime stopped answering /dev/profile before the plateau; deltas over the
+85 s of ramp): snapshot builds admitted 441/s with slot hold 4.1 ms mean (**≈ 92 % slot use**, the
+admission fix works: grant lag p99 0.19 ms, budget wait ≈ 0), permit wait p50 1.4 s / p99 10.5 s,
+waiting builds at the 4,096 cap (shed: "too many waiting builds" and the 30 s deadline), offload
+runtime holding 4,101 tasks; runtime CPU 0.98–1.00 cores from t+8 s; anon 645 → ≈ 1,900 MiB in
+80 s (memory.events max 56,408, no OOM kill seen); 1.10 sockets per account (transport retries).
+Demand: 1,000 users × ≈ 140 opens in a 90 s ramp ≈ 1,550 opens/s vs ≈ 440/s capacity on 1 vCPU.
+
+**Reopen churn (app set, 100 users):** `spots.list` reopened 2,373 times in 1.7 min (14.9 per socket
+per minute), every one after a server `needHashes` with reason `needHashesPrincipal`
+(`replica_mask.rs` resync) answered by a full-integrity reopen: the same pattern as staging's
+listMembers reopens. `spots` visibility reads `members.see_all_spots` (members is a permission
+table), a likely trigger; not traced.
+
+**Generator gap:** the thin client does not retry `replica.error` (the SDK retries with 250 ms ×
+2ⁿ backoff up to 5 s, `packages/client/src/index.ts` scheduleReplicaRetry), so a shed subscription
+stays failed; the 1.05 M error count is error notifications, not retries.
