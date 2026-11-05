@@ -2184,7 +2184,7 @@ async fn websocket(
                         if let Some(session) = tenant_session.as_ref() {
                             if membership_affects(session, &event) || events.iter().any(|earlier| membership_affects(session, earlier)) {
                                 discard_tenant_session!();
-                                for message in membership_changed_frames(transaction_watermark.map(|revision| ServerMessage::ReplicaWatermark { revision })) {
+                                for message in membership_changed_frames(replica_watermark(&event)) {
                                     if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                                 }
                                 continue;
