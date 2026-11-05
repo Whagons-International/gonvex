@@ -1469,3 +1469,81 @@ eventual deferred opens must settle. Old app7d97617cf capture is reference only.
 Shipping SQLite.1 patch contains deferral APIs absent from bare perf SDK; use
 actual patched shipping SDK in isolated packaging, not bare local client.
 No runtime architecture prototype/build authorized; unchanged7d01af5b baseline.
+
+## Step 18: authorized reopen-only integration (2026-11-05 UTC)
+
+Gabriel's latest ordered plan superseded the unchanged mixed baseline while
+capture was in setup: integrate reviewed reopen fix first, then reload work,
+permission primitives, starter measurements, and expanded mixed qualification.
+No load series was active and no gate/RC/freeze is claimed.
+
+- Reviewed source **e12c86565e80064034dbd406ae4807c304c053cc** merged cleanly
+  into integration as **e5812dfbcf27eca83ed0c224f40e954df91b4170**.
+- This is the ONLY runtime integration authorized/merged. The existing runtime
+  binary for **7d01af5b** remains preserved at `lab-5k/bin-gate6`, SHA-256
+  `d8283384ed1df4ddff65c46fed0e31075a8a0978fc9ade608d8cac9d597d5f32`.
+- Reopen change scopes dependencies per permission set, propagates context
+  anchors only through proven join equalities, retains own-member identity
+  invalidation, and keeps conservative fallbacks. It stores shared plan metadata,
+  not snapshot rows. No app/SDK/client/protocol edits.
+- Child evidence (not full-app measurements): 396 runtime tests passed/8 ignored,
+  seven focused correctness tests including SQLite oracle; debug routing median
+  thread CPU 11,438→2,833 ns/check and unrelated principal resyncs 100,000→0.
+  These are module results, not a capacity or sign-in CPU claim.
+
+Integrated verification (final results recorded below):
+- `node --test bench/whagons/*.test.mjs`: **34 passed**.
+- `python3 bench/whagons/summary.test.py`: **5 passed**.
+- `node --experimental-strip-types --check bench/whagons/run.ts`: pass.
+- `pnpm --filter @gonvex/docs typecheck`: pass, metadata regenerated with no
+  tracked diff. Initial attempt failed because the relocated generated directory
+  could not resolve dependencies; adding its dependency lookup symlink fixed
+  the build layout. No generator/application source repair was needed.
+- Static relative runtime-import graph for the changed harness: 0 cycles on
+  base38e600f6 (10 modules) and integrated head (12 modules). SDK/application
+  import graphs are unchanged. No other Gonvex/i18n generator input changed.
+- `CARGO_TARGET_DIR=/mnt/data/work/gonvex-gate6-baseline/target-integrate cargo test --locked -p gonvex-runtime --lib`
+  from `rust/` on **e5812dfb**: **396 passed, 0 failed, 8 ignored**; Cargo
+  direct exit **0**, admitted command exit **0**. New unrelated-member,
+  permission/membership transition and SQLite-oracle regressions all passed.
+  Logs and direct exit file are under `/mnt/data/work/gonvex-gate6-baseline/`.
+  This was integration validation, not a full-app measurement.
+
+### Shipping collection recapture status: NOT VERIFIED
+
+Isolated app worktree **37ca8278b** (`perf/gate6-capture-sqlite`) used actual
+published **0.5.2-sqlite.1** dependencies and the app's matching patch (SHA-256
+`06786316f912c262f7638b8f3c82cff02a8787f71eabcafca84b4087a3333334`).
+Matching tracked manifest SHA-256
+`7676b14074cef430d1b74bcf4bc0d3414669f87d5e130e5f7fe7603cb345e353`
+was synced successfully (1,982 functions) into a disposable synthetic lab clone
+on unchanged gate6. Fixture project routing was configured and Synthetic0's
+cloned tenant domain set to `synthetic-0`; no shared staging/app checkout changed.
+
+Shipping managed sign-in exchanged the emulator token successfully and returned
+an access-token-bearing grant with one tenant, but the observed flow returned
+to sign-in without opening collections. Control-only tokenless auth frames are
+expected on the separate control client; incompatibility is NOT established.
+Returned tenant domain/ID versus selector and native session installation remain
+under parent source investigation. No SDK/runtime/app feature was swapped or
+patched to force a capture. Counts, first-window/deferred-release timing, eventual
+first visit and warm cursor reload for this shipping pin remain UNVERIFIED.
+
+Current staging **814415ca0** is a separate source pin (29 frontend file deltas
+plus SQL/module changes versus the shipping branch). Deferral API source carryover
+is confirmed, but exact current-staging counts remain UNVERIFIED. No mixed
+frontend/module overlay was authorized or created. Old7d97617cf counts are still
+reference evidence only; no final gate app set has been frozen from this attempt.
+
+Artifacts are preserved under `/mnt/data/work/gonvex-gate6-capture/`, including
+`managed-auth-blocker.json` (sanitized fields, no tokens/row contents), exact
+module copy, sync receipt, isolated source, setup logs and observer configuration.
+The capture tab, Vite, forwarder and all `gvcap-*` services were stopped before
+integration. An interrupted disposable DB copy was preserved under an alternate
+name; it was replaced before module sync, and no measurement used it.
+
+Resource helper currently rejects `/mnt/data` paths despite newer storage rules.
+Actual cache/output/checkouts use `/mnt/data` with headroom checks; only helper
+bookkeeping build-dir uses existing `/home/gabriel/work` paths. Compile caps were
+not changed. Next explicit lab handoff is to `perf/reload-delta`, sourced from
+**e5812dfb**; no heap or permission integration is authorized yet.
