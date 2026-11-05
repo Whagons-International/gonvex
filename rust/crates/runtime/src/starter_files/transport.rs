@@ -16,10 +16,49 @@ use std::{
 
 const GLOBAL_LIMIT: usize = 64 << 20;
 static OFFER_BYTES: AtomicUsize = AtomicUsize::new(0);
-struct Reservation(usize);
+#[cfg(test)]
+static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) fn reset_budget_peak() {
+    PEAK_BYTES.store(OFFER_BYTES.load(Ordering::Acquire), Ordering::Release);
+}
+#[cfg(test)]
+pub(crate) fn process_budget_stats() -> (usize, usize, usize) {
+    (
+        OFFER_BYTES.load(Ordering::Acquire),
+        PEAK_BYTES.load(Ordering::Acquire),
+        GLOBAL_LIMIT,
+    )
+}
+fn record_budget_peak() {
+    #[cfg(test)]
+    PEAK_BYTES.fetch_max(OFFER_BYTES.load(Ordering::Acquire), Ordering::Relaxed);
+}
+struct Reservation(AtomicUsize);
+impl Reservation {
+    fn bytes(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+    // Resizing is private to a not-yet-published singleflight factory.
+    fn resize(&self, next: usize) -> io::Result<()> {
+        let old = self.bytes();
+        if next > old {
+            OFFER_BYTES
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                    v.checked_add(next - old).filter(|v| *v <= GLOBAL_LIMIT)
+                })
+                .map_err(|_| io::Error::other("artifact process budget"))?;
+        } else {
+            OFFER_BYTES.fetch_sub(old - next, Ordering::AcqRel);
+        }
+        record_budget_peak();
+        self.0.store(next, Ordering::Release);
+        Ok(())
+    }
+}
 impl Drop for Reservation {
     fn drop(&mut self) {
-        OFFER_BYTES.fetch_sub(self.0, Ordering::AcqRel);
+        OFFER_BYTES.fetch_sub(self.bytes(), Ordering::AcqRel);
     }
 }
 fn reserve(n: usize) -> Result<Arc<Reservation>, LocalSnapshotError> {
@@ -28,8 +67,12 @@ fn reserve(n: usize) -> Result<Arc<Reservation>, LocalSnapshotError> {
             v.checked_add(n).filter(|v| *v <= GLOBAL_LIMIT)
         })
         .map_err(|_| LocalSnapshotError::Rejected("starter process budget"))?;
-    Ok(Arc::new(Reservation(n)))
+    record_budget_peak();
+    Ok(Arc::new(Reservation(AtomicUsize::new(n))))
 }
+#[path = "transport_artifact.rs"]
+mod artifact;
+
 #[derive(Clone)]
 struct Registered {
     registration: Arc<LocalSnapshotRegistration>,
@@ -41,6 +84,7 @@ struct Registered {
 pub(crate) struct Registry(
     Mutex<BTreeMap<String, Registered>>,
     Mutex<Vec<tokio::task::JoinHandle<Result<Manifest, LocalSnapshotError>>>>,
+    Mutex<artifact::Cache>,
 );
 fn registry_key(session: &TenantSession, path: &str) -> String {
     serde_json::json!([
@@ -53,7 +97,8 @@ fn registry_key(session: &TenantSession, path: &str) -> String {
 }
 struct Offer {
     registered: Registered,
-    manifest: Manifest,
+    manifest: Arc<Manifest>,
+    artifact: Arc<artifact::ValidatedArtifact>,
     public: StarterOffer,
     request: ReplicaOpenRequest,
     next: usize,
@@ -120,7 +165,10 @@ impl Connection {
     pub(crate) fn budget_stats(&self) -> (usize, usize) {
         (
             self.offers.len(),
-            self.offers.values().map(|o| o._reservation.0).sum(),
+            self.offers
+                .values()
+                .map(|o| o._reservation.bytes() + o.artifact.charge())
+                .sum(),
         )
     }
     pub fn is_empty(&self) -> bool {
@@ -240,6 +288,18 @@ fn checked_hash(row: &Value, types: &BTreeMap<String, String>) -> io::Result<Str
     Ok(row_hash(row))
 }
 impl Runtime {
+    #[cfg(test)]
+    pub(crate) fn hold_starter_factory(&self) -> impl Drop + '_ {
+        self.inner.starter_transport.2.lock().unwrap()
+    }
+    #[cfg(test)]
+    pub(crate) fn clear_starter_artifact_cache(&self) {
+        self.inner.starter_transport.2.lock().unwrap().clear();
+    }
+    #[cfg(test)]
+    pub(crate) fn starter_artifact_entries(&self) -> usize {
+        self.inner.starter_transport.2.lock().unwrap().len()
+    }
     /// Explicit trusted local provider registration, never an RPC/schema install.
     pub(crate) async fn register_local_starter_transport(
         &self,
@@ -461,10 +521,14 @@ impl Runtime {
             &session.member.permissions,
         );
         drop(module);
-        let connection_bytes: usize = connection.offers.values().map(|o| o._reservation.0).sum();
+        let connection_bytes: usize = connection
+            .offers
+            .values()
+            .map(|o| o._reservation.bytes() + o.artifact.charge())
+            .sum();
         let generation = connection.generation;
         let tx = connection.tx.clone();
-        let (manifest, public, reservation) = self
+        let (artifact, public, reservation) = self
             .with_local_starter_admission_guarded(
                 &registered.registration,
                 session,
@@ -478,43 +542,42 @@ impl Runtime {
                     }) {
                         return Err(io::Error::other("usable cache must resume normally"));
                     }
-                    let mut sequence = 0;
-                    // Obtain the authoritative manifest through a no-payload pass, then
-                    // validate the exact raw representation under the same writer lease.
+                    // No SQL-proof memo: this offer independently scanned the
+                    // current authorized set above, and must compare it again
+                    // before reusing ANY process-only encoded proof.
                     let read_timing = Scope::new(Site::OfferRead);
-                    let manifest = registered.store.read(
-                        &fresh.identity,
-                        || Ok(fresh.clone()),
-                        |_, _| Ok(()),
-                    )?;
+                    let artifact = self
+                        .inner
+                        .starter_transport
+                        .2
+                        .try_lock()
+                        .map_err(|_| io::Error::other("artifact singleflight busy"))?
+                        .get_or_validate(
+                            &registered,
+                            fresh,
+                            inspected_window.rows as u64,
+                            &inspected_digest,
+                        )?;
                     drop(read_timing);
-                    let format_timing = Scope::new(Site::OfferFormat);
-                    let mut v =
-                        format::Verifier::new(&registered.registration.definition, &manifest)?;
-                    registered.store.read(
-                        &fresh.identity,
-                        || Ok(fresh.clone()),
-                        |_, bytes| {
-                            v.piece(&manifest, sequence, bytes, |row| {
-                                checked_hash(row, &registered.column_types)
-                            })?;
-                            sequence += 1;
-                            Ok(())
-                        },
-                    )?;
-                    let verified = v.finish(&manifest)?;
-                    crate::starter_files::diagnostics::add(Site::FormatRows, verified.rows);
-                    drop(format_timing);
+                    let manifest = artifact.manifest();
+                    let verified = artifact.verified();
                     let d = &registered.registration.definition;
-                    // Nontruncated complete set only. Exact boundary proof is repeated
-                    // using the normal v2 SQL scanner at commit, before any ready.
-                    if verified.rows != inspected_window.rows as u64
-                        || verified.digest != inspected_digest
+                    // Reserve descriptor clones, pending base64 and serialization
+                    // BEFORE allocating them. Encoded Arc/context have a separate
+                    // shared charge held until their last active/cache owner drops.
+                    let envelope_bytes = (1usize << 20)
+                        .checked_add(registered.proof.definition().len().saturating_mul(4))
+                        .and_then(|n| n.checked_add(manifest.pieces.len().saturating_mul(1024)))
+                        .ok_or_else(|| io::Error::other("offer size"))?;
+                    if connection_bytes
+                        .checked_add(envelope_bytes)
+                        .and_then(|n| n.checked_add(artifact.charge()))
+                        .is_none_or(|n| n > 8 << 20)
                     {
-                        return Err(io::Error::other(
-                            "starter differs from fresh authorized SQL window",
-                        ));
+                        return Err(io::Error::other("starter connection budget"));
                     }
+                    let reservation =
+                        reserve(envelope_bytes).map_err(|_| io::Error::other("offer budget"))?;
                     let public = StarterOffer {
                         id: request.id.clone(),
                         offer_id: uuid::Uuid::new_v4().to_string(),
@@ -534,7 +597,7 @@ impl Runtime {
                         max_rows: d.max_rows,
                         max_bytes: d.max_bytes,
                         truncated: false,
-                        digest: verified.digest,
+                        digest: verified.digest.clone(),
                         rows: verified.rows,
                         serialized_definition: String::from_utf8(
                             registered.proof.definition().to_vec(),
@@ -558,19 +621,6 @@ impl Runtime {
                             })
                             .collect(),
                     };
-                    let bytes = serde_json::to_vec(&public)?
-                        .len()
-                        .checked_add(serde_json::to_vec(&manifest)?.len())
-                        .and_then(|n| n.checked_add(1 << 20))
-                        .ok_or_else(|| io::Error::other("offer size"))?;
-                    if connection_bytes
-                        .checked_add(bytes)
-                        .is_none_or(|n| n > 8 << 20)
-                    {
-                        return Err(io::Error::other("starter connection budget"));
-                    }
-                    let reservation =
-                        reserve(bytes).map_err(|_| io::Error::other("offer budget"))?;
                     if now_ms() >= fresh.valid_until_ms {
                         return Err(io::Error::other("starter session expired before enqueue"));
                     }
@@ -580,7 +630,7 @@ impl Runtime {
                         reservation.clone(),
                         ServerMessage::ReplicaStarterOffer(public.clone()),
                     )?;
-                    Ok((manifest, public, reservation))
+                    Ok((artifact, public, reservation))
                 },
             )
             .await?;
@@ -588,7 +638,8 @@ impl Runtime {
             request.id.clone(),
             Offer {
                 registered,
-                manifest,
+                manifest: artifact.manifest().clone(),
+                artifact,
                 public,
                 request: request.clone(),
                 next: 0,
@@ -635,35 +686,23 @@ impl Runtime {
             Some(auth.parts()),
             |fresh| {
                 let _read_timing = Scope::new(Site::PieceRead);
-                offer
-                    .registered
-                    .store
-                    .read_pinned_piece(
-                        &offer.manifest,
-                        index as usize,
-                        || Ok(fresh.clone()),
-                        |_, bytes| {
-                            if now_ms() >= fresh.valid_until_ms
-                                || now_ms() >= offer.public.expires_at
-                            {
-                                return Err(io::Error::other(
-                                    "starter session expired before enqueue",
-                                ));
-                            }
-                            enqueue(
-                                &tx,
-                                generation,
-                                reservation.clone(),
-                                ServerMessage::ReplicaStarterPiece {
-                                    id: id.into(),
-                                    offer_id: offer_id.into(),
-                                    index,
-                                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                                },
-                            )
-                        },
-                    )
-                    .map(|_| ())
+                let bytes = offer
+                    .artifact
+                    .bytes(&offer.registered, fresh, index as usize)?;
+                if now_ms() >= fresh.valid_until_ms || now_ms() >= offer.public.expires_at {
+                    return Err(io::Error::other("starter session expired before enqueue"));
+                }
+                enqueue(
+                    &tx,
+                    generation,
+                    reservation.clone(),
+                    ServerMessage::ReplicaStarterPiece {
+                        id: id.into(),
+                        offer_id: offer_id.into(),
+                        index,
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    },
+                )
             },
         )
         .await?;

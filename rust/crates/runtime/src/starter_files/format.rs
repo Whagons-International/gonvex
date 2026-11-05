@@ -5,6 +5,8 @@ use crate::modules::ReplicaCollectionDefinition;
 use gonvex_protocol::replica_digest::ReplicaSetDigest;
 use serde_json::Value;
 use std::{collections::BTreeSet, io};
+#[path = "strict_json.rs"]
+mod strict_json;
 
 pub(crate) const MAX_PIECE: usize = 256 << 10;
 pub(crate) const MAX_TOTAL: u64 = 32 << 20;
@@ -105,7 +107,7 @@ impl Verifier {
             if line.is_empty() || line.len() > MAX_PIECE {
                 return Err(invalid());
             }
-            let value: Value = serde_json::from_slice(line)?;
+            let value: Value = strict_json::parse(line)?;
             let object = value.as_object().ok_or_else(invalid)?;
             if object.len() != self.definition.columns.len()
                 || object.keys().any(|k| !self.definition.columns.contains(k))

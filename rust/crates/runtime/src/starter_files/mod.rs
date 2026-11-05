@@ -18,6 +18,7 @@ use std::{
 };
 
 pub(crate) mod diagnostics;
+pub(crate) mod pinned;
 const FORMAT: u32 = 1;
 // Exactly the websocket level-1, 12-bit, raw RFC7692 no-context compressor.
 const ENCODING: &str = "json-lines-pmd-level1-window12-no-context-v1";

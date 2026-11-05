@@ -692,6 +692,7 @@ async fn starter_live_module_benchmark() {
             crate::starter_files::capture_allocations(
                 std::env::var("STARTER_ALLOC_PROFILE").as_deref() != Ok("0"),
             );
+            crate::replica::permission::transport::reset_budget_peak();
             let cpu_start = process_cpu_ns();
             let output = tokio::process::Command::new("node")
                 .arg(concat!(
@@ -723,7 +724,7 @@ async fn starter_live_module_benchmark() {
                 .lock()
                 .unwrap()
                 .clone();
-            reports.push(json!({"repeat":repeat,"node":node,"raw_sites":crate::raw_sites::snapshot(),"detail":crate::starter_files::diagnostics::snapshot(),"server_stage_wall_ns":timings,"server_process_cpu_ns":server_cpu_ns,"server_alloc_count_requested_bytes":server_allocations,"fast_profiler":gonvex_profiler::snapshot().into_iter().filter(|s|s.count>0).map(|s|json!({"stage":s.name(),"label":format!("{:?}",s.label),"count":s.count,"sum_ns":s.sum,"max_ns":s.max})).collect::<Vec<_>>()}));
+            reports.push(json!({"repeat":repeat,"node":node,"raw_sites":crate::raw_sites::snapshot(),"detail":crate::starter_files::diagnostics::snapshot(),"server_stage_wall_ns":timings,"server_process_cpu_ns":server_cpu_ns,"server_artifact_budget_retained_peak_limit":crate::replica::permission::transport::process_budget_stats(),"server_alloc_count_requested_bytes":server_allocations,"fast_profiler":gonvex_profiler::snapshot().into_iter().filter(|s|s.count>0).map(|s|json!({"stage":s.name(),"label":format!("{:?}",s.label),"count":s.count,"sum_ns":s.sum,"max_ns":s.max})).collect::<Vec<_>>()}));
         }
     }
     fn files(path: &std::path::Path) -> Vec<(String, u64)> {
@@ -893,4 +894,191 @@ async fn starter_valid_checksums_cannot_replace_authorized_rows_before_offer() {
         c.pop().is_none(),
         "a forged cache was offered before authorized SQL equality proof"
     );
+}
+
+#[tokio::test]
+async fn starter_cached_proof_still_scans_sql_and_rejects_restored_mtime_bytes() {
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let _env = Environment::set();
+    let f = fixture().await;
+    let (mut c, s) = bob_connection(&f).await;
+    let first = offered(&f, &mut c, &s).await;
+    c.cancel(&first.id, &first.offer_id).unwrap();
+    // A warm proof still runs fresh SQL. Row-scope mutation without a change to
+    // member atoms must reject the old artifact before any offer or piece.
+    let mut tx = gonvex_store::begin_transaction(&f.runtime.inner.pools, &f.url, false)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET team='t2' WHERE id='a'")
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(!matches!(
+        f.runtime.offer_starter(&mut c, &s, &cold(), false).await,
+        Ok(true)
+    ));
+    assert!(c.pop().is_none());
+    drop(f);
+    let f = fixture().await;
+    let (mut c, s) = bob_connection(&f).await;
+    let offer = offered(&f, &mut c, &s).await;
+    let path = f
+        ._artifacts
+        .path()
+        .join("pieces")
+        .join(&offer.pieces[0].hash);
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0] ^= 1;
+    std::fs::write(&path, bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert!(f
+        .runtime
+        .starter_piece(&mut c, &s, &offer.id, &offer.offer_id, 0)
+        .await
+        .is_err());
+    assert!(
+        c.pop().is_none(),
+        "new disk bytes cannot inherit an old immutable proof"
+    );
+}
+
+#[tokio::test]
+async fn starter_duplicate_projected_field_cannot_hide_private_bytes_under_valid_digest() {
+    use sha2::{Digest, Sha256};
+    let hash = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let _env = Environment::set();
+    let f = fixture().await;
+    let path = std::fs::read_dir(f._artifacts.path().join("manifests"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut envelope: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // Ordinary Value parsing would overwrite the private value, producing the
+    // exact authorized SQL digest while still disclosing it in raw NDJSON.
+    let raw = b"{\"id\":\"a\",\"body\":\"private-secret\",\"body\":\"first\",\"rank\":1}\n{\"id\":\"c\",\"body\":\"last\",\"rank\":3}\n";
+    let piece_hash = hash(raw);
+    std::fs::write(f._artifacts.path().join("pieces").join(&piece_hash), raw).unwrap();
+    envelope["manifest"]["pieces"] = json!([{"hash":piece_hash,"raw_hash":piece_hash,"compressed":false,"bytes":raw.len(),"raw_bytes":raw.len()}]);
+    let manifest: crate::starter_files::Manifest =
+        serde_json::from_value(envelope["manifest"].clone()).unwrap();
+    envelope["checksum"] = json!(hash(&serde_json::to_vec(&manifest).unwrap()));
+    std::fs::write(path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    let (mut c, s) = bob_connection(&f).await;
+    assert!(!matches!(
+        f.runtime.offer_starter(&mut c, &s, &cold(), false).await,
+        Ok(true)
+    ));
+    assert!(
+        c.pop().is_none(),
+        "shadowed private bytes were offered under a normalized digest"
+    );
+}
+
+#[tokio::test]
+async fn starter_factory_singleflight_eviction_cancel_and_last_active_charge() {
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let _env = Environment::set();
+    let f = fixture().await;
+    let (mut owner, s) = bob_connection(&f).await;
+    let first = offered(&f, &mut owner, &s).await;
+    for _ in 0..10 {
+        // An immutable replacement registration cannot inherit the old proof.
+        f.runtime
+            .register_local_starter_transport(&s, f.registration.clone(), f.store.clone())
+            .await
+            .unwrap();
+        let (mut c, s) = bob_connection(&f).await;
+        let offer = offered(&f, &mut c, &s).await;
+        assert!(c.cancel(&offer.id, &offer.offer_id).is_some());
+        assert!(c.cancel(&offer.id, &offer.offer_id).is_none());
+        assert!(f.runtime.starter_artifact_entries() <= 8);
+    }
+    assert_eq!(f.runtime.starter_artifact_entries(), 8);
+    f.runtime.clear_starter_artifact_cache();
+    assert_eq!(f.runtime.starter_artifact_entries(), 0);
+    assert!(
+        crate::replica::permission::transport::process_budget_stats().0 > 0,
+        "eviction released an active owner's copied bytes"
+    );
+    // The evicted proof remains private and usable only under fresh authority.
+    f.runtime
+        .starter_piece(&mut owner, &s, &first.id, &first.offer_id, 0)
+        .await
+        .unwrap();
+    assert!(owner.pop().is_some());
+    owner.retire();
+    assert_eq!(
+        crate::replica::permission::transport::process_budget_stats().0,
+        0
+    );
+}
+
+#[tokio::test]
+async fn starter_factory_contention_falls_back_without_queue_or_partial_offer() {
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let _env = Environment::set();
+    let f = fixture().await;
+    let (mut c, s) = bob_connection(&f).await;
+    let guard = f.runtime.hold_starter_factory();
+    assert!(f
+        .runtime
+        .offer_starter(&mut c, &s, &cold(), false)
+        .await
+        .is_err());
+    assert!(c.pop().is_none());
+    assert!(c.is_empty());
+    drop(guard);
+    let offer = offered(&f, &mut c, &s).await;
+    c.cancel(&offer.id, &offer.offer_id).unwrap();
+    f.runtime.clear_starter_artifact_cache();
+    assert_eq!(
+        crate::replica::permission::transport::process_budget_stats().0,
+        0
+    );
+}
+
+#[cfg(feature = "perf-fixture")]
+#[tokio::test]
+async fn starter_warm_artifact_reuse_retains_fresh_sql_rows_and_digest_per_offer() {
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let _env = Environment::set();
+    let f = fixture().await;
+    crate::starter_files::diagnostics::reset(true);
+    let (mut c, s) = bob_connection(&f).await;
+    let first = offered(&f, &mut c, &s).await;
+    c.cancel(&first.id, &first.offer_id).unwrap();
+    let second = offered(&f, &mut c, &s).await;
+    assert_eq!(first.digest, second.digest);
+    let counters = crate::starter_files::diagnostics::snapshot();
+    let count = |site: &str| {
+        counters.iter().find(|v| v["site"] == site).unwrap()["count"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(
+        count("format.rows"),
+        2,
+        "copied encoding should be validated once"
+    );
+    assert_eq!(
+        count("sql.rows"),
+        4,
+        "every offer must freshly scan ALL authorized rows"
+    );
+    crate::starter_files::diagnostics::reset(false);
 }
