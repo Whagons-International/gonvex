@@ -1,11 +1,11 @@
+import { utf8ByteLength } from './utf8-size.js';
 import type { JsonValue, ReplicaRowPatchFrame, ServerMessage } from '@gonvex/protocol';
 
 type Row = Record<string, JsonValue>;
 type Entry = { value: Row; bytes: number };
 const maxBytes = 4 * 1024 * 1024;
 const maxEntries = 4096;
-let encoder: TextEncoder | undefined;
-const size = (value: JsonValue) => (encoder ??= new TextEncoder()).encode(JSON.stringify(value)).byteLength;
+const size = (value: JsonValue) => utf8ByteLength(JSON.stringify(value));
 const object = (value: unknown): value is Row => value !== null && typeof value === 'object' && !Array.isArray(value);
 const version = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
 const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);

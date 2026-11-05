@@ -463,3 +463,40 @@ const client = new GonvexClient(runtimeUrl, {
 This creates `my-app-fresh-engine-cohort:engine-members-v1`. It never opens or upgrades the legacy database with the same base name. Engine participants use a separate peer channel and keep existing scope/authority, offline outbox, reducer coverage and resume rules. This option changes replica persistence only; it does not start a worker or move subscriptions off the main thread.
 
 Use a fresh cohort namespace. This release supplies no automatic legacy import or lossless backend export. Keep the engine database when disabling the option; do not treat changing storage factories as a migration of populated data. Existing durable outbox storage and its coordination remain unchanged. Runtime and application contract changes are unnecessary.
+
+## Bounded scratch windows and memory checks
+
+`RowWindowBuffer<T>(200)` borrows at most 200 row references using typed numeric
+position columns. `set(index, canonicalRow)` replaces a colliding ring slot;
+`get(index)` checks its position tag so stale positions cannot return the wrong
+row. `retainRange(start, length)` and `clear()` release references. This does not
+pack task fields, change canonical row ownership, or configure replica residency.
+Keep this mutable scratch buffer outside React snapshots; publish immutable IDs
+or a version when the UI needs notification.
+
+`node --expose-gc packages/client/bench/query-window.mjs` compares the current
+local query implementation with the earlier array pipeline. It reports timing,
+transient heap observations and logical retention separately; it does not
+establish application RSS or a browser memory cap. Sorted offset windows retain
+at most offset + limit candidates, while exact counts still scan all matches.
+
+`pnpm --filter @gonvex/client test:memory-smoke` builds current SDK sources and
+runs 20 seconds of native Chromium IndexedDB and offline sorted queries across 10,000 distinct
+records in five workspaces, retaining 200 full records at a time. Cold fixture
+setup is reported separately. The normal test has no backend, Docker, tracing,
+allocation sampling or GC during active work. Its JSON reports observed tab
+private footprint, CPU time, retained JS growth and coverage. This SDK guard
+does not establish a whole application's memory budget; keep an app UI smoke
+test as well.
+
+Set `GONVEX_MEMORY_PROFILE` to a dedicated directory to reuse the synthetic
+IndexedDB fixture. A hash of `fixture.mjs` selects its database, so query and SDK
+edits reuse seeded data. A changed fixture uses an isolated database; deterministic
+keys allow interrupted fixture writes to resume without a full indexed clear. CI caches
+only this unauthenticated SDK profile; warm runs avoid reseeding. The SDK gate
+uses 120 MB private footprint and 4 MiB retained growth. An opt-in
+`GONVEX_MEMORY_CONTROL_LATE_PROJECTION=1` restores the old query retention path
+inside the benchmark bundle for a negative control; it never edits SDK sources.
+The summary separates fixture setup, active work and total harness time; package
+build time is additional. A short smoke catches regressions in this workload,
+but cannot rule out slow leaks or replace full application traversal tests.

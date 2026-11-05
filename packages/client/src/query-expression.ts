@@ -1,5 +1,6 @@
 import type { JsonValue } from "@gonvex/protocol";
 import type { DataPredicate } from "@gonvex/module-sdk";
+import { QueryRowWindow } from "./query-row-window.js";
 
 export type LiveQueryValue = { context?: "account.id" | "member.id" | "tenant.id"; argument?: string; literal?: JsonValue };
 export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
@@ -102,104 +103,105 @@ export function runOfflineLiveQuery<T extends Record<string, unknown>>(
   if (state.incomplete) completeness = 'partial';
   if (unsupported) return { rows: [], completeness, supported: false, unsupportedOperator: unsupported };
 
-  let result = where ? rows.filter((row) => evaluateLiveExpression(where, row, args)) : [...rows];
-  const filterResult = applyStructuredFilters(result, plan.filters, args);
+  const filterResult = compileStructuredFilters(plan.filters, args);
   if (!filterResult.supported) return { rows: [], completeness, supported: false, unsupportedOperator: filterResult.reason };
-  result = filterResult.rows;
+  const filters = filterResult.filters;
   const search = plan.search ? String(args[plan.search.argument] ?? "").trim().toLocaleLowerCase() : "";
-  if (search && plan.search) {
-    const separator = plan.search.booleanTerms && search.includes('$and') ? '$and' : plan.search.booleanTerms && search.includes('$or') ? '$or' : '';
-    const terms = (separator ? search.split(separator) : [search]).map(term=>term.trim()).filter(Boolean);
-    const columns = plan.search.offlineColumns ?? plan.search.columns;
-    result = result.filter(row => {
-      const matches = terms.map(term => columns.some(column => String(row[column] ?? '').toLowerCase().includes(term)));
-      return separator === '$or' ? matches.some(Boolean) : matches.every(Boolean);
-    });
-    // A partial working set cannot prove matches in server-only search documents.
-    if (plan.search.sources?.length) completeness = 'partial';
+  const separator = search && plan.search?.booleanTerms && search.includes('$and') ? '$and'
+    : search && plan.search?.booleanTerms && search.includes('$or') ? '$or' : '';
+  const terms: string[] = [];
+  if (search && !separator) terms.push(search);
+  else if (search) for (const part of search.split(separator)) {
+    const term = part.trim();
+    if (term) terms.push(term);
   }
-  const total = plan.window?.count === "exact" ? result.length : undefined;
+  const searchColumns = plan.search?.offlineColumns ?? plan.search?.columns ?? [];
+  // A partial working set cannot prove matches in server-only search documents.
+  if (search && plan.search?.sources?.length) completeness = 'partial';
+
+  const offset = plan.window ? nonNegativeInteger(args[plan.window.offsetArgument], 0) : 0;
+  const requestedLimit = plan.window ? nonNegativeInteger(args[plan.window.limitArgument], plan.window.defaultLimit) : rows.length;
+  const limit = plan.window ? Math.min(requestedLimit || plan.window.defaultLimit,
+    plan.window.maxLimit || requestedLimit || plan.window.defaultLimit) : rows.length;
+  const take = Math.min(rows.length, offset + limit);
+  let fields: readonly string[] = [];
+  let direction = 1;
   if (plan.sort) {
     const requestedColumn = plan.sort.columnArgument ? String(args[plan.sort.columnArgument] ?? "") : "";
     const column = plan.sort.allowedColumns.includes(requestedColumn) ? requestedColumn : plan.sort.defaultColumn;
     const requestedDirection = plan.sort.directionArgument ? String(args[plan.sort.directionArgument] ?? "").toLocaleLowerCase() : "";
-    const direction = requestedDirection === "asc" || requestedDirection === "desc" ? requestedDirection : plan.sort.defaultDirection;
-    const fields = plan.index?.sortColumns?.[column] ?? [column];
-    const resolved = fields.some(field => plan.index?.referenceFields?.[field]) ? new Map<T, unknown[]>() : undefined;
-    if (resolved) for (const row of result) {
-      resolved.set(row,fields.map(field=>{
-        const reference=plan.index?.referenceFields?.[field];
-        if(!reference)return row[field];
-        const id=row[reference.foreignKey];
-        const related=id == null ? undefined : referenceRow?.(reference.table,String(id));
-        if(id!=null && !related)completeness='partial';
-        return related?.[reference.column] ?? reference.fallback ?? null;
-      }));
-    }
-    if(fields.some(field=>!plan.index?.referenceFields?.[field] && result.some(row=>!Object.hasOwn(row,field))))return {rows:[],completeness:'partial',supported:false,unsupportedOperator:'missingSortField'};
-    const comparator = (left: T, right: T) => {
-      for(let i=0;i<fields.length;i++){
-        const a=resolved ? resolved.get(left)![i] : left[fields[i]!],b=resolved ? resolved.get(right)![i] : right[fields[i]!];
-        // Server SQL orders ASC NULLS LAST and DESC NULLS FIRST.
-        const order=a==null ? b==null ? 0 : 1 : b==null ? -1 : compare(a,b);
-        if(order)return direction==='desc'?-order:order;
-      }
-      return compare(left[plan.key],right[plan.key]);
-    };
-    const requestedLimit = plan.window && nonNegativeInteger(args[plan.window.limitArgument], plan.window.defaultLimit);
-    const take = plan.window ? nonNegativeInteger(args[plan.window.offsetArgument], 0)
-      + Math.min(requestedLimit || plan.window.defaultLimit, plan.window.maxLimit || requestedLimit || plan.window.defaultLimit) : result.length;
-    result = take < result.length ? smallestRows(result, take, comparator) : result.sort(comparator);
+    direction = (requestedDirection === "asc" || requestedDirection === "desc" ? requestedDirection : plan.sort.defaultDirection) === 'desc' ? -1 : 1;
+    fields = plan.index?.sortColumns?.[column] ?? [column];
   }
-  let offset: number | undefined;
-  let limit: number | undefined;
-  if (plan.window) {
-    offset = nonNegativeInteger(args[plan.window.offsetArgument], 0);
-    const requestedLimit = nonNegativeInteger(args[plan.window.limitArgument], plan.window.defaultLimit);
-    limit = Math.min(requestedLimit || plan.window.defaultLimit, plan.window.maxLimit || requestedLimit || plan.window.defaultLimit);
-    result = result.slice(offset, offset + limit);
+  // Reference keys are resolved once for each matching candidate. Only retained
+  // heap slots own key arrays; this scratch array is reused across the scan.
+  const references = fields.map(field => plan.index?.referenceFields?.[field]);
+  const needsReferenceValues = references.some(reference => reference !== undefined);
+  const values: unknown[] | undefined = needsReferenceValues ? new Array(fields.length) : undefined;
+  const compareRows = (left: T, right: T, leftValues?: readonly unknown[], rightValues?: readonly unknown[]) => {
+    for (let i = 0; i < fields.length; i++) {
+      const a = leftValues ? leftValues[i] : left[fields[i]!];
+      const b = rightValues ? rightValues[i] : right[fields[i]!];
+      // Server SQL orders ASC NULLS LAST and DESC NULLS FIRST.
+      const order = a == null ? b == null ? 0 : 1 : b == null ? -1 : compare(a, b);
+      if (order) return direction * order;
+    }
+    return compare(left[plan.key], right[plan.key]);
+  };
+  // A full direct-field sort already needs its output array. Preserve native
+  // stable sorting there rather than allocating numeric heap metadata for it.
+  const window = plan.sort && (needsReferenceValues || take < rows.length) ? new QueryRowWindow<T>(take, compareRows) : undefined;
+  let result: T[] = [];
+  let total = 0;
+  let missingSortField = false;
+  for (let position = 0; position < rows.length; position++) {
+    const row = rows[position]!;
+    if (where && !evaluateLiveExpression(where, row, args)) continue;
+    let matches = true;
+    for (const filter of filters) if (!evaluateFilter(row[filter.column], filter)) { matches = false; break; }
+    if (!matches || search && !matchesSearch(row, terms, searchColumns, separator === '$or')) continue;
+    const matchPosition = total++;
+    if (plan.sort) {
+      for (let i = 0; i < fields.length; i++) {
+        const field = fields[i]!;
+        const reference = references[i];
+        if (reference) {
+          const id = row[reference.foreignKey];
+          const related = id == null ? undefined : referenceRow?.(reference.table, String(id));
+          if (id != null && !related) completeness = 'partial';
+          values![i] = related?.[reference.column] ?? reference.fallback ?? null;
+        } else {
+          if (!Object.hasOwn(row, field)) missingSortField = true;
+          if (values) values[i] = row[field];
+        }
+      }
+      if (window) window.add(row, values);
+      else result.push(row);
+    } else if (matchPosition >= offset && matchPosition < offset + limit) result.push(row);
+  }
+  // Every match participates in validation and counting, including candidates
+  // outside the result window. A bounded projection cannot prove completeness.
+  if (missingSortField) return { rows: [], completeness: 'partial', supported: false, unsupportedOperator: 'missingSortField' };
+  if (window) result = window.orderedRows(offset);
+  else if (plan.sort) {
+    result.sort(compareRows);
+    if (plan.window) result = result.slice(offset, offset + limit);
   }
   return {
     rows: result,
-    ...(total === undefined ? {} : { total }),
-    ...(total === undefined || offset === undefined ? {} : { offset }),
-    ...(total === undefined || limit === undefined ? {} : { limit }),
+    ...(plan.window?.count === 'exact' ? { total, offset, limit } : {}),
     completeness,
     supported: true,
   };
 }
 
-/** A bounded max heap, with input position preserving stable-sort ties. */
-function smallestRows<T>(rows: readonly T[], count: number, compareRows: (a: T, b: T) => number): T[] {
-  if (!count) return [];
-  type Entry = { row: T; position: number };
-  const compare = (a: Entry, b: Entry) => compareRows(a.row, b.row) || a.position - b.position;
-  const heap: Entry[] = [];
-  for (let position = 0; position < rows.length; position++) {
-    const row = rows[position]!;
-    if (heap.length < count) {
-      const entry = { row, position };
-      heap.push(entry);
-      let i = heap.length - 1;
-      while (i > 0) {
-        const parent = (i - 1) >>> 1;
-        if (compare(heap[parent]!, entry) >= 0) break;
-        heap[i] = heap[parent]!; i = parent;
-      }
-      heap[i] = entry;
-    } else if ((compareRows(row,heap[0]!.row) || position - heap[0]!.position) < 0) {
-      const entry = { row, position };
-      let i = 0;
-      while (i * 2 + 1 < heap.length) {
-        let child = i * 2 + 1;
-        if (child + 1 < heap.length && compare(heap[child + 1]!, heap[child]!) > 0) child++;
-        if (compare(entry, heap[child]!) >= 0) break;
-        heap[i] = heap[child]!; i = child;
-      }
-      heap[i] = entry;
-    }
+function matchesSearch(row: Record<string, unknown>, terms: readonly string[], columns: readonly string[], disjunction: boolean): boolean {
+  for (const term of terms) {
+    let matches = false;
+    for (const column of columns) if (String(row[column] ?? '').toLowerCase().includes(term)) { matches = true; break; }
+    if (matches === disjunction) return disjunction;
   }
-  return heap.sort(compare).map(entry => entry.row);
+  return !disjunction;
 }
 
 /** All tables that can affect evaluation, including reference sorts and coverage. */
@@ -232,30 +234,42 @@ export function liveQueryEquality(expression: LiveQueryExpression | undefined, a
   return value === null || ['string', 'number', 'boolean', 'undefined'].includes(typeof value) ? { column: expression.column, value } : undefined;
 }
 
-function applyStructuredFilters<T extends Record<string, unknown>>(
-  rows: T[],
+type StructuredFilter = { column: string; operator: FilterOperator; value: string; valueTo?: string; choices?: ReadonlySet<string> };
+const INVALID_FILTERS = { supported: false, reason: 'invalidFilter' } as const;
+function compileStructuredFilters(
   definition: LiveQueryPlan["filters"],
   args: Record<string, JsonValue>,
-): { rows: T[]; supported: true } | { rows: T[]; supported: false; reason: string } {
-  if (!definition) return { rows, supported: true };
+): { filters: StructuredFilter[]; supported: true } | { supported: false; reason: string } {
+  const filters: StructuredFilter[] = [];
+  if (!definition) return { filters, supported: true };
   const raw = args[definition.argument];
-  if (raw === undefined || raw === null) return { rows, supported: true };
-  if (!Array.isArray(raw)) return { rows: [], supported: false, reason: "invalidFilter" };
+  if (raw === undefined || raw === null) return { filters, supported: true };
+  if (!Array.isArray(raw)) return INVALID_FILTERS;
   const allowedColumns = new Set(definition.allowedColumns);
   const allowedOperators = new Set(definition.allowedOperators);
-  const filters: Array<{ column: string; operator: FilterOperator; value: string; valueTo?: string }> = [];
   for (const candidate of raw) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return { rows: [], supported: false, reason: "invalidFilter" };
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return INVALID_FILTERS;
     const filter = candidate as Record<string, unknown>;
     if (typeof filter.column !== "string" || !allowedColumns.has(filter.column) || typeof filter.operator !== "string" || !allowedOperators.has(filter.operator as FilterOperator) || typeof filter.value !== "string" || (filter.valueTo !== undefined && typeof filter.valueTo !== "string")) {
-      return { rows: [], supported: false, reason: "invalidFilter" };
+      return INVALID_FILTERS;
     }
-    filters.push({ column: filter.column, operator: filter.operator as FilterOperator, value: filter.value, ...(filter.valueTo === undefined ? {} : { valueTo: filter.valueTo }) });
+    // allocation-allow loop-allocation: one prepared record per query filter replaces per-row filter parsing and never scales with corpus size
+    const prepared: StructuredFilter = { column: filter.column, operator: filter.operator as FilterOperator, value: filter.value, ...(filter.valueTo === undefined ? {} : { valueTo: filter.valueTo }) };
+    if (prepared.operator === 'oneOf') {
+      // allocation-allow loop-allocation: query arguments own one reusable choice set per filter; the row scan performs only membership lookups
+      const choices = new Set<string>();
+      try {
+        const parsed: unknown = JSON.parse(prepared.value);
+        if (Array.isArray(parsed)) for (const value of parsed) choices.add(String(value));
+      } catch { /* Invalid choices match no rows, as on the unprepared path. */ }
+      prepared.choices = choices;
+    }
+    filters.push(prepared);
   }
-  return { rows: rows.filter((row) => filters.every((filter) => evaluateFilter(row[filter.column], filter))), supported: true };
+  return { filters, supported: true };
 }
 
-function evaluateFilter(left: unknown, filter: { operator: FilterOperator; value: string; valueTo?: string }): boolean {
+function evaluateFilter(left: unknown, filter: StructuredFilter): boolean {
   const text = String(left ?? "");
   const value = filter.value;
   const comparisonValue = typeof left === "number" ? Number(value) : value;
@@ -269,9 +283,7 @@ function evaluateFilter(left: unknown, filter: { operator: FilterOperator; value
     case "endsWith": return text.toLocaleLowerCase().endsWith(value.toLocaleLowerCase());
     case "empty": return left === null || left === undefined || text === "";
     case "notEmpty": return left !== null && left !== undefined && text !== "";
-    case "oneOf": {
-      try { const choices = JSON.parse(value); return Array.isArray(choices) && choices.some((choice) => String(choice) === text); } catch { return false; }
-    }
+    case "oneOf": return filter.choices!.has(text);
     case "lessThan": return compare(left, comparisonValue) < 0;
     case "lessThanOrEqual": return compare(left, comparisonValue) <= 0;
     case "greaterThan": return compare(left, comparisonValue) > 0;
@@ -280,14 +292,22 @@ function evaluateFilter(left: unknown, filter: { operator: FilterOperator; value
   }
 }
 
+const EMPTY_EXPRESSIONS: readonly LiveQueryExpression[] = Object.freeze([]);
+
 export function evaluateLiveExpression(
   expression: LiveQueryExpression,
   row: Record<string, unknown>,
   args: Record<string, JsonValue>,
 ): boolean {
-  const children = expression.children ?? [];
-  if (expression.operator === "and") return children.every((child) => evaluateLiveExpression(child, row, args));
-  if (expression.operator === "or") return children.some((child) => evaluateLiveExpression(child, row, args));
+  const children = expression.children ?? EMPTY_EXPRESSIONS;
+  if (expression.operator === "and") {
+    for (const child of children) if (!evaluateLiveExpression(child, row, args)) return false;
+    return true;
+  }
+  if (expression.operator === "or") {
+    for (const child of children) if (evaluateLiveExpression(child, row, args)) return true;
+    return false;
+  }
   if (expression.operator === "not") return children.length === 1 && !evaluateLiveExpression(children[0]!, row, args);
   if (expression.operator === "server") return false;
 
@@ -339,7 +359,7 @@ function compare(left: unknown, right: unknown) {
 }
 
 function equal(left: unknown, right: unknown) {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return left === right || (left !== null && right !== null && typeof left === "object" && typeof right === "object" && JSON.stringify(left) === JSON.stringify(right));
 }
 
 /** A weaker predicate is safe for coverage: it can only reject a usable slice. */

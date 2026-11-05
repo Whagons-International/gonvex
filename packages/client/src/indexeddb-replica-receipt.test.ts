@@ -21,6 +21,28 @@ function open(name = `legacy-receipt-${crypto.randomUUID()}`) {
   stores.push(storage);
   return storage;
 }
+
+it('checks wide-window authority without parsing its membership, including legacy and stale records', async () => {
+  const storage = open();
+  const ids = Array.from({ length: 2000 }, (_, index) => `member-${index}`);
+  const window = owner('wide-membership', 10, ids);
+  await storage.replaceSnapshot(snapshot(window), scope);
+  const db = (storage as any).database;
+  const record = await db.windows.get([scope, window.signature]);
+  expect(record.cursor).toEqual(cursor(10));
+  const parse = vi.spyOn(JSON, 'parse');
+  try {
+    await storage.advanceWatermark([{ ...window, cursor: cursor(11) }], cursor(11), scope);
+    expect(parse.mock.calls.some(([value]) => value === record.value)).toBe(false);
+  } finally { parse.mockRestore(); }
+  const current = await db.windows.get([scope, window.signature]);
+  delete current.cursor; // A database written by the older SDK has no header.
+  await db.windows.put(current);
+  await storage.advanceWatermark([{ ...window, cursor: cursor(1), ids: [] }], cursor(1), scope);
+  const persisted = await storage.load(scope);
+  expect(persisted!.liveQueries[window.signature]!.cursor).toEqual(cursor(11));
+  expect(persisted!.liveQueries[window.signature]!.ids).toEqual(ids);
+});
 function authoritative(receipt: unknown): ReplicaStorageCommit {
   expect(receipt).toHaveProperty('changes');
   return receipt as ReplicaStorageCommit;

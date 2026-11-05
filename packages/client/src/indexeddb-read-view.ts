@@ -66,6 +66,17 @@ function compare(read: DataRead, a: JsonObject, b: JsonObject): number {
   return 0;
 }
 
+function projectRow(row: JsonObject, columns: readonly string[], preserveMissing = false): JsonObject {
+  const projected: JsonObject = {};
+  for (const column of columns) {
+    if (preserveMissing && !Object.hasOwn(row, column)) continue;
+    const value = row[column] ?? null;
+    if (column === '__proto__') Object.defineProperty(projected, column, { value, enumerable: true, configurable: true, writable: true });
+    else projected[column] = value;
+  }
+  return projected;
+}
+
 /** Must be used inside the storage adapter's transaction. Cursor iteration keeps
  * unrelated records off the JS heap; bounded reads retain at most limit rows.
  */
@@ -101,22 +112,24 @@ export function indexedDBReadView(entities: Table<EntityRecord, [string, string,
       };
       if(read.where) requirePredicate(read.where);
       for(const order of read.orderBy ?? []) required.add(order.column);
+      const retainedColumns = read.columns ? [...new Set([...read.columns, ...(read.orderBy ?? []).map(order => order.column)])] : undefined;
+      const needsFinalProjection = read.columns && retainedColumns!.length > new Set(read.columns).size;
       if (read.limit !== 0) await candidates.until(() => !read.orderBy?.length && read.limit !== undefined && result.length >= read.limit).each(record => {
         if (record.deleted || excluded.has(record.id)) return;
         const row = JSON.parse(record.value) as JsonObject;
         if (primaryKeys) foundPrimary.add(record.id);
-        if([...required].some(column=>!Object.hasOwn(row,column))) fieldsComplete=false;
+        for (const column of required) if (!Object.hasOwn(row, column)) { fieldsComplete = false; break; }
         if (read.where && !matchesDataPredicate(row, read.where)) return;
         if (read.orderBy?.length && read.limit !== undefined) {
           // Retain a bounded ordered candidate set, never sort a full collection.
           let low = 0, high = result.length;
           while (low < high) { const mid = (low + high) >>> 1; if (compare(read, result[mid]!, row) <= 0) low = mid + 1; else high = mid; }
-          if (low < read.limit) { result.splice(low, 0, row); if (result.length > read.limit) result.pop(); }
-        } else result.push(row);
+          if (low < read.limit) { result.splice(low, 0, retainedColumns ? projectRow(row, retainedColumns, true) : row); if (result.length > read.limit) result.pop(); }
+        } else result.push(retainedColumns ? projectRow(row, retainedColumns, true) : row);
       });
       if (read.orderBy?.length && read.limit === undefined) result.sort((a, b) => compare(read, a, b));
       const complete = read.limit === 0 || fieldsComplete && (readIsCovered(known, read) || (primaryKeys !== undefined && primaryKeys.every(id => excluded.has(id) || foundPrimary.has(id))));
-      return { rows: read.columns ? result.map(row => Object.fromEntries(read.columns!.map(column => [column, row[column] ?? null]))) : result, complete };
+      return { rows: read.columns && (needsFinalProjection || !fieldsComplete) ? result.map(row => projectRow(row, read.columns!)) : result, complete };
     },
   };
 }

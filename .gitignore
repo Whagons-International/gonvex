@@ -18,6 +18,7 @@ tmp/
 packages/gonvex/templates/
 **/gonvex/_build/
 test-results/
+packages/client/bench/memory-smoke/results.json
 .DS_Store
 .ralph/
 .recovery/
