@@ -289,6 +289,15 @@ async fn run() {
             fixture.members_of_kind(TENANT, MemberKind::TeamSpots)[0],
         );
         if enabled("app_queue/") {
+            // Populate shared bases first: cold-cache single-flight waits
+            // precede snapshot admission and are a separate queue.
+            for path in &paths {
+                fixture
+                    .runtime
+                    .open_replica(&session, request(path, json!({}), None))
+                    .await
+                    .unwrap();
+            }
             use std::future::Future;
             use std::task::{Context, Poll};
             let admission = gonvex_runtime::offload::SnapshotAdmission::global();
