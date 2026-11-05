@@ -6,6 +6,10 @@
     "access": "public"
   },
   "exports": {
+    "./starter-browser": {
+      "types": "./dist/starter-browser.d.ts",
+      "default": "./dist/starter-browser.js"
+    },
     "./experimental-opfs": {
       "types": "./dist/experimental-opfs/index.d.ts",
       "default": "./dist/experimental-opfs/index.js"
