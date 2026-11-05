@@ -104,6 +104,9 @@ export function applyDeferredOwnerOverlay(input) {
                 this.deferredReplicaOpens = this.deferredReplicaOpens.filter(entry => entry !== open);
                 open.release = this.subscribeReplicaTransport(open.ref, open.args,
                     open.onMessage, open.metadataOnly, open.owner);
+                // A cached-snapshot observer can cancel/retire synchronously
+                // before subscribeReplicaTransport returns its unsubscribe.
+                if (open.cancelled || !this.ownsDeferredReplicaOwner(open.owner)) open.release?.();
             }, () => {
                 if (open.task !== task) return;
                 open.task = undefined;

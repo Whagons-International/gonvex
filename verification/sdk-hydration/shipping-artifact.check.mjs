@@ -22,7 +22,7 @@ const { LocalReplica } = await import(pathToFileURL(join(root, 'dist/local-repli
 const { replicaRowsHashes, replicaAggregateDigest } = await import(pathToFileURL(join(root, 'dist/replica-integrity.js')).href);
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
-async function fixture({ provisional = false } = {}) {
+async function fixture({ provisional = false, onMessage = () => {} } = {}) {
   const storage = new MemoryLocalReplicaStorage();
   const seed = new LocalReplica(storage); await seed.activateScope('visible');
   const refs = ['empty', 'populated'].map(name => ({ kind: 'query', path: `tasks.${name}`, delivery: 'replica', replica: { table: 'tasks', key: 'id', columns: ['id'] } }));
@@ -42,7 +42,7 @@ async function fixture({ provisional = false } = {}) {
   client.serverCapabilities = { replicaBatch: 1, replicaResume: 1 };
   const frames = []; client.send = message => frames.push(message);
   client.setReplicaReady(client.replica.activateScope('visible')); await entered.promise;
-  const stops = refs.map(ref => client.subscribeReplica(ref, {}, () => {}));
+  const stops = refs.map((ref, index) => client.subscribeReplica(ref, {}, message => onMessage(index, message)));
   assert.equal(client.deferredReplicaOpens.length, 2, 'actual shipping overlay must hold the subscriptions');
   const waiters = () => Promise.all([
     ...[...client.replicaOpenHydrations.values()].map(entry => entry.task),
@@ -144,5 +144,34 @@ test('hydration failure permanently cancels released admitted intents', async ()
     f.release.reject(Error('durable scope failed')); await observed; await waiting;
     f.client.releaseDeferredReplicaOpens(); f.flush();
     assert.equal(f.opens().length, 0); assert.equal(f.client.deferredReplicaOpens.length, 0);
+  } finally { f.release.resolve(); f.client.close(); }
+});
+
+
+test('reentrant cached snapshot unsubscribe retains its original deferred cancellation handle', async () => {
+  let f;
+  f = await fixture({ onMessage: index => { if (index === 0) f.stops[0](); } });
+  try {
+    f.client.releaseDeferredReplicaOpens(); const waiting = f.waiters();
+    f.release.resolve(); await waiting; f.flush();
+    assert.equal(f.opens().length, 1, 'cancelled snapshot observer must not open on the wire');
+    assert.equal(f.opens()[0].path, f.refs[1].path);
+    const retired = [...f.client.replicaSubscriptions.values()].find(s => s.path === f.refs[0].path);
+    assert.equal(retired?.listeners.size ?? 0, 0);
+  } finally { f.release.resolve(); f.client.close(); }
+});
+
+test('reentrant cached snapshot scope retirement drops the returned handle and all sibling intents', async () => {
+  let f;
+  f = await fixture({ onMessage: index => {
+    if (index === 0) { f.client.resetReplicaScopeState(); f.client.replicaScope = 'retired-during-callback'; }
+  } });
+  try {
+    f.client.releaseDeferredReplicaOpens(); const waiting = f.waiters();
+    f.release.resolve(); await waiting; f.flush();
+    assert.equal(f.opens().length, 0);
+    assert.equal(f.client.deferredReplicaOpens.length, 0);
+    const retired = [...f.client.replicaSubscriptions.values()].find(s => s.path === f.refs[0].path);
+    assert.equal(retired?.listeners.size ?? 0, 0);
   } finally { f.release.resolve(); f.client.close(); }
 });
