@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "branch": "t3/sqlite-starter-schema-profile",
+  "base": "6c030c1d96094c6f799dace5d5ae142a4abc4de0",
+  "acceptedPerformanceBase": "73a72db9912e5c6dbfd23b6a884b930c7549a56b",
+  "sourceCommit": "094935ce831bb5da3de5e7dd3bcc30dca39f4e7b",
+  "decision": "BATCH_NOT_IMPLEMENTED: conditional IPC-dominance prerequisite not established; preserve original production SQLx path",
+  "productionSemanticsChanged": false,
+  "cheapStarterGoalMet": false,
+  "diagnosis": [
+    {
+      "repeat": 0,
+      "metadataWallNs": 2873275,
+      "metadataProcessCpuNs": 3122906,
+      "metadataWorkerCpuNs": 1028960,
+      "metadataNonWorkerProcessCpuUpperBoundNs": 2093946,
+      "metadataNonWorkerWallUpperBoundNs": 1841266,
+      "keyShapeWorkerCpuNs": 22614632,
+      "keyShapeWallNs": 23252593,
+      "keyShapeVm": 1800940,
+      "keyShapeFullscanSteps": 180040,
+      "sourceSchemaSQLxExecuteCommands": 80,
+      "internalPragmaStatements": 40
+    },
+    {
+      "repeat": 1,
+      "metadataWallNs": 2217776,
+      "metadataProcessCpuNs": 2576587,
+      "metadataWorkerCpuNs": 831609,
+      "metadataNonWorkerProcessCpuUpperBoundNs": 1744978,
+      "metadataNonWorkerWallUpperBoundNs": 1387353,
+      "keyShapeWorkerCpuNs": 22454750,
+      "keyShapeWallNs": 23045131,
+      "keyShapeVm": 1800940,
+      "keyShapeFullscanSteps": 180040,
+      "sourceSchemaSQLxExecuteCommands": 80,
+      "internalPragmaStatements": 40
+    },
+    {
+      "repeat": 2,
+      "metadataWallNs": 2134324,
+      "metadataProcessCpuNs": 2472497,
+      "metadataWorkerCpuNs": 818195,
+      "metadataNonWorkerProcessCpuUpperBoundNs": 1654302,
+      "metadataNonWorkerWallUpperBoundNs": 1318837,
+      "keyShapeWorkerCpuNs": 20346250,
+      "keyShapeWallNs": 20828525,
+      "keyShapeVm": 1800940,
+      "keyShapeFullscanSteps": 180040,
+      "sourceSchemaSQLxExecuteCommands": 80,
+      "internalPragmaStatements": 40
+    }
+  ],
+  "shapePlan": {
+    "sql": "SELECT EXISTS(SELECT 1 FROM \"tasks\" WHERE typeof(\"id\") <> 'text' OR \"id\"='' OR instr(\"id\",char(0))<>0)",
+    "plan": [
+      "SCAN CONSTANT ROW",
+      "SCALAR SUBQUERY 1",
+      "SCAN tasks USING COVERING INDEX sqlite_autoindex_tasks_1"
+    ],
+    "physicalRows": 9003,
+    "invalid": 0,
+    "qualification": "Separate EXPLAIN on actual synthetic tenant source; not included in profiled source_schema calls"
+  },
+  "superseded": [
+    "leaf-profile-data.json and leaf-alloc-data.json: nested PRAGMA PROFILE completion was incorrectly assumed LIFO; errors=20. Retained for audit only, superseded by validated v2 active-statement arena, errors=0."
+  ],
+  "constraints": [
+    "No skipped/combined source checks, broad shape proof, proof memo/elision, authority/serial memo, API, SQLite bindings, production SQL or guard ordering changes.",
+    "80 SQLx Execute commands counted from 80 top-level statements in successful source_schema calls plus 40 internal PRAGMA statements. One worker Execute per source query confirmed by sqlx0.8.6 source; not an independent scheduler context-switch counter.",
+    "Worker CPU spans begin at SQLite STMT and exclude prepare. Process CPU spans include all Rust threads; residual bounds prepare, decoding, FS, caller, scheduling and handoff together; cannot be labeled pure IPC.",
+    "Trace has overhead and is explicit test-only. Allocation capture is separate, includes Rust process requests excluding SQLite C and Node. Resident samples are not peak/RSS reduction proof.",
+    "Concurrent provider/open-admission lanes; actual aggregate 6GiB/200% CPU verified. Primary allocation/trace disabled cases separate from attribution. Fresh SDK/storage per operation, warm server/OS, first proof factory cold and two warm proofs.",
+    "No customer data, full Whagons completeness, integration, browser performance, shipping activation or 1000-user capacity claim."
+  ],
+  "nextProposal": {
+    "status": "PROPOSED_ONLY_NOT_IMPLEMENTED_OR_AUTHORIZED_AS_WIN",
+    "target": "Keep all 20 complete shape scans; compare exact NUL-presence predicate instr(TEXTkey,char(0)) with instr(CAST(TEXTkey AS BLOB),X'00') in a separate actual-TX alternating optimized kernel experiment.",
+    "reason": "Measured fullshape SQLite VM (1.80M instructions/180040 fullscan steps) dominates schema admission, already scans covering primary-key index. Byte-search predicate could reduce text scalar work without reducing row visits or fresh checks; benefit unproven.",
+    "proofObligations": [
+      "Exact Boolean/error/type behavior against old query for NULL/BLOB/integer/real/empty/NUL/Unicode/malformed TEXT, indexed and nonindexed keys; no charset/collation coercion assumptions.",
+      "Preserve original physical/DDL/columns/guard checks, all 20 fresh scans and exact same transaction/lease; no provider interface or broad selective-serial proof.",
+      "Reject if no repeatable CPU win; fresh offer COUNT+DIGEST, piece writer barriers and final normal-v2 SQL/XOR anchor remain unchanged."
+    ],
+    "remainingLowerBound": "For this current SQL plan/fixture only: shape worker 20.3\u201322.6ms plus offer stream 46.3\u201352.2ms and final v2 stream 22.9\u201324.5ms, sequential measured spans. They include distinct work and require new algorithmic execution wins, not metadata batching. This is a measured current implementation cost, not a universal minimum."
+  },
+  "pins": {
+    "/mnt/data/work/gonvex-starter-schema/artifacts/runtime-tests-094935ce": "9559475bb28e1b13cacb4f7121f60f6280f7a3fabad2eb783351fe0e05fbad56",
+    "/mnt/data/work/gonvex-starter-semijoin/artifacts/final-tests": "a23245638d36808c76c28476a291e8ea289069189983bd7beb88b38dc5d5358d",
+    "/mnt/data/work/gonvex-starter-perf/sdk-candidate/packages/client/dist/starter-bootstrap.js": "15fee03012dd7be6fb8a06b7d6288c89c6850f7e0d18e5d12714834d26aaab2d"
+  },
+  "resultsFile": "/mnt/data/work/gonvex-starter-schema/results.json",
+  "caseFiles": {
+    "baseline6c-primary": {
+      "path": "/mnt/data/work/gonvex-starter-schema/baseline6c-primary-data.json",
+      "sha256": "6636ccb5f11bb230ed1b4c01c48d2a87ded0920834c6270b33e828735281b0fc"
+    },
+    "baseline6c-profile": {
+      "path": "/mnt/data/work/gonvex-starter-schema/baseline6c-profile-data.json",
+      "sha256": "24a5ed21234102708821d6318ee3ccb2811d584e6e904dd6619b85f5a402add3"
+    },
+    "instrumented-primary-v2": {
+      "path": "/mnt/data/work/gonvex-starter-schema/instrumented-primary-v2-data.json",
+      "sha256": "be2a6d1897874d5bf1793539c6ae9fe8414f74d41beef1b8b4a9e22832e9e1b4"
+    },
+    "leaf-profile-v2": {
+      "path": "/mnt/data/work/gonvex-starter-schema/leaf-profile-v2-data.json",
+      "sha256": "6d2b58f1a2e059605f7644ef8b1f3c0cca8ec6a57a0ffbd327ef9361ce6246bd"
+    },
+    "leaf-alloc-v2": {
+      "path": "/mnt/data/work/gonvex-starter-schema/leaf-alloc-v2-data.json",
+      "sha256": "5458e89d7a39e183c16dc269574f9acb63ad328c63e0ec13a5c812355cfc1585"
+    }
+  },
+  "checks": {
+    "baseline6c-primary": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/baseline6c-primary.json"
+    },
+    "baseline6c-profile": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/baseline6c-profile.json"
+    },
+    "trace-correctness": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/trace-correctness.json"
+    },
+    "instrumented-primary-v2": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/instrumented-primary-v2.json"
+    },
+    "leaf-profile-v2": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/leaf-profile-v2.json"
+    },
+    "leaf-alloc-v2": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/leaf-alloc-v2.json"
+    },
+    "shape-plan-v2": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/shape-plan-v2.json"
+    },
+    "final-runtime-on": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/final-runtime-on.json"
+    },
+    "final-live": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/final-live.json"
+    },
+    "final-runtime-off": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/final-runtime-off.json"
+    },
+    "final-dashboard-codegen": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/final-dashboard-codegen.json"
+    },
+    "final-template-codegen": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/final-template-codegen.json"
+    },
+    "final-docs": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/final-docs.json"
+    },
+    "final-cycles": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/final-cycles.json"
+    },
+    "final-format": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/final-format.json"
+    },
+    "freeze-artifact": {
+      "exit": 0,
+      "receipt": "/mnt/data/work/gonvex-starter-schema/freeze-artifact.json"
+    }
+  }
+}
