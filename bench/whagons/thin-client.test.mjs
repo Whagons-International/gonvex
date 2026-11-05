@@ -325,3 +325,21 @@ test('ready before retry deadline cancels retry and resets the backoff', (t) => 
   assert.equal(sub.retryAttempt, 0); assert.equal(sub.error, undefined);
   c.close();
 });
+
+
+test('a failed retained subscription resumes retry when a listener returns', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.method(Math, 'random', () => 0);
+  const { c } = connected(); c.watchReplica(ref);
+  t.mock.timers.tick(1); c.flushOpens();
+  const sub = [...c.subscriptions.values()][0];
+  c.dispatch({ type: 'replica.error', id: sub.id, error: 'refused' });
+  sub.listeners.clear();
+  t.mock.timers.tick(201);
+  assert.equal(sub.retryTimer, undefined);
+  c.watchReplica(ref);
+  assert.ok(sub.retryTimer);
+  t.mock.timers.tick(401); c.flushOpens();
+  assert.equal(sub.opening, true);
+  c.close();
+});

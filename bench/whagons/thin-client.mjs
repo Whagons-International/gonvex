@@ -351,7 +351,8 @@ export class ThinClient {
       sub = live;
       clearTimeout(sub.unsubscribeTimer); sub.unsubscribeTimer = undefined;
       sub.listeners.add(listener);
-      this.openSubscription(sub);
+      if (sub.error && sub.id) this.scheduleReplicaRetry(sub);
+      else this.openSubscription(sub);
     };
     const stop = () => {
       if (!started) return; started = false;
