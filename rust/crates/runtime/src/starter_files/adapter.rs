@@ -72,13 +72,17 @@ pub(super) async fn authority(
             format!("{}:{}", registration.generation, registration.artifact_hash),
             prepared.identity.generation,
             prepared.identity.change_serial,
-            serde_json::to_vec(&(
-                &registration.binding.authority,
-                &registration.manifest_identity,
-                &registration.source_schemas,
-                &registration.source_guards,
-            ))
-            .expect("source authority serializes"),
+            {
+                #[cfg(test)]
+                let _leaf = crate::replica::permission::schema_profile::pure(5);
+                serde_json::to_vec(&(
+                    &registration.binding.authority,
+                    &registration.manifest_identity,
+                    &registration.source_schemas,
+                    &registration.source_guards,
+                ))
+                .expect("source authority serializes")
+            },
         ),
         epoch: clock.epoch,
         revision: clock.revision,

@@ -61,22 +61,41 @@ async fn source_schema(
     tx: &mut TenantTransaction,
     definition: &ReplicaCollectionDefinition,
 ) -> Result<String, LocalSnapshotError> {
-    indexes::require_local(tx.transaction()).await?;
-    let schema: String =
+    #[cfg(all(test, feature = "starter-files"))]
+    let profile = schema_profile::Probe::install(tx).await?;
+    {
+        #[cfg(all(test, feature = "starter-files"))]
+        let _leaf = profile.as_ref().map(|p| p.leaf(0));
+        indexes::require_local(tx.transaction()).await?;
+    }
+    let schema: String = {
+        #[cfg(all(test, feature = "starter-files"))]
+        let _leaf = profile.as_ref().map(|p| p.leaf(1));
         sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name=?1")
             .bind(&definition.table)
             .fetch_optional(&mut **tx.transaction())
             .await?
             .ok_or(LocalSnapshotError::Rejected(
                 "source must be a real local table",
-            ))?;
-    let ddl = schema.to_ascii_uppercase();
-    if ddl.contains("COLLATE") || ddl.contains("VIRTUAL") {
-        return Err(LocalSnapshotError::Rejected(
-            "explicit collations and virtual tables unsupported",
-        ));
+            ))?
+    };
+    {
+        #[cfg(all(test, feature = "starter-files"))]
+        let _leaf = profile.as_ref().map(|p| p.leaf(4));
+        let ddl = schema.to_ascii_uppercase();
+        if ddl.contains("COLLATE") || ddl.contains("VIRTUAL") {
+            return Err(LocalSnapshotError::Rejected(
+                "explicit collations and virtual tables unsupported",
+            ));
+        }
     }
-    let columns = gonvex_store::rows::table_columns(tx.transaction(), &definition.table).await?;
+    let columns = {
+        #[cfg(all(test, feature = "starter-files"))]
+        let _leaf = profile.as_ref().map(|p| p.leaf(2));
+        gonvex_store::rows::table_columns(tx.transaction(), &definition.table).await?
+    };
+    #[cfg(all(test, feature = "starter-files"))]
+    let validation = profile.as_ref().map(|p| p.leaf(4));
     let key = columns
         .iter()
         .find(|c| c.name == definition.key)
@@ -132,6 +151,10 @@ async fn source_schema(
             "JSON ordering adapter unsupported",
         ));
     }
+    #[cfg(all(test, feature = "starter-files"))]
+    drop(validation);
+    #[cfg(all(test, feature = "starter-files"))]
+    let _shape_leaf = profile.as_ref().map(|p| p.leaf(3));
     // SQL validation only, not a Rust authorization loop. TEXT affinity still
     // permits BLOB storage; reject it rather than silently converting row IDs.
     #[cfg(feature = "starter-files")]
@@ -834,3 +857,7 @@ pub(crate) async fn visit_indexed_collection_window(
 #[cfg(all(test, feature = "starter-files"))]
 #[path = "starter_files/sql_pair_probe.rs"]
 mod sql_pair_probe;
+
+#[cfg(all(test, feature = "starter-files"))]
+#[path = "starter_files/schema_profile.rs"]
+pub(crate) mod schema_profile;

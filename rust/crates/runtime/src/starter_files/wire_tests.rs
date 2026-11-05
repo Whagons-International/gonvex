@@ -696,6 +696,7 @@ async fn starter_live_module_benchmark() {
                 std::env::var("STARTER_ALLOC_PROFILE").as_deref() != Ok("0"),
             );
             crate::replica::permission::transport::reset_budget_peak();
+            crate::replica::permission::schema_profile::reset();
             let cpu_start = process_cpu_ns();
             let output = tokio::process::Command::new("node")
                 .arg(concat!(
@@ -727,7 +728,7 @@ async fn starter_live_module_benchmark() {
                 .lock()
                 .unwrap()
                 .clone();
-            reports.push(json!({"repeat":repeat,"node":node,"raw_sites":crate::raw_sites::snapshot(),"detail":crate::starter_files::diagnostics::snapshot(),"server_stage_wall_ns":timings,"server_process_cpu_ns":server_cpu_ns,"server_artifact_budget_retained_peak_limit":crate::replica::permission::transport::process_budget_stats(),"server_alloc_count_requested_bytes":server_allocations,"fast_profiler":gonvex_profiler::snapshot().into_iter().filter(|s|s.count>0).map(|s|json!({"stage":s.name(),"label":format!("{:?}",s.label),"count":s.count,"sum_ns":s.sum,"max_ns":s.max})).collect::<Vec<_>>()}));
+            reports.push(json!({"repeat":repeat,"node":node,"raw_sites":crate::raw_sites::snapshot(),"schemaProfile":crate::replica::permission::schema_profile::snapshot(),"detail":crate::starter_files::diagnostics::snapshot(),"server_stage_wall_ns":timings,"server_process_cpu_ns":server_cpu_ns,"server_artifact_budget_retained_peak_limit":crate::replica::permission::transport::process_budget_stats(),"server_alloc_count_requested_bytes":server_allocations,"fast_profiler":gonvex_profiler::snapshot().into_iter().filter(|s|s.count>0).map(|s|json!({"stage":s.name(),"label":format!("{:?}",s.label),"count":s.count,"sum_ns":s.sum,"max_ns":s.max})).collect::<Vec<_>>()}));
         }
     }
     fn files(path: &std::path::Path) -> Vec<(String, u64)> {
@@ -1084,4 +1085,36 @@ async fn starter_warm_artifact_reuse_retains_fresh_sql_rows_and_digest_per_offer
         "every offer must freshly scan ALL authorized rows"
     );
     crate::starter_files::diagnostics::reset(false);
+}
+
+#[tokio::test]
+#[ignore = "explicit source schema shape plan; synthetic-only"]
+async fn starter_schema_shape_plan() {
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let _env = Environment::set();
+    let f = fixture_with(true, 9000).await;
+    let mut tx = gonvex_store::begin_transaction(&f.runtime.inner.pools, &f.url, true)
+        .await
+        .unwrap();
+    use sqlx::Row;
+    let sql="SELECT EXISTS(SELECT 1 FROM \"tasks\" WHERE typeof(\"id\") <> 'text' OR \"id\"='' OR instr(\"id\",char(0))<>0)";
+    let plan = sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .fetch_all(&mut **tx.transaction())
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<String, _>(3))
+        .collect::<Vec<_>>();
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks")
+        .fetch_one(&mut **tx.transaction())
+        .await
+        .unwrap();
+    let valid: i64 = sqlx::query_scalar(sql)
+        .fetch_one(&mut **tx.transaction())
+        .await
+        .unwrap();
+    assert_eq!(valid, 0);
+    assert_eq!(rows, 9003);
+    std::fs::write(std::env::var("STARTER_SCHEMA_PLAN").unwrap(),serde_json::to_vec_pretty(&json!({"sql":sql,"plan":plan,"physicalRows":rows,"invalid":valid,"qualification":"Separate EXPLAIN on actual synthetic tenant source; not included in profiled source_schema calls"})).unwrap()).unwrap();
+    tx.rollback().await.unwrap();
 }

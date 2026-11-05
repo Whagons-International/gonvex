@@ -51,6 +51,8 @@ impl Identity {
         }
     }
     fn key(&self) -> String {
+        #[cfg(test)]
+        let _leaf = crate::replica::permission::schema_profile::pure(6);
         let _timing = diagnostics::Scope::new(diagnostics::Site::IdentitySerialize);
         let bytes = serde_json::to_vec(self).expect("identity");
         diagnostics::add(diagnostics::Site::IdentityBytes, bytes.len() as u64);
