@@ -86,7 +86,10 @@ export class StarterStage {
     let total=0;
     for(const [i,p] of offer.pieces.entries()) {integer(p.index,1023);integer(p.bytes,PIECE);integer(p.rawBytes,PIECE);if(p.index!==i||typeof p.compressed!=="boolean"||! /^[0-9a-f]{64}$/.test(p.hash)||! /^[0-9a-f]{64}$/.test(p.rawHash))throw new Error("starter-piece-descriptor");total+=p.rawBytes;integer(total,TOTAL);}
     const descriptor=JSON.stringify(offer);
-    this.#overhead=new TextEncoder().encode(descriptor).byteLength*8+Math.max(0,...offer.pieces.map(p=>p.bytes))*8;
+    // Structural DEFLATE preflight tables plus native decoder window/framing.
+    // Reserve even for empty/tiny pieces; raw/encoded multipliers alone cannot
+    // cover fixed codec workspace. Held through any cancelled pending codec.
+    this.#overhead=64*1024+new TextEncoder().encode(descriptor).byteLength*8+Math.max(0,...offer.pieces.map(p=>p.bytes))*8;
     this.#reservedRaw=total;
     this.#held=total*12+offer.rows*896+this.#overhead;
     this.#loan=budget.acquire(this.#held);

@@ -217,3 +217,10 @@ it('aborts recomputed promotion on a same-key mutation during crypto and bounds 
   gate.release();await expect(pending).rejects.toThrow('mutated');expect(f.budget.usage().memoReuses).toBe(0);
  } finally {gate.release();gate.restore();}
 });
+it('reserves fixed codec/preflight workspace even for a tiny stage until cancellation settles',async()=>{
+ const f=await fixture();expect(f.budget.usage().chargedBytes).toBeGreaterThanOrEqual(64*1024);
+ const budget=new StarterBudget();let enter!:()=>void,release!:()=>void;const entered=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>release=r);
+ const stage=new StarterStage(f.offer,async(bytes,limits)=>{enter();await gate;return nodeStarterInflater(bytes,limits);},budget);stages.push(stage);
+ const pending=stage.piece(f.piece);await entered;stage.dispose();expect(budget.usage().chargedBytes).toBeGreaterThanOrEqual(64*1024);
+ release();await expect(pending).rejects.toThrow('retired');expect(budget.usage().chargedBytes).toBe(0);
+});
