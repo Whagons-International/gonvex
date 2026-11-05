@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## Client allocation work
+
+- `gonvex perf allocations <hot-path> --json` reports syntactic allocation hints using the CLI's existing parser. Use `--marked-only` for `@allocation-hot` functions in otherwise ordinary UI code. Pair findings with browser evidence; a copy can be necessary for ownership, and a shared buffer view can retain more memory than a small copy.
+- The runtime-regression workflow checks the client hot-path baseline. Review new findings rather than accepting them by regenerating the baseline. Generic bounded buffers and storage/query helpers belong in this SDK, with no application-specific task logic or additional frontend dependency.
+- Mark measured allocation-sensitive accessors/scans with `/** @allocation-hot */`. Run `gonvex perf allocations packages/client/src packages/react/src --strict-hot --check`: strict annotations cannot use a baseline. Explain necessary cold/error allocations individually with `allocation-allow hot-allocation: reason`. This checks known syntax, not transitive allocations; keep the browser memory guard as a separate check.
+
 ## Before you open a PR
 
 - Before opening or pushing, run every generator checked by CI and commit its output: Gonvex codegen, `agent-api.ndjson`, i18n and other artifacts where present. On this branch, `pnpm --filter @gonvex/docs typecheck` regenerates docs metadata; verify other commands against the relevant `package.json` and CI.

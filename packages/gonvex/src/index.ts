@@ -265,6 +265,12 @@ export async function main(argv = process.argv.slice(2)) {
     await runDev(argv.slice(1));
     return;
   }
+  if (command === "perf") {
+    if (argv[1] !== "allocations") throw new Error("Usage: gonvex perf allocations <hot-path>... [--json] [--baseline FILE --check]");
+    const { runAllocationAudit } = await import("./allocation-audit.js");
+    await runAllocationAudit(argv.slice(2));
+    return;
+  }
   if (command === "codegen") {
     await runCodegen(argv.slice(1));
     return;
@@ -2452,7 +2458,8 @@ function sleep(ms: number, signal?: AbortSignal) {
 }
 
 function printHelp() {
-  console.log("Usage: gonvex <dev|codegen|functions|init|create|env|auth|login|logout|whoami|project|token> [options]");
+  console.log("Usage: gonvex <dev|codegen|functions|perf|init|create|env|auth|login|logout|whoami|project|token> [options]");
+  console.log("  gonvex perf allocations <hot-path>... [--json] [--marked-only|--strict-hot] [--baseline FILE --check] [--write-baseline FILE]");
   console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
   console.log("  gonvex codegen [--project <path>] [--project-id <id>]");
   console.log("  gonvex functions emit --format ndjson|typescript [--output FILE] [--project <path>]");

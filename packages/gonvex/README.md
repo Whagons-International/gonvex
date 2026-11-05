@@ -208,3 +208,32 @@ public HTTPS/WSS origin.
 ## Documentation
 
 Full docs live at https://whagons-international.github.io/gonvex/
+
+## Allocation checks for hot paths
+
+`gonvex perf allocations path/to/hot-code --json` reports likely allocations
+with file, line, rule, function and a stable fingerprint. It uses the CLI's
+existing TypeScript parser and adds no browser runtime dependency.
+Rules flag copying accumulators, bulk object spreads, intermediate array
+pipelines, repeated encoders, typed buffer slices, deep cloning and containers
+created in loops. The JSON includes `newFindings` for agent and CI feedback.
+
+Warnings are hints, not measurements or a zero-allocation guarantee. Scope the
+command to replica, codec or grid query code. Use `--marked-only` to check only
+functions annotated with `/** @allocation-hot */` in otherwise ordinary UI code.
+Use `--strict-hot --check` to reject known per-call allocations in annotated
+functions, even outside loops: containers, closures, JSON conversions, array
+pipelines, typed views, dynamic string construction and async promises. Strict
+mode cannot use a baseline; document individual cold or bounded exceptions with
+`allocation-allow hot-allocation: reason`. Constructor-time buffer allocation
+stays outside the annotated access/scan methods. Strict mode checks syntax;
+unknown callees, array capacity growth and engine internals still require runtime
+measurement. It does not prove zero allocation.
+Prefer profiling before changing ownership
+or replacing a copy with a view that keeps its backing buffer alive.
+
+Create a reviewed baseline with `--write-baseline allocations.json`, then use
+`--baseline allocations.json --check` in CI to reject new findings. A line can
+document an exception using `// allocation-allow rule-name: reason` immediately
+above it. Baselines acknowledge existing warnings; they do not certify them as
+efficient. Do not regenerate the baseline just to make a check green.

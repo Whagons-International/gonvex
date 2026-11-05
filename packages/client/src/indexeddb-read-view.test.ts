@@ -63,6 +63,27 @@ describe('IndexedDB reducer reads',()=>{
     const result=await storage.withReadView('tenant',coverage,view=>view.select({table:'tasks',orderBy:[{column:'rank',nulls:'last'}],limit:2}));
     expect(result.rows.map(row=>row._id)).toEqual(['c','d']);
   });
+  it('projects wide rows without losing sort fields that were not requested', async () => {
+    const tasks = {
+      a: { _id: 'a', rank: 3, description: 'Long body A'.repeat(1000) },
+      b: { _id: 'b', rank: 1, description: 'Long body B'.repeat(1000) },
+      c: { _id: 'c', rank: 2, description: 'Long body C'.repeat(1000) },
+    };
+    await storage.replaceSnapshot({ entities: { tasks }, liveQueries: {} }, 'tenant');
+    const read = (limit?: number) => storage.withReadView('tenant', coverage, view => view.select({
+      table: 'tasks', columns: ['_id'], orderBy: [{ column: 'rank', direction: 'asc' }], limit,
+    }));
+    expect(await read(2)).toEqual({ rows: [{ _id: 'b' }, { _id: 'c' }], complete: true });
+    expect(await read()).toEqual({ rows: [{ _id: 'b' }, { _id: 'c' }, { _id: 'a' }], complete: true });
+  });
+  it('does not turn missing projected fields into proof of a complete query', async () => {
+    const tasks = { a: { _id: 'a', rank: 1 }, b: { _id: 'b', rank: 2, optional: 'present' } };
+    await storage.replaceSnapshot({ entities: { tasks }, liveQueries: {} }, 'tenant');
+    const result = await storage.withReadView('tenant', coverage, view => view.select({
+      table: 'tasks', columns: ['_id', 'optional'], orderBy: [{ column: 'rank' }],
+    }));
+    expect(result).toEqual({ rows: [{ _id: 'a', optional: null }, { _id: 'b', optional: 'present' }], complete: false });
+  });
   it('reports incomplete negative reads instead of inventing absence',async()=>{
     await storage.replaceSnapshot({entities:{tasks:{a:{_id:'a',status:'new'}}},liveQueries:{}},'tenant');
     const partial={tasks:{key:'_id',complete:false}};

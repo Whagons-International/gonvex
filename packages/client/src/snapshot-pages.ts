@@ -1,4 +1,5 @@
 import type { ServerMessage } from "@gonvex/protocol";
+import { utf8ByteLength } from './utf8-size.js';
 import { replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 import { isReplicaRevision } from "./revision-policy.js";
 
@@ -30,9 +31,9 @@ export class SnapshotPageStager {
       || !sameMetadata(metadata, this.first)
       || (!page.last && (result.length === 0 || digest !== undefined))
       || result.length > 512) throw new Error("invalid-snapshot-page");
-    const pageBytes = new TextEncoder().encode(JSON.stringify(page)).byteLength;
+    const pageBytes = utf8ByteLength(JSON.stringify(page));
     if (result.length > 1 && pageBytes > 256 * 1024) throw new Error("snapshot-page-too-large");
-    for (const row of result) this.bytes += new TextEncoder().encode(JSON.stringify(row)).byteLength;
+    for (const row of result) this.bytes += utf8ByteLength(JSON.stringify(row));
     if ((page.maxRows !== undefined && page.maxRows > 0 && this.rows.length + result.length > page.maxRows)
       || (page.maxBytes !== undefined && page.maxBytes > 0 && this.bytes > page.maxBytes)) {
       throw new Error("snapshot-page-budget-exceeded");

@@ -6302,3 +6302,4 @@ function localIntentDependencies(transaction: LocalTransactionResult): IntentDep
     writes: transaction.patches.map(patch => ({ entity: patch.entity, rowId: patch.rowId })),
   };
 }
+export { RowWindowBuffer } from './row-window-buffer.js';

@@ -55,6 +55,28 @@ jobs:
         run: test -z "$(find . -path ./node_modules -prune -o -path ./rust/target -prune -o \( -name '*.go' -o -name go.mod -o -name go.sum \) -print)"
       - name: Build JavaScript packages
         run: pnpm build:packages
+      - name: Prevent new allocation patterns in client hot paths
+        run: node packages/gonvex/dist/index.js perf allocations packages/client/src/local-replica.ts packages/client/src/query-expression.ts packages/client/src/resident-map.ts packages/client/src/indexeddb-engine.ts packages/client/src/indexeddb-replica.ts --baseline packages/client/bench/allocation-baseline.json --check
+      - name: Reject allocations in explicitly hot SDK functions
+        run: node packages/gonvex/dist/index.js perf allocations packages/client/src packages/react/src --strict-hot --check
+      # This profile contains only the synthetic, unauthenticated SDK fixture.
+      # Reuse IndexedDB to keep ordinary checks close to the 20-second workload.
+      - uses: actions/cache@v5
+        with:
+          path: .cache/sdk-memory-profile
+          key: sdk-memory-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml', 'packages/client/bench/memory-smoke/fixture.mjs') }}
+      - name: Check SDK memory with a 20-second browser workload
+        run: pnpm --filter @gonvex/client test:memory-smoke
+        env:
+          GONVEX_MEMORY_OUTPUT: ${{ runner.temp }}/sdk-memory.json
+          GONVEX_MEMORY_PROFILE: ${{ github.workspace }}/.cache/sdk-memory-profile
+      - name: Retain SDK memory summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-memory
+          path: ${{ runner.temp }}/sdk-memory.json
+          if-no-files-found: ignore
       - name: Require historical SQLite transaction crash recovery and reject rearmed acceptance
         run: python3 verification/native-sqlite/check_historical_node.py --output "${{ runner.temp }}/historical-sqlite-node"
       - name: Retain historical SQLite process evidence

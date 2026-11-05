@@ -1,4 +1,5 @@
 import { Dexie, type Table, type Collection } from "dexie";
+import { utf8ByteLength } from './utf8-size.js';
 import { versionedIndexedDB } from './indexeddb-version.js';
 import { assertReplicaSequence, readReplicaSequence } from './indexeddb-sequence.js';
 import { entityRecord, indexedDBReadView, type EntityRecord, type ReadCoverage } from './indexeddb-read-view.js';
@@ -18,7 +19,7 @@ import type {
   ReplicaWindowWriteContext,
 } from "./local-replica.js";
 
-type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean };
+type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean; cursor?: ReplicaCursor | null };
 type MetaRecord = { scope: ReplicaScope; key: string; value: string };
 type LegacySnapshotRecord = { scope?: ReplicaScope; key?: string; snapshot: ReplicaSnapshot };
 type ReplicaDatabase = Dexie & {
@@ -37,7 +38,6 @@ const writeBatchSize = 32;
 const writeIndexBudget = 64;
 const windowBatchSize = 64;
 const windowBatchBytes = 16 * 1024;
-const windowEncoder = new TextEncoder();
 
 // Small replica checkpoints usually change only a few rows. IndexedDB getAll
 // avoids a JS/Dexie continuation per row. The fallback remains streaming so a
@@ -253,23 +253,27 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       const prior=await this.database.windows.bulkGet(batch.map(({window})=>[scope,window.signature]) as [string,string][]);
       await this.database.windows.bulkPut(batch.flatMap(({window,value},index)=>{
         const record=prior[index];
-        const before=record && !record.deleted ? JSON.parse(record.value) as ReplicaWindow : undefined;
-        if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision))) {
+        // New records carry the tiny authority header separately. Read legacy
+        // JSON only on first access, rather than decoding every ID/hash on each watermark.
+        const beforeCursor = record && !record.deleted
+          ? Object.hasOwn(record, 'cursor') ? record.cursor : (JSON.parse(record.value) as ReplicaWindow).cursor
+          : undefined;
+        if(beforeCursor && (!window.cursor || (beforeCursor.epoch===window.cursor.epoch && beforeCursor.revision>window.cursor.revision))) {
           accepted = false;
-          if (changes) changes.windows[window.signature] = before;
+          if (changes) changes.windows[window.signature] = JSON.parse(record!.value) as ReplicaWindow;
           return [{...record!,sequence}];
         }
         // Serialization already isolates persisted values. Copying ordered IDs
         // and large integrity maps before stringifying doubled temporary memory
         // for every cursor-only checkpoint.
         if (changes) changes.windows[window.signature] = JSON.parse(value) as ReplicaWindow;
-        return [{scope,sequence,signature:window.signature,value}];
+        return [{scope,sequence,signature:window.signature,value,cursor:window.cursor ?? null}];
       }));
       batch = []; bytes = 0;
     };
     for (const window of windows) {
       const value = JSON.stringify({ ...window, kind: window.kind ?? 'live', key: window.key ?? 'id' });
-      const size = windowEncoder.encode(value).byteLength;
+      const size = utf8ByteLength(value);
       if (batch.length && (batch.length >= windowBatchSize || bytes + size > windowBatchBytes)) await flush();
       batch.push({ window, value }); bytes += size;
     }
