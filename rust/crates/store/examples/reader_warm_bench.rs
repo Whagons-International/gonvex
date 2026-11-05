@@ -97,7 +97,10 @@ fn ms(duration: Duration) -> f64 {
 fn setup_breakdown(path: &Path) -> Vec<(&'static str, f64)> {
     use rusqlite::{Connection, OpenFlags};
     let mut steps = Vec::new();
-    let mmap = format!("PRAGMA mmap_size = {}", env_or("MMAP_BYTES", 268_435_456u64));
+    let mmap = format!(
+        "PRAGMA mmap_size = {}",
+        env_or("MMAP_BYTES", 268_435_456u64)
+    );
     let started = Instant::now();
     // sqlx runs each connection on its own worker thread.
     std::thread::spawn(|| ()).join().unwrap();

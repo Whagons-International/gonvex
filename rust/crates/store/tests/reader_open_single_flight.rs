@@ -3,7 +3,9 @@
 //! opened and share it, instead of each parsing the schema in parallel (the
 //! staging reconnect burst of 2026-11-04: 8 opens at 1.1-2.5 s each). Own
 //! test binary: `sqlite_reader_opens` is process-wide.
-use gonvex_store::{begin_transaction, database_url, sqlite_reader_opens, PoolLimits, PoolRegistry};
+use gonvex_store::{
+    begin_transaction, database_url, sqlite_reader_opens, PoolLimits, PoolRegistry,
+};
 use std::time::Duration;
 
 async fn burst_opens(reader_opens: u32) -> u64 {

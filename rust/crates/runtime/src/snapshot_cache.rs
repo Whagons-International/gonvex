@@ -1041,7 +1041,9 @@ pub(crate) fn content_hash(
     let hash = u64::from_le_bytes(digest[..8].try_into().expect("8 bytes"));
     let mut memo = memo.lock().unwrap();
     // Generations only grow; drop older ones of this project.
-    memo.retain(|(other, other_generation, _), _| other != project || *other_generation >= generation);
+    memo.retain(|(other, other_generation, _), _| {
+        other != project || *other_generation >= generation
+    });
     memo.insert(key, hash);
     hash
 }
@@ -1451,19 +1453,43 @@ mod tests {
         }))
         .unwrap();
         let schema = serde_json::json!({"tasks": {"_id": "text", "name": "text"}});
-        let hash = |project: &str, generation, path: &str, definition: &ReplicaCollectionDefinition, plan: &VisibilityPlan, schema: &Value| {
+        let hash = |project: &str,
+                    generation,
+                    path: &str,
+                    definition: &ReplicaCollectionDefinition,
+                    plan: &VisibilityPlan,
+                    schema: &Value| {
             content_hash(project, generation, path, definition, plan, schema)
         };
         let base = hash("content-p", 1, "tasks.all", &definition, &plan, &schema);
-        assert_eq!(base, hash("content-p", 2, "tasks.all", &definition, &plan, &schema));
+        assert_eq!(
+            base,
+            hash("content-p", 2, "tasks.all", &definition, &plan, &schema)
+        );
         let mut wider = definition.clone();
         wider.columns.push("description".into());
-        assert_ne!(base, hash("content-p", 3, "tasks.all", &wider, &plan, &schema));
+        assert_ne!(
+            base,
+            hash("content-p", 3, "tasks.all", &wider, &plan, &schema)
+        );
         let mut other_plan = plan.clone();
         other_plan.version = Some(1);
-        assert_ne!(base, hash("content-p", 4, "tasks.all", &definition, &other_plan, &schema));
+        assert_ne!(
+            base,
+            hash(
+                "content-p",
+                4,
+                "tasks.all",
+                &definition,
+                &other_plan,
+                &schema
+            )
+        );
         let altered = serde_json::json!({"tasks": {"_id": "text", "name": "integer"}});
-        assert_ne!(base, hash("content-p", 5, "tasks.all", &definition, &plan, &altered));
+        assert_ne!(
+            base,
+            hash("content-p", 5, "tasks.all", &definition, &plan, &altered)
+        );
     }
 
     #[tokio::test]

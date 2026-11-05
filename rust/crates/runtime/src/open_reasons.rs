@@ -56,7 +56,10 @@ const REASONS: [(Reason, &str); 15] = [
     (Reason::FullIntegrity, "fullIntegrity"),
     (Reason::ReopenOnSocket, "reopenOnSocket"),
     (Reason::Close, "clientClose"),
-    (Reason::NeedHashesResumeDependency, "needHashesResumeDependency"),
+    (
+        Reason::NeedHashesResumeDependency,
+        "needHashesResumeDependency",
+    ),
     (Reason::NeedHashesResumeDigest, "needHashesResumeDigest"),
     (Reason::NeedHashesResumeWholeSet, "needHashesResumeWholeSet"),
     (Reason::NeedHashesPrincipal, "needHashesPrincipal"),
@@ -87,7 +90,11 @@ pub(crate) fn shape(request: &ReplicaOpenRequest) -> Reason {
         Reason::Reconcile
     } else if request.cursor.is_some() {
         Reason::Resume
-    } else if request.digest.as_deref().is_some_and(|digest| !digest.is_empty()) {
+    } else if request
+        .digest
+        .as_deref()
+        .is_some_and(|digest| !digest.is_empty())
+    {
         Reason::ColdDigest
     } else {
         Reason::Cold
@@ -110,9 +117,10 @@ impl SocketOpens {
     pub(crate) fn record(&mut self, request: &ReplicaOpenRequest) {
         let shape = shape(request);
         add(shape, 1);
-        let reopen = !self
-            .seen
-            .insert((request.path.clone(), crate::replica::stable_json(&request.args)));
+        let reopen = !self.seen.insert((
+            request.path.clone(),
+            crate::replica::stable_json(&request.args),
+        ));
         if reopen {
             add(Reason::ReopenOnSocket, 1);
         }
@@ -167,19 +175,46 @@ mod tests {
     #[test]
     fn shapes_and_reopens() {
         let cursor = json!({"epoch": "e", "revision": 3});
-        assert_eq!(shape(&request(json!({"id": "a", "path": "p", "cursor": cursor, "digest": "xor1:0"}))), Reason::Resume);
         assert_eq!(
-            shape(&request(json!({"id": "a", "path": "p", "cursor": cursor, "keys": ["k"], "hashes": {"k": "h"}}))),
+            shape(&request(
+                json!({"id": "a", "path": "p", "cursor": cursor, "digest": "xor1:0"})
+            )),
+            Reason::Resume
+        );
+        assert_eq!(
+            shape(&request(
+                json!({"id": "a", "path": "p", "cursor": cursor, "keys": ["k"], "hashes": {"k": "h"}})
+            )),
             Reason::Reconcile
         );
-        assert_eq!(shape(&request(json!({"id": "a", "path": "p", "digest": "xor1:0"}))), Reason::ColdDigest);
-        assert_eq!(shape(&request(json!({"id": "a", "path": "p"}))), Reason::Cold);
+        assert_eq!(
+            shape(&request(
+                json!({"id": "a", "path": "p", "digest": "xor1:0"})
+            )),
+            Reason::ColdDigest
+        );
+        assert_eq!(
+            shape(&request(json!({"id": "a", "path": "p"}))),
+            Reason::Cold
+        );
         let before = COUNTS[index(Reason::ReopenOnSocket)].load(Relaxed);
         let mut socket = SocketOpens::default();
-        socket.record(&request(json!({"id": "a", "path": "open-reasons.test", "args": {"x": 1}})));
-        socket.record(&request(json!({"id": "b", "path": "open-reasons.test", "args": {"x": 1}})));
-        socket.record(&request(json!({"id": "c", "path": "open-reasons.test", "args": {"x": 2}})));
-        assert_eq!(COUNTS[index(Reason::ReopenOnSocket)].load(Relaxed) - before, 1);
-        assert_eq!(json()["topPaths"]["open-reasons.test"]["reopensOnSocket"], 1);
+        socket.record(&request(
+            json!({"id": "a", "path": "open-reasons.test", "args": {"x": 1}}),
+        ));
+        socket.record(&request(
+            json!({"id": "b", "path": "open-reasons.test", "args": {"x": 1}}),
+        ));
+        socket.record(&request(
+            json!({"id": "c", "path": "open-reasons.test", "args": {"x": 2}}),
+        ));
+        assert_eq!(
+            COUNTS[index(Reason::ReopenOnSocket)].load(Relaxed) - before,
+            1
+        );
+        assert_eq!(
+            json()["topPaths"]["open-reasons.test"]["reopensOnSocket"],
+            1
+        );
     }
 }

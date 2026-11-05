@@ -213,6 +213,11 @@ impl Fixture {
         let url = gonvex_store::database_url(&root.join("tenant.db"));
         let mut cfg = config(true);
         cfg.module_host.binary = Some(binary.into());
+        cfg.module_host.endpoint = Some(format!(
+            "unix:{}/receipt-{}.sock",
+            std::env::temp_dir().display(),
+            uuid::Uuid::new_v4().simple()
+        ));
         cfg.module_host.isolate_pool_size = 1;
         cfg.module_host.max_concurrent_calls = 2;
         cfg.module_host.start_timeout = Duration::from_secs(5);
@@ -264,6 +269,9 @@ export function all() { throw new Error("replica collections must use the server
                 "interactive":false,"classification":"system","handler":"all","file":"receipt.js",
                 "delivery":"replica","args":{"kind":"any"},"result":{"kind":"any"},
                 "replica":{"table":"receipt_records","key":"id","columns":["id","value"],"maxRows":100}});
+            module["functions"]["quietLive"] = serde_json::json!({"kind":"query","handler":"all","file":"receipt.js",
+                "delivery":"live","args":{"kind":"any"},"result":{"kind":"any"},
+                "dependencies":{"liveQueryPlan":{"table":"receipt_records","key":"id","columns":["id","value"]}}});
             module["visibility"] = serde_json::json!({"receipt_records":{"table":"receipt_records","key":"id",
                 "where":{"operator":"public"}}});
         }
@@ -1715,4 +1723,216 @@ async fn receipt_recovery_after_process_crash() {
     assert_eq!(row, ("original".to_owned(), 7));
     assert_eq!(f.integrity().await, "ok");
     f.close().await;
+}
+
+/// Real socket loop + PostgreSQL: an unchanged A stays ready at 258, while
+/// late/reopened B needs a new ordered W259 in a tenant with no further writes.
+#[tokio::test]
+async fn quiet_open_cohort_legacy_socket() {
+    quiet_open_cohort_socket(false, false).await;
+}
+#[tokio::test]
+async fn quiet_open_cohort_paged_socket() {
+    quiet_open_cohort_socket(true, false).await;
+}
+#[tokio::test]
+async fn quiet_open_cohort_native_socket() {
+    quiet_open_cohort_socket(true, true).await;
+}
+async fn quiet_open_cohort_socket(paged: bool, native: bool) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as Wire;
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    async fn read(socket: &mut Socket) -> serde_json::Value {
+        let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .expect("quiet cohort never emitted its terminal watermark")
+            .unwrap()
+            .unwrap();
+        serde_json::from_slice(&frame.into_data()).unwrap()
+    }
+    async fn send(socket: &mut Socket, value: serde_json::Value) {
+        socket
+            .send(Wire::Text(value.to_string().into()))
+            .await
+            .unwrap();
+    }
+    async fn cohort(socket: &mut Socket, id: &str, revision: u64, paged: bool, native: bool) {
+        let mut ready = false;
+        let mut last_page = false;
+        loop {
+            let frame = read(socket).await;
+            match frame["type"].as_str().unwrap() {
+                "replica.snapshotStart" => {
+                    assert_eq!(frame["id"], id);
+                }
+                "replica.snapshotPage" => {
+                    last_page = frame["last"].as_bool().unwrap();
+                }
+                "replica.snapshotEncodedPage" => {
+                    last_page = frame["last"].as_bool().unwrap();
+                    if last_page {
+                        assert!(
+                            tokio::time::timeout(Duration::from_millis(80), socket.next())
+                                .await
+                                .is_err(),
+                            "ready/watermark overtook the native durable ACK"
+                        );
+                    }
+                    send(
+                        socket,
+                        serde_json::json!({"type":"replica.snapshotAck","id":id,
+                        "snapshotId":frame["snapshotId"],"sequence":frame["sequence"]}),
+                    )
+                    .await;
+                }
+                "replica.snapshot" => {
+                    assert!(!native);
+                }
+                "replica.ready" => {
+                    assert_eq!(frame["id"], id);
+                    assert_eq!(frame["cursor"]["revision"], revision);
+                    if paged {
+                        assert!(last_page);
+                    }
+                    ready = true;
+                }
+                "replica.watermark" => {
+                    assert!(ready, "cohort watermark overtook final ready");
+                    assert_eq!(frame["revision"], revision);
+                    break;
+                }
+                other => panic!("unexpected {other}: {frame}"),
+            }
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), socket.next())
+                .await
+                .is_err(),
+            "idle cohort emitted a duplicate watermark"
+        );
+    }
+    {
+        let Some(f) = Fixture::create(true).await else {
+            return;
+        };
+        f.enable_sdk_session().await;
+        sqlx::query("INSERT INTO receipt_records SELECT repeat('x',5000)||n,n FROM generate_series(1,100) n")
+            .execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE _gonvex_sync_clock SET revision=258")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let runtime = f.runtime.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                runtime
+                    .router()
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        assert_eq!(read(&mut socket).await["type"], "session.ready");
+        let auth = serde_json::json!({"type":"auth","id":"auth","project":"project","tenant":"tenant",
+            "token":"gvx_session_receipt_sdk_fixture","capabilities":{"replicaWatermark":1,
+                "replicaSnapshotPages":if paged {1} else {0},"replicaSetDigest":1,
+                "replicaNativeRows":if native {1} else {0}}});
+        send(&mut socket, auth.clone()).await;
+        assert_eq!(read(&mut socket).await["type"], "auth.result");
+        send(
+            &mut socket,
+            serde_json::json!({"type":"replica.open","id":"A","path":"all","args":{}}),
+        )
+        .await;
+        cohort(&mut socket, "A", 258, paged, native).await;
+        send(
+            &mut socket,
+            serde_json::json!({"type":"query.subscribe","id":"live","path":"quietLive","args":{}}),
+        )
+        .await;
+        assert_eq!(read(&mut socket).await["type"], "query.result");
+        assert_eq!(read(&mut socket).await["revision"], 258);
+        // Publish a durable unrelated transaction through the real change-feed
+        // reader. A's SQL rows are unchanged; no second ready is warranted.
+        let mut tx = f.pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO _gonvex_sync_changes(transaction_id,revision,ordinal,table_name,row_id,operation,new_value) VALUES (259,259,0,'unrelated','one','insert','{}')").execute(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE _gonvex_sync_clock SET revision=259")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_notify('gonvex_change_feed','{\"revision\":259}')")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let watermark = read(&mut socket).await;
+        assert_eq!(watermark["type"], "replica.watermark");
+        assert_eq!(watermark["revision"], 259);
+        for _ in 0..2 {
+            send(
+                &mut socket,
+                serde_json::json!({"type":"replica.open","id":"B","path":"all","args":{}}),
+            )
+            .await;
+            cohort(&mut socket, "B", 259, paged, native).await;
+        }
+        // A rejected open must release the cohort without certifying any
+        // nonexistent subscription or waiting for another transaction.
+        send(
+            &mut socket,
+            serde_json::json!({"type":"replica.open","id":"bad","path":"missing","args":{}}),
+        )
+        .await;
+        assert_eq!(read(&mut socket).await["type"], "replica.error");
+        assert_eq!(read(&mut socket).await["revision"], 259);
+        if native {
+            send(
+                &mut socket,
+                serde_json::json!({"type":"replica.open","id":"closing","path":"all","args":{}}),
+            )
+            .await;
+            loop {
+                let frame = read(&mut socket).await;
+                if frame["type"] == "replica.snapshotEncodedPage" {
+                    break;
+                }
+            }
+            send(
+                &mut socket,
+                serde_json::json!({"type":"replica.close","id":"closing"}),
+            )
+            .await;
+            loop {
+                let frame = read(&mut socket).await;
+                if frame["type"] == "replica.closed" {
+                    break;
+                }
+                assert_eq!(frame["type"], "replica.snapshotEncodedPage");
+            }
+            let terminal = read(&mut socket).await;
+            assert_eq!(terminal["type"], "replica.watermark");
+            assert_eq!(terminal["revision"], 259);
+        }
+        // Auth reset must admit a new cohort even at the same revision.
+        send(&mut socket, auth).await;
+        assert_eq!(read(&mut socket).await["type"], "auth.result");
+        send(
+            &mut socket,
+            serde_json::json!({"type":"replica.open","id":"A","path":"all","args":{}}),
+        )
+        .await;
+        cohort(&mut socket, "A", 259, paged, native).await;
+        socket.close(None).await.unwrap();
+        server.abort();
+        f.close().await;
+    }
 }
