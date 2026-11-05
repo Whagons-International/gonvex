@@ -1274,9 +1274,16 @@ async fn starter_timestamp_schema_stays_on_normal_transport() {
     sqlx::raw_sql("ALTER TABLE tasks RENAME COLUMN body TO previous_body; ALTER TABLE tasks ADD COLUMN body TIMESTAMP_MICROS")
         .execute(&mut **tx.transaction()).await.unwrap();
     tx.commit().await.unwrap();
+    // Rebind authority to the changed physical schema; a stale registration
+    // would correctly reject earlier at the independent schema fence.
+    let registration = f
+        .runtime
+        .install_local_source_permission_snapshot(&f.session, "tasks.all")
+        .await
+        .unwrap();
     let error = f
         .runtime
-        .register_local_starter_transport(&f.session, f.registration.clone(), f.store.clone())
+        .register_local_starter_transport(&f.session, Arc::new(registration), f.store.clone())
         .await
         .unwrap_err();
     assert!(matches!(
