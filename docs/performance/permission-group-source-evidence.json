@@ -1,0 +1,229 @@
+{
+  "sourceCheckpoint": "000d7445095d01c1fa4d073bd2c06f8d0b7db8a2",
+  "checks": {
+    "groups-runtime-check": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/cargo.py",
+        "check",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "--tests",
+        "--features",
+        "permission-primitives"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/rust",
+      "start": "2026-11-05T10:41:53.855552+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:42:25.634098+00:00"
+    },
+    "groups-runtime-test": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/cargo.py",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "--lib",
+        "--features",
+        "permission-primitives",
+        "signed_group_sources_match_v2",
+        "--",
+        "--test-threads=1"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/rust",
+      "start": "2026-11-05T10:43:02.104786+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:45:06.750646+00:00"
+    },
+    "groups-js-fixture": {
+      "command": [
+        "node",
+        "--test",
+        "packages/gonvex/test/permission-primitives.test.mjs"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:46:58.005246+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:46:59.804024+00:00"
+    },
+    "groups-full-on": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/cargo.py",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--features",
+        "permission-primitives",
+        "--",
+        "--test-threads=1"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/rust",
+      "start": "2026-11-05T10:47:00.264740+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:50:29.972417+00:00"
+    },
+    "groups-full-off": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/cargo.py",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--",
+        "--test-threads=1"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/rust",
+      "start": "2026-11-05T10:50:30.342260+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:52:13.196584+00:00"
+    },
+    "group-fixture-final": {
+      "command": [
+        "node",
+        "packages/gonvex/scripts/generate-permission-fixtures.mjs"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:56:48.347177+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:56:48.374609+00:00"
+    },
+    "group-cold-final": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/cargo.py",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "--lib",
+        "--features",
+        "permission-primitives",
+        "permission_replica",
+        "--",
+        "--test-threads=1"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/rust",
+      "start": "2026-11-05T10:56:48.723107+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:57:05.426260+00:00"
+    },
+    "group-clippy-final": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/cargo.py",
+        "clippy",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--tests",
+        "--features",
+        "permission-primitives",
+        "--",
+        "-W",
+        "clippy::redundant_clone"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/rust",
+      "start": "2026-11-05T10:57:05.827842+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:57:11.394562+00:00"
+    }
+  },
+  "caps": {
+    "groups-runtime-check": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-groups-runtime-check.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "groups-runtime-test": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-groups-runtime-test.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "groups-js-fixture": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-groups-js-fixture.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "groups-full-on": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-groups-full-on.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "groups-full-off": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-groups-full-off.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "group-fixture-final": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-group-fixture-final.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "group-cold-final": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-group-cold-final.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    },
+    "group-clippy-final": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/cli-schema-cap-group-clippy-final.scope",
+      "memory.max": "6442450944",
+      "cpu.max": [
+        "200000",
+        "100000"
+      ]
+    }
+  },
+  "fullTestCounts": {
+    "groups-full-on": [
+      "test result: ok. 407 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 75.06s",
+      "test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s"
+    ],
+    "groups-full-off": [
+      "test result: ok. 397 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 59.24s",
+      "test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s"
+    ]
+  },
+  "qualification": "local subset only; full policy and real-data differential incomplete; live disabled",
+  "performance": "not measured; concurrent lanes",
+  "functionalSourceSHA256": {
+    "rust/crates/runtime/src/permissions/source.rs": "97f7c2a8993e02c989fda1e1ced46842b08ed4fc9b35cb9bc2d40cfd3c2ba719",
+    "rust/crates/runtime/testdata/permission-source-groups.json": "c238bdb18c61dceeffe04905073ab69780206c6ce7642c895b7e30dbe1030ab0"
+  },
+  "fullSuitesThenFinalFreeze": "Full functional suites passed before the final test-only lock lint expectation/comment; final frozen checkpoint compiled and all three cold SQL/v2 oracles plus clippy passed again"
+}

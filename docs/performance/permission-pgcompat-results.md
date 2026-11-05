@@ -19,8 +19,8 @@ branch is unsuitable for a PostgreSQL application: its data/write helpers emit
 SQLite SQL. Earlier app generator/typecheck successes using that SDK are
 qualified and superseded for SQL semantic compatibility.
 
-The new local extension is `0.5.2-permission-pgcompat.202611051025`, tar SHA256
-`11672e357b6bec7ad86f846cd2bf8152321f97c3184d0746b4d792835c1ad7b7`.
+The new local extension is `0.5.2-permission-pgcompat.202611051051`, tar SHA256
+`96936808cb60c7f4dda1355677ec96b9ecbbd92338a0f6f8f94caeee03f04fb5`.
 Its baseline is the exact published `@gonvex/module-sdk@0.5.2-staging.31` tarball,
 verified against the frozen app lock's SHA512 integrity. The reproducible
 composer is `packages/gonvex/scripts/permission-pgcompat-artifact.py`.
@@ -43,7 +43,7 @@ the frozen e762 build. The app's installed patched staging.31 CLI identity and
 all other lockfile dependency pins are preserved.
 
 Private local artifact receipt:
-`/mnt/data/work/gonvex-cli-schema/artifacts-pgcompat/pairing.json`.
+`/mnt/data/work/gonvex-cli-schema/artifacts-pgcompat2/pairing.json`.
 Invoke its `cliEntrypoint` explicitly; do not alias the installed CLI. The old
 bd8720 pair retains its original dirty-build-then-matching-freeze provenance.
 The e762 pair was built after freezing e762; the new extension composition does
@@ -104,3 +104,9 @@ index generation and permission-change serial. Every indexed row or principal
 source mutation invalidates old authority conservatively. Piece retrieval and
 manifest admission must check the same current authority before disclosure;
 content hashes or unchanged member atoms alone are insufficient.
+
+The superseded 1025 extension also appended a trailing newline to package.json.
+The 1051 extension preserves even the original missing final newline: its
+manifest bytes equal the published file with only the version token replaced.
+The earlier 1025 tarball/receipt remain immutable; its SQL comparisons remain
+valid but its strict manifest-byte qualification is superseded.

@@ -201,7 +201,7 @@
       "end": "2026-11-05T10:32:59.026547+00:00"
     }
   },
-  "pairingSHA256": "4585556e20bb88e5c20d68d253ffc0a4c1e04fa080dbede27b56ddaf68dc5a98",
+  "pairingSHA256": "9a349f9d99dad20a0caed7a95b242f6b86be752ab584187784d4bb9f0aa1af83",
   "v2MetadataPreservation": {
     "v2VisibilityPlans": 342,
     "replicaDefinitions": 812,
@@ -211,7 +211,7 @@
     "baselineSDK": "0.5.2-staging.31 published frozen-lock SRI",
     "baselineCLI": "0.5.2-staging.31 patch dbb4b7c91dd17556b4ed68dbe00d7a951ea06683c609a86a932809e5580169fa",
     "baselineManifestSHA256": "874e538738677d611fd4817207a2e35588a7368d40cce77108fca9b1ba57286c",
-    "candidateManifestSHA256": "7ff219bb112f2b716b70106e716259fa0da5fcdfc6bfdc48b6acac0fc420fd0f",
+    "candidateManifestSHA256": "5959ea6a85279c105e2ad63e112d42486e944a095f7b3ada02a3a2f23792d5c2",
     "qualification": "metadata parity; not every-user row differential"
   },
   "caps": {
@@ -328,5 +328,126 @@
       ]
     }
   },
-  "performance": "not measured; concurrent autonomous host lanes"
+  "performance": "not measured; concurrent autonomous host lanes",
+  "superseded1025PairingSHA256": "4585556e20bb88e5c20d68d253ffc0a4c1e04fa080dbede27b56ddaf68dc5a98",
+  "latestPairChecks": {
+    "pgcompat2-oracle": {
+      "command": [
+        "env",
+        "GONVEX_PG_PAIRED_SDK=/mnt/data/work/gonvex-cli-schema/artifacts-pgcompat2/sdk-stage/package",
+        "python3",
+        "/mnt/data/work/gonvex-cli-schema/pgcompat-tests2.py"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:54:42.025103+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:54:47.296776+00:00"
+    },
+    "app-pg2-reducer-oracle": {
+      "command": [
+        "node",
+        "scripts/permission-primitives/pg-compatibility.mjs",
+        "/mnt/data/work/gonvex-cli-schema/original-pg-app/gonvex/_generated",
+        "gonvex/_generated",
+        "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/packages/gonvex/node_modules/@electric-sql/pglite/dist/index.js",
+        "/mnt/data/work/gonvex-cli-schema/app-source-schema.json"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:56:09.917751+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:56:12.702178+00:00"
+    },
+    "app-pg2-v2-types": {
+      "command": [
+        "node",
+        "/home/gabriel/.cache/node/corepack/v1/pnpm/11.8.0/bin/pnpm.cjs",
+        "--config.manage-package-manager-versions=false",
+        "--config.package-manager-strict=false",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "gonvex:v2:typecheck"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:56:04.341322+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:56:06.594195+00:00"
+    },
+    "app-pg2-architecture": {
+      "command": [
+        "node",
+        "/home/gabriel/.cache/node/corepack/v1/pnpm/11.8.0/bin/pnpm.cjs",
+        "--config.manage-package-manager-versions=false",
+        "--config.package-manager-strict=false",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "arch:check"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:56:06.932421+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:56:09.532561+00:00"
+    },
+    "app-pg2-frozen-lock": {
+      "command": [
+        "env",
+        "XDG_CACHE_HOME=/mnt/data/work/gonvex-app-permission-verify/cache",
+        "node",
+        "/home/gabriel/.cache/node/corepack/v1/pnpm/11.8.0/bin/pnpm.cjs",
+        "--config.manage-package-manager-versions=false",
+        "--config.package-manager-strict=false",
+        "--config.verify-deps-before-run=false",
+        "install",
+        "--offline",
+        "--ignore-scripts",
+        "--frozen-lockfile",
+        "--store-dir",
+        "/mnt/data/work/gonvex-app-permission-verify/store",
+        "--virtual-store-dir",
+        "/mnt/data/work/gonvex-app-permission-verify/virtual-store"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:59:32.163665+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:59:33.386524+00:00"
+    },
+    "app-pg2-cycles": {
+      "command": [
+        "node",
+        "/mnt/data/work/gonvex-cli-schema/app-cycles.mjs"
+      ],
+      "cwd": "/mnt/data/work/gonvex-gate6-capture/app-staging",
+      "start": "2026-11-05T10:59:04.029100+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:59:30.879014+00:00"
+    },
+    "final-framework-cycles": {
+      "command": [
+        "node",
+        "/mnt/data/work/gonvex-permission-stage3-resume/cycles.mjs"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:59:02.521132+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:59:03.697942+00:00"
+    },
+    "final-framework-docs": {
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "--filter",
+        "@gonvex/docs",
+        "typecheck"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T10:59:00.693792+00:00",
+      "exit": 0,
+      "end": "2026-11-05T10:59:02.169471+00:00"
+    }
+  },
+  "strictManifestCorrection": "1051 replaces 1025; preserves even missing final newline, only version bytes change",
+  "exactPackageManifestDiff": "--- published/package.json\n+++ paired/package.json\n@@ -1,6 +1,6 @@\n {\n   \"name\": \"@gonvex/module-sdk\",\n-  \"version\": \"0.5.2-staging.31\",\n+  \"version\": \"0.5.2-permission-pgcompat.202611051051\",\n   \"type\": \"module\",\n   \"publishConfig\": {\n     \"access\": \"public\"\n",
+  "exactIndexExportAppends": {
+    "dist/index.js": "\nexport { permissionPrimitives } from \"./permission-primitives.js\";\n",
+    "dist/index.d.ts": "\nexport { permissionPrimitives } from \"./permission-primitives.js\";\nexport type { PermissionPrimitiveDeclaration, PermissionSourceBinding, PermissionExpression, PermissionField, PermissionText, PermissionTable, PermissionFilter, PermissionJoin, PermissionAtomProjection, PermissionSubjectProjection, PermissionRoleScope } from \"./permission-primitives.js\";\n"
+  }
 }
