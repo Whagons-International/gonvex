@@ -23,6 +23,7 @@ pub(crate) enum LocalSnapshotError {
 /// Owned, non-client registration. Exact module/physical schema and normalized
 /// binding are pinned; possession alone never bypasses same-read readiness.
 /// Deliberately no Runtime registry, app migration, SDK or network selector.
+#[derive(Clone)]
 pub(crate) struct LocalSnapshotRegistration {
     binding: NormalizedBinding,
     definition: ReplicaCollectionDefinition,
@@ -671,3 +672,9 @@ impl Runtime {
         }
     }
 }
+
+// Private starter adapter. This is deliberately separate from normal Replica
+// handlers until the bootstrap/catchup client contract is reviewed.
+#[cfg(feature = "starter-files")]
+#[path = "starter_files/adapter.rs"]
+pub(crate) mod starter_adapter;

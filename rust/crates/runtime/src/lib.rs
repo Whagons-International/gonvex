@@ -40,6 +40,8 @@ mod operator_data;
 pub mod perf_fixture;
 #[cfg(feature = "permission-primitives")]
 mod permissions;
+#[cfg(feature = "starter-files")]
+mod starter_files;
 pub mod presence;
 pub mod profiling;
 pub mod public_functions;
@@ -5342,6 +5344,9 @@ mod tests {
     mod action_depth;
     #[cfg(feature = "permission-primitives")]
     mod permission_replica;
+    #[cfg(feature = "starter-files")]
+    #[path = "../starter_files/runtime_tests.rs"]
+    mod starter_runtime;
     mod receipt_guarantee_tests;
     #[tokio::test]
     async fn native_snapshot_socket_backpressures_until_durable_ack() {

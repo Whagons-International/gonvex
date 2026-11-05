@@ -7,6 +7,8 @@ license.workspace = true
 # Unsigned Firebase Auth Emulator tokens never enter release binaries.
 [features]
 default = []
+# Private disk snapshot backend; no network/client activation.
+starter-files = ["permission-primitives"]
 # Internal indexed permission primitives; no app/SDK contract and no route yet.
 permission-primitives = ["gonvex-store/permission-primitives"]
 test-firebase-auth-emulator = []
