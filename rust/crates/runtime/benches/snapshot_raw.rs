@@ -321,11 +321,12 @@ async fn run() {
                 let waker = futures_util::task::noop_waker();
                 let mut cx = Context::from_waker(&waker);
                 for i in 0..env("BENCH_QUEUE_ATTEMPTS", 5000) {
-                    let mut future =
-                        Box::pin(fixture.runtime.open_replica(
-                            &session,
-                            request(&paths[i % paths.len()], json!({}), None),
-                        ));
+                    let path = &paths[if same_key { 0 } else { i % paths.len() }];
+                    let mut future = Box::pin(tokio::task::unconstrained(
+                        fixture
+                            .runtime
+                            .open_replica(&session, request(path, json!({}), None)),
+                    ));
                     match future.as_mut().poll(&mut cx) {
                         Poll::Pending => waiting.push(future),
                         Poll::Ready(result) => {
