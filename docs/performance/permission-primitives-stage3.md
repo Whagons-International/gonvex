@@ -1,9 +1,11 @@
 # Local Replica snapshot and permission source bindings: source stage
 
 Work in progress after pushed head `68987788ca04738cb0c2470e448aa39dad796886`.
-These edits are source-only and have not been compiled or tested. Heap's exclusive
-window remains authoritative until explicit release and a new verification grant.
-Prior stage tests do not cover these edits. No integration or serving activation.
+The source checkpoint is `bd8720dadea70d1a2c00a632cb547b9053e06eff`. SDK/CLI
+builds and five focused declaration/extraction tests passed in the granted window.
+Rust verification is incomplete because the original check was cancelled during
+severe host filesystem I/O contention, before any compiler diagnostics. Prior
+stage Rust tests do not cover these edits. No integration or serving activation.
 
 ## Snapshot slice
 
@@ -144,7 +146,65 @@ source declarations, extraction, backend normalization and provider completeness
 must agree; opaque app-maintained personal/ordinary slots are not an accepted
 replacement for the actual Whagons permission program.
 
-No full authorized local production-v2 dataset is available. The hard copy oracle
-remains pending. No production/staging reads, schema changes, endpoint calls or
+An approved private 28-dump local export is now available per parent. This worker
+has not opened/scanned/restored it. Same-kit conversion/preflight and the complete
+private copy oracle remain pending separate grants. No production/staging reads, schema changes, endpoint calls or
 deployment are authorized. Query/write/disk/memory costs and full-app acceptance
 remain unmeasured.
+
+
+## Verification and artifact provenance
+
+Owned LAB reservation: 07:00:03–07:16:55 UTC, 2026-11-05, with original hard end
+07:30:03. Every heavy phase used headroom and coach resource admission; build
+outputs stayed under `/mnt/data`. The original single Cargo check spent 13m21s
+with about four CPU seconds and no output/diagnostics while host I/O was severely
+pressured. Parent requested cancellation at 07:15:16. Only the owned unit was
+stopped; it became inactive, all known owned child PIDs exited, and only the
+owned lock was removed after ownership/inode checks. Wrapper exit was **143**;
+direct Cargo exit was not captured because cancellation terminated the payload.
+This is **INCOMPLETE/environment IO blocked**, neither a Rust source pass nor fail.
+No second Cargo/read job, cap change or performance run was started.
+
+The SDK and CLI TypeScript builds pass. Five focused JS tests pass: immutable
+source declaration/export, callback/accessor/cycle rejection, exact old/new
+source dependency certificate, unsupported/coercing/opaque input rejection, and
+artifact extraction/authority/real collection validation. Initial failures were
+missing cached SDK dependency link and an absolute test entrypoint; both were
+corrected. The first SDK command bootstrapped pnpm through Corepack in the owned
+cache; later phases disabled Corepack network and reused project dependencies
+read-only. No project dependency install occurred.
+
+Paired artifact receipt:
+`/mnt/data/work/gonvex-permission-stage3/artifacts/pairing.json`.
+New local SDK version **0.5.2-permission-stage3.202611050700**, tarball SHA256
+`3d45a19d0934e30921bde295f5807d7f6f557f134ac792ba3a7be408897d3c44`.
+The CLI is an audited external executable tree, not an installable CLI package.
+Parent approved explicit invocation of
+`node /mnt/data/work/gonvex-permission-stage3/artifacts/cli-dist/index.js`, while
+keeping the app's freshly installed staging.31 CLI identity unchanged. No alias,
+silent pnpm reroute or registry/version claim. Cached CLI dependencies originate
+from the integration checkout's existing CLI dependency tree and are read-only.
+
+Both artifacts were **built from dirty fingerprint**
+`91067d45d9e480292a94e479e64477785547d33c8ae7ab5956e974e75017139a`;
+matching checkpoint `bd8720da` was frozen **afterward**. Every SDK/CLI TypeScript
+input blob was then verified against the receipt. No exact-commit-at-build claim.
+The initial source patch is preserved privately, SHA256
+`6f41eccff9cc62657177c557b863bc60eccfbf605ae17c5ba136a33f86ebbfaf`.
+
+App source audit currently has 20 owner-policy table candidates, **19 tables with
+40 actual Replica paths**; one candidate has no Replica path. Twenty paths lack
+orderBy and are unsupported by this first cold adapter. Policy/source declaration
+coverage is not serving/window acceptance. The next adapter gap fixtures and
+exact collection shape matrix are maintained by the app worker. Only one exported
+`permissionPrimitives({...})` program is extracted per module; unsupported task
+source staging is a plain typed literal, not a second helper call.
+
+Full feature-off/on Rust tests, real source-to-facts/window/message oracle runs,
+full SDK/CLI regressions, required generators and cycle checks remain pending.
+The checkpoint has not been pushed. Write amplification and query/disk/memory
+costs were not measured; source ingestion currently rebuilds full logical batches,
+and scopes conservatively reject stale coverage. Content-only writes must not
+change the canonical Member identity atom set. No live feed, network selector,
+production-data processing or staging schema migration was enabled.
