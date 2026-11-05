@@ -154,3 +154,15 @@ unchanged generation/artifact labels, incomplete principal backfill followed by
 a row-only mutation, and rejection/rollback of legacy apply/register/seal calls
 against a compiled scope. Terminal decision IDs are reserved by `Builder::default`;
 invalid atom IDs and oversized decision/cover construction cannot publish.
+
+Frozen source is `88c92cfdde35afdd38c0865daa63e08d4cbee1ab` (implementation
+`1b07063731fab2ce173b3c6fc71aa6b06b014e04` followed by generated-record formatting).
+On that frozen tree, 20 runtime permission regressions and 6 store kernel tests
+passed, including the final module-schema guard. The named-record fixture
+reformat preserves the complete canonical JSON AST and upstream manifest digest;
+its byte hashes and canonical AST hash are in the companion evidence file.
+`provider-frozen-clippy` and changed-file formatting passed with the baseline
+qualification above. Codegen for dashboard/template, deterministic fixture
+regeneration, docs metadata/typecheck and runtime import-cycle comparison passed;
+the TS runtime cycle count remains 2 with no added cyclic edges. No source or
+artifact from the full starter transport was consumed.

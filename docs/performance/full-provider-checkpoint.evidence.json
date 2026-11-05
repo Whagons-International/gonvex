@@ -1,0 +1,347 @@
+{
+  "sourceCommit": "88c92cfdde35afdd38c0865daa63e08d4cbee1ab",
+  "base": "155988263856f4e3d78ce376814c8cd4264adc94",
+  "wrapperCommit": "21eb92696854f615fd268daa01559094a50c22ce",
+  "slotAnyCommit": "740e685b01f7167e831dcd9b8754fffdba3263eb",
+  "qualification": "LOCAL SYNTHETIC CHECKPOINT; full provider, full Whagons migration and production-copy gate unfinished",
+  "coverage": {
+    "typedPolicies": 191,
+    "certificatePoliciesWithReplicaPaths": 189,
+    "noReplicaInventoryOnlyPolicies": 2,
+    "structuralDefinitions": 427,
+    "orderedExactWindowOracles": 184,
+    "unorderedNormalV2Definitions": 243,
+    "unsupportedPolicies": 151,
+    "unsupportedDefinitions": 385,
+    "productionCopyQualified": 0
+  },
+  "tests": {
+    "fullFeatureOnBeforeFinalMetadataOnlyRefinement": {
+      "runtimePassed": 412,
+      "runtimeIgnored": 8,
+      "storePassed": 49
+    },
+    "fullDefault": {
+      "runtimePassed": 397,
+      "runtimeIgnored": 8,
+      "storePassed": 44
+    },
+    "frozenPermissionRegressions": {
+      "runtimePassed": 20,
+      "storePassed": 6
+    }
+  },
+  "checks": {
+    "provider-source-authority": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-full-provider/cargo.py",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--features",
+        "permission-primitives",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T13:19:30.949269+00:00",
+      "end": "2026-11-05T13:22:42.872396+00:00"
+    },
+    "provider-full-off": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-full-provider/cargo.py",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T12:56:31.439525+00:00",
+      "end": "2026-11-05T12:57:29.863365+00:00"
+    },
+    "provider-frozen-schema": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-full-provider/cargo.py",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--features",
+        "permission-primitives",
+        "permission",
+        "--",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T13:40:22.989025+00:00",
+      "end": "2026-11-05T13:41:26.805087+00:00"
+    },
+    "provider-frozen-clippy": {
+      "command": [
+        "python3",
+        "/mnt/data/work/gonvex-full-provider/cargo.py",
+        "clippy",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--all-targets",
+        "--features",
+        "permission-primitives",
+        "--",
+        "-D",
+        "warnings",
+        "-A",
+        "deprecated",
+        "-A",
+        "dead_code",
+        "-A",
+        "clippy::unnecessary_sort_by",
+        "-A",
+        "clippy::result_large_err",
+        "-A",
+        "clippy::manual_ignore_case_cmp",
+        "-A",
+        "clippy::chunks_exact_to_as_chunks",
+        "-A",
+        "clippy::cloned_ref_to_slice_refs",
+        "-A",
+        "clippy::await_holding_lock"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T14:07:43.628488+00:00",
+      "end": "2026-11-05T14:08:39.262525+00:00"
+    },
+    "provider-frozen-format": {
+      "command": [
+        "/home/gabriel/.cargo/bin/rustfmt",
+        "--check",
+        "--edition",
+        "2021",
+        "--config",
+        "skip_children=true",
+        "rust/crates/runtime/src/permissions/compile.rs",
+        "rust/crates/runtime/src/permissions/mod.rs",
+        "rust/crates/runtime/src/permissions/provider.rs",
+        "rust/crates/runtime/src/permissions/provider/tests.rs",
+        "rust/crates/runtime/src/permissions/provider/tests/actual_definitions.rs",
+        "rust/crates/runtime/src/replica_permission.rs",
+        "rust/crates/store/src/permission_indexes.rs",
+        "rust/crates/store/src/permission_indexes/decision.rs",
+        "rust/crates/store/src/permission_indexes/decision_diff.rs",
+        "rust/crates/store/src/permission_indexes/literal.rs",
+        "rust/crates/store/src/permission_indexes/program.rs"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T14:14:25.555125+00:00",
+      "end": "2026-11-05T14:14:25.610366+00:00"
+    },
+    "provider-fixture-records": {
+      "command": [
+        "node",
+        "packages/gonvex/scripts/generate-whagons-provider-fixture.mjs",
+        "/mnt/data/work/gonvex-cli-schema/original-pg-app/gonvex/_generated/manifest.json",
+        "/mnt/data/work/gonvex-cli-schema/app-source-schema.json",
+        "/mnt/data/work/gonvex-full-provider/fixture-records.json"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T13:40:10.452108+00:00",
+      "end": "2026-11-05T13:40:10.613412+00:00"
+    },
+    "provider-runtime-cycles": {
+      "command": [
+        "node",
+        "/mnt/data/work/gonvex-full-provider/cycles.mjs"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T13:09:31.851387+00:00",
+      "end": "2026-11-05T13:09:33.043580+00:00"
+    },
+    "provider-dashboard-codegen": {
+      "command": [
+        "node",
+        "packages/gonvex/dist/index.js",
+        "codegen",
+        "--project",
+        "apps/dashboard",
+        "--project-id",
+        "d49bf233-9a6e-419e-8aef-1778dba8cef7"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T13:09:33.368169+00:00",
+      "end": "2026-11-05T13:09:33.485945+00:00"
+    },
+    "provider-template-codegen": {
+      "command": [
+        "node",
+        "packages/gonvex/dist/index.js",
+        "codegen",
+        "--project",
+        "templates/vite-react",
+        "--project-id",
+        "701afa6f-0a89-404f-afa8-30c314981ad3"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T13:09:33.814774+00:00",
+      "end": "2026-11-05T13:09:33.912511+00:00"
+    },
+    "provider-docs-resolved": {
+      "command": [
+        "sh",
+        "-c",
+        "/home/gabriel/.local/bin/build-headroom /mnt/data/work/gonvex-full-provider/docs/.next && pnpm --config.verify-deps-before-run=false --filter @gonvex/docs typecheck"
+      ],
+      "exit": 0,
+      "start": "2026-11-05T13:23:26.141040+00:00",
+      "end": "2026-11-05T13:23:27.736325+00:00"
+    }
+  },
+  "baselineClippy": {
+    "base": "155988263856f4e3d78ce376814c8cd4264adc94",
+    "checks": [
+      {
+        "path": "rust/crates/runtime/src/control.rs",
+        "baseBlob": "8b8cbb943cb52bf9257db12c4553f4b42e73dc5d",
+        "currentBlob": "8b8cbb943cb52bf9257db12c4553f4b42e73dc5d"
+      },
+      {
+        "path": "rust/crates/runtime/src/modules.rs",
+        "baseBlob": "7be10dc8b22b727961499128be15b0207f523009",
+        "currentBlob": "7be10dc8b22b727961499128be15b0207f523009"
+      },
+      {
+        "path": "rust/crates/runtime/src/operations.rs",
+        "baseBlob": "45ad3a52c03bb32825dfaed7e9e5d50f96b52fe2",
+        "currentBlob": "45ad3a52c03bb32825dfaed7e9e5d50f96b52fe2"
+      },
+      {
+        "path": "rust/crates/runtime/src/operator_data.rs",
+        "baseBlob": "ed19a73a993fcd3aef09ba89174d5ae7bd0ed8ed",
+        "currentBlob": "ed19a73a993fcd3aef09ba89174d5ae7bd0ed8ed"
+      },
+      {
+        "path": "rust/crates/runtime/src/snapshot_cache.rs",
+        "baseBlob": "652f5da6078cbdaa66e4ee39f4904ea84e5f9977",
+        "currentBlob": "652f5da6078cbdaa66e4ee39f4904ea84e5f9977"
+      },
+      {
+        "path": "rust/crates/runtime/src/visibility_class.rs",
+        "baseBlob": "0813912e91531513a5e43da9c757a7ebe56815b9",
+        "currentBlob": "0813912e91531513a5e43da9c757a7ebe56815b9"
+      },
+      {
+        "path": "rust/crates/runtime/src/replica_permission.rs",
+        "basePrefixByteIdentical": true,
+        "onlyAddition": "14-line authorized wrapper; existing manual_ignore_case_cmp line unchanged"
+      },
+      {
+        "path": "rust/crates/runtime/src/permissions/model.rs",
+        "baseBlob": "ab1f751ab457d40b1869452f6c5cda92043f6807",
+        "currentBlob": "ab1f751ab457d40b1869452f6c5cda92043f6807"
+      },
+      {
+        "path": "rust/crates/runtime/src/permissions/tests.rs",
+        "baseBlob": "e512bd694c1ba92420adbb7566631f79c4e742b1",
+        "currentBlob": "e512bd694c1ba92420adbb7566631f79c4e742b1"
+      },
+      {
+        "path": "rust/crates/runtime/src/tests/permission_replica.rs",
+        "baseBlob": "3939ac773cd21cc17ab780f673f0f1c44f79b8fb",
+        "currentBlob": "3939ac773cd21cc17ab780f673f0f1c44f79b8fb"
+      }
+    ],
+    "baselineLints": [
+      "deprecated",
+      "dead_code",
+      "clippy::unnecessary_sort_by",
+      "clippy::result_large_err",
+      "clippy::manual_ignore_case_cmp",
+      "clippy::chunks_exact_to_as_chunks",
+      "clippy::cloned_ref_to_slice_refs",
+      "clippy::await_holding_lock"
+    ]
+  },
+  "baselineDeprecation": {
+    "kind": "exact unmodified baseline source",
+    "base": "155988263856f4e3d78ce376814c8cd4264adc94",
+    "path": "rust/crates/module-host/src/session.rs",
+    "baseBlob": "a0b7b004300fef6deac2c1c910ff451af459d8bc",
+    "currentBlob": "a0b7b004300fef6deac2c1c910ff451af459d8bc",
+    "diagnostic": "deprecated AtomicU64::fetch_update at line127; -D warnings fails in module-host dependency before selected crates",
+    "qualifiedFollowup": "clippy -D warnings -A deprecated; no source or lint config edit; ours audited separately for deprecated calls"
+  },
+  "baselineFormatting": {
+    "base": "155988263856f4e3d78ce376814c8cd4264adc94",
+    "unchangedSourceDiffs": [
+      {
+        "path": "rust/crates/runtime/src/open_reasons.rs",
+        "baseBlob": "c701edbe856fb97d8e7d6d0fa4d1db489fe5d2a6",
+        "currentBlob": "c701edbe856fb97d8e7d6d0fa4d1db489fe5d2a6"
+      },
+      {
+        "path": "rust/crates/runtime/src/replica.rs",
+        "baseBlob": "ec299c82306e1a79b5f2a019edbfff9de5cbde13",
+        "currentBlob": "ec299c82306e1a79b5f2a019edbfff9de5cbde13"
+      },
+      {
+        "path": "rust/crates/runtime/src/snapshot_cache.rs",
+        "baseBlob": "652f5da6078cbdaa66e4ee39f4904ea84e5f9977",
+        "currentBlob": "652f5da6078cbdaa66e4ee39f4904ea84e5f9977"
+      },
+      {
+        "path": "rust/crates/store/examples/reader_warm_bench.rs",
+        "baseBlob": "0c6cdee509b152d20aab66f27baa8aa91dd39915",
+        "currentBlob": "0c6cdee509b152d20aab66f27baa8aa91dd39915"
+      },
+      {
+        "path": "rust/crates/store/tests/reader_open_single_flight.rs",
+        "baseBlob": "0d1f60c5c13d1ceb02db68f4c20cb96c68dc468c",
+        "currentBlob": "0d1f60c5c13d1ceb02db68f4c20cb96c68dc468c"
+      }
+    ],
+    "qualification": "full cargo fmt --check fails only these unchanged baseline files; no shared/reserved source reformat"
+  },
+  "fixtureReformat": {
+    "beforeSHA256": "6cca1e7c03dc0d6c81e234fffb737deef1dc8d717c7565e606d9f6a10ee8b9c7",
+    "afterSHA256": "9b57d8b323e220323c356c348bab8a3c636004b2a26a423a1ef6fa66f1a759de",
+    "beforeBytes": 2742851,
+    "afterBytes": 1325949,
+    "canonicalASTSHA256": "34e1b854c0e4af1c653dd7ac09f43b2569c63151855467dd932e8a9d0adb4600",
+    "sourceManifestSHA256": "874e538738677d611fd4817207a2e35588a7368d40cce77108fca9b1ba57286c",
+    "semanticASTEqual": true
+  },
+  "candidateVMInstructions": {
+    "experimentalBeforeAt1000And10000Roots": [
+      14054,
+      131054
+    ],
+    "indexedAfterAt1000And10000Roots": [
+      1036,
+      1036
+    ],
+    "candidateRows": 1,
+    "v2TimingOrCapacityClaim": false
+  },
+  "liveServing": false,
+  "fullProviderTransportIntegrated": false,
+  "broadShapeTokenSupplied": false,
+  "sdkCli1051PairChanged": false,
+  "dataAccess": false
+}
