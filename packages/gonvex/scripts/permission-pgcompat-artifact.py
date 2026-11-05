@@ -43,7 +43,11 @@ for name in ['index.js', 'index.d.ts']:
     files['dist/' + name] += append
     appends['dist/' + name] = append.decode()
 meta['version'] = a.version
-files['package.json'] = (json.dumps(meta, indent=2) + '\n').encode()
+old_version = b'"version": "0.5.2-staging.31"'
+assert baseline['package.json'].count(old_version) == 1
+# Preserve even the baseline's lack of a final newline. Parsed field equality
+# alone would miss an additional, unauthorized package-manifest byte change.
+files['package.json'] = baseline['package.json'].replace(old_version, ('"version": ' + json.dumps(a.version)).encode())
 files.update(extensions)
 changed = [name for name in baseline if baseline[name] != files[name]]
 assert sorted(changed) == ['dist/index.d.ts', 'dist/index.js', 'package.json']
@@ -59,7 +63,7 @@ receipt = {'schemaVersion': 1, 'sdkVersion': a.version, 'sdkTarball': str(tar.re
  'baselineVersion': '0.5.2-staging.31', 'baselineIntegrity': a.integrity, 'baselineTarSHA256': sha(raw),
  'baselineFilesSHA256': {n: sha(b) for n,b in sorted(baseline.items())},
  'sdkFilesSHA256': {n: sha(b) for n,b in sorted(files.items())},
- 'exactAllowedChanges': {'package.json': {'versionOnly': a.version}, 'indexExportAppends': appends},
+ 'exactAllowedChanges': {'package.json': {'versionOnly': a.version, 'byteReplacementOnly': True, 'baselineHasFinalNewline': baseline['package.json'].endswith(b'\n')}, 'indexExportAppends': appends},
  'unchangedBaselineFiles': sorted(set(baseline) - set(changed)), 'addedFiles': sorted(extensions),
  'helperClosure': 'compiled literal helper has no imports or runtime dependencies', 'published': False}
 (out / 'sdk-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')

@@ -71,8 +71,11 @@ test('paired PG extension preserves baseline closure and actual generated SQL ex
     } finally {await pg.close();}
   }
   assert.deepEqual(results[1],results[0], 'old CLI+SDK and new CLI+extended PG SDK must execute identical SQL/parameters/results');
-  const baseMeta=JSON.parse(await readFile(join(baselineSDK,'package.json')));
-  const pairedMeta=JSON.parse(await readFile(join(pairedSDK,'package.json')));
+  const baseMetaBytes=await readFile(join(baselineSDK,'package.json'),'utf8');
+  const pairedMetaBytes=await readFile(join(pairedSDK,'package.json'),'utf8');
+  const baseMeta=JSON.parse(baseMetaBytes);
+  const pairedMeta=JSON.parse(pairedMetaBytes);
+  assert.equal(pairedMetaBytes,baseMetaBytes.replace('"version": "0.5.2-staging.31"','"version": '+JSON.stringify(pairedMeta.version)));
   baseMeta.version=pairedMeta.version; assert.deepEqual(pairedMeta,baseMeta);
   for(const folder of ['dist','runtime-contract']) {
     for(const file of await readdir(join(baselineSDK,folder))) {
