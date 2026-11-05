@@ -424,3 +424,15 @@ Each result hashes all harness runtime helper sources, the installed SDK entry,
 generated app manifest/API/contract and the collection fixture. A measured run
 also needs external runtime binary, full SDK artifact/patch, schema and source
 pins; the JS entry hash alone is not a full artifact qualification.
+
+For a reviewed experimental SDK artifact, `LOAD_SDK_ENTRY` selects its actual
+entry file without changing the installed app dependency graph.
+`LOAD_SDK_ENTRY_SHA256` is mandatory. `LOAD_SDK_PROVENANCE` additionally verifies
+every member of a frozen composition payload before any client is constructed.
+Results record the selected entry and composition identity/tree hash. This is
+an explicit artifact comparison lane; it grants no compatibility or release claim.
+
+`LOAD_PROGRESS` writes an atomic per-worker scheduling receipt every five
+seconds. An independent supervisor can use the offered/attempted sign-in times
+and checkpoint failures to stop an invalid generator. It does not change the
+arrival schedule or exclude late starts from latency qualification.
