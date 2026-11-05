@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { buildModuleArtifact, moduleManifestFunctions } from "../dist/module-artifact.js";
+import { buildModuleArtifact, latin1JavaScript, moduleManifestFunctions } from "../dist/module-artifact.js";
 import { renderFunctionCatalog } from "../dist/function-catalog.js";
 
 async function moduleProject(t, source, supportingFiles = {}) {
@@ -188,6 +188,96 @@ export const rename = reducer<RenameArgs, RenameResult>({
     },
   });
   assert.deepEqual(functions.rename.result, { kind: "object", fields: { ok: { kind: "boolean" } } });
+});
+
+test("one-byte bundle source escapes non-Latin-1 text without changing values", async () => {
+  const source = [
+    "// comment — dash",
+    "export const dash = \"a—b\";",
+    "export const emoji = '😀';",
+    "export const strip = (value) => value.normalize('NFD').replace(/[\u0300-\u036f̀-ͯ]/g, '');",
+    "export const unicode = /😀/u.test('😀');",
+    "export const template = `x—${dash}—y`;",
+    "export const café = 'é stays Latin-1';",
+    "export const ναme = 1;",
+  ].join("\n");
+  const result = latin1JavaScript(source);
+  assert.equal(result.latin1, true);
+  assert.doesNotMatch(result.code, /[^\u0000-\u00ff]/);
+  const load = (code) => import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const [before, after] = await Promise.all([load(source), load(result.code)]);
+  for (const key of ["dash", "emoji", "unicode", "template", "café", "ναme"]) assert.deepEqual(after[key], before[key], key);
+  assert.equal(after.strip("é"), before.strip("é"));
+
+  // A tagged template exposes its raw text, so it is left as written.
+  const tagged = latin1JavaScript("export const raw = String.raw`a—b`;");
+  assert.equal(tagged.latin1, false);
+  assert.match(tagged.code, /a—b/);
+  assert.equal(latin1JavaScript("export const ascii = 1;").code, "export const ascii = 1;");
+});
+
+test("split artifacts add a Query/Reducer bundle without Action-only code", async (t) => {
+  const definitions = `
+export const schema = {
+  string: () => ({ kind: "string" }),
+  object: (fields) => ({ kind: "object", fields }),
+};
+export const query = (definition) => ({ kind: "query", ...definition });
+export const reducer = (definition) => ({ kind: "reducer", ...definition });
+export const action = (definition) => ({ kind: "action", ...definition });
+`;
+  const project = await moduleProject(t, `
+export * as tasks from "./tasks.ts";
+export * as assistant from "./assistant.ts";
+`, {
+    "sdk.ts": definitions,
+    "heavy.ts": "export const heavyModel = () => 'HEAVY_ACTION_ONLY_DEPENDENCY';\n",
+    "tasks.ts": `
+import { query, reducer, schema } from "./sdk.ts";
+export const get = query({ liveQueryPlan: { table: "tasks", key: "id", columns: ["id", "deletedAt"], where: { operator: "eq", column: "deletedAt", value: { literal: null } } }, args: schema.object({}), result: schema.string(), run: async () => "task" });
+export const rename = reducer({ name: "tasks.rename", args: schema.object({ title: schema.string() }), result: schema.string(), run: async (_ctx, args) => args.title });
+`,
+    "assistant.ts": `
+import { action, query, schema } from "./sdk.ts";
+import { heavyModel } from "./heavy.ts";
+export const status = query({ liveQueryPlan: { table: "tasks", key: "id", columns: ["id", "deletedAt"], where: { operator: "eq", column: "deletedAt", value: { literal: null } } }, args: schema.object({}), result: schema.string(), run: async () => "ready" });
+export const ask = action({ args: schema.object({}), result: schema.string(), run: async () => heavyModel() });
+`,
+  });
+  const files = ["index.ts", "sdk.ts", "heavy.ts", "tasks.ts", "assistant.ts"].map((name) => join(project.backendDir, name));
+  const unsplit = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files, migrations: [] });
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files, migrations: [], split: true });
+
+  assert.equal(unsplit.reducerBundle, undefined);
+  assert.notEqual(artifact.hash, unsplit.hash, "the reducer bundle is part of the signed contract");
+  assert.equal(artifact.javascript.hash, unsplit.javascript.hash, "the complete bundle is unchanged");
+  assert.equal(artifact.reducerBundle.path, "gonvex/_build/module.reducers.js");
+  assert.deepEqual(artifact.reducerBundle.functions, ["assistant.status", "tasks.get", "tasks.rename"]);
+  const reducerCode = Buffer.from(artifact.reducerBundle.code, "base64").toString("utf8");
+  assert.doesNotMatch(reducerCode, /HEAVY_ACTION_ONLY_DEPENDENCY/);
+  assert.match(Buffer.from(artifact.javascript.code, "base64").toString("utf8"), /HEAVY_ACTION_ONLY_DEPENDENCY/);
+  assert.equal(await readFile(join(project.backendDir, "_build", "module.reducers.js"), "utf8"), reducerCode);
+
+  // Hosts resolve split functions by exact path on the bundle namespace.
+  const namespace = await import(`data:text/javascript;base64,${artifact.reducerBundle.code}`);
+  assert.deepEqual(Object.keys(namespace).sort(), ["assistant.status", "tasks.get", "tasks.rename"]);
+  assert.equal(await namespace["tasks.rename"].run({}, { title: "x" }), "x");
+
+  const artifactFile = join(project.root, "artifact.json");
+  await writeFile(artifactFile, JSON.stringify(artifact));
+  const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+  const verify = () => execFileSync("cargo", [
+    "run", "--quiet", "--manifest-path", join(repositoryRoot, "rust", "Cargo.toml"),
+    "-p", "gonvex-runtime", "--", "verify-module-artifact", "--file", artifactFile,
+  ], { cwd: repositoryRoot, encoding: "utf8", stdio: "pipe" }).trim();
+  assert.equal(verify(), artifact.hash, "TypeScript CLI and Rust runtime must hash the same split contract");
+  for (const tampered of [
+    { ...artifact, reducerBundle: { ...artifact.reducerBundle, functions: ["tasks.get"] } },
+    { ...artifact, reducerBundle: { ...artifact.reducerBundle, hash: unsplit.javascript.hash } },
+  ]) {
+    await writeFile(artifactFile, JSON.stringify(tampered));
+    assert.throws(verify, /Command failed/);
+  }
 });
 
 test("literal agent metadata is signed and checkout-path independent", async (t) => {
@@ -432,6 +522,34 @@ export const tenantSchedule = tenantCron({ name: "tenant-heartbeat", function: "
     { name: "heartbeat", function: "heartbeat", scope: "project", intervalMs: 15000 },
     { name: "tenant-heartbeat", function: "heartbeat", scope: "tenant", args: { reason: "test" }, expression: "*/5 * * * *" },
   ]);
+});
+
+test("TypeScript artifacts carry a cron's literal dueWhen pre-check", async (t) => {
+  const project = await moduleProject(t, `
+const schema = { object: (fields) => ({ kind: "object", fields }), boolean: () => ({ kind: "boolean" }) };
+const internalReducer = (definition) => definition;
+const tenantCron = (definition) => definition;
+export const tick = internalReducer({ args: schema.object({}), result: schema.object({ ok: schema.boolean() }), run: async () => ({ ok: true }) });
+export const tickEveryMinute = tenantCron({
+  name: "tick-every-minute",
+  function: "tick",
+  intervalMs: 60_000,
+  dueWhen: \`SELECT EXISTS (SELECT 1 FROM jobs WHERE dueAt <= $1)\`,
+  args: {},
+});
+`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.deepEqual(artifact.crons, [
+    { name: "tick-every-minute", function: "tick", scope: "tenant", args: {}, intervalMs: 60000, dueWhen: "SELECT EXISTS (SELECT 1 FROM jobs WHERE dueAt <= $1)" },
+  ]);
+  const bad = await moduleProject(t, `
+const tenantCron = (definition) => definition;
+export const broken = tenantCron({ name: "broken", function: "tick", intervalMs: 60000, dueWhen: "DELETE FROM jobs" });
+`);
+  await assert.rejects(
+    buildModuleArtifact({ root: bad.root, backendDir: bad.backendDir, files: [bad.entrypoint], migrations: [] }),
+    /dueWhen must be a literal read-only SELECT/,
+  );
 });
 
 test("TypeScript artifacts declare one internal invitation acceptance Reducer", async (t) => {

@@ -8,9 +8,26 @@ license.workspace = true
 [features]
 default = []
 test-firebase-auth-emulator = []
+# Heap profiling builds: use the system allocator instead of mimalloc.
+system-alloc = []
+# Heap attribution builds: jemalloc with sampled heap profiling
+# (`_RJEM_MALLOC_CONF=prof:true,...`, dumps via GONVEX_HEAP_DUMP_PREFIX; read
+# them with jeprof). Never in release builds.
+jemalloc-prof = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 duckdb = ["dep:duckdb", "dep:calamine"]
+# Benchmark fixture (`gonvex_runtime::perf_fixture`): a Whagons-shaped
+# Runtime with a fake in-process module host. Never enabled in release builds.
+perf-fixture = ["gonvex-websocket/perf-fixture"]
 
 [dependencies]
+gonvex-profiler = { path = "../profiler" }
+# Process allocator: lower fragmentation under bursty multi-threaded snapshot
+# work, and freed memory is returned to the OS promptly.
+mimalloc = { version = "=0.1.48", default-features = false }
+# Fast seeded hasher for per-event/per-row maps (see `fast_hash`).
+foldhash = { version = "=0.1.5" }
+tikv-jemallocator = { version = "=0.7.0", features = ["profiling"], optional = true }
+tikv-jemalloc-ctl = { version = "=0.7.0", optional = true }
 axum.workspace = true
 async-trait.workspace = true
 aes-gcm.workspace = true
@@ -21,11 +38,13 @@ chrono.workspace = true
 cron.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
+libc.workspace = true
 ipnet.workspace = true
 gonvex-module-host = { path = "../module-host" }
 gonvex-module-runtime = { path = "../module-runtime" }
+gonvex-module-runtime-v8 = { path = "../module-runtime-v8" }
 gonvex-protocol = { path = "../protocol" }
-gonvex-postgres = { path = "../postgres" }
+gonvex-store = { path = "../store" }
 serde.workspace = true
 serde_json.workspace = true
 ryu-js.workspace = true
@@ -45,7 +64,153 @@ uuid.workspace = true
 url.workspace = true
 duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
+bytes = "1"
+socket2 = { version = "0.6", features = ["all"] }
+
+[lints.clippy]
+# Deep clones on hot paths (perf workstreams).
+redundant_clone = "warn"
 
 [dev-dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+tempfile = "3"
 tokio-tungstenite = "0.29"
 tower.workspace = true
+
+[[bench]]
+name = "baseline"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "delivery"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "visibility_classes"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "replica_state"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "delivery_v3"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "stalls"
+harness = false
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "offload_equivalence"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "perf_fixture_smoke"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "delivery_oracle"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "replica_state"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "slow_reader_delivery"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "class_sharing_oracle"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "raw_rows_oracle"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "call_watermark_latency"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "burst_control"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "snapshot_cache_oracle"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "principal_cache_oracle"
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "snapshot_cache"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "open_visibility"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "snapshot_raw"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "feed_backlog"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "delivery_coverage"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "burst_control"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "conn_idle"
+harness = false
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "feed_backlog"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "targeted_wake"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "resume_log_only"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "redeploy_cache"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "resume_validation"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "resume_permission_race"
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "reload_trace"
+harness = false
+required-features = ["perf-fixture"]

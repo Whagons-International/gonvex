@@ -20,11 +20,15 @@ async fn socket(
     let enabled = query.get("compression").is_some_and(|v| v == "1");
     websocket_transport::upgrade(
         request,
-        enabled,
-        1024,
-        64 << 20,
-        16 << 20,
-        move |mut ws| async move {
+        websocket_transport::UpgradeOptions {
+            compression: enabled,
+            threshold: 1024,
+            max_message: 64 << 20,
+            max_frame: 16 << 20,
+            outbound: websocket_transport::OutboundLimits::default(),
+            socket_fd: None,
+        },
+        move |mut ws: websocket_transport::WebSocket| async move {
             while let Some(Ok(message)) = ws.next().await {
                 match message {
                     Message::Text(kind) => {

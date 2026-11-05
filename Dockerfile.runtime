@@ -1,12 +1,15 @@
 # syntax=docker/dockerfile:1
-# The Rust runtime owns HTTP, authentication, tenant routing, Postgres
-# transactions, the change feed, visibility, and the replica protocol. The
-# separately bounded V8 process owns TypeScript application execution only.
+# The Rust runtime owns HTTP, authentication, tenant routing, the SQLite
+# database files and their transactions, the change feed, visibility, and the
+# replica protocol. The separately bounded V8 process owns TypeScript
+# application execution only.
 FROM rust:1.94-bookworm AS rust-build
 ARG GONVEX_DUCKDB=false
 WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
+COPY rust/.cargo ./.cargo
 COPY rust/crates ./crates
+COPY rust/vendor ./vendor
 COPY packages/module-sdk/runtime-contract /src/packages/module-sdk/runtime-contract
 # Cache Cargo artifacts independently of Docker layers: Coolify build arguments
 # and network host mappings can invalidate RUN layers even on an unchanged tree.
@@ -31,22 +34,22 @@ RUN --mount=type=cache,id=gonvex-cargo-registry,target=/usr/local/cargo/registry
 FROM debian:bookworm-slim
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates curl \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl sqlite3 \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/gonvex/data /var/lib/gonvex/tmp
+    && mkdir -p /data /var/lib/gonvex/tmp
 COPY --from=rust-build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
 COPY --from=rust-build /out/gonvex-admin /usr/local/bin/gonvex-admin
 COPY --from=rust-build /out/gonvex-module-host /usr/local/bin/gonvex-module-host
 COPY --from=rust-build /out/gonvex-sandbox-worker /usr/local/bin/gonvex-sandbox-worker
-# Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)
-# live here; mount a volume to keep them across deploys. Artifacts re-ingest
-# from object storage on miss, so an ephemeral dir also works (just slower on
-# first access after a redeploy).
+# GONVEX_DATA_DIR holds every SQLite database (control.db and tenant files)
+# and data-file artifacts (DuckDB). Mount a persistent volume at /data; one
+# runtime process owns it at a time (/data/.gonvex.lock). The sqlite3 CLI is
+# included for operator inspection and restores.
 ENV GONVEX_ADDR=0.0.0.0:8080 \
     GONVEX_MODULE_HOST_ENABLED=true \
     GONVEX_MODULE_HOST_BINARY=/usr/local/bin/gonvex-module-host \
     GONVEX_SANDBOX_WORKER_BINARY=/usr/local/bin/gonvex-sandbox-worker \
-    GONVEX_DATA_DIR=/var/lib/gonvex/data \
+    GONVEX_DATA_DIR=/data \
     GONVEX_TELEMETRY_LOG=/var/lib/gonvex/telemetry.jsonl \
     TMPDIR=/var/lib/gonvex/tmp
 WORKDIR /var/lib/gonvex

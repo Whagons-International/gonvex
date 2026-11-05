@@ -172,12 +172,20 @@ type RuntimeFunctionMetricPoint = {
 
 type RuntimeFunctionMetrics = {
   kind: string;
+  /** Server-side counts since the runtime process started when `source` is
+   * "server" (profiler v2); browser-reported numbers otherwise. */
   calls: number;
   errors: number;
   averageDurationMs: number;
   lastDurationMs: number;
   lastCalledAt?: string;
   series: RuntimeFunctionMetricPoint[];
+  source?: "server";
+  cancelled?: number;
+  maxDurationMs?: number;
+  totalDurationMs?: number;
+  /** Browser telemetry (`client_duration_ms`, last 24 h). */
+  client?: { calls: number; errors: number; averageDurationMs: number; lastDurationMs: number; lastCalledAt?: string };
 };
 
 type RuntimeCacheMetricPoint = {
@@ -779,7 +787,7 @@ function buildFunctionStats(metrics: RuntimeFunctionMetrics | undefined, cache: 
   const hasCacheRequests = (cache?.requests ?? 0) > 0;
   return [
     {
-      label: "Function Calls",
+      label: metrics?.source === "server" ? "Function Calls (server, since start)" : "Function Calls",
       value: String(metrics?.calls ?? 0),
       tone: "blue",
       series: functionSeries.map((point) => point.calls),
@@ -4848,7 +4856,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
     for (const fn of Object.values(functions)) {
       totalCalls += fn.calls;
       totalErrors += fn.errors;
-      totalDuration += fn.averageDurationMs * fn.calls;
+      totalDuration += fn.totalDurationMs ?? fn.averageDurationMs * fn.calls;
     }
     const cacheSeries = (metrics?.cache?.series ?? []).map((point) => ({
       label: shortClockLabel(point.time),

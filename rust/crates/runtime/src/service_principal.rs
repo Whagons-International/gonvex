@@ -31,11 +31,11 @@
 
 use chrono::Utc;
 use gonvex_module_runtime::InvocationChannel;
-use gonvex_postgres::{
+use gonvex_protocol::{ClientMessage, ExecutionScope, ServerMessage};
+use gonvex_store::{
     Account, DelegationActor, Member, SessionIdentity, TenantRoute, TenantSession,
     SERVICE_PRINCIPAL_ACTOR_PREFIX,
 };
-use gonvex_protocol::{ClientMessage, ExecutionScope, ServerMessage};
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 
@@ -115,7 +115,7 @@ pub(crate) fn find_principal<'a>(
     if !token.starts_with(TOKEN_PREFIX) {
         return None;
     }
-    let digest = gonvex_postgres::token_hash(token);
+    let digest = gonvex_store::token_hash(token);
     let mut found = None;
     for principal in principals {
         if bool::from(digest.as_bytes().ct_eq(principal.token_sha256.as_bytes())) {
@@ -655,12 +655,12 @@ impl Runtime {
         )
         .bind(&grant_id)
         .bind(&grant.route.project_id)
-        .bind(gonvex_postgres::token_hash(&token))
+        .bind(gonvex_store::token_hash(&token))
         .bind(grant.actor())
         .bind(account_id)
         .bind(&grant.route.tenant_id)
         .bind(format!("{}: {reason}", grant.actor()))
-        .bind(expires)
+        .bind(expires.timestamp_millis())
         .bind(actor.clone().map(sqlx::types::Json))
         .execute(&mut **transaction.transaction())
         .await
@@ -715,7 +715,7 @@ impl Runtime {
             .await
             .map_err(|error| error.to_string())?;
         let affected = sqlx::query(
-            r#"UPDATE gonvex_impersonation_grants SET revoked_at=now()
+            r#"UPDATE gonvex_impersonation_grants SET revoked_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                WHERE project_id=$1 AND tenant_id=$2 AND id=$3 AND actor_account_id=$4
                  AND revoked_at IS NULL"#,
         )
@@ -752,7 +752,7 @@ mod tests {
     fn principal(id: &str, token: &str) -> ServicePrincipalConfig {
         ServicePrincipalConfig {
             id: id.to_owned(),
-            token_sha256: gonvex_postgres::token_hash(token),
+            token_sha256: gonvex_store::token_hash(token),
             projects: vec!["project".to_owned()],
             functions: vec!["keys.authenticate".to_owned()],
             max_delegation: Duration::from_secs(900),
@@ -773,7 +773,7 @@ mod tests {
             route: TenantRoute {
                 project_id: "project".to_owned(),
                 tenant_id: "tenant".to_owned(),
-                database_url: "postgres://unused".to_owned(),
+                database_url: "sqlite:///nonexistent/unused.db".to_owned(),
             },
             functions: vec!["keys.authenticate".to_owned()],
             max_delegation: Duration::from_secs(900),
@@ -1094,6 +1094,7 @@ mod tests {
                 replica_epochs: Default::default(),
                 schema: json!({"tables": {"apiKeys": {}}}),
                 visibility: Default::default(),
+                permission_grants: None,
                 invitation_acceptance_reducer: String::new(),
                 migrations: Vec::new(),
                 crons: Vec::new(),
@@ -1147,46 +1148,18 @@ mod tests {
         assert_eq!(full["functions"], body["functions"]);
     }
 
-    /// Full delegation contract against a disposable PostgreSQL database.
-    /// Set GONVEX_TEST_POSTGRES_URL to run it; it creates and drops its own
-    /// schemas.
+    /// Full delegation contract against disposable SQLite Control Plane and
+    /// tenant files in a temporary data directory.
     #[tokio::test]
     async fn delegated_sessions_are_member_scoped_single_use_and_revocable() {
         use axum::body::{to_bytes, Body};
         use axum::http::{Request, StatusCode};
-        use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry};
-        use sqlx::postgres::PgPoolOptions;
+        use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry};
         use tower::ServiceExt;
 
-        let Some(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        else {
-            eprintln!(
-                "GONVEX_TEST_POSTGRES_URL is not set; skipping service principal contract test"
-            );
-            return;
-        };
-        let nonce = uuid::Uuid::new_v4().simple().to_string();
-        let control_schema = format!("gonvex_svc_control_{nonce}");
-        let tenant_schema = format!("gonvex_svc_tenant_{nonce}");
-        let scoped = |schema: &str| {
-            let separator = if base_url.contains('?') { '&' } else { '?' };
-            format!("{base_url}{separator}options=-csearch_path%3D{schema}")
-        };
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&base_url)
-            .await
-            .unwrap();
-        for schema in [&control_schema, &tenant_schema] {
-            sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-                .execute(&admin)
-                .await
-                .unwrap();
-        }
-        let control_url = scoped(&control_schema);
-        let tenant_url = scoped(&tenant_schema);
+        let data = tempfile::tempdir().unwrap();
+        let control_url = gonvex_store::database_url(&data.path().join("control.db"));
+        let tenant_url = gonvex_store::database_url(&data.path().join("tenant.db"));
         let pools = PoolRegistry::new(PoolLimits::default());
         let control = ControlPlane::connect(&control_url, pools.clone(), Default::default())
             .await
@@ -1201,11 +1174,7 @@ mod tests {
             .provision_tenant_database(route, Vec::new())
             .await
             .unwrap();
-        let fixture = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&control_url)
-            .await
-            .unwrap();
+        let fixture = pools.pool(&control_url).await.unwrap();
         sqlx::query(
             r#"INSERT INTO gonvex_runtime_projects(id,name,database_mode,database_url,status,auth_mode)
                VALUES('project','Project','multiTenant',$1,'active','gonvex-native')"#,
@@ -1225,7 +1194,7 @@ mod tests {
 
         let mut config = crate::config::Config::from_env().expect("default config");
         config.control_plane_database_url = Some(control_url.clone());
-        config.default_database_url = Some(control_url.clone());
+        config.default_database_url = Some(gonvex_store::database_url(data.path()));
         config.require_auth = true;
         config.module_host.enabled = false;
         config.admin_key = Some("test-admin-key".to_owned());
@@ -1307,7 +1276,7 @@ mod tests {
             stored.3.map(|actor| actor.0),
             Some(json!({"kind": "api_key", "name": "CI key", "reference": "key_1"}))
         );
-        let expected_delegation = gonvex_postgres::SessionDelegation {
+        let expected_delegation = gonvex_store::SessionDelegation {
             principal: "gateway".to_owned(),
             actor: Some(DelegationActor {
                 kind: "api_key".to_owned(),
@@ -1405,7 +1374,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             unattributed_session.tenant.delegation,
-            Some(gonvex_postgres::SessionDelegation {
+            Some(gonvex_store::SessionDelegation {
                 principal: "gateway".to_owned(),
                 actor: None,
             })
@@ -1417,9 +1386,9 @@ mod tests {
         sqlx::query(
             r#"INSERT INTO gonvex_impersonation_grants
                (id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at)
-               VALUES('imp_support','project',$1,$2,$3,'tenant','support',now()+interval '5 minutes')"#,
+               VALUES('imp_support','project',$1,$2,$3,'tenant','support',CAST(unixepoch('subsec')*1000 AS INTEGER)+300000)"#,
         )
-        .bind(gonvex_postgres::token_hash(support_token))
+        .bind(gonvex_store::token_hash(support_token))
         .bind(&other_account)
         .bind(&account)
         .execute(&fixture)
@@ -1440,9 +1409,9 @@ mod tests {
                (id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at,
                 delegation_actor)
                VALUES('svcdel_tampered','project',$1,'service:gateway',$2,'tenant','service:gateway: x',
-                      now()+interval '5 minutes','{"kind":"api_key"}')"#,
+                      CAST(unixepoch('subsec')*1000 AS INTEGER)+300000,'{"kind":"api_key"}')"#,
         )
-        .bind(gonvex_postgres::token_hash(tampered_token))
+        .bind(gonvex_store::token_hash(tampered_token))
         .bind(&account)
         .execute(&fixture)
         .await
@@ -1460,11 +1429,7 @@ mod tests {
         assert!(!consumed);
 
         // Deactivated members cannot be delegated.
-        let tenant_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&tenant_url)
-            .await
-            .unwrap();
+        let tenant_pool = pools.pool(&tenant_url).await.unwrap();
         sqlx::query("UPDATE members SET status='inactive' WHERE id=$1")
             .bind(&member)
             .execute(&tenant_pool)
@@ -1489,25 +1454,16 @@ mod tests {
             .await
             .unwrap();
         let restored: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM information_schema.columns
-               WHERE table_schema=current_schema() AND table_name='gonvex_impersonation_grants'
-                 AND column_name='delegation_actor' AND data_type='jsonb' AND is_nullable='YES')"#,
+            r#"SELECT EXISTS(SELECT 1 FROM pragma_table_info('gonvex_impersonation_grants')
+               WHERE name='delegation_actor' AND upper(type) LIKE '%JSON%' AND "notnull"=0)"#,
         )
         .fetch_one(&fixture)
         .await
         .unwrap();
         assert!(restored);
 
-        tenant_pool.close().await;
         runtime.shutdown().await;
-        fixture.close().await;
         pools.close().await;
-        for schema in [&tenant_schema, &control_schema] {
-            sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-                .execute(&admin)
-                .await
-                .unwrap();
-        }
-        admin.close().await;
+        drop(data);
     }
 }

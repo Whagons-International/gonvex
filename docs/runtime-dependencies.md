@@ -6,8 +6,9 @@ ordered change history and recovery. Analysis tools are optional extensions.
 
 ## Current deployment
 
-The Rust server requires PostgreSQL for application and control-plane data.
-SQLx provides database access. Tokio and Axum provide async HTTP/WebSocket
+The Rust server stores application and Control Plane data in SQLite files that
+it owns, under `GONVEX_DATA_DIR` (see [SQLite storage](sqlite-storage.md)). No
+database server is required. SQLx provides database access. Tokio and Axum provide async HTTP/WebSocket
 services. A separate native V8 process executes application JavaScript.
 
 Redis and Valkey are not used by the Rust runtime. Reference Compose files and
@@ -18,7 +19,7 @@ The existing health response retains its cache fields, which report disabled.
 
 S3-compatible storage is needed only for file APIs. The reference full stack
 includes MinIO. Browser replicas use IndexedDB; the Expo adapter uses SQLite.
-Neither local storage adapter replaces the authoritative server database.
+Neither local storage adapter replaces the authoritative server database files.
 
 DuckDB and the spreadsheet reader are excluded from default Rust builds.
 The `duckdb` feature enables the sandbox's analysis binding and file imports.
@@ -26,30 +27,28 @@ Enable it on both `gonvex-runtime` and `gonvex-sandbox-worker`, or build the
 Docker image with `GONVEX_DUCKDB=true`. Ordinary sandbox TypeScript and workspace
 files do not require it. See [build commands](../rust/README.md#optional-duckdb-analysis).
 
-## Why PostgreSQL remains the reference backend
+## Why SQLite is the server backend
 
-Current code uses PostgreSQL triggers to capture row changes, a durable
-transaction change log, transactional revision updates, JSONB, typed parameters,
-advisory locks and row locks for worker coordination. The server also exposes SQL,
-so backend portability includes application query semantics and migrations.
+Gonvex moved from PostgreSQL to SQLite on 2026-11-02. On the same two cores a
+point read, a 100-row grid read and a reducer write cost several times less CPU
+in process than through a PostgreSQL connection, opening a database costs about
+1 ms instead of 12.5 ms, and the connection-pool failure modes (exhaustion,
+churn, `too many connections`) disappear. [SQLite storage](sqlite-storage.md)
+has the measurements and the full contract.
 
-`LISTEN/NOTIFY` wakes listeners after commit. The notification is not the durable
-change record. Listeners read the log, recover after reconnect and periodically
-check it even without notifications. Removing a notification service therefore
-requires a replacement wakeup strategy, not a replacement for durable history.
+The guarantees are unchanged in meaning. Row triggers append to the durable
+`_gonvex_sync_changes` log; each commit stamps one revision inside its own
+transaction, and only then does the runtime publish an in-process wake-up (this
+replaces `LISTEN/NOTIFY`). The notification is not the durable change record:
+listeners read the log, recover after reconnect and periodically check it.
 
-SQLite supports row triggers and transactions. It could implement equivalent
-change-capture and log guarantees, but it is not compatible with the current
-PostgreSQL SQL, types, locking or driver. Ordinary SQLite serializes writers per
-database, so a server implementation also needs an explicit ownership and
-concurrency model. A local PostgreSQL instance remains necessary for backend
-tests. SDK SQLite tests validate the local adapter only.
-
-The current recommendation is to retain PostgreSQL and define explicit contracts
-for transaction completion, committed change capture, replay and worker claims.
-Do not flatten those guarantees into a generic SQL interface. A future SQLite
-backend should first pass the same contract suite, including rollback, concurrent
-writes, reconnect recovery, visibility and idempotency.
+The costs are explicit. Each database file has one writer connection, so a
+tenant's writes are serialized in process (different tenants write in
+parallel). One runtime process owns a data directory and holds a lock file;
+horizontal replicas over shared files and overlapping rolling deploys are not
+supported. Backups are file snapshots (online backup API); continuous
+replication is a follow-up. Application SQL follows the dialect rules in the
+storage contract.
 
 ## Durable Objects as a possible deployment adapter
 
@@ -66,8 +65,8 @@ across objects also gives up a single local transaction across those objects.
 Cross-object atomicity cannot be assumed.
 
 Cloudflare Containers are a separate option for hosting a native runtime under
-Durable Object control. They avoid a full Wasm port, but still need PostgreSQL
-connectivity and validation of process isolation, restart and sandbox permissions.
+Durable Object control. They avoid a full Wasm port, but still need a persistent
+volume for the data directory and validation of process isolation, restart and sandbox permissions.
 No Cloudflare deployment or compatibility test is part of this change.
 
 Keep portable policy code separate from those services. Evaluate a narrowly
@@ -76,7 +75,7 @@ benchmark it before committing to a second server backend.
 
 ## References
 
-- [PostgreSQL notification transaction behavior](https://www.postgresql.org/docs/current/sql-notify.html)
+- [SQLite write-ahead logging](https://www.sqlite.org/wal.html)
 - [SQLite triggers](https://www.sqlite.org/lang_createtrigger.html) and [isolation](https://www.sqlite.org/isolation.html)
 - [Durable Objects architecture](https://developers.cloudflare.com/durable-objects/concepts/what-are-durable-objects/)
 - [Durable Object SQLite transactions](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)

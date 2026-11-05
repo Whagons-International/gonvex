@@ -68,6 +68,8 @@ export async function runSDKOwnerSwitch(url, output, dimension = 'account') {
         }
         if (message.type === 'reducer.result' && owner === firstOwner) committedRevision = message.committedRevision;
         if (message.type === 'replica.watermark') watermarks.push({ owner, revision: message.revision });
+        // Delivery v2 carries the tick's watermark on its replica.batch message.
+        if (message.type === 'replica.batch' && typeof message.watermark === 'number') watermarks.push({ owner, revision: message.watermark });
         if (typeof listener === 'function') listener.call(this, event); else listener.handleEvent(event);
       }, options);
     }
@@ -138,7 +140,7 @@ export async function runSDKOwnerSwitch(url, output, dimension = 'account') {
     assert.equal(calls.filter(call => call.owner === secondOwner).length, 1);
     assert(calls.every(call => call.idempotencyKey === original.idempotencyKey), 'owner switch changed original logical keys');
     await writeFile(join(output, 'receipt.json'), JSON.stringify({ dimension, auth, calls, oldOutcome, original, bob, retained,
-      boundary: (tenantSwitch ? 'Actual authenticated tenant A->B->A across separately routed PostgreSQL databases; account remains fixed. ' : '') + 'Actual authenticated owner A->B->A on one SDK/socket and real SQLite. Same logical key in distinct owner namespaces, delayed durable acceptance completion, parked prediction, explicit retry and original-owner reconciliation.' }, null, 2) + '\n');
+      boundary: (tenantSwitch ? 'Actual authenticated tenant A->B->A across separately routed tenant SQLite files; account remains fixed. ' : '') + 'Actual authenticated owner A->B->A on one SDK/socket and real SQLite. Same logical key in distinct owner namespaces, delayed durable acceptance completion, parked prediction, explicit retry and original-owner reconciliation.' }, null, 2) + '\n');
   } catch (error) {
     await writeFile(join(output, 'failure.json'), JSON.stringify({ error: error.message, owner, visibility, auth, calls, watermarks, events,
       scope: client?.outboxScope, cursor: client?.localReplica.cursor(),

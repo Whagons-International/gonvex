@@ -89,7 +89,7 @@ such as one API key:
 
 A non-object `actor`, any other field inside it, or an invalid value fails
 the call with `invalid arguments`, before any grant is written. The grant
-keeps the actor in the nullable JSONB column
+keeps the actor in the nullable JSON column
 `gonvex_impersonation_grants.delegation_actor`. A Control Plane created
 earlier gains that column the next time a runtime starts.
 

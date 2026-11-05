@@ -1,6 +1,6 @@
 ---
 title: Schema and Migrations
-description: Define Postgres tables and indexes with versioned SQL migrations.
+description: Define SQLite tables and indexes with versioned SQL migrations.
 ---
 
 # Schema and Migrations
@@ -41,8 +41,8 @@ destructive changes and large backfills.
 ## Live Query indexes
 
 Index the columns used by Live Query visibility predicates, filters, ordering,
-and search. PostgreSQL-specific search features remain available to the SQL
-migration and can be marked server-only in the Live Query plan.
+and search. SQLite-specific features (for example FTS5 virtual tables) remain
+available to the SQL migration and can be marked server-only in the Live Query plan.
 
 ## Generated schema metadata
 

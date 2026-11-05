@@ -189,7 +189,6 @@ This builds and starts:
 | --- | --- | --- |
 | Runtime | `http://localhost:8080` | Functions, HTTP, WebSockets, and project routing |
 | Dashboard | `http://localhost:3000` | Local project and runtime inspection |
-| Postgres | `localhost:5432` | Control-plane and application data |
 | MinIO API | `http://localhost:9000` | Optional S3-compatible file storage |
 | MinIO console | `http://localhost:9001` | Local storage administration |
 
@@ -239,7 +238,8 @@ VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
 ```
 
 At minimum, replace all development credentials, terminate TLS at a reverse proxy,
-use durable Postgres storage, persist runtime data, and configure backups.
+mount a durable volume at the runtime's `GONVEX_DATA_DIR` (its SQLite files),
+persist runtime data, and configure backups.
 S3-compatible storage is optional unless your app uses file APIs.
 
 Gonvex is still beta: production auth, migrations, tenant operations, and deployment

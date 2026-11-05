@@ -8,7 +8,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use gonvex_postgres::TenantSession;
+use gonvex_store::TenantSession;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};

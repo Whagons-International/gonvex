@@ -1,5 +1,5 @@
 import { isReplicaRevision } from "./revision-policy.js";
-import { REDUCER_RECEIPT_QUERY } from "@gonvex/protocol";
+import { REDUCER_RECEIPT_QUERY, expandReplicaBatch } from "@gonvex/protocol";
 import { ownsCurrentScope } from "./ownership-policy.js";
 import { RowPatchDecoder } from "./row-patch.js";
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
@@ -23,6 +23,7 @@ import { applyReplicaHashDelta, replicaAggregateDigest, replicaHashesDigest, rep
 import type { LocalExecution, LocalSnapshot, LocalTransactionResult } from "@gonvex/local-runtime";
 import type { LocalExecutor, LocalRuntimeBinding } from "@gonvex/local-runtime/worker-client";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
+import { PresenceFeed, type PresenceFeedSnapshot } from "./presence.js";
 export { GonvexErrorReporter } from "./error-reporter.js";
 export type { ErrorReporterOptions, ErrorEventPayload, ErrorContext, ErrorAccount } from "./error-reporter.js";
 import {
@@ -66,6 +67,7 @@ import {
 } from "./local-replica.js";
 import { runOfflineLiveQuery, liveQueryDependencies, liveQueryEquality, liveScopeCoverage, type LiveQueryPlan, type OfflineLiveQueryResult } from "./query-expression.js";
 export * from "./error-reporter.js";
+export { PresenceFeed, type PresenceFeedSnapshot } from "./presence.js";
 export * from "./optimistic.js";
 export * from "./outbox.js";
 export { OutboxRecoveryError } from "./outbox-recovery.js";
@@ -651,6 +653,11 @@ export class GonvexClient {
   private replicaOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
+  private readonly presenceFeed = new PresenceFeed({
+    supported: () => this.serverCapabilities.presence === 1,
+    canSend: () => !!this.activeAuthFrameId && this.socket?.readyState === WebSocket.OPEN,
+    send: (message) => this.sendNow(message),
+  });
   private readonly replicaSnapshotPagesEnabled: boolean;
   private replicaFieldPatchesEnabled: boolean;
   private activeArtifactHashValue = "";
@@ -878,6 +885,10 @@ export class GonvexClient {
         tenant: options.tenant,
         ...options.errorReporting,
         transport: (type, payload) => this.sendNativeError(type, payload),
+        client: {
+          reportError: (type, payload) => this.sendNativeError(type, payload),
+          presenceSupported: () => this.presenceSupported(),
+        },
       });
     }
     this.localSessionRestore = this.restoreLocalSession(initialScope, this.outboxScopeGeneration);
@@ -2016,6 +2027,8 @@ export class GonvexClient {
     }
     const socket = new WebSocket(transportUrl);
     const rowPatches = new RowPatchDecoder();
+    // Delivery v2 stream token -> subscription ids, scoped to this socket.
+    const replicaStreams = new Map<string, string[]>();
     this.socket = socket;
     this.serverCapabilities = {};
     socket.addEventListener("open", () => {
@@ -2038,6 +2051,7 @@ export class GonvexClient {
     socket.addEventListener("close", () => {
       rowPatches.clear();
       if (this.socket !== socket || this.manuallyClosed) return;
+      this.presenceFeed.disconnected();
       this.flushTelemetry();
       this.publishTenantAdmission(undefined);
       this.isWebSocketConnected = false;
@@ -2068,11 +2082,21 @@ export class GonvexClient {
       this.scheduleReconnect();
       this.notifyConnectionState();
     });
-    socket.addEventListener("message", (event) => {
+    // Delivery v2 batches re-enter with already parsed frames (`parsed`).
+    const onMessage = (event: { data?: unknown; parsed?: ServerMessage }) => {
       if (this.socket !== socket) return;
       let message: ServerMessage;
       try {
-        const frame = JSON.parse(String(event.data));
+        const frame = event.parsed ?? JSON.parse(String(event.data));
+        if (frame?.type === "replica.batch") {
+          // One message per tick of shared, stream-addressed items: dispatch
+          // the frames it stands for, in order (see docs/performance/delivery.md).
+          for (const parsed of expandReplicaBatch(frame, replicaStreams)) {
+            if (this.socket !== socket) return;
+            onMessage({ parsed });
+          }
+          return;
+        }
         if (frame?.type === "replica.rowPatch") {
           try {
             if (!this.replicaFieldPatchesEnabled || this.serverCapabilities.replicaFieldPatches !== 1) throw new Error("unnegotiated-replica-row-patch");
@@ -2096,7 +2120,10 @@ export class GonvexClient {
         return;
       }
       if (message.type === "session.ready") {
+        const presenceChanged = (message.capabilities?.presence === 1) !== (this.serverCapabilities.presence === 1);
         this.serverCapabilities = message.capabilities ?? {};
+        // Capability-dependent UI (presence v2) re-reads on connection state.
+        if (presenceChanged) this.notifyConnectionState();
         if (this.controlOnly) {
           this.flushPendingMessages();
           return;
@@ -2216,6 +2243,8 @@ export class GonvexClient {
         if (message.type === "auth.result") this.activeAuthFrameId = message.id;
         else this.activeAuthFrameId = undefined;
         if (message.type === "auth.result") this.flushPendingNativeErrors();
+        if (message.type === "auth.result") this.presenceFeed.authenticated();
+        else this.presenceFeed.disconnected();
         if (this.authWatchdogTimer) {
           clearTimeout(this.authWatchdogTimer);
           this.authWatchdogTimer = undefined;
@@ -2393,6 +2422,7 @@ export class GonvexClient {
         }
         return;
       }
+      if (this.presenceFeed.handle(message)) return;
       if (message.type === "support.command") {
         const result = message.result && typeof message.result === "object" && !Array.isArray(message.result)
           ? message.result as Record<string, JsonValue>
@@ -2426,7 +2456,8 @@ export class GonvexClient {
 			}
       const id = "id" in message ? message.id : "system";
       this.handlers.get(id)?.(message);
-    });
+    };
+    socket.addEventListener("message", onMessage);
   }
 
   close() {
@@ -2537,6 +2568,35 @@ export class GonvexClient {
   onSessionScopeChange(handler: () => void) {
     this.sessionScopeHandlers.add(handler);
     return () => this.sessionScopeHandlers.delete(handler);
+  }
+
+  /**
+   * Presence v2 is available on this connection: the runtime advertised
+   * `capabilities.presence`. Applications then report state with
+   * `setPresence` and stop calling heartbeat Reducers.
+   */
+  presenceSupported(): boolean {
+    return this.serverCapabilities.presence === 1;
+  }
+
+  /**
+   * Reports this connection's own presence. Send on transitions only; the
+   * client re-sends the latest state after every reconnect. `offline` leaves
+   * immediately (e.g. on page hide); closing the socket leaves after grace.
+   */
+  setPresence(state: "active" | "idle" | "offline"): void {
+    this.presenceFeed.set(state);
+  }
+
+  /** Subscribes to the tenant's presence feed while at least one listener exists. */
+  subscribePresence(listener: () => void): () => void {
+    this.connect();
+    return this.presenceFeed.subscribe(listener);
+  }
+
+  /** Current presence view; stable identity until the next change. */
+  presenceSnapshot(): PresenceFeedSnapshot {
+    return this.presenceFeed.snapshot();
   }
 
   onSupportCommand(handler: (command: SupportCommand) => void) {
@@ -5458,7 +5518,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
+		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 },
     });
   }
 

@@ -1,3 +1,4 @@
+#![warn(clippy::redundant_clone)]
 //! Bounded TypeScript/V8 module engine.
 //!
 //! The adapter executes one bundled JavaScript ESM artifact inside pooled
@@ -22,6 +23,7 @@
 //! taken back out afterwards, never in a JavaScript global, so isolate reuse
 //! cannot carry one call's authority into the next.
 
+mod admission;
 mod budget;
 mod dispatch;
 mod isolate;
@@ -30,7 +32,14 @@ mod lookup_deadline_tests;
 mod pool;
 #[cfg(test)]
 mod runtime_contract_tests;
+#[cfg(test)]
+mod scheduling_tests;
+#[cfg(test)]
+mod split_tests;
 mod webcrypto;
+
+/// Per-thread priority (re-exported for gonvex-module-host).
+pub use gonvex_profiler::thread_priority;
 
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use std::collections::HashMap;
@@ -44,7 +53,11 @@ use gonvex_module_runtime::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+pub use crate::admission::Lane;
 use crate::budget::CallBudget;
+pub use crate::isolate::{
+    heap_tally, isolate_stats, live_isolates, trim_native_heap, ISOLATE_STAT_FIELDS,
+};
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
 use crate::pool::IsolatePool;
 use gonvex_module_runtime::effective_capabilities;
@@ -54,7 +67,22 @@ use gonvex_module_runtime::effective_capabilities;
 /// lazy initialization makes later generations created by sibling threads
 /// abort the process instead of loading alongside the active generation.
 pub fn initialize_v8_platform() {
+    // V8 freezes its flags once the platform is initialized, so operator
+    // flags (for example `--max-lazy`, `--no-opt`) are applied first. The
+    // deno_core defaults are applied on top and do not reset them.
+    if let Some(flags) = v8_flags_from_env() {
+        deno_core::v8::V8::set_flags_from_string(&flags);
+    }
     deno_core::JsRuntime::init_platform(None, false);
+}
+
+/// Extra V8 flags from `GONVEX_V8_FLAGS`, space separated. Unset or blank
+/// means V8's defaults.
+pub fn v8_flags_from_env() -> Option<String> {
+    std::env::var("GONVEX_V8_FLAGS")
+        .ok()
+        .map(|flags| flags.trim().to_owned())
+        .filter(|flags| !flags.is_empty())
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +103,35 @@ pub struct V8Config {
     pub recycle_after_calls: usize,
     /// Live isolates, and therefore the ceiling on concurrent module calls.
     pub isolate_pool_size: usize,
+    /// Split artifacts only: how long an idle isolate of the complete bundle
+    /// (which serves Actions) stays alive before it is released. Those
+    /// isolates start on demand, so a quiet module keeps only its small
+    /// Query/Reducer isolates resident.
+    pub on_demand_idle_ttl: Duration,
+    /// Split artifacts only: evaluate the complete bundle once while loading,
+    /// then release that isolate, so a bundle that throws at evaluation still
+    /// fails the load instead of the first Action.
+    pub validate_on_demand_bundle: bool,
+    /// Unsplit artifacts: run Actions in their own isolates of the complete
+    /// bundle, started on demand and released after `on_demand_idle_ttl`,
+    /// like a split artifact's Action isolates. Queries and Reducers keep the
+    /// warm isolates, so an Action that awaits `fetch` never holds the
+    /// isolate user Reducers need. Off: Actions share the warm pools.
+    pub on_demand_actions: bool,
+    /// Serve isolate waiters by lane (user, then outbox/system, then
+    /// scheduled; see `admission`). Off: first come, first served.
+    pub isolate_priority: bool,
+    /// Execution ceiling for scheduled Queries and Reducers (crons and
+    /// one-shot jobs at nesting depth 0), counted from isolate dispatch. A
+    /// scheduled Reducer holds the tenant writer and the module isolate for
+    /// its whole run, so it gets a short slice and an error that says to
+    /// process a bounded batch per run. Zero: only `execution_timeout`.
+    pub scheduled_execution_timeout: Duration,
+    /// Run scheduled Queries and Reducers in their own isolate (started on
+    /// demand, released after `on_demand_idle_ttl`), so a long cron never
+    /// holds the isolate user calls wait for. Costs one more isolate heap
+    /// while scheduled work runs.
+    pub scheduled_isolate: bool,
 }
 
 impl Default for V8Config {
@@ -87,11 +144,47 @@ impl Default for V8Config {
             max_result_bytes: 8 * 1024 * 1024,
             recycle_after_calls: 10_000,
             isolate_pool_size: 1,
+            on_demand_idle_ttl: Duration::from_secs(60),
+            validate_on_demand_bundle: true,
+            on_demand_actions: true,
+            isolate_priority: true,
+            scheduled_execution_timeout: Duration::from_secs(3),
+            scheduled_isolate: false,
         }
     }
 }
 
 impl V8Config {
+    /// Applies the scheduling knobs shared by the in-process and the separate
+    /// module host: `GONVEX_MODULE_HOST_ISOLATE_PRIORITY` (default on),
+    /// `GONVEX_MODULE_HOST_SCHEDULED_SLICE_MS` (default 3000, 0 = off) and
+    /// `GONVEX_MODULE_HOST_SCHEDULED_ISOLATE` (default off).
+    pub fn with_scheduling_env(self) -> Self {
+        self.with_scheduling(|name| std::env::var(name).ok())
+    }
+
+    pub fn with_scheduling(mut self, lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let flag = |name: &str, default: bool| {
+            lookup(name)
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .map_or(default, |value| {
+                    !matches!(value.as_str(), "0" | "false" | "off" | "no")
+                })
+        };
+        self.isolate_priority = flag("GONVEX_MODULE_HOST_ISOLATE_PRIORITY", self.isolate_priority);
+        self.scheduled_isolate = flag(
+            "GONVEX_MODULE_HOST_SCHEDULED_ISOLATE",
+            self.scheduled_isolate,
+        );
+        if let Some(ms) = lookup("GONVEX_MODULE_HOST_SCHEDULED_SLICE_MS")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+        {
+            self.scheduled_execution_timeout = Duration::from_millis(ms);
+        }
+        self
+    }
+
     pub fn timeout_for(&self, kind: &gonvex_module_runtime::FunctionKind) -> Duration {
         if matches!(kind, gonvex_module_runtime::FunctionKind::Action) {
             self.action_execution_timeout
@@ -106,15 +199,51 @@ pub struct V8ModuleEngine {
     inner: Arc<EngineInner>,
 }
 
+/// The Query/Reducer-only bundle of a split artifact.
+#[derive(Clone, Debug)]
+pub struct ReducerBundle {
+    pub code: Vec<u8>,
+    /// Function paths this bundle serves; each must be a Query or Reducer of
+    /// the artifact. Every other function runs from the complete bundle.
+    pub functions: Vec<String>,
+}
+
 struct EngineInner {
     manifest: ModuleManifest,
     functions: HashMap<String, FunctionContract>,
     config: V8Config,
+    /// Complete bundle, one pool per nesting depth. In a split engine these
+    /// isolates start on demand and are released after `on_demand_idle_ttl`.
+    pools: Vec<IsolatePool>,
+    reducer: Option<ReducerPools>,
+    /// Unsplit engines with `on_demand_actions`: complete-bundle pools for
+    /// Actions (one per nesting depth), started on demand and released when
+    /// idle. Empty otherwise.
+    actions: Vec<IsolatePool>,
+    /// With `scheduled_isolate`: one pool for scheduled Queries and Reducers
+    /// at depth 0, from the same bundle as the warm pools, started on demand.
+    scheduled: Option<IsolatePool>,
+}
+
+struct ReducerPools {
+    functions: std::collections::HashSet<String>,
     pools: Vec<IsolatePool>,
 }
 
 impl V8ModuleEngine {
     pub fn from_artifact(artifact: ModuleArtifact, config: V8Config) -> Result<Self, ModuleError> {
+        Self::from_split_artifact(artifact, None, config)
+    }
+
+    /// Like `from_artifact`, plus an optional Query/Reducer-only bundle. The
+    /// functions it lists run from it, resolved by exact export path; all
+    /// other functions, Actions included, run from the complete bundle, whose
+    /// isolates are then started on demand and released when idle.
+    pub fn from_split_artifact(
+        artifact: ModuleArtifact,
+        reducer: Option<ReducerBundle>,
+        config: V8Config,
+    ) -> Result<Self, ModuleError> {
         if !matches!(artifact.manifest.language, ModuleLanguage::TypeScript) {
             return Err(ModuleError::InvalidArtifact(
                 "V8 adapter requires a TypeScript artifact".to_owned(),
@@ -170,17 +299,92 @@ impl V8ModuleEngine {
         // A call awaiting a host-mediated nested function must keep its V8
         // continuation alive. Separate depth pools prevent the nested call
         // from waiting on the isolate held by its parent.
-        let pools = (0..=gonvex_module_runtime::MAX_INVOCATION_DEPTH)
+        let pools: Vec<IsolatePool> = (0..=gonvex_module_runtime::MAX_INVOCATION_DEPTH)
             .map(|_| IsolatePool::new(Arc::clone(&source), config.clone()))
             .collect();
-        Ok(Self {
-            inner: Arc::new(EngineInner {
-                manifest: artifact.manifest,
-                functions,
-                config,
-                pools,
-            }),
-        })
+        let reducer = match reducer {
+            None => None,
+            Some(bundle) => {
+                if bundle.code.is_empty() {
+                    return Err(ModuleError::InvalidArtifact(
+                        "empty JavaScript reducer bundle".to_owned(),
+                    ));
+                }
+                let code = String::from_utf8(bundle.code).map_err(|_| {
+                    ModuleError::InvalidArtifact(
+                        "JavaScript reducer bundle is not valid UTF-8".to_owned(),
+                    )
+                })?;
+                let mut served = std::collections::HashSet::with_capacity(bundle.functions.len());
+                for path in bundle.functions {
+                    match functions.get(&path).map(|contract| &contract.kind) {
+                        Some(gonvex_module_runtime::FunctionKind::Query)
+                        | Some(gonvex_module_runtime::FunctionKind::Reducer) => {
+                            served.insert(path);
+                        }
+                        Some(_) => {
+                            return Err(ModuleError::InvalidArtifact(format!(
+                                "reducer bundle lists {path}, which is not a Query or Reducer"
+                            )))
+                        }
+                        None => {
+                            return Err(ModuleError::InvalidArtifact(format!(
+                                "reducer bundle lists unknown function {path}"
+                            )))
+                        }
+                    }
+                }
+                let source = Arc::new(ModuleSource::reducer_bundle(
+                    &artifact.manifest.module_id,
+                    code,
+                )?);
+                Some(ReducerPools {
+                    functions: served,
+                    pools: (0..=gonvex_module_runtime::MAX_INVOCATION_DEPTH)
+                        .map(|_| IsolatePool::new(Arc::clone(&source), config.clone()))
+                        .collect(),
+                })
+            }
+        };
+        let actions = if reducer.is_none() && config.on_demand_actions {
+            (0..=gonvex_module_runtime::MAX_INVOCATION_DEPTH)
+                .map(|_| IsolatePool::new(Arc::clone(&source), config.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let scheduled = config.scheduled_isolate.then(|| {
+            let warm = match &reducer {
+                Some(reducer) => &reducer.pools[0],
+                None => &pools[0],
+            };
+            // One isolate: scheduled runs are one per tenant and few at once.
+            IsolatePool::new(
+                warm.source(),
+                V8Config {
+                    isolate_pool_size: 1,
+                    ..config.clone()
+                },
+            )
+        });
+        let inner = Arc::new(EngineInner {
+            manifest: artifact.manifest,
+            functions,
+            config,
+            pools,
+            reducer,
+            actions,
+            scheduled,
+        });
+        if inner.has_on_demand_pools() {
+            spawn_on_demand_reaper(Arc::downgrade(&inner));
+        }
+        Ok(Self { inner })
+    }
+
+    /// Whether this engine runs a split artifact.
+    pub fn is_split(&self) -> bool {
+        self.inner.reducer.is_some()
     }
 
     pub fn config(&self) -> &V8Config {
@@ -191,15 +395,50 @@ impl V8ModuleEngine {
     /// broken artifact fails at load time rather than on a user's first call
     /// and an activated generation is warm before it serves traffic. Leases are
     /// held together, so this warms the pool rather than one reused isolate.
+    ///
+    /// A split engine warms its Query/Reducer pool instead, and evaluates the
+    /// complete bundle once (unless `validate_on_demand_bundle` is off) before
+    /// releasing that isolate again.
     pub async fn prewarm(&self) -> Result<(), ModuleError> {
+        let warm = match &self.inner.reducer {
+            Some(reducer) => &reducer.pools[0],
+            None => &self.inner.pools[0],
+        };
         let mut leases = Vec::with_capacity(self.inner.config.isolate_pool_size.max(1));
         for _ in 0..self.inner.config.isolate_pool_size.max(1) {
-            leases.push(self.inner.pools[0].acquire().await?);
+            leases.push(warm.acquire().await?);
         }
         for lease in leases {
             lease.release_unused();
         }
+        if self.inner.reducer.is_some() && self.inner.config.validate_on_demand_bundle {
+            self.inner.pools[0].acquire().await?.retire_unused();
+        }
         Ok(())
+    }
+
+    /// Releases idle isolates of the on-demand (complete bundle) pools that
+    /// have been idle for at least `ttl`. Returns how many were released.
+    pub fn release_idle_on_demand(&self, ttl: Duration) -> usize {
+        self.inner.release_idle_on_demand(ttl)
+    }
+
+    /// Idle isolates per pool family, `(warm, on demand)`, for diagnostics.
+    pub fn idle_isolates(&self) -> (usize, usize) {
+        let warm = match &self.inner.reducer {
+            Some(reducer) => &reducer.pools,
+            None => &self.inner.pools,
+        };
+        let scheduled = self.inner.scheduled.as_ref().map_or(0, IsolatePool::idle);
+        let on_demand = match (&self.inner.reducer, self.inner.actions.is_empty()) {
+            (Some(_), _) => &self.inner.pools,
+            (None, false) => &self.inner.actions,
+            (None, true) => return (warm.iter().map(IsolatePool::idle).sum(), scheduled),
+        };
+        (
+            warm.iter().map(IsolatePool::idle).sum(),
+            on_demand.iter().map(IsolatePool::idle).sum::<usize>() + scheduled,
+        )
     }
 }
 
@@ -217,7 +456,90 @@ impl ModuleEngine for V8ModuleEngine {
     }
 }
 
+/// One thread per split engine; it ends once the engine is dropped.
+fn spawn_on_demand_reaper(engine: std::sync::Weak<EngineInner>) {
+    let _ = std::thread::Builder::new()
+        .name("gonvex-module-reaper".to_owned())
+        .spawn(move || loop {
+            let ttl = match engine.upgrade() {
+                Some(engine) => engine.config.on_demand_idle_ttl,
+                None => return,
+            };
+            std::thread::sleep((ttl / 4).clamp(Duration::from_millis(50), Duration::from_secs(5)));
+            match engine.upgrade() {
+                Some(engine) => {
+                    engine.release_idle_on_demand(ttl);
+                }
+                None => return,
+            }
+        });
+}
+
 impl EngineInner {
+    fn has_on_demand_pools(&self) -> bool {
+        self.reducer.is_some() || !self.actions.is_empty() || self.scheduled.is_some()
+    }
+
+    fn release_idle_on_demand(&self, ttl: Duration) -> usize {
+        let on_demand = if self.reducer.is_some() {
+            &self.pools
+        } else {
+            &self.actions
+        };
+        on_demand
+            .iter()
+            .map(|pool| pool.evict_idle(ttl))
+            .sum::<usize>()
+            + self
+                .scheduled
+                .as_ref()
+                .map_or(0, |pool| pool.evict_idle(ttl))
+    }
+
+    /// The pool family and slot for one call.
+    ///
+    /// Only Actions start nested calls (tools, `ctx.functions`), and a nested
+    /// call must not wait for an isolate its own ancestors hold, so a family
+    /// that serves Actions is indexed by nesting depth. A Query or Reducer in
+    /// a family that never serves Actions has no ancestor there, so it always
+    /// uses slot 0: an Action's tool Reducers share the warm isolate with
+    /// user calls instead of starting one more warm isolate per depth.
+    fn pool_for(
+        &self,
+        function: &str,
+        kind: &gonvex_module_runtime::FunctionKind,
+        depth: u8,
+        lane: Lane,
+    ) -> Option<&IsolatePool> {
+        let data = matches!(
+            kind,
+            gonvex_module_runtime::FunctionKind::Query
+                | gonvex_module_runtime::FunctionKind::Reducer
+        );
+        // Scheduled data calls at the root take the scheduled isolate when
+        // the warm pools would serve them.
+        if let Some(scheduled) = &self.scheduled {
+            let warm = match &self.reducer {
+                Some(reducer) => reducer.functions.contains(function),
+                None => true,
+            };
+            if data && depth == 0 && lane == Lane::Scheduled && warm {
+                return Some(scheduled);
+            }
+        }
+        let (pools, slot) = match &self.reducer {
+            Some(reducer) if data && reducer.functions.contains(function) => (&reducer.pools, 0),
+            Some(_) => (&self.pools, depth),
+            None if self.actions.is_empty() => (&self.pools, depth),
+            None if data => (&self.pools, 0),
+            None => (&self.actions, depth),
+        };
+        if depth > gonvex_module_runtime::MAX_INVOCATION_DEPTH {
+            return None;
+        }
+        pools.get(usize::from(slot))
+    }
+
     async fn execute(
         &self,
         host: &dyn ModuleHost,
@@ -241,7 +563,9 @@ impl EngineInner {
             &arguments,
         )
         .map_err(ModuleError::InvalidArguments)?;
-        let budget = self.call_budget(&invocation.context, &contract)?;
+        let lane = Lane::of(&invocation.context);
+        let slice = self.scheduled_slice(&invocation.context, &contract, lane);
+        let budget = self.call_budget(&invocation.context, &contract, slice)?;
         let capabilities = effective_capabilities(&contract.kind, &invocation.context.capabilities);
         let context = invocation.context.clone();
         // A host-stamped `now` keeps every engine reporting the same clock for
@@ -256,23 +580,28 @@ impl EngineInner {
         };
 
         let pool = self
-            .pools
-            .get(usize::from(invocation.context.nesting_depth))
+            .pool_for(
+                &invocation.function,
+                &contract.kind,
+                invocation.context.nesting_depth,
+                lane,
+            )
             .ok_or_else(|| {
                 ModuleError::Execution(
                     "nested function invocation exceeded the maximum depth".to_owned(),
                 )
             })?;
         let lease = match budget.invocation_remaining()? {
-            Some(remaining) => tokio::time::timeout(remaining, pool.acquire())
+            Some(remaining) => tokio::time::timeout(remaining, pool.acquire_in(lane))
                 .await
                 .map_err(|_| {
                     ModuleError::BudgetExceeded(
                         "invocation deadline elapsed while waiting for a module isolate".to_owned(),
                     )
                 })??,
-            None => pool.acquire().await?,
+            None => pool.acquire_in(lane).await?,
         };
+        host.isolate_acquired();
         let timeout = match budget.execution_timeout() {
             Ok(timeout) => timeout,
             Err(error) => {
@@ -293,6 +622,7 @@ impl EngineInner {
                 timeout,
                 max_result_bytes: self.config.max_result_bytes,
                 host: host_sender,
+                inline: host.inline(),
             },
             reply,
         })?;
@@ -347,10 +677,21 @@ impl EngineInner {
         drop(serial);
         drop(network);
         drop(host_calls);
+        let sliced = slice.is_some() && timeout == slice;
         let result = match reply {
             Ok(reply) => {
                 lease.finish(reply.healthy);
-                reply.result
+                match reply.result {
+                    Err(ModuleError::BudgetExceeded(message))
+                        if sliced && message.contains("execution deadline") =>
+                    {
+                        Err(ModuleError::BudgetExceeded(scheduled_slice_message(
+                            &contract,
+                            slice.unwrap_or_default(),
+                        )))
+                    }
+                    other => other,
+                }
             }
             // Dropping the lease retires the isolate rather than pooling one
             // that stopped without answering.
@@ -373,10 +714,28 @@ impl EngineInner {
 
     /// The call deadline is the configured ceiling, shortened by whatever the
     /// invocation's own deadline leaves.
+    /// The time slice of a scheduled Query or Reducer at the root, if any.
+    fn scheduled_slice(
+        &self,
+        context: &InvocationContext,
+        contract: &FunctionContract,
+        lane: Lane,
+    ) -> Option<Duration> {
+        let data = matches!(
+            contract.kind,
+            gonvex_module_runtime::FunctionKind::Query
+                | gonvex_module_runtime::FunctionKind::Reducer
+        );
+        let slice = self.config.scheduled_execution_timeout;
+        (data && lane == Lane::Scheduled && context.nesting_depth == 0 && !slice.is_zero())
+            .then_some(slice)
+    }
+
     fn call_budget(
         &self,
         context: &InvocationContext,
         contract: &FunctionContract,
+        slice: Option<Duration>,
     ) -> Result<CallBudget, ModuleError> {
         let agent = matches!(contract.kind, gonvex_module_runtime::FunctionKind::Action)
             && contract
@@ -384,9 +743,28 @@ impl EngineInner {
                 .get("actionProfile")
                 .and_then(serde_json::Value::as_str)
                 == Some("agent");
-        let ceiling = (!agent).then(|| self.config.timeout_for(&contract.kind));
+        let ceiling = (!agent).then(|| {
+            let ceiling = self.config.timeout_for(&contract.kind);
+            slice.map_or(ceiling, |slice| slice.min(ceiling))
+        });
         CallBudget::capture(context.deadline, ceiling)
     }
+}
+
+/// The error a scheduled Query or Reducer gets when it outruns its slice.
+fn scheduled_slice_message(contract: &FunctionContract, slice: Duration) -> String {
+    format!(
+        "scheduled {} {} exceeded its {} ms time slice for scheduled work \
+         (GONVEX_MODULE_HOST_SCHEDULED_SLICE_MS). A scheduled run holds the tenant \
+         writer and the module isolate while it runs: process a bounded batch per \
+         run and schedule the rest with ctx.scheduler.runAfter",
+        match contract.kind {
+            gonvex_module_runtime::FunctionKind::Query => "query",
+            _ => "reducer",
+        },
+        contract.path,
+        slice.as_millis()
+    )
 }
 
 #[cfg(test)]

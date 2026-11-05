@@ -30,7 +30,7 @@ test("runtime image contains no application compiler or Go plugin state", () => 
   assert.match(build, /-p gonvex-admin/);
   assert.match(build, /-p gonvex-runtime/);
   assert.match(runtime, /^FROM debian:bookworm-slim/m);
-  assert.match(runtime, /GONVEX_DATA_DIR=\/var\/lib\/gonvex\/data/);
+  assert.match(runtime, /GONVEX_DATA_DIR=\/data/);
   assert.doesNotMatch(runtime, /GOCACHE|GOMODCACHE|GOPATH|GONVEX_PLUGIN_CACHE_DIR|GONVEX_MODULE_ROOT/);
   assert.doesNotMatch(dockerfile, /^FROM golang:/m);
   assert.doesNotMatch(dockerfile, /buildmode=plugin|plugin\.Open|project bundle|synced project bundles/i);
@@ -79,9 +79,11 @@ test("local runtime development starts the Rust server and selects its workers",
   assert.doesNotMatch(command, /\bair\b|\bgo run\b/);
 });
 
-test("compose deployments use the canonical Control Plane configuration", () => {
+test("compose deployments keep every database in the SQLite data directory", () => {
   for (const [name, compose] of [["local", localCompose], ["production", productionCompose]]) {
-    assert.match(compose, /GONVEX_CONTROL_PLANE_DATABASE_URL:/, `${name} compose must configure the Control Plane`);
+    assert.match(compose, /GONVEX_DATA_DIR: \/data\n/, `${name} compose must place SQLite databases in /data`);
+    assert.match(compose, /- [a-z-]*sqlite-data:\/data\n/, `${name} compose must persist /data`);
+    assert.doesNotMatch(compose, /DATABASE_URL|postgres/i, `${name} compose must not configure a database server`);
     assert.doesNotMatch(compose, /GONVEX_LANDLORD_DATABASE_URL:/, `${name} compose must not configure the legacy landlord alias`);
     assert.doesNotMatch(compose, /GOCACHE|GOMODCACHE|GONVEX_PLUGIN_CACHE_DIR/, `${name} compose must not configure removed Go application caches`);
     assert.match(compose, /GONVEX_SANDBOX_ENABLED: \$\{GONVEX_SANDBOX_ENABLED:-false\}/, `${name} sandbox must be opt-in`);

@@ -1,38 +1,74 @@
-//! Native receipt/commit composition, using an owned PostgreSQL fixture and host.
+//! Native receipt/commit composition on owned SQLite files and a real module host.
+//!
+//! SQLite gives every database file one writer connection (writes serialize in
+//! process) and a read-only pool whose transactions see one WAL snapshot. The
+//! races that PostgreSQL witnessed with advisory locks and `pg_blocking_pids`
+//! are orchestrated here with the mechanisms that now provide the guarantee:
+//! the runtime's keyed in-process locks, the single writer connection (a
+//! fixture holds it in a real tenant transaction so reducers queue behind it)
+//! and query admission.
 use super::*;
 use base64::Engine as _;
-use gonvex_postgres::{MigrationScope, RuntimeManifestRecord, SqlMigration, TenantRoute};
+use gonvex_store::{MigrationScope, RuntimeManifestRecord, SqlMigration, TenantRoute};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::SqlitePool;
 use sqlx::Row as _;
+use std::path::PathBuf;
+
+const SCHEMA_LOCK: &str = "gonvex:reducer-receipt-schema";
 
 struct Fixture {
     runtime: Runtime,
     control: ControlPlane,
     session: TenantSession,
-    pool: sqlx::PgPool,
-    admin: sqlx::PgPool,
-    schema: String,
+    /// The runtime's single tenant writer connection.
+    pool: SqlitePool,
+    /// The runtime's read-only tenant pool (committed WAL snapshots only).
+    reader: SqlitePool,
+    /// The Control Plane writer.
+    control_pool: SqlitePool,
+    root: PathBuf,
+    _data: Option<tempfile::TempDir>,
 }
 
+/// The runtime writer is checked out by some transaction (its only connection).
+fn writer_owned(pool: &SqlitePool) -> bool {
+    pool.size() == 1 && pool.num_idle() == 0
+}
+
+/// Competing SDK claims of one logical intent, serialized by the runtime's
+/// own single tenant writer (the only writer in production). The gate holds
+/// that writer in a real tenant write transaction while both SDK reducers are
+/// admitted and queue behind it; reads keep working and see none of the
+/// intent meanwhile. `commit`: the gate releases without effect, one claimant
+/// executes and the other replays its receipt. `rollback`: the gate is a first
+/// owner that claimed the same receipt and wrote the business row, then rolls
+/// back; a claimant must take over (execute, not replay a phantom receipt).
 #[derive(Default)]
 struct SDKConcurrencyGate {
     index: usize,
-    connection: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
-    controller_pid: i32,
-    overlap: Option<serde_json::Value>,
+    gate: Option<gonvex_store::TenantTransaction>,
+    stable: usize,
     witnesses: Vec<serde_json::Value>,
+}
+
+/// Transactions queued for this tenant database's single writer.
+fn queued_writers(fixture: &Fixture) -> u32 {
+    let path = gonvex_store::database_path(&fixture.session.route.database_url);
+    fixture
+        .runtime
+        .inner
+        .pools
+        .writer_queues(usize::MAX)
+        .into_iter()
+        .find(|queue| std::path::Path::new(&queue.database) == path)
+        .map_or(0, |queue| queue.waiting)
 }
 
 impl SDKConcurrencyGate {
     async fn release(&mut self) {
-        if let Some(mut connection) = self.connection.take() {
-            assert!(
-                sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock(39071030)")
-                    .fetch_one(&mut *connection)
-                    .await
-                    .unwrap()
-            );
+        if let Some(gate) = self.gate.take() {
+            gate.rollback().await.unwrap();
         }
     }
 
@@ -42,7 +78,7 @@ impl SDKConcurrencyGate {
         }
         let mode = ["commit", "rollback"][self.index];
         let directory = root.join("concurrency").join(mode);
-        if self.connection.is_none() {
+        if self.gate.is_none() {
             let request = directory.join("request.json");
             if !tokio::fs::try_exists(&request).await.unwrap() {
                 return;
@@ -51,17 +87,26 @@ impl SDKConcurrencyGate {
                 serde_json::from_slice(&tokio::fs::read(request).await.unwrap()).unwrap();
             assert_eq!(request["mode"], mode);
             assert_eq!(request["rowId"], format!("sdk-concurrent-{mode}"));
-            assert!(!request["key"].as_str().unwrap().is_empty());
-            let mut connection = fixture.pool.acquire().await.unwrap();
-            self.controller_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&mut *connection)
-                .await
-                .unwrap();
-            sqlx::query("SELECT pg_advisory_lock(39071030)")
-                .execute(&mut *connection)
-                .await
-                .unwrap();
-            self.connection = Some(connection);
+            let key = request["key"].as_str().unwrap();
+            assert!(!key.is_empty());
+            // The runtime's own writer: the same single connection reducers use.
+            let mut gate = gonvex_store::begin_transaction(
+                &fixture.runtime.inner.pools,
+                &fixture.session.route.database_url,
+                false,
+            )
+            .await
+            .unwrap();
+            if mode == "rollback" {
+                assert!(gate.claim_reducer("account", key, "write").await.unwrap());
+                sqlx::query("INSERT INTO receipt_records(id, value) VALUES ($1, 7)")
+                    .bind(request["rowId"].as_str().unwrap())
+                    .execute(&mut **gate.transaction())
+                    .await
+                    .unwrap();
+            }
+            self.gate = Some(gate);
+            self.stable = 0;
             tokio::fs::write(directory.join("prepared.tmp"), b"{\"ready\":true}")
                 .await
                 .unwrap();
@@ -73,54 +118,52 @@ impl SDKConcurrencyGate {
             .unwrap();
             return;
         }
-        if self.overlap.is_none() {
-            // Require the second runtime transaction to be inside the unique
-            // receipt INSERT and blocked by the first business-write owner.
-            let row = sqlx::query("SELECT a.pid AS first_pid,b.pid AS second_pid,pg_blocking_pids(a.pid) AS first_blockers,pg_blocking_pids(b.pid) AS second_blockers FROM pg_stat_activity a CROSS JOIN pg_stat_activity b WHERE $1=ANY(pg_blocking_pids(a.pid)) AND a.pid=ANY(pg_blocking_pids(b.pid)) AND a.pid<>b.pid AND a.query LIKE '%receipt_records%' AND b.query LIKE '%INSERT INTO _gonvex_reducer_idempotency%' LIMIT 1")
-                .bind(self.controller_pid).fetch_optional(&fixture.pool).await.unwrap();
-            let Some(row) = row else {
-                let waiting = sqlx::query("SELECT pid,query,state,pg_blocking_pids(pid) AS blockers FROM pg_stat_activity WHERE datname=current_database() AND cardinality(pg_blocking_pids(pid))>0")
-                    .fetch_all(&fixture.pool).await.unwrap();
-                let graph: Vec<_> = waiting.into_iter().map(|row| serde_json::json!({"pid":row.get::<i32,_>("pid"),"query":row.get::<String,_>("query"),"state":row.get::<String,_>("state"),"blockers":row.get::<Vec<i32>,_>("blockers")})).collect();
-                tokio::fs::write(
-                    directory.join("wait-graph.json"),
-                    serde_json::to_vec_pretty(&graph).unwrap(),
-                )
-                .await
-                .unwrap();
-                return;
-            };
-            let first: i32 = row.get("first_pid");
-            let second: i32 = row.get("second_pid");
-            self.overlap = Some(
-                serde_json::json!({"overlap":true,"mode":mode,"controllerPid":self.controller_pid,
-                "firstPid":first,"secondPid":second,"firstBlockers":row.get::<Vec<i32>,_>("first_blockers"),
-                "secondBlockers":row.get::<Vec<i32>,_>("second_blockers")}),
-            );
-            if mode == "rollback" {
-                assert!(
-                    sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
-                        .bind(first)
-                        .fetch_one(&fixture.pool)
-                        .await
-                        .unwrap()
-                );
-                return;
-            }
+        let row_id = format!("sdk-concurrent-{mode}");
+        let queued = queued_writers(fixture);
+        let owned = writer_owned(&fixture.pool);
+        // Reads proceed while the writer is held, and see nothing uncommitted:
+        // a second writer that let a claimant commit would show here.
+        let visible = tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query("SELECT count(*) FROM receipt_records WHERE id=$1")
+                .bind(&row_id)
+                .fetch_one(&fixture.reader),
+        )
+        .await;
+        let read = visible.is_ok();
+        let rows = visible
+            .ok()
+            .map(|row| row.unwrap().get::<i64, _>(0))
+            .unwrap_or(-1);
+        assert_eq!(
+            rows.max(0),
+            0,
+            "a claimant committed while the single writer was held"
+        );
+        if owned && queued >= 2 && read {
+            self.stable += 1;
+        } else {
+            self.stable = 0;
+            tokio::fs::write(
+                directory.join("wait-graph.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "writerOwned": owned, "queuedWriters": queued, "readDuringWrite": read,
+                    "admissionActive": fixture.runtime.inner.pools.snapshot().await.admission_active,
+                    "writerQueues": fixture.runtime.inner.pools.writer_queues(8)}))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
         }
-        let mut witness = self.overlap.as_ref().unwrap().clone();
+        // Sustained (three polls 50 ms apart), not one sample.
+        if self.stable < 3 {
+            return;
+        }
+        let mut witness = serde_json::json!({"overlap": true, "mode": mode,
+            "gate": "runtime-writer", "writerOwned": owned, "queuedWriters": queued,
+            "readDuringWrite": read, "rowsWhileHeld": rows});
         if mode == "rollback" {
-            let second = witness["secondPid"].as_i64().unwrap() as i32;
-            let takeover: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
-                .bind(self.controller_pid)
-                .bind(second)
-                .fetch_one(&fixture.pool)
-                .await
-                .unwrap();
-            if !takeover {
-                return;
-            }
-            witness["takeover"] = serde_json::json!(true);
+            witness["ownerRolledBack"] = serde_json::json!(true);
         }
         if std::env::var_os("GONVEX_SDK_CONCURRENCY_DAMAGE").is_some() {
             witness["overlap"] = serde_json::json!(false);
@@ -139,38 +182,38 @@ impl SDKConcurrencyGate {
         .await
         .unwrap();
         self.witnesses.push(witness);
-        self.overlap = None;
+        self.stable = 0;
         self.index += 1;
     }
 }
 
 impl Fixture {
     async fn new() -> Option<Self> {
-        Self::create(false).await
+        Self::build(false, None).await
     }
 
     async fn create(sdk: bool) -> Option<Self> {
+        Self::build(sdk, None).await
+    }
+
+    /// `root` reuses one exact data directory (process-crash recovery);
+    /// otherwise each fixture owns a fresh directory.
+    async fn build(sdk: bool, root: Option<PathBuf>) -> Option<Self> {
         let required = std::env::var_os("GONVEX_RECEIPT_TEST_REQUIRE_NATIVE").is_some();
-        let Some(base) = std::env::var("GONVEX_TEST_POSTGRES_URL").ok() else {
-            assert!(!required, "native receipt test requires PostgreSQL");
-            return None;
-        };
         let Some(binary) = std::env::var("GONVEX_TEST_MODULE_HOST_BINARY").ok() else {
             assert!(!required, "native receipt test requires the module host");
             return None;
         };
-        let schema = format!("receipt_guarantee_{}", uuid::Uuid::new_v4().simple());
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&base)
-            .await
-            .unwrap();
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if base.contains('?') { '&' } else { '?' };
-        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let (data, root) = match root {
+            Some(root) => (None, root),
+            None => {
+                let data = test_data_dir();
+                let root = data.path().to_path_buf();
+                (Some(data), root)
+            }
+        };
+        let control_url = gonvex_store::database_url(&root.join("control.db"));
+        let url = gonvex_store::database_url(&root.join("tenant.db"));
         let mut cfg = config(true);
         cfg.module_host.binary = Some(binary.into());
         cfg.module_host.endpoint = Some(format!(
@@ -178,22 +221,26 @@ impl Fixture {
             std::env::temp_dir().display(),
             uuid::Uuid::new_v4().simple()
         ));
-        cfg.module_host.isolate_pool_size = 1;
+        // The SDK composition runs two competing reducers at once (both must
+        // reach the writer queue); other fixtures keep one isolate.
+        cfg.module_host.isolate_pool_size = if sdk { 2 } else { 1 };
         cfg.module_host.max_concurrent_calls = 2;
         cfg.module_host.start_timeout = Duration::from_secs(5);
         let runtime = Runtime::new(cfg);
-        let control = ControlPlane::connect(&url, runtime.inner.pools.clone(), BTreeMap::new())
-            .await
-            .unwrap();
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE receipt_records(id text PRIMARY KEY, value integer NOT NULL)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        let control =
+            ControlPlane::connect(&control_url, runtime.inner.pools.clone(), BTreeMap::new())
+                .await
+                .unwrap();
+        let pool = runtime.inner.pools.pool(&url).await.unwrap();
+        let reader = runtime.inner.pools.reader(&url).await.unwrap();
+        let control_pool = runtime.inner.pools.pool(&control_url).await.unwrap();
+        // Created before provisioning so the change-feed capture triggers exist.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS receipt_records(id TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let route = TenantRoute {
             project_id: "project".into(),
             tenant_id: "tenant".into(),
@@ -258,8 +305,10 @@ export function all() { throw new Error("replica collections must use the server
             control,
             session,
             pool,
-            admin,
-            schema,
+            reader,
+            control_pool,
+            root,
+            _data: data,
         })
     }
 
@@ -282,21 +331,72 @@ export function all() { throw new Error("replica collections must use the server
             .unwrap()
     }
 
+    /// Tenant writes go through a `TenantTransaction`, like every runtime
+    /// write, so the change feed revisions them in the same commit.
+    async fn tenant_exec_on(&self, route: &TenantRoute, sql: &str) {
+        let mut transaction = self
+            .control
+            .begin_tenant_transaction(route, false)
+            .await
+            .unwrap();
+        gonvex_store::execute_script(transaction.transaction(), sql)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+    }
+
+    async fn tenant_exec(&self, sql: &str) {
+        self.tenant_exec_on(&self.session.route, sql).await;
+    }
+
+    /// Schema changes made by an operator, outside any runtime transaction.
+    async fn ddl(&self, sql: &str) {
+        let mut connection = self.pool.acquire().await.unwrap();
+        gonvex_store::execute_script(&mut connection, sql)
+            .await
+            .unwrap();
+    }
+
+    /// Committed state as any other connection sees it.
+    async fn count(&self, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(&self.reader)
+            .await
+            .unwrap()
+    }
+
+    async fn table_exists(&self, name: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$1)",
+        )
+        .bind(name)
+        .fetch_one(&self.reader)
+        .await
+        .unwrap()
+    }
+
+    async fn integrity(&self) -> String {
+        sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&self.reader)
+            .await
+            .unwrap()
+    }
+
     async fn enable_sdk_session(&self) {
+        let expires = gonvex_store::unix_millis() + 3_600_000;
         sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,environment,database_mode,status,auth_mode) VALUES ('project','Receipt fixture','test','multiTenant','active','firebase')")
-            .execute(&self.pool).await.unwrap();
+            .execute(&self.control_pool).await.unwrap();
         sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,status,database_url) VALUES ('tenant','project','tenant','Receipt fixture','active',$1)")
-            .bind(&self.session.route.database_url).execute(&self.pool).await.unwrap();
+            .bind(&self.session.route.database_url).execute(&self.control_pool).await.unwrap();
         sqlx::query("INSERT INTO accounts(id,auth_realm_id,email,name) VALUES ('account','project','receipt@example.test','Receipt fixture')")
-            .execute(&self.pool).await.unwrap();
-        sqlx::query("INSERT INTO gonvex_auth_sessions(token_hash,project_id,account_id,expires_at) VALUES ($1,'project','account',now()+interval '1 hour')")
-            .bind(gonvex_postgres::token_hash("gvx_session_receipt_sdk_fixture")).execute(&self.pool).await.unwrap();
-        sqlx::query("INSERT INTO members(id,account_id,status,role,permissions) VALUES ('member','account','active','manager','{}')")
-            .execute(&self.pool).await.unwrap();
-        sqlx::query("INSERT INTO accounts(id,auth_realm_id,email,name) VALUES ('bob','project','bob@example.test','Bob fixture')").execute(&self.pool).await.unwrap();
-        sqlx::query("INSERT INTO gonvex_auth_sessions(token_hash,project_id,account_id,expires_at) VALUES ($1,'project','bob',now()+interval '1 hour')")
-            .bind(gonvex_postgres::token_hash("gvx_session_receipt_sdk_bob")).execute(&self.pool).await.unwrap();
-        sqlx::query("INSERT INTO members(id,account_id,status,role,permissions) VALUES ('bob-member','bob','active','manager','{}')").execute(&self.pool).await.unwrap();
+            .execute(&self.control_pool).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_auth_sessions(token_hash,project_id,account_id,expires_at) VALUES ($1,'project','account',$2)")
+            .bind(gonvex_store::token_hash("gvx_session_receipt_sdk_fixture")).bind(expires).execute(&self.control_pool).await.unwrap();
+        sqlx::query("INSERT INTO accounts(id,auth_realm_id,email,name) VALUES ('bob','project','bob@example.test','Bob fixture')")
+            .execute(&self.control_pool).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_auth_sessions(token_hash,project_id,account_id,expires_at) VALUES ($1,'project','bob',$2)")
+            .bind(gonvex_store::token_hash("gvx_session_receipt_sdk_bob")).bind(expires).execute(&self.control_pool).await.unwrap();
+        self.tenant_exec("INSERT INTO members(id,account_id,status,role,permissions) VALUES ('member','account','active','manager','{}'); INSERT INTO members(id,account_id,status,role,permissions) VALUES ('bob-member','bob','active','manager','{}')").await;
         let admitted = self
             .control
             .authenticate_session(
@@ -310,25 +410,12 @@ export function all() { throw new Error("replica collections must use the server
         assert_eq!(admitted.member.id, "member");
     }
 
-    async fn enable_sdk_tenant_b(&self) -> (String, sqlx::PgPool) {
-        let database = format!("{}_b", self.schema);
-        sqlx::query(&format!("CREATE DATABASE {database}"))
-            .execute(&self.admin)
-            .await
-            .unwrap();
-        let base = std::env::var("GONVEX_TEST_POSTGRES_URL").unwrap();
-        let mut url = url::Url::parse(&base).unwrap();
-        url.set_path(&format!("/{database}"));
-        let parameters: Vec<_> = url
-            .query_pairs()
-            .filter(|(name, _)| name != "options")
-            .map(|(name, value)| (name.into_owned(), value.into_owned()))
-            .collect();
-        url.query_pairs_mut().clear().extend_pairs(parameters);
+    /// A second tenant in its own SQLite file (replaces CREATE DATABASE).
+    async fn enable_sdk_tenant_b(&self) -> SqlitePool {
         let route = TenantRoute {
             project_id: "project".into(),
             tenant_id: "tenant-b".into(),
-            database_url: url.to_string(),
+            database_url: gonvex_store::database_url(&self.root.join("tenant-b.db")),
         };
         self.control
             .clone()
@@ -338,7 +425,7 @@ export function all() { throw new Error("replica collections must use the server
                     "0001_receipt_records.sql".into(),
                     MigrationScope::Tenant,
                     false,
-                    "CREATE TABLE receipt_records(id text PRIMARY KEY,value integer NOT NULL)"
+                    "CREATE TABLE receipt_records(id TEXT PRIMARY KEY,value INTEGER NOT NULL)"
                         .into(),
                 )],
             )
@@ -348,29 +435,22 @@ export function all() { throw new Error("replica collections must use the server
             .ensure_reducer_idempotency(&route)
             .await
             .unwrap();
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&route.database_url)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO members(id,account_id,status,role,permissions) VALUES ('member-b','account','active','manager','{}')")
-            .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO receipt_records(id,value) VALUES ('tenant-b-private',73)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        self.tenant_exec_on(&route, "INSERT INTO members(id,account_id,status,role,permissions) VALUES ('member-b','account','active','manager','{}'); INSERT INTO receipt_records(id,value) VALUES ('tenant-b-private',73)").await;
         // Independent databases can have either numeric clock ordering. Give
         // B a higher counter through real commits so an incorrect old-owner
         // acknowledgement cannot hide behind B's initially smaller revision.
         for index in 0..100 {
-            sqlx::query("UPDATE receipt_records SET value=$1 WHERE id='tenant-b-private'")
-                .bind(72 + index % 2)
-                .execute(&pool)
-                .await
-                .unwrap();
+            self.tenant_exec_on(
+                &route,
+                &format!(
+                    "UPDATE receipt_records SET value={} WHERE id='tenant-b-private'",
+                    72 + index % 2
+                ),
+            )
+            .await;
         }
         sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,status,database_url) VALUES ('tenant-b','project','tenant-b','Isolated B','active',$1)")
-            .bind(&route.database_url).execute(&self.pool).await.unwrap();
+            .bind(&route.database_url).execute(&self.control_pool).await.unwrap();
         let session = self
             .control
             .authenticate_session(
@@ -382,17 +462,17 @@ export function all() { throw new Error("replica collections must use the server
             .unwrap();
         assert_eq!(session.route.database_url, route.database_url);
         assert_eq!(session.member.id, "member-b");
-        (database, pool)
+        self.runtime
+            .inner
+            .pools
+            .reader(&route.database_url)
+            .await
+            .unwrap()
     }
 
     async fn close(self) {
         self.runtime.shutdown().await;
-        self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await
-            .unwrap();
-        self.admin.close().await;
+        drop(self._data);
     }
 
     async fn sync_client_contract(&self, version: u64) -> serde_json::Value {
@@ -447,7 +527,7 @@ export function all() { throw new Error("replica collections must use the server
 }
 
 #[tokio::test]
-#[ignore = "requires the module-upgrade browser/PostgreSQL coordinator"]
+#[ignore = "requires the module-upgrade browser coordinator"]
 async fn authenticated_sdk_module_upgrade_recovery() {
     let script = std::env::var("GONVEX_SDK_MODULE_UPGRADE_SCRIPT")
         .expect("module upgrade requires its coordinator");
@@ -459,15 +539,15 @@ async fn authenticated_sdk_module_upgrade_recovery() {
     sqlx::query(
         "UPDATE gonvex_runtime_projects SET project_key='receipt-upgrade-sync' WHERE id='project'",
     )
-    .execute(&f.pool)
+    .execute(&f.control_pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO receipt_records(id,value) VALUES ('confirmed-before-upgrade',11)")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    sqlx::raw_sql("CREATE TABLE upgrade_effects(position bigserial PRIMARY KEY,operation text NOT NULL); CREATE FUNCTION upgrade_effect() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO upgrade_effects(operation) VALUES (TG_OP); RETURN NEW; END $$; CREATE TRIGGER upgrade_effect AFTER INSERT OR UPDATE ON receipt_records FOR EACH ROW EXECUTE FUNCTION upgrade_effect()")
-        .execute(&f.pool).await.unwrap();
+    f.tenant_exec("INSERT INTO receipt_records(id,value) VALUES ('confirmed-before-upgrade',11)")
+        .await;
+    // Business-effect journal written by triggers in the same transaction as
+    // each effect (replaces the plpgsql trigger function).
+    f.ddl("CREATE TABLE upgrade_effects(position INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL); CREATE TRIGGER upgrade_effect_insert AFTER INSERT ON receipt_records BEGIN INSERT INTO upgrade_effects(operation) VALUES ('INSERT'); END; CREATE TRIGGER upgrade_effect_update AFTER UPDATE ON receipt_records BEGIN INSERT INTO upgrade_effects(operation) VALUES ('UPDATE'); END;")
+        .await;
     let initial_module = f.sync_client_contract(1).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -498,19 +578,19 @@ async fn authenticated_sdk_module_upgrade_recovery() {
                     let second = request["keys"][1].as_str().unwrap();
                     assert_ne!(first, second);
                     let effects: Vec<String> = sqlx::query_scalar("SELECT operation FROM upgrade_effects ORDER BY position")
-                        .fetch_all(&f.pool).await.unwrap();
+                        .fetch_all(&f.reader).await.unwrap();
                     assert_eq!(effects, ["INSERT"], "second intent executed before module replacement");
                     let receipts: Vec<String> = sqlx::query_scalar("SELECT path FROM _gonvex_reducer_idempotency WHERE subject='account' ORDER BY path")
-                        .fetch_all(&f.pool).await.unwrap();
+                        .fetch_all(&f.reader).await.unwrap();
                     assert_eq!(receipts, ["write"]);
                     let module = f.sync_client_contract(2).await;
                     assert_ne!(module["artifactHash"], initial_module["artifactHash"]);
                     assert!(module["generation"].as_u64().unwrap() > initial_module["generation"].as_u64().unwrap());
-                    let value: i32 = sqlx::query_scalar("SELECT count FROM receipt_records WHERE id='upgrade-intent'")
-                        .fetch_one(&f.pool).await.unwrap();
+                    let value: i64 = sqlx::query_scalar("SELECT count FROM receipt_records WHERE id='upgrade-intent'")
+                        .fetch_one(&f.reader).await.unwrap();
                     assert_eq!(value, 7);
                     let key: String = sqlx::query_scalar("SELECT idempotency_key FROM _gonvex_reducer_idempotency WHERE subject='account'")
-                        .fetch_one(&f.pool).await.unwrap();
+                        .fetch_one(&f.reader).await.unwrap();
                     assert_eq!(key, first);
                     let witness = serde_json::json!({"before":initial_module,"after":module,"effectsBeforeReplacement":effects,
                         "receiptPathsBeforeReplacement":receipts,"committedKey":key,"renamedColumnValue":value});
@@ -524,7 +604,7 @@ async fn authenticated_sdk_module_upgrade_recovery() {
     let successful = matches!(&output, Ok(Ok(child)) if child.status.success());
     let effects: Vec<String> = if successful {
         sqlx::query_scalar("SELECT operation FROM upgrade_effects ORDER BY position")
-            .fetch_all(&f.pool)
+            .fetch_all(&f.reader)
             .await
             .unwrap()
     } else {
@@ -534,7 +614,7 @@ async fn authenticated_sdk_module_upgrade_recovery() {
         sqlx::query_scalar(
             "SELECT path FROM _gonvex_reducer_idempotency WHERE subject='account' ORDER BY path",
         )
-        .fetch_all(&f.pool)
+        .fetch_all(&f.reader)
         .await
         .unwrap()
     } else {
@@ -573,9 +653,7 @@ async fn authenticated_sdk_receipt_replica_composition() {
         .await
         .expect("authenticated SDK receipt test requires native fixtures");
     f.enable_sdk_session().await;
-    let (tenant_b_database, tenant_b_pool) = f.enable_sdk_tenant_b().await;
-    sqlx::raw_sql("CREATE FUNCTION sdk_receipt_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id IN ('sdk-concurrent-commit','sdk-concurrent-rollback') THEN PERFORM pg_advisory_xact_lock(39071030); END IF; RETURN NEW; END $$; CREATE TRIGGER sdk_receipt_gate BEFORE INSERT ON receipt_records FOR EACH ROW EXECUTE FUNCTION sdk_receipt_gate()")
-        .execute(&f.pool).await.unwrap();
+    let tenant_b = f.enable_sdk_tenant_b().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let router = f.runtime.router();
@@ -609,12 +687,12 @@ async fn authenticated_sdk_receipt_replica_composition() {
                     let key = request["key"].as_str().unwrap().to_owned();
                     assert!(!key.is_empty());
                     if std::env::var_os("GONVEX_SDK_ROLLBACK_DAMAGE").is_some() {
-                        sqlx::query("INSERT INTO receipt_records(id,value) VALUES ('sdk-upgrade-rollback',7)").execute(&f.pool).await.unwrap();
+                        f.tenant_exec("INSERT INTO receipt_records(id,value) VALUES ('sdk-upgrade-rollback',7)").await;
                     }
-                    // One SQL snapshot, after the SDK recorded the actual reducer
+                    // One WAL snapshot, after the SDK recorded the actual reducer
                     // failure and before the browser starts its upgrade/retry.
                     let row = sqlx::query("SELECT (SELECT count(*) FROM receipt_records WHERE id=$1) AS business, (SELECT count(*) FROM _gonvex_reducer_idempotency WHERE subject='account' AND idempotency_key=$2) AS receipts")
-                        .bind("sdk-upgrade-rollback").bind(&key).fetch_one(&f.pool).await.unwrap();
+                        .bind("sdk-upgrade-rollback").bind(&key).fetch_one(&f.reader).await.unwrap();
                     let witness = serde_json::json!({"business":row.get::<i64,_>("business"),"receipts":row.get::<i64,_>("receipts")});
                     tokio::fs::write(coordination.join("rollback-observed.tmp"), serde_json::to_vec(&witness).unwrap()).await.unwrap();
                     tokio::fs::rename(coordination.join("rollback-observed.tmp"),coordination.join("rollback-observed.json")).await.unwrap();
@@ -626,63 +704,56 @@ async fn authenticated_sdk_receipt_replica_composition() {
     concurrency.release().await;
     let renamed_receipt = if let Some(key) = rollback_key.as_ref() {
         sqlx::query_scalar::<_, String>("SELECT path FROM _gonvex_reducer_idempotency WHERE subject='account' AND idempotency_key=$1")
-            .bind(key).fetch_optional(&f.pool).await.unwrap()
+            .bind(key).fetch_optional(&f.reader).await.unwrap()
     } else {
         None
     };
-    let business =
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records WHERE value=7")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap();
-    let receipts = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM _gonvex_reducer_idempotency WHERE subject='account'",
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    let bob_receipts = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM _gonvex_reducer_idempotency WHERE subject='bob'",
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
+    let business = f.count("receipt_records WHERE value=7").await;
+    let receipts = f
+        .count("_gonvex_reducer_idempotency WHERE subject='account'")
+        .await;
+    let bob_receipts = f
+        .count("_gonvex_reducer_idempotency WHERE subject='bob'")
+        .await;
     let tenant_b_business: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM receipt_records WHERE id='sdk-tenant-bob' AND value=7",
     )
-    .fetch_one(&tenant_b_pool)
+    .fetch_one(&tenant_b)
     .await
     .unwrap();
     let tenant_b_receipts: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM _gonvex_reducer_idempotency WHERE subject='account'",
     )
-    .fetch_one(&tenant_b_pool)
+    .fetch_one(&tenant_b)
     .await
     .unwrap();
     let leaked_into_b: i64 =
         sqlx::query_scalar("SELECT count(*) FROM receipt_records WHERE id='sdk-tenant-alice'")
-            .fetch_one(&tenant_b_pool)
+            .fetch_one(&tenant_b)
             .await
             .unwrap();
-    let leaked_into_a: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM receipt_records WHERE id IN ('sdk-tenant-bob','tenant-b-private')",
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
+    let leaked_into_a = f
+        .count("receipt_records WHERE id IN ('sdk-tenant-bob','tenant-b-private')")
+        .await;
+    // Each competing intent took effect exactly once, from an executed claim
+    // (a stored result), after the gate released the single writer.
+    let mut concurrent = Vec::new();
+    for mode in ["commit", "rollback"] {
+        let row = format!("sdk-concurrent-{mode}");
+        let business = f
+            .count(&format!("receipt_records WHERE id='{row}' AND value=7"))
+            .await;
+        let executed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM _gonvex_reducer_idempotency WHERE subject='account' AND path='write' AND result LIKE '%' || $1 || '%'",
+        )
+        .bind(&row)
+        .fetch_one(&f.reader)
+        .await
+        .unwrap();
+        concurrent.push((mode, business, executed));
+    }
     server.abort();
-    tenant_b_pool.close().await;
     f.close().await;
-    let cleanup = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&std::env::var("GONVEX_TEST_POSTGRES_URL").unwrap())
-        .await
-        .unwrap();
-    sqlx::query(&format!("DROP DATABASE {tenant_b_database} WITH (FORCE)"))
-        .execute(&cleanup)
-        .await
-        .unwrap();
-    cleanup.close().await;
     let output = result
         .expect("authenticated SDK composition exceeded its fixture deadline")
         .unwrap();
@@ -726,6 +797,16 @@ async fn authenticated_sdk_receipt_replica_composition() {
         2,
         "both concurrent SDK outcomes require witnessed overlap"
     );
+    for (mode, business, executed) in concurrent {
+        assert_eq!(
+            business, 1,
+            "{mode}: competing claims must take effect exactly once"
+        );
+        assert_eq!(
+            executed, 1,
+            "{mode}: exactly one executed receipt must remain"
+        );
+    }
     assert_eq!(
         renamed_receipt.as_deref(),
         Some("abort"),
@@ -741,10 +822,9 @@ async fn receipt_initialization_preserves_legacy_replay() {
     let first = f
         .call("original", "legacy-key", "write", "legacy-row")
         .await;
-    sqlx::query("ALTER TABLE _gonvex_reducer_idempotency RENAME TO _gonvex_mutation_idempotency")
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    f.ddl("ALTER TABLE _gonvex_reducer_idempotency RENAME TO _gonvex_mutation_idempotency")
+        .await;
+    assert!(!f.table_exists("_gonvex_reducer_idempotency").await);
     let replay = f
         .runtime
         .execute_tenant_reducer(
@@ -763,26 +843,11 @@ async fn receipt_initialization_preserves_legacy_replay() {
     let replay = replay.unwrap();
     assert_eq!(replay.value, first.value);
     assert!(replay.committed_revision.unwrap() >= first.committed_revision.unwrap());
-    assert!(!sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('_gonvex_mutation_idempotency') IS NOT NULL"
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap());
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_reducer_idempotency")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
+    assert!(!f.table_exists("_gonvex_mutation_idempotency").await);
+    assert!(f.table_exists("_gonvex_reducer_idempotency").await);
+    assert_eq!(f.count("receipt_records").await, 1);
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
+    assert_eq!(f.integrity().await, "ok");
     f.close().await;
 }
 
@@ -792,8 +857,8 @@ async fn receipt_initialization_refuses_ambiguous_histories() {
         return;
     };
     f.call("original", "known-key", "write", "known-row").await;
-    sqlx::query("CREATE TABLE _gonvex_mutation_idempotency (LIKE _gonvex_reducer_idempotency INCLUDING ALL)")
-        .execute(&f.pool).await.unwrap();
+    f.ddl("CREATE TABLE _gonvex_mutation_idempotency (subject TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL, path TEXT NOT NULL, result JSON, created_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (subject, idempotency_key))")
+        .await;
     let result = f
         .runtime
         .execute_tenant_reducer(
@@ -813,27 +878,9 @@ async fn receipt_initialization_refuses_ambiguous_histories() {
         crate::error_class::ReducerErrorClass::Transient,
         "receipt recovery must retain the intent as infrastructure failure"
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_reducer_idempotency")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_mutation_idempotency")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(f.count("receipt_records").await, 1);
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
+    assert_eq!(f.count("_gonvex_mutation_idempotency").await, 0);
     f.close().await;
 }
 
@@ -842,37 +889,67 @@ async fn receipt_initialization_repairs_missing_index_and_observes_schema_reset(
     let Some(f) = Fixture::new().await else {
         return;
     };
+    let indexed = "SELECT EXISTS(SELECT 1 FROM pragma_index_list('_gonvex_reducer_idempotency') WHERE name='gonvex_reducer_idempotency_created_at')";
     f.control
         .ensure_reducer_idempotency(&f.session.route)
         .await
         .unwrap();
-    sqlx::query("DROP INDEX gonvex_reducer_idempotency_created_at")
-        .execute(&f.pool)
+    f.ddl("DROP INDEX gonvex_reducer_idempotency_created_at")
+        .await;
+    assert!(!sqlx::query_scalar::<_, bool>(indexed)
+        .fetch_one(&f.reader)
         .await
-        .unwrap();
+        .unwrap());
     f.control
         .ensure_reducer_idempotency(&f.session.route)
         .await
         .unwrap();
-    assert!(sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('gonvex_reducer_idempotency_created_at') AND indrelid=to_regclass('_gonvex_reducer_idempotency') AND indisvalid AND indisready)")
-        .fetch_one(&f.pool).await.unwrap());
-    sqlx::query("DROP TABLE _gonvex_reducer_idempotency")
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>(indexed)
+            .fetch_one(&f.reader)
+            .await
+            .unwrap(),
+        "missing receipt index was not repaired"
+    );
+    // The repaired index is consistent with its table.
+    assert_eq!(f.integrity().await, "ok");
+    // No process cache may outlive a schema reset: the catalog is inspected
+    // on every call.
+    f.ddl("DROP TABLE _gonvex_reducer_idempotency").await;
     f.control
         .ensure_reducer_idempotency(&f.session.route)
         .await
         .unwrap();
-    assert!(sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('_gonvex_reducer_idempotency') IS NOT NULL"
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap());
+    assert!(f.table_exists("_gonvex_reducer_idempotency").await);
+    assert!(sqlx::query_scalar::<_, bool>(indexed)
+        .fetch_one(&f.reader)
+        .await
+        .unwrap());
     f.call("after-reset", "fresh-key", "write", "fresh-row")
         .await;
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
     f.close().await;
+}
+
+/// Polls until `condition` holds, then requires it to keep holding for a
+/// further settle period (a blocked waiter stays blocked; a sample alone would
+/// not distinguish waiting from passing through).
+async fn witness_sustained<F, Fut>(label: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !condition().await {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label}: never observed"));
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(condition().await, "{label}: not sustained");
+    }
 }
 
 #[tokio::test]
@@ -880,19 +957,14 @@ async fn receipt_initialization_serializes_cold_callers() {
     let Some(f) = Fixture::new().await else {
         return;
     };
-    sqlx::query("DROP TABLE IF EXISTS _gonvex_reducer_idempotency")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    let mut gate = f.pool.acquire().await.unwrap();
-    let controller: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *gate)
-        .await
-        .unwrap();
-    sqlx::query("SELECT pg_advisory_lock(hashtext('gonvex:reducer-receipt-schema'))")
-        .execute(&mut *gate)
-        .await
-        .unwrap();
+    f.ddl("DROP TABLE IF EXISTS _gonvex_reducer_idempotency")
+        .await;
+    let pools = f.runtime.inner.pools.clone();
+    let url = f.session.route.database_url.clone();
+    assert_eq!(pools.snapshot().await.admission_active, 0);
+    // Own the keyed schema lock that serializes cold initialization (the
+    // in-process replacement for the advisory lock).
+    let gate = pools.lock(&url, SCHEMA_LOCK).await.unwrap();
     let mut initializers = Vec::new();
     for _ in 0..2 {
         let control = f.control.clone();
@@ -901,47 +973,34 @@ async fn receipt_initialization_serializes_cold_callers() {
             control.ensure_reducer_idempotency(&route).await
         }));
     }
-    let witnessed = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let blocked: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%pg_advisory_xact_lock%' AND datname=current_database()")
-                .bind(controller).fetch_one(&f.pool).await.unwrap();
-            if blocked == 2 { break; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await;
-    assert!(sqlx::query_scalar::<_, bool>(
-        "SELECT pg_advisory_unlock(hashtext('gonvex:reducer-receipt-schema'))"
-    )
-    .fetch_one(&mut *gate)
-    .await
-    .unwrap());
+    // Both cold callers are admitted, saw the missing table, and wait on the
+    // schema lock: neither finishes and neither creates the table.
+    witness_sustained("both cold initializers waiting on the schema lock", || {
+        let pools = pools.clone();
+        let finished = initializers.iter().any(|task| task.is_finished());
+        async move { !finished && pools.snapshot().await.admission_active == 2 }
+    })
+    .await;
+    assert!(!f.table_exists("_gonvex_reducer_idempotency").await);
     drop(gate);
     for initializer in initializers {
-        initializer.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), initializer)
+            .await
+            .expect("serialized initializer did not finish after the lock was released")
+            .unwrap()
+            .unwrap();
     }
-    assert!(
-        witnessed.is_ok(),
-        "cold receipt initialization did not serialize both callers"
-    );
+    assert_eq!(pools.snapshot().await.admission_active, 0);
+    assert!(f.table_exists("_gonvex_reducer_idempotency").await);
+    assert_eq!(f.integrity().await, "ok");
+    // Two callers with one key: exactly one executes, the other replays.
     let (first, second) = tokio::join!(
         f.call("cold-first", "cold-key", "write", "cold-row"),
         f.call("cold-second", "cold-key", "write", "cold-row"),
     );
     assert_eq!(first.value, second.value);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_reducer_idempotency")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(f.count("receipt_records").await, 1);
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
     f.close().await;
 }
 
@@ -950,37 +1009,25 @@ async fn receipt_initialization_cancellation_releases_lock_and_admission() {
     let Some(f) = Fixture::new().await else {
         return;
     };
-    sqlx::query("DROP TABLE IF EXISTS _gonvex_reducer_idempotency")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    let pools = &f.runtime.inner.pools;
+    f.ddl("DROP TABLE IF EXISTS _gonvex_reducer_idempotency")
+        .await;
+    let pools = f.runtime.inner.pools.clone();
+    let url = f.session.route.database_url.clone();
     assert_eq!(pools.snapshot().await.admission_active, 0);
-    let mut gate = f.pool.acquire().await.unwrap();
-    let controller: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *gate)
-        .await
-        .unwrap();
-    sqlx::query("SELECT pg_advisory_lock(hashtext('gonvex:reducer-receipt-schema'))")
-        .execute(&mut *gate)
-        .await
-        .unwrap();
+    let gate = pools.lock(&url, SCHEMA_LOCK).await.unwrap();
     let control = f.control.clone();
     let route = f.session.route.clone();
     let initializer = tokio::spawn(async move { control.ensure_reducer_idempotency(&route).await });
-    let blocked = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%pg_advisory_xact_lock%' AND datname=current_database())")
-                .bind(controller).fetch_one(&f.pool).await.unwrap();
-            if blocked { break; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await;
-    assert!(
-        blocked.is_ok(),
-        "cancellation omitted the actual schema-lock wait"
-    );
-    assert_eq!(pools.snapshot().await.admission_active, 1);
+    witness_sustained(
+        "initializer admitted and waiting on the schema lock",
+        || {
+            let pools = pools.clone();
+            let finished = initializer.is_finished();
+            async move { !finished && pools.snapshot().await.admission_active == 1 }
+        },
+    )
+    .await;
+    assert!(!f.table_exists("_gonvex_reducer_idempotency").await);
     initializer.abort();
     assert!(initializer.await.unwrap_err().is_cancelled());
     assert_eq!(
@@ -988,76 +1035,32 @@ async fn receipt_initialization_cancellation_releases_lock_and_admission() {
         0,
         "cancelled initialization leaked query admission"
     );
-    assert!(sqlx::query_scalar::<_, bool>(
-        "SELECT pg_advisory_unlock(hashtext('gonvex:reducer-receipt-schema'))"
-    )
-    .fetch_one(&mut *gate)
-    .await
-    .unwrap());
     drop(gate);
     tokio::time::timeout(
         Duration::from_secs(5),
         f.control.ensure_reducer_idempotency(&f.session.route),
     )
     .await
-    .expect("cancelled initializer retained the schema lock or pool connection")
+    .expect("cancelled initializer retained the schema lock or the writer")
     .unwrap();
     assert_eq!(pools.snapshot().await.admission_active, 0);
-    let mut probe = f.pool.acquire().await.unwrap();
-    assert!(
-        sqlx::query_scalar::<_, bool>(
-            "SELECT pg_try_advisory_lock(hashtext('gonvex:reducer-receipt-schema'))"
-        )
-        .fetch_one(&mut *probe)
+    let probe = tokio::time::timeout(Duration::from_millis(20), pools.lock(&url, SCHEMA_LOCK))
         .await
-        .unwrap(),
-        "schema lock survived cancellation and recovery"
-    );
-    assert!(sqlx::query_scalar::<_, bool>(
-        "SELECT pg_advisory_unlock(hashtext('gonvex:reducer-receipt-schema'))"
-    )
-    .fetch_one(&mut *probe)
-    .await
-    .unwrap());
+        .expect("schema lock survived cancellation and recovery")
+        .unwrap();
     drop(probe);
-    // Exercise the routed database's local slots independently of shared
-    // capacity. A cancelled initializer must return exactly its original slot.
-    let database_capacity = f
-        .runtime
-        .inner
-        .config
-        .database_max_connections
-        .clamp(1, pools.snapshot().await.admission_limit as u32);
-    let mut permits = Vec::new();
-    for _ in 0..database_capacity {
-        permits.push(
-            tokio::time::timeout(
-                Duration::from_secs(1),
-                pools.admit(&f.session.route.database_url),
-            )
-            .await
-            .unwrap()
-            .unwrap(),
-        );
-    }
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(20),
-            pools.admit(&f.session.route.database_url)
-        )
+    // The single writer connection was returned, not leaked by the cancelled
+    // or the recovering initializer (sqlx returns connections asynchronously).
+    let writer = tokio::time::timeout(Duration::from_secs(1), f.pool.acquire())
         .await
-        .is_err(),
-        "cancellation released database admission twice"
-    );
-    drop(permits);
-    assert_eq!(pools.snapshot().await.admission_active, 0);
-
-    // Each intentionally unopened lazy pool has independent local capacity.
-    // Fill the shared semaphore without connecting to fictitious databases.
+        .expect("cancelled initializer retained the single writer connection")
+        .unwrap();
+    drop(writer);
+    // Admission is runtime-wide. Fill it exactly: a cancelled initializer
+    // must have returned exactly its own permit, never two.
     let capacity = pools.snapshot().await.admission_limit;
     let mut permits = Vec::new();
-    for index in 0..capacity {
-        let url = format!("postgresql://localhost/gonvex_admission_only_{index}");
+    for _ in 0..capacity {
         permits.push(
             tokio::time::timeout(Duration::from_secs(1), pools.admit(&url))
                 .await
@@ -1067,18 +1070,16 @@ async fn receipt_initialization_cancellation_releases_lock_and_admission() {
     }
     assert_eq!(pools.snapshot().await.admission_active, capacity);
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(20),
-            pools.admit("postgresql://localhost/gonvex_admission_only_extra")
-        )
-        .await
-        .is_err(),
+        tokio::time::timeout(Duration::from_millis(20), pools.admit(&url))
+            .await
+            .is_err(),
         "cancellation released query admission twice"
     );
     drop(permits);
     assert_eq!(pools.snapshot().await.admission_active, 0);
     f.call("after-cancellation", "cancel-key", "write", "cancel-row")
         .await;
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
     f.close().await;
 }
 
@@ -1089,19 +1090,30 @@ async fn receipt_lookup_progresses_while_snapshot_preparations_own_pool_connecti
         return;
     };
     f.enable_sdk_session().await;
+    let committed: i64 =
+        sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton=1")
+            .fetch_one(&f.reader)
+            .await
+            .unwrap();
+    // The PostgreSQL gate was an exclusive lock on the clock. Hold its SQLite
+    // analog for the whole test: the single writer inside a transaction that
+    // advanced the clock without committing. Snapshot readers never wait on it.
     let mut gate = f.pool.begin().await.unwrap();
-    let controller: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *gate)
-        .await
-        .unwrap();
-    sqlx::query("LOCK TABLE _gonvex_sync_clock IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("UPDATE _gonvex_sync_clock SET revision=revision+1000 WHERE singleton=1")
         .execute(&mut *gate)
         .await
         .unwrap();
+    let readers = f.runtime.inner.config.database_max_connections as usize;
+    assert_eq!(readers, 2, "fixture expects two reader connections");
+    let owned = Arc::new(tokio::sync::Barrier::new(readers + 1));
+    let (release, released) = tokio::sync::watch::channel(false);
     let mut queue = crate::replica_open_queue::ReplicaOpenQueue::default();
     for id in ["opening-first", "opening-second"] {
         let runtime = f.runtime.clone();
         let session = f.session.clone();
+        let reader = f.reader.clone();
+        let owned = owned.clone();
+        let mut released = released.clone();
         let request: ReplicaOpenRequest = serde_json::from_value(serde_json::json!({
             "id":id,"path":"all","args":{}
         }))
@@ -1112,32 +1124,50 @@ async fn receipt_lookup_progresses_while_snapshot_preparations_own_pool_connecti
                 128,
                 false,
                 async move {
-                    runtime
+                    // Each preparation owns one reader connection in an open
+                    // snapshot transaction until the socket releases it.
+                    let mut snapshot = reader.begin().await.unwrap();
+                    let seen: i64 = sqlx::query_scalar(
+                        "SELECT revision FROM _gonvex_sync_clock WHERE singleton=1",
+                    )
+                    .fetch_one(&mut *snapshot)
+                    .await
+                    .unwrap();
+                    owned.wait().await;
+                    released.wait_for(|released| *released).await.unwrap();
+                    drop(snapshot);
+                    let result = runtime
                         .open_replica_negotiated(&session, request, false)
-                        .await
+                        .await;
+                    (seen, result)
                 }
                 .boxed(),
             )
             .unwrap();
     }
-    // Poll exactly as the socket select loop does. Both actual snapshot
-    // transactions must be inside PostgreSQL before an inline query begins.
+    // Poll exactly as the socket select loop does until both preparations
+    // own every reader connection.
     let witnessed = {
         let pending = queue.next();
         tokio::pin!(pending);
         tokio::select! {
             _ = &mut pending => panic!("snapshot gate failed to hold preparation"),
-            witnessed = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let blocked: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%_gonvex_sync_clock%' AND datname=current_database()")
-                        .bind(controller).fetch_one(&f.pool).await.unwrap();
-                    if blocked == 2 { break; }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            }) => witnessed,
+            witnessed = tokio::time::timeout(Duration::from_secs(5), owned.wait()) => witnessed,
         }
     };
-    gate.commit().await.unwrap();
+    assert!(
+        witnessed.is_ok(),
+        "both snapshot pool owners were not witnessed"
+    );
+    assert_eq!(f.reader.size() as usize, readers);
+    assert_eq!(f.reader.num_idle(), 0);
+    assert!(
+        f.reader.try_acquire().is_none(),
+        "a reader connection was available while both preparations owned the pool"
+    );
+    // Release the preparations but do not poll the queue: the inline lookup
+    // needs a reader connection that only the spawned preparations can return.
+    release.send(true).unwrap();
     let lookup = tokio::time::timeout(
         Duration::from_secs(5),
         f.runtime.execute_tenant_query(
@@ -1147,17 +1177,26 @@ async fn receipt_lookup_progresses_while_snapshot_preparations_own_pool_connecti
         ),
     )
     .await;
-    queue.clear();
-    f.close().await;
-    assert!(
-        witnessed.is_ok(),
-        "both snapshot pool owners were not witnessed"
-    );
     assert!(
         lookup.is_ok(),
-        "inline receipt lookup starved snapshot preparation and pool cleanup"
+        "inline receipt lookup starved behind snapshot preparations that own the reader pool"
     );
     assert_eq!(lookup.unwrap().unwrap(), serde_json::json!({"found":false}));
+    // The real snapshot preparations complete while the writer is still held,
+    // and observe only the committed clock.
+    for _ in 0..2 {
+        let (seen, result) = tokio::time::timeout(Duration::from_secs(5), queue.next())
+            .await
+            .expect("snapshot preparation waited on the held writer")
+            .unwrap();
+        assert_eq!(seen, committed);
+        let subscription = result.unwrap().subscription.unwrap();
+        assert_eq!(subscription.cursor.revision as i64, committed);
+    }
+    assert!(queue.is_empty());
+    gate.rollback().await.unwrap();
+    queue.clear();
+    f.close().await;
 }
 
 #[tokio::test]
@@ -1188,12 +1227,7 @@ async fn accepted_receipt_lookup_never_claims_or_executes_a_reducer() {
             .unwrap(),
         serde_json::json!({"found":false})
     );
-    assert!(!sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('_gonvex_reducer_idempotency') IS NOT NULL"
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap());
+    assert!(!f.table_exists("_gonvex_reducer_idempotency").await);
     let committed = f.call("request", "known", "write", "original").await;
     let status = f
         .runtime
@@ -1237,7 +1271,7 @@ async fn accepted_receipt_lookup_never_claims_or_executes_a_reducer() {
     other.identity.account.id = "other-account".into();
     other.member.id = "other-member".into();
     other.member.account_id = "other-account".into();
-    sqlx::query("INSERT INTO members(id,account_id,status,role,permissions) VALUES ('other-member','other-account','active','manager','{}')").execute(&f.pool).await.unwrap();
+    f.tenant_exec("INSERT INTO members(id,account_id,status,role,permissions) VALUES ('other-member','other-account','active','manager','{}')").await;
     assert_eq!(
         f.runtime
             .execute_tenant_query(
@@ -1261,26 +1295,12 @@ async fn accepted_receipt_lookup_never_claims_or_executes_a_reducer() {
             .unwrap(),
         serde_json::json!({"found":false})
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_reducer_idempotency")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(f.count("receipt_records").await, 1);
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
     // Reading historical receipts must neither migrate nor silently choose
     // between conflicting current and legacy journals.
-    sqlx::query("ALTER TABLE _gonvex_reducer_idempotency RENAME TO _gonvex_mutation_idempotency")
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    f.ddl("ALTER TABLE _gonvex_reducer_idempotency RENAME TO _gonvex_mutation_idempotency")
+        .await;
     assert_eq!(
         f.runtime
             .execute_tenant_query(
@@ -1292,13 +1312,8 @@ async fn accepted_receipt_lookup_never_claims_or_executes_a_reducer() {
             .unwrap()["found"],
         true
     );
-    assert!(!sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('_gonvex_reducer_idempotency') IS NOT NULL"
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap());
-    sqlx::query("CREATE TABLE _gonvex_reducer_idempotency (LIKE _gonvex_mutation_idempotency INCLUDING ALL)").execute(&f.pool).await.unwrap();
+    assert!(!f.table_exists("_gonvex_reducer_idempotency").await);
+    f.ddl("CREATE TABLE _gonvex_reducer_idempotency (subject TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL, path TEXT NOT NULL, result JSON, created_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (subject, idempotency_key))").await;
     assert!(f
         .runtime
         .execute_tenant_query(
@@ -1310,18 +1325,9 @@ async fn accepted_receipt_lookup_never_claims_or_executes_a_reducer() {
         .unwrap_err()
         .to_string()
         .contains("ambiguous"));
-    sqlx::query("DROP TABLE _gonvex_reducer_idempotency")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    sqlx::query("ALTER TABLE _gonvex_mutation_idempotency RENAME TO _gonvex_reducer_idempotency")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE members SET status='inactive' WHERE id='member'")
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    f.ddl("DROP TABLE _gonvex_reducer_idempotency; ALTER TABLE _gonvex_mutation_idempotency RENAME TO _gonvex_reducer_idempotency").await;
+    f.tenant_exec("UPDATE members SET status='inactive' WHERE id='member'")
+        .await;
     assert!(f
         .runtime
         .execute_tenant_query(
@@ -1347,12 +1353,9 @@ async fn assert_replay_barrier(prune: bool, replace_request_id: bool) {
         .await;
     assert!(later.committed_revision > first.committed_revision);
     if prune {
-        sqlx::query(
-            "UPDATE _gonvex_sync_changes SET created_at=clock_timestamp()-interval '31 days'",
-        )
-        .execute(&f.pool)
-        .await
-        .unwrap();
+        // 31 days in milliseconds.
+        f.ddl("UPDATE _gonvex_sync_changes SET created_at=created_at-2678400000")
+            .await;
         crate::change_feed::prune_retained(&f.runtime.inner.pools, &f.session.route)
             .await
             .unwrap();
@@ -1363,13 +1366,7 @@ async fn assert_replay_barrier(prune: bool, replace_request_id: bool) {
                 .unwrap(),
             None
         );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_sync_changes")
-                .fetch_one(&f.pool)
-                .await
-                .unwrap(),
-            0
-        );
+        assert_eq!(f.count("_gonvex_sync_changes").await, 0);
     }
     let replay = f
         .call(
@@ -1391,20 +1388,8 @@ async fn assert_replay_barrier(prune: bool, replace_request_id: bool) {
         later.committed_revision,
         replay.committed_revision
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_reducer_idempotency")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        2
-    );
+    assert_eq!(f.count("receipt_records").await, 2);
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 2);
     f.close().await;
 }
 
@@ -1424,10 +1409,7 @@ async fn replay_does_not_succeed_when_its_clock_cannot_be_read() {
     };
     f.call("first-request", "same-intent", "write", "original")
         .await;
-    sqlx::query("DROP TABLE _gonvex_sync_clock")
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    f.ddl("DROP TABLE _gonvex_sync_clock").await;
     assert!(f
         .runtime
         .execute_tenant_reducer(
@@ -1439,13 +1421,7 @@ async fn replay_does_not_succeed_when_its_clock_cannot_be_read() {
         )
         .await
         .is_err());
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(f.count("receipt_records").await, 1);
     f.close().await;
 }
 
@@ -1466,23 +1442,14 @@ async fn failed_reducer_rolls_back_business_write_and_receipt_together() {
         .await
         .is_err());
     for table in ["receipt_records", "_gonvex_reducer_idempotency"] {
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
-                .fetch_one(&f.pool)
-                .await
-                .unwrap(),
-            0
-        );
+        assert_eq!(f.count(table).await, 0);
     }
+    // No captured change row survives the rollback for a later commit to adopt.
+    assert_eq!(f.count("_gonvex_sync_changes").await, 0);
     f.call("retry-after-rollback", "retry", "write", "committed")
         .await;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(f.count("receipt_records").await, 1);
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
     f.close().await;
 }
 
@@ -1504,17 +1471,23 @@ async fn receipt_rejects_path_reuse_and_separates_account_subjects() {
         return;
     };
     f.call("first", "same-key", "write", "original").await;
-    assert!(f
+    let mismatch = f
         .runtime
         .execute_tenant_reducer(
             &f.session,
             "wrong-path",
             Some("same-key"),
             "noop",
-            serde_json::json!({})
+            serde_json::json!({}),
         )
-        .await
-        .is_err());
+        .await;
+    let Err(error) = mismatch else {
+        panic!("a receipt key was replayed for a different reducer path");
+    };
+    assert!(
+        error.to_string().contains("refusing to replay"),
+        "unexpected path-mismatch error: {error}"
+    );
     let mut other = f.session.clone();
     other.identity.account.id = "other-account".into();
     other.member.account_id = "other-account".into();
@@ -1528,25 +1501,14 @@ async fn receipt_rejects_path_reuse_and_separates_account_subjects() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_reducer_idempotency")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        2
-    );
+    assert_eq!(f.count("receipt_records").await, 2);
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 2);
     f.close().await;
 }
 
-// Observe the actual PostgreSQL unique-index wait. A delay alone would not
-// establish that both claims overlap before the owner commits or rolls back.
+// The owner holds the tenant's single writer inside an open transaction that
+// has claimed the receipt and written its effect. The contender is admitted
+// and waits for that writer; it cannot observe or race the uncommitted claim.
 async fn competing_claim(owner_commits: bool) {
     let Some(f) = Fixture::new().await else {
         return;
@@ -1555,13 +1517,10 @@ async fn competing_claim(owner_commits: bool) {
         .ensure_reducer_idempotency(&f.session.route)
         .await
         .unwrap();
+    let pools = f.runtime.inner.pools.clone();
     let mut owner = f
         .control
         .begin_tenant_transaction(&f.session.route, false)
-        .await
-        .unwrap();
-    let owner_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-        .fetch_one(&mut **owner.transaction())
         .await
         .unwrap();
     assert!(owner
@@ -1578,24 +1537,17 @@ async fn competing_claim(owner_commits: bool) {
         .unwrap();
     // Uncommitted effects and the receipt are invisible to other connections.
     for table in ["receipt_records", "_gonvex_reducer_idempotency"] {
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
-                .fetch_one(&f.pool)
-                .await
-                .unwrap(),
-            0
-        );
+        assert_eq!(f.count(table).await, 0);
     }
-    let mut contender = f
-        .control
-        .begin_tenant_transaction(&f.session.route, false)
-        .await
-        .unwrap();
-    let contender_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-        .fetch_one(&mut **contender.transaction())
-        .await
-        .unwrap();
+    assert!(writer_owned(&f.pool));
+    assert_eq!(pools.snapshot().await.admission_active, 1);
+    let control = f.control.clone();
+    let route = f.session.route.clone();
     let task = tokio::spawn(async move {
+        let mut contender = control
+            .begin_tenant_transaction(&route, false)
+            .await
+            .unwrap();
         let claimed = contender
             .claim_reducer("account", "competing", "write")
             .await
@@ -1613,26 +1565,15 @@ async fn competing_claim(owner_commits: bool) {
         contender.commit().await.unwrap();
         claimed
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let blocked = sqlx::query_scalar::<_, bool>("SELECT $1 = ANY(pg_blocking_pids($2))")
-                .bind(owner_pid)
-                .bind(contender_pid)
-                .fetch_one(&f.pool)
-                .await
-                .unwrap();
-            if blocked {
-                break;
-            }
-            assert!(
-                !task.is_finished(),
-                "contender completed without waiting on receipt owner"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    // The contender is admitted (its permit is held for its transaction) and
+    // blocked on the single writer the owner holds.
+    witness_sustained("contender waiting on the receipt owner's writer", || {
+        let pools = pools.clone();
+        let finished = task.is_finished();
+        let owned = writer_owned(&f.pool);
+        async move { !finished && owned && pools.snapshot().await.admission_active == 2 }
     })
-    .await
-    .expect("PostgreSQL did not report the receipt claim blocker");
+    .await;
     if owner_commits {
         owner.commit().await.unwrap();
     } else {
@@ -1643,13 +1584,8 @@ async fn competing_claim(owner_commits: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(claimed, !owner_commits);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(f.count("receipt_records").await, 1);
+    assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
     let replay = f
         .control
         .replay_reducer_result(&f.session.route, "account", "competing", "write")
@@ -1669,93 +1605,116 @@ async fn competing_claim_executes_after_owner_rolls_back() {
     competing_claim(false).await;
 }
 
-// Only the owned Docker coordinator may run this test. The ordinary suite
-// excludes it; mandatory CI explicitly runs it with --ignored and --exact.
+// Only the process-crash coordinator (verification/backend-receipts/
+// check_restart.py) may run this test. It runs twice per case on one data
+// directory: the `crash` phase stages a boundary and is SIGKILLed, the
+// `recover` phase is a fresh process that reopens the same SQLite files.
 #[tokio::test]
-#[ignore = "requires the owned PostgreSQL process-crash coordinator"]
-async fn receipt_recovery_after_postgres_process_crash() {
+#[ignore = "requires the runtime process-crash coordinator"]
+async fn receipt_recovery_after_process_crash() {
     let coordination = std::env::var("GONVEX_RECEIPT_CRASH_COORDINATION")
         .expect("receipt crash test requires its process-crash coordinator");
     let mode = std::env::var("GONVEX_RECEIPT_CRASH_MODE")
         .expect("receipt crash test requires an explicit commit boundary");
     assert!(matches!(mode.as_str(), "committed" | "uncommitted"));
-    let f = Fixture::new()
+    let phase = std::env::var("GONVEX_RECEIPT_CRASH_PHASE")
+        .expect("receipt crash test requires an explicit phase");
+    assert!(matches!(phase.as_str(), "crash" | "recover"));
+    let root = PathBuf::from(
+        std::env::var("GONVEX_TEST_DATA_DIR")
+            .expect("receipt crash test requires a retained data directory"),
+    );
+    // A SIGKILLed owner must not retain the exclusive data-directory lock.
+    let _owner = gonvex_store::DataDir::new(&root)
+        .lock()
+        .expect("data directory is still owned after the runtime process died");
+    let f = Fixture::build(false, Some(root))
         .await
         .expect("receipt crash test requires native fixtures");
-    f.control
-        .ensure_reducer_idempotency(&f.session.route)
-        .await
+    let database = gonvex_store::database_path(&f.session.route.database_url);
+    if phase == "crash" {
+        f.control
+            .ensure_reducer_idempotency(&f.session.route)
+            .await
+            .unwrap();
+        let mut interrupted = None;
+        if mode == "committed" {
+            // The process dies after the effect and receipt commit. Discard
+            // this result and retry later as if the network reply was lost.
+            let _lost_reply = f
+                .call("lost-reply", "crash-intent", "write", "original")
+                .await;
+            assert_eq!(f.count("receipt_records").await, 1);
+            assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
+        } else {
+            let mut transaction = f
+                .control
+                .begin_tenant_transaction(&f.session.route, false)
+                .await
+                .unwrap();
+            transaction
+                .set_command_id("interrupted-request")
+                .await
+                .unwrap();
+            assert!(transaction
+                .claim_reducer("account", "crash-intent", "write")
+                .await
+                .unwrap());
+            sqlx::query("INSERT INTO receipt_records VALUES ('uncommitted', 99)")
+                .execute(&mut **transaction.transaction())
+                .await
+                .unwrap();
+            transaction
+                .store_reducer_result(
+                    "account",
+                    "crash-intent",
+                    &serde_json::json!({"uncommitted":true}),
+                )
+                .await
+                .unwrap();
+            // Another connection observes neither side before the crash.
+            for table in ["receipt_records", "_gonvex_reducer_idempotency"] {
+                assert_eq!(f.count(table).await, 0);
+            }
+            interrupted = Some(transaction);
+        }
+        let marker = serde_json::json!({"mode":mode,"database":database});
+        let mut file = std::fs::File::create(format!("{coordination}.ready.tmp")).unwrap();
+        std::io::Write::write_all(&mut file, marker.to_string().as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        std::fs::rename(
+            format!("{coordination}.ready.tmp"),
+            format!("{coordination}.ready"),
+        )
         .unwrap();
-    let mut interrupted = None;
+        // Hold the open transaction (or the committed state) until SIGKILL.
+        let _held = interrupted;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    // Fresh process on the same files: WAL recovery happened on open.
+    assert_eq!(
+        f.integrity().await,
+        "ok",
+        "crash left a corrupt tenant file"
+    );
     if mode == "committed" {
-        // The coordinator kills PostgreSQL after the effect and receipt commit.
-        // Discard this result and retry as if the network reply was lost.
-        let _lost_reply = f
-            .call("lost-reply", "crash-intent", "write", "original")
-            .await;
+        assert_eq!(
+            f.count("receipt_records").await,
+            1,
+            "crash recovery changed committed business count"
+        );
+        assert_eq!(f.count("_gonvex_reducer_idempotency").await, 1);
     } else {
-        let mut transaction = f
-            .control
-            .begin_tenant_transaction(&f.session.route, false)
-            .await
-            .unwrap();
-        transaction
-            .set_command_id("interrupted-request")
-            .await
-            .unwrap();
-        assert!(transaction
-            .claim_reducer("account", "crash-intent", "write")
-            .await
-            .unwrap());
-        sqlx::query("INSERT INTO receipt_records VALUES ('uncommitted', 99)")
-            .execute(&mut **transaction.transaction())
-            .await
-            .unwrap();
-        transaction
-            .store_reducer_result(
-                "account",
-                "crash-intent",
-                &serde_json::json!({"uncommitted":true}),
-            )
-            .await
-            .unwrap();
-        // A different connection must observe neither side before the crash.
         for table in ["receipt_records", "_gonvex_reducer_idempotency"] {
             assert_eq!(
-                sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
-                    .fetch_one(&f.pool)
-                    .await
-                    .unwrap(),
-                0
+                f.count(table).await,
+                0,
+                "uncommitted {table} survived the crash"
             );
         }
-        interrupted = Some(transaction);
     }
-    let marker = serde_json::json!({"mode":mode,"schema":f.schema});
-    let mut file = std::fs::File::create(format!("{coordination}.ready.tmp")).unwrap();
-    std::io::Write::write_all(&mut file, marker.to_string().as_bytes()).unwrap();
-    file.sync_all().unwrap();
-    std::fs::rename(
-        format!("{coordination}.ready.tmp"),
-        format!("{coordination}.ready"),
-    )
-    .unwrap();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    while !std::path::Path::new(&format!("{coordination}.resume")).is_file() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "process-crash coordinator did not resume the test"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    drop(interrupted);
-    // Pooled sockets may contain a connection closed by the killed postmaster.
-    // Clear them before the first retry so the assertion concerns durable state.
-    f.runtime
-        .inner
-        .pools
-        .close_database(&f.session.route.database_url)
-        .await;
     let recovered = f
         .call(
             "new-transport-after-crash",
@@ -1780,26 +1739,21 @@ async fn receipt_recovery_after_postgres_process_crash() {
     assert_eq!(replay.value, recovered.value);
     assert!(replay.committed_revision >= recovered.committed_revision);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
+        f.count("receipt_records").await,
         1,
         "crash recovery changed committed business count"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_reducer_idempotency")
-            .fetch_one(&f.pool)
-            .await
-            .unwrap(),
+        f.count("_gonvex_reducer_idempotency").await,
         1,
         "crash recovery changed committed receipt count"
     );
-    let row = sqlx::query_as::<_, (String, i32)>("SELECT id, value FROM receipt_records")
-        .fetch_one(&f.pool)
+    let row = sqlx::query_as::<_, (String, i64)>("SELECT id, value FROM receipt_records")
+        .fetch_one(&f.reader)
         .await
         .unwrap();
     assert_eq!(row, ("original".to_owned(), 7));
+    assert_eq!(f.integrity().await, "ok");
     f.close().await;
 }
 
@@ -1897,7 +1851,8 @@ async fn quiet_open_cohort_socket(paged: bool, native: bool) {
             return;
         };
         f.enable_sdk_session().await;
-        sqlx::query("INSERT INTO receipt_records SELECT repeat('x',5000)||n,n FROM generate_series(1,100) n")
+        sqlx::query("WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<100) INSERT INTO receipt_records SELECT $1 || n,n FROM numbers")
+            .bind("x".repeat(5000))
             .execute(&f.pool).await.unwrap();
         sqlx::query("UPDATE _gonvex_sync_clock SET revision=258")
             .execute(&f.pool)
@@ -1947,11 +1902,17 @@ async fn quiet_open_cohort_socket(paged: bool, native: bool) {
             .execute(&mut *tx)
             .await
             .unwrap();
-        sqlx::query("SELECT pg_notify('gonvex_change_feed','{\"revision\":259}')")
-            .execute(&mut *tx)
+        tx.commit().await.unwrap();
+        f.runtime
+            .inner
+            .pools
+            .notify(
+                &f.session.route.database_url,
+                gonvex_store::feed::CHANGE_FEED_CHANNEL,
+                "{\"revision\":259}",
+            )
             .await
             .unwrap();
-        tx.commit().await.unwrap();
         let watermark = read(&mut socket).await;
         assert_eq!(watermark["type"], "replica.watermark");
         assert_eq!(watermark["revision"], 259);

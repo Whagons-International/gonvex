@@ -38,6 +38,9 @@ gonvex-module-host — executes Gonvex TypeScript modules for the Rust runtime
   --action-execution-timeout-ms <n> ceiling on one Action invocation
   --max-result-bytes <n>       largest result one invocation may return
   --recycle-after <n>          calls an isolate serves before retirement
+  --on-demand-idle-ms <n>      split artifacts: release idle complete-bundle
+                               (Action) isolates after this long (default 60000;
+                               env GONVEX_MODULE_HOST_ON_DEMAND_IDLE_MS)
   --drain-ms <n>               how long a retired generation may finish calls
   --shutdown-ms <n>            bound on shutdown
   --exit-on-stdin-eof          exit when the parent closes stdin
@@ -107,8 +110,18 @@ fn parse_options() -> Result<Option<Options>, String> {
         max_concurrent_calls: 32,
         drain_timeout: Duration::from_secs(30),
         shutdown_timeout: Duration::from_secs(15),
-        v8: V8Config::default(),
+        v8: V8Config::default().with_scheduling_env(),
     };
+
+    if let Ok(value) = std::env::var("GONVEX_MODULE_HOST_ON_DEMAND_IDLE_MS") {
+        if !value.trim().is_empty() {
+            config.v8.on_demand_idle_ttl = Duration::from_millis(number(&value)?);
+        }
+    }
+
+    if let Ok(value) = std::env::var("GONVEX_MODULE_HOST_ON_DEMAND_ACTIONS") {
+        config.v8.on_demand_actions = !matches!(value.trim(), "0" | "false" | "off");
+    }
 
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
@@ -131,6 +144,9 @@ fn parse_options() -> Result<Option<Options>, String> {
             }
             "--max-result-bytes" => config.v8.max_result_bytes = number(&value()?)?,
             "--recycle-after" => config.v8.recycle_after_calls = number(&value()?)?,
+            "--on-demand-idle-ms" => {
+                config.v8.on_demand_idle_ttl = Duration::from_millis(number(&value()?)?)
+            }
             "--drain-ms" => config.drain_timeout = Duration::from_millis(number(&value()?)?),
             "--shutdown-ms" => config.shutdown_timeout = Duration::from_millis(number(&value()?)?),
             "--exit-on-stdin-eof" => exit_on_stdin_eof = true,
@@ -159,6 +175,8 @@ fn main() -> ExitCode {
     // otherwise isolate threads spawned by different workers do not have the
     // common initialized parent V8 11.6 requires.
     initialize_v8_platform();
+    // The spawner that creates isolate threads at base priority (after V8).
+    gonvex_module_runtime_v8::thread_priority::init();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

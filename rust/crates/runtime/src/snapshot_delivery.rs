@@ -59,6 +59,12 @@ impl SnapshotDelivery {
     pub(crate) fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
+    /// Whether the next `pump` may encode many rows (worth the offload pool).
+    pub(crate) fn has_bulk_pending(&self) -> bool {
+        self.pending
+            .values()
+            .any(|pending| !pending.last_sent && pending.pages.remaining_rows() >= 64)
+    }
     pub(crate) fn remove(&mut self, id: &str) {
         if let Some(pending) = self.pending.remove(id) {
             // Cancellation prevents future frames; it cannot revoke bytes
@@ -369,7 +375,9 @@ mod tests {
                 revision: 1,
             },
             result: (0..n)
-                .map(|id| json!({"_id":id,"body":"a".repeat(1000)}))
+                .map(|id| {
+                    gonvex_protocol::JsonRow::from_value(&json!({"_id":id,"body":"a".repeat(1000)}))
+                })
                 .collect(),
             metadata: BTreeMap::from([(
                 "digest".into(),
@@ -595,7 +603,9 @@ mod tests {
         let mut input = snapshot("large", 8);
         if let ServerMessage::ReplicaSnapshot { result, .. } = &mut input {
             for row in result {
-                row["body"] = json!("x".repeat(100_000));
+                let mut value = row.to_value();
+                value["body"] = json!("x".repeat(100_000));
+                *row = gonvex_protocol::JsonRow::from_value(&value);
             }
         }
         delivery.begin(input).unwrap();
@@ -650,7 +660,7 @@ mod tests {
         let ready = json!({"id":"one","cursor":{"epoch":"e","revision":9},"digest":"new"});
         assert_eq!(
             delivery.gate(&ServerMessage::ReplicaReadyMany {
-                ready: vec![ready.clone(), json!({"id":"other"})]
+                ready: vec![ready, json!({"id":"other"})]
             }),
             Some(ServerMessage::ReplicaReadyMany {
                 ready: vec![json!({"id":"other"})]
@@ -687,7 +697,9 @@ mod tests {
         delivery.begin(snapshot("a-valid", 1)).unwrap();
         let mut oversized = snapshot("z-oversized", 1);
         if let ServerMessage::ReplicaSnapshot { result, .. } = &mut oversized {
-            result[0]["body"] = json!("x".repeat(FRAME_LIMIT));
+            let mut value = result[0].to_value();
+            value["body"] = json!("x".repeat(FRAME_LIMIT));
+            result[0] = gonvex_protocol::JsonRow::from_value(&value);
         }
         delivery.begin(oversized).unwrap();
         let batch = delivery.pump();

@@ -7,9 +7,10 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use gonvex_module_host::protocol::{
-    ActivateRequest, FunctionWire, JavaScriptWire, LoadRequest, ModuleArtifactWire, ResponsePayload,
+    ActivateRequest, FunctionWire, JavaScriptWire, LoadRequest, ModuleArtifactWire,
+    ReducerBundleWire, ResponsePayload,
 };
-use gonvex_postgres::RuntimeManifestRecord;
+use gonvex_store::RuntimeManifestRecord;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -36,6 +37,9 @@ pub struct FunctionDefinition {
     pub confirmation: String,
     pub args_schema: Value,
     pub result_schema: Value,
+    /// Per-function profiler slot (`gonvex_profiler::function`), assigned
+    /// once per (project, path) at module install.
+    pub profile_slot: u16,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -85,8 +89,10 @@ pub struct ProjectModule {
     pub(crate) replica_epochs: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
     pub schema: Value,
     pub visibility: BTreeMap<String, crate::visibility::VisibilityPlan>,
+    /// Optional `permissionGrants` projection backing `ctx.permissions`.
+    pub permission_grants: Option<crate::permission_bits::PermissionGrantSource>,
     pub invitation_acceptance_reducer: String,
-    pub migrations: Vec<gonvex_postgres::SqlMigration>,
+    pub migrations: Vec<gonvex_store::SqlMigration>,
     pub crons: Vec<CronSpec>,
 }
 
@@ -102,6 +108,15 @@ pub struct CronSpec {
     pub interval_ms: Option<u64>,
     #[serde(default)]
     pub expression: Option<String>,
+    /// Optional pre-check: one read-only SQL statement evaluated on a tenant
+    /// reader before each run, with `$1` bound to the run's due time (Unix
+    /// ms). The run enters V8 only when the first column of the first row is
+    /// truthy (not NULL, 0, '' or absent). Errors fail open (the run happens).
+    #[serde(default)]
+    pub due_when: Option<String>,
+    /// Profiler cron-table slot, assigned once at module install.
+    #[serde(skip)]
+    pub slot: u16,
 }
 
 #[derive(Default)]
@@ -115,6 +130,13 @@ pub struct ModuleRegistry {
 pub struct ModuleCallLease {
     module: Arc<ProjectModule>,
     _activation: Arc<OwnedRwLockReadGuard<()>>,
+}
+
+impl ModuleCallLease {
+    /// The leased module itself (shared, no copy).
+    pub fn shared(&self) -> Arc<ProjectModule> {
+        self.module.clone()
+    }
 }
 
 impl std::ops::Deref for ModuleCallLease {
@@ -171,6 +193,21 @@ impl ModuleRegistry {
             }
         })?;
         let crons = crons_from_module(module, &project)?;
+        let permission_grants = module
+            .get("permissionGrants")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                serde_json::from_value::<crate::permission_bits::PermissionGrantSource>(
+                    value.clone(),
+                )
+                .map_err(|error| error.to_string())
+                .and_then(|source| source.validate().map(|()| source))
+            })
+            .transpose()
+            .map_err(|message| ModuleRegistryError::InvalidArtifact {
+                project: project.clone(),
+                message: format!("permissionGrants: {message}"),
+            })?;
         let (artifact, functions, visibility) = artifact_from_manifest(&record)?;
         for cron in &crons {
             let function = functions.get(&cron.function).ok_or_else(|| {
@@ -235,6 +272,7 @@ impl ModuleRegistry {
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Map::new())),
             visibility,
+            permission_grants,
             invitation_acceptance_reducer: record
                 .manifest
                 .get("module")
@@ -304,7 +342,7 @@ fn crons_from_module(
         .get("crons")
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
-    let crons: Vec<CronSpec> = serde_json::from_value(values)
+    let mut crons: Vec<CronSpec> = serde_json::from_value(values)
         .map_err(|error| invalid(format!("invalid crons: {error}")))?;
     let mut names = std::collections::BTreeSet::new();
     for cron in &crons {
@@ -330,12 +368,23 @@ fn crons_from_module(
             )));
         }
     }
+    for cron in &mut crons {
+        if let Some(statement) = cron.due_when.as_deref() {
+            if statement.trim().is_empty() {
+                cron.due_when = None;
+            } else {
+                crate::host_calls::admit_read_statement(statement)
+                    .map_err(|error| invalid(format!("cron {:?} dueWhen: {error}", cron.name)))?;
+            }
+        }
+        cron.slot = gonvex_profiler::cron::register(cron.name.trim());
+    }
     Ok(crons)
 }
 
 pub(crate) fn validate_manifest_record(
     record: &RuntimeManifestRecord,
-) -> Result<Vec<gonvex_postgres::SqlMigration>, ModuleRegistryError> {
+) -> Result<Vec<gonvex_store::SqlMigration>, ModuleRegistryError> {
     let project = record.project_id.clone();
     let module = record
         .manifest
@@ -375,7 +424,7 @@ pub fn verify_standalone_module_artifact(module: Value) -> Result<String, Module
 
 fn migrations_from_module(
     module: &Map<String, Value>,
-) -> Result<Vec<gonvex_postgres::SqlMigration>, String> {
+) -> Result<Vec<gonvex_store::SqlMigration>, String> {
     let Some(files) = module.get("files").and_then(Value::as_object) else {
         return Ok(Vec::new());
     };
@@ -425,8 +474,8 @@ fn migrations_from_module(
             let directive = directive.trim();
             if let Some(value) = directive.strip_prefix("gonvex:scope") {
                 scope = Some(match value.trim() {
-                    "tenant" => gonvex_postgres::MigrationScope::Tenant,
-                    "control-plane" => gonvex_postgres::MigrationScope::ControlPlane,
+                    "tenant" => gonvex_store::MigrationScope::Tenant,
+                    "control-plane" => gonvex_store::MigrationScope::ControlPlane,
                     value => return Err(format!("migration {name}: invalid scope {value:?}")),
                 });
             } else if directive == "gonvex:no-transaction" {
@@ -438,7 +487,7 @@ fn migrations_from_module(
                 "migration {name}: missing required -- gonvex:scope tenant|control-plane directive"
             )
         })?;
-        migrations.push(gonvex_postgres::SqlMigration::new(
+        migrations.push(gonvex_store::SqlMigration::new(
             name.to_owned(),
             scope,
             no_transaction,
@@ -557,6 +606,12 @@ fn artifact_from_manifest(
             .ok_or_else(|| invalid("artifact has no JavaScript bundle".to_owned()))?,
     )
     .map_err(|error| invalid(error.to_string()))?;
+    let reducer_bundle: Option<ReducerBundleWire> = module
+        .get("reducerBundle")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| invalid(format!("reducerBundle: {error}")))?;
     let function_values = module
         .get("functions")
         .and_then(Value::as_object)
@@ -765,10 +820,28 @@ fn artifact_from_manifest(
                     .get("result")
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({"kind":"any"})),
+                profile_slot: gonvex_profiler::function::register(&record.project_id, path),
             },
         );
     }
     function_wires.sort_by(|left, right| left.path.cmp(&right.path));
+    if let Some(bundle) = &reducer_bundle {
+        for path in &bundle.functions {
+            match definitions.get(path) {
+                Some(definition) if matches!(definition.kind.as_str(), "query" | "reducer") => {}
+                Some(_) => {
+                    return Err(invalid(format!(
+                        "reducerBundle lists {path:?}, which is not a Query or Reducer"
+                    )))
+                }
+                None => {
+                    return Err(invalid(format!(
+                        "reducerBundle lists unknown function {path:?}"
+                    )))
+                }
+            }
+        }
+    }
     let visibility: BTreeMap<String, crate::visibility::VisibilityPlan> = module
         .get("visibility")
         .cloned()
@@ -828,6 +901,7 @@ fn artifact_from_manifest(
             entrypoint: text(module, "entrypoint")?,
             hash,
             javascript,
+            reducer_bundle,
             functions: function_wires,
             metadata: Map::new(),
         },
@@ -842,7 +916,7 @@ pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, St
         .get("javascript")
         .and_then(Value::as_object)
         .ok_or_else(|| "artifact has no JavaScript bundle".to_owned())?;
-    let contract = serde_json::json!({
+    let mut contract = serde_json::json!({
         "generation":module.get("generation").cloned().unwrap_or(Value::Null),
         "language":module.get("language").cloned().unwrap_or(Value::String("typescript".to_owned())),
         "entrypoint":module.get("entrypoint").cloned().unwrap_or(Value::Null),
@@ -856,6 +930,29 @@ pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, St
             "hash":javascript.get("hash").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase(),
         },
     });
+    // A split artifact signs its reducer bundle too. Unsplit artifacts keep
+    // their existing hash because the key is absent.
+    if let Some(bundle) = module.get("reducerBundle") {
+        let bundle = bundle
+            .as_object()
+            .ok_or_else(|| "reducerBundle must be an object".to_owned())?;
+        contract.as_object_mut().expect("contract object").insert(
+            "reducerBundle".to_owned(),
+            serde_json::json!({
+                "path": bundle.get("path").cloned().unwrap_or(Value::Null),
+                "hash": bundle.get("hash").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase(),
+                "functions": bundle.get("functions").cloned().unwrap_or_else(|| serde_json::json!([])),
+            }),
+        );
+    }
+    // Declared only by modules that use `ctx.permissions`; absent keeps every
+    // earlier artifact hash unchanged.
+    if let Some(grants) = module
+        .get("permissionGrants")
+        .filter(|value| !value.is_null())
+    {
+        contract["permissionGrants"] = grants.clone();
+    }
     let bytes = canonical_json(&contract)?.into_bytes();
     Ok(Sha256::digest(bytes)
         .iter()
@@ -937,6 +1034,7 @@ mod tests {
             schema: serde_json::json!({"tasks": {"id": "text"}}),
             replica_epochs: Default::default(),
             visibility: BTreeMap::new(),
+            permission_grants: None,
             invitation_acceptance_reducer: String::new(),
             migrations: Vec::new(),
             crons: Vec::new(),
@@ -1003,6 +1101,15 @@ mod tests {
             Value::Null
         );
         assert_eq!(functions["tasks.find"].kind, "query");
+        // The per-function profiler slot is assigned at install, per project.
+        let slot = functions["tasks.find"].profile_slot;
+        assert_ne!(slot, gonvex_profiler::function::NONE);
+        assert_eq!(
+            gonvex_profiler::function::name(slot).unwrap(),
+            ("project-a".to_owned(), "tasks.find".to_owned())
+        );
+        let (_, again, _) = artifact_from_manifest(&record).unwrap();
+        assert_eq!(again["tasks.find"].profile_slot, slot);
     }
 
     #[test]

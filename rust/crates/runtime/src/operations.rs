@@ -27,6 +27,19 @@ use url::Url;
 use crate::control::encrypt_control_secret;
 use crate::Runtime;
 
+/// Control Plane timestamps are INTEGER Unix milliseconds.
+fn millis_to_datetime(millis: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(millis).unwrap_or_default()
+}
+
+fn row_time(row: &sqlx::sqlite::SqliteRow, column: &str) -> DateTime<Utc> {
+    millis_to_datetime(row.get::<i64, _>(column))
+}
+
+fn row_time_opt(row: &sqlx::sqlite::SqliteRow, column: &str) -> Option<DateTime<Utc>> {
+    row.get::<Option<i64>, _>(column).map(millis_to_datetime)
+}
+
 const DASHBOARD_PASSWORD_ROUNDS: u32 = 210_000;
 const DASHBOARD_SESSION_DAYS: i64 = 7;
 
@@ -44,6 +57,7 @@ pub fn router() -> Router<Runtime> {
         .route("/dev/auth/notifications/read", post(read_notifications))
         .route("/dev/manifest", get(manifest))
         .route("/dev/metrics", get(metrics))
+        .route("/dev/profile", get(profile))
         .route("/dev/metrics/stream", get(metrics_stream))
         .route("/dev/logs/stream", get(log_stream))
         .route("/dev/logs", delete(clear_logs))
@@ -366,8 +380,8 @@ async fn create_account(
     };
     let result = sqlx::query(
         r#"INSERT INTO gonvex_dashboard_accounts(email,name,role,password_hash,updated_at)
-           VALUES($1,$2,$3,$4,now()) ON CONFLICT(email) DO UPDATE SET
-           name=EXCLUDED.name,role=EXCLUDED.role,password_hash=EXCLUDED.password_hash,updated_at=now()"#,
+           VALUES($1,$2,$3,$4,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(email) DO UPDATE SET
+           name=EXCLUDED.name,role=EXCLUDED.role,password_hash=EXCLUDED.password_hash,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
     )
     .bind(&email)
     .bind(&name)
@@ -436,7 +450,7 @@ async fn project_members(
                 "projectId":row.get::<String,_>("project_id"),
                 "email":row.get::<String,_>("email"),
                 "role":row.get::<String,_>("role"),
-                "expiresAt":row.get::<DateTime<Utc>,_>("expires_at"),
+                "expiresAt":row_time(&row,"expires_at"),
                 "accepted":row.get::<bool,_>("accepted"),
             })).collect::<Vec<_>>(),
         }))
@@ -575,11 +589,11 @@ async fn create_project_invitation(
     let stored = sqlx::query(
         r#"INSERT INTO gonvex_project_invitations
            (id,project_id,email,role,token_hash,invited_by,expires_at,accepted_at,created_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,NULL,now())
+           VALUES($1,$2,$3,$4,$5,$6,$7,NULL,CAST(unixepoch('subsec')*1000 AS INTEGER))
            ON CONFLICT(project_id,email) DO UPDATE SET
              id=EXCLUDED.id,role=EXCLUDED.role,token_hash=EXCLUDED.token_hash,
              invited_by=EXCLUDED.invited_by,expires_at=EXCLUDED.expires_at,
-             accepted_at=NULL,created_at=now()"#,
+             accepted_at=NULL,created_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
     )
     .bind(&id)
     .bind(&project)
@@ -587,7 +601,7 @@ async fn create_project_invitation(
     .bind(role)
     .bind(sha256_hex(token.as_bytes()))
     .bind(&actor.email)
-    .bind(expires_at)
+    .bind(expires_at.timestamp_millis())
     .execute(&mut **transaction.transaction())
     .await;
     if stored.is_err() || transaction.commit().await.is_err() {
@@ -631,12 +645,11 @@ async fn project_auth_accounts(
     match sqlx::query(
         r#"SELECT account.id,account.email,account.name,account.avatar_url,
                   account.disabled_at IS NOT NULL AS disabled,account.created_at,account.updated_at,
-                  COALESCE(identity.verified_email,FALSE) AS email_verified,
-                  COALESCE(identity.provider,'') AS provider
-           FROM accounts account LEFT JOIN LATERAL (
-             SELECT provider,verified_email FROM account_identities
-             WHERE account_id=account.id ORDER BY updated_at DESC LIMIT 1
-           ) identity ON TRUE
+                  COALESCE((SELECT verified_email FROM account_identities
+                    WHERE account_id=account.id ORDER BY updated_at DESC LIMIT 1),0) AS email_verified,
+                  COALESCE((SELECT provider FROM account_identities
+                    WHERE account_id=account.id ORDER BY updated_at DESC LIMIT 1),'') AS provider
+           FROM accounts account
            WHERE account.auth_realm_id=$1 ORDER BY account.created_at DESC"#,
     )
     .bind(&project)
@@ -648,8 +661,8 @@ async fn project_auth_accounts(
             "email":row.get::<String,_>("email"),"emailVerified":row.get::<bool,_>("email_verified"),
             "name":row.get::<String,_>("name"),"picture":row.get::<String,_>("avatar_url"),
             "provider":row.get::<String,_>("provider"),"disabled":row.get::<bool,_>("disabled"),
-            "createdAt":row.get::<DateTime<Utc>,_>("created_at"),
-            "lastSignedInAt":row.get::<DateTime<Utc>,_>("updated_at"),
+            "createdAt":row_time(&row,"created_at"),
+            "lastSignedInAt":row_time(&row,"updated_at"),
         })).collect::<Vec<_>>() })).into_response(),
         Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "auth account store is unavailable"),
     }
@@ -702,8 +715,8 @@ async fn set_project_account_disabled(
         );
     };
     let updated = sqlx::query(
-        r#"UPDATE accounts SET disabled_at=CASE WHEN $3 THEN COALESCE(disabled_at,now()) ELSE NULL END,
-                  updated_at=now() WHERE auth_realm_id=$1 AND id=$2"#,
+        r#"UPDATE accounts SET disabled_at=CASE WHEN $3 THEN COALESCE(disabled_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) ELSE NULL END,
+                  updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE auth_realm_id=$1 AND id=$2"#,
     )
     .bind(project)
     .bind(account)
@@ -721,7 +734,7 @@ async fn set_project_account_disabled(
     }
     if disabled {
         let revoked = sqlx::query(
-            "UPDATE gonvex_auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE project_id=$1 AND account_id=$2",
+            "UPDATE gonvex_auth_sessions SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE project_id=$1 AND account_id=$2",
         )
         .bind(project)
         .bind(account)
@@ -734,7 +747,7 @@ async fn set_project_account_disabled(
             );
         }
         let refreshed = sqlx::query(
-            "UPDATE gonvex_auth_refresh_tokens SET revoked_at=COALESCE(revoked_at,now()) WHERE project_id=$1 AND account_id=$2",
+            "UPDATE gonvex_auth_refresh_tokens SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE project_id=$1 AND account_id=$2",
         )
         .bind(project)
         .bind(account)
@@ -890,7 +903,7 @@ async fn project_auth_memberships(
         Ok(route) => route,
         Err(cause) => return error(StatusCode::NOT_FOUND, cause.to_string()),
     };
-    let pool = match runtime.inner.pools.pool(&route.database_url).await {
+    let pool = match runtime.inner.pools.reader(&route.database_url).await {
         Ok(pool) => pool,
         Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
     };
@@ -936,7 +949,7 @@ async fn project_auth_memberships(
     }
     let invitation_rows = match sqlx::query(
         r#"SELECT email,role,permissions,expires_at FROM gonvex_auth_membership_invitations
-           WHERE project_id=$1 AND tenant_id=$2 AND expires_at>now()
+           WHERE project_id=$1 AND tenant_id=$2 AND expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER)
              AND revoked_at IS NULL AND accepted_at IS NULL ORDER BY lower(email)"#,
     )
     .bind(&project)
@@ -954,7 +967,7 @@ async fn project_auth_memberships(
                 "email":row.get::<String,_>("email"),
                 "role":row.get::<String,_>("role"),
                 "permissions":row.get::<SqlJson<Value>,_>("permissions").0,
-                "expiresAt":row.get::<DateTime<Utc>,_>("expires_at"),
+                "expiresAt":row_time(&row,"expires_at"),
             })
         })
         .collect::<Vec<_>>();
@@ -1045,14 +1058,14 @@ async fn store_operator_membership_invitation(
            (project_id,tenant_id,email,role,permissions,invited_by,expires_at,id,token_hash,
             revoked_at,accepted_at,accepted_account_id,accepted_idempotency_key,handoff_state,
             handoff_command_id,completed_at,updated_at)
-           VALUES($1,$2,$3,$4,$5,'project-admin',now()+interval '7 days',$6,$7,
-                  NULL,NULL,NULL,NULL,'pending','',NULL,now())
+           VALUES($1,$2,$3,$4,$5,'project-admin',CAST(unixepoch('subsec')*1000 AS INTEGER)+604800000,$6,$7,
+                  NULL,NULL,NULL,NULL,'pending','',NULL,CAST(unixepoch('subsec')*1000 AS INTEGER))
            ON CONFLICT(project_id,tenant_id,email) DO UPDATE SET role=EXCLUDED.role,
              permissions=EXCLUDED.permissions,invited_by=EXCLUDED.invited_by,
              expires_at=EXCLUDED.expires_at,id=EXCLUDED.id,token_hash=EXCLUDED.token_hash,
              revoked_at=NULL,accepted_at=NULL,accepted_account_id=NULL,
              accepted_idempotency_key=NULL,handoff_state='pending',handoff_command_id='',
-             completed_at=NULL,updated_at=now()"#,
+             completed_at=NULL,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
     )
     .bind(project)
     .bind(tenant)
@@ -1099,17 +1112,21 @@ async fn delete_project_auth_membership(
             Ok(route) => route,
             Err(cause) => return error(StatusCode::NOT_FOUND, cause.to_string()),
         };
-        let pool = match runtime.inner.pools.pool(&route.database_url).await {
-            Ok(pool) => pool,
+        // A tenant write: the TenantTransaction revisions the member change in
+        // the change feed so the membership projector and replicas observe it.
+        let mut transaction = match control.begin_tenant_transaction(&route, false).await {
+            Ok(transaction) => transaction,
             Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
         };
-        let _admission = match runtime.inner.pools.admit(&route.database_url).await {
-            Ok(admission) => admission,
-            Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
-        };
-        match sqlx::query("UPDATE members SET status='revoked',membership_revision=membership_revision+1,updated_at=now() WHERE id=$1")
-            .bind(query.member.trim()).execute(&pool).await {
-            Ok(result) if result.rows_affected() > 0 => runtime.inner.membership_projector.wake(),
+        let revoked = sqlx::query("UPDATE members SET status='revoked',membership_revision=membership_revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1")
+            .bind(query.member.trim()).execute(&mut **transaction.transaction()).await;
+        match revoked {
+            Ok(result) if result.rows_affected() > 0 => {
+                if let Err(cause) = transaction.commit().await {
+                    return error(StatusCode::BAD_REQUEST, cause.to_string());
+                }
+                runtime.inner.membership_projector.wake()
+            }
             Ok(_) => return error(StatusCode::BAD_REQUEST, "member was not found"),
             Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
         }
@@ -1120,7 +1137,7 @@ async fn delete_project_auth_membership(
                 "project auth store is unavailable",
             );
         };
-        let result = sqlx::query("UPDATE gonvex_auth_membership_invitations SET revoked_at=now(),updated_at=now() WHERE project_id=$1 AND tenant_id=$2 AND lower(email)=lower($3) AND accepted_at IS NULL")
+        let result = sqlx::query("UPDATE gonvex_auth_membership_invitations SET revoked_at=CAST(unixepoch('subsec')*1000 AS INTEGER),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND tenant_id=$2 AND lower(email)=lower($3) AND accepted_at IS NULL")
             .bind(&project).bind(tenant).bind(query.email.trim()).execute(&mut **transaction.transaction()).await;
         if result.is_err() || transaction.commit().await.is_err() {
             return error(StatusCode::BAD_REQUEST, "invitation could not be removed");
@@ -1284,7 +1301,7 @@ async fn create_token(
         .bind(&prefix)
         .bind(sha256_hex(access_token.as_bytes()))
         .bind(SqlJson(permissions.clone()))
-        .bind(expires_at)
+        .bind(expires_at.map(|value| value.timestamp_millis()))
         .execute(&mut **transaction.transaction())
         .await
         .is_err()
@@ -1328,7 +1345,7 @@ async fn revoke_token(
         );
     };
     let result = sqlx::query(
-        "UPDATE gonvex_account_access_tokens SET revoked_at=now() WHERE id=$1 AND owner_email=$2 AND revoked_at IS NULL",
+        "UPDATE gonvex_account_access_tokens SET revoked_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1 AND owner_email=$2 AND revoked_at IS NULL",
     )
     .bind(token.trim())
     .bind(&actor.email)
@@ -1380,8 +1397,8 @@ async fn list_notifications(State(runtime): State<Runtime>, headers: HeaderMap) 
                         "title":row.get::<String,_>("title"),"body":row.get::<String,_>("body"),
                         "projectId":row.get::<String,_>("project_id"),
                         "metadata":row.get::<SqlJson<Value>,_>("metadata").0,
-                        "read":row.get::<Option<DateTime<Utc>>,_>("read_at").is_some(),
-                        "createdAt":row.get::<DateTime<Utc>,_>("created_at"),
+                        "read":row_time_opt(&row,"read_at").is_some(),
+                        "createdAt":row_time(&row,"created_at"),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1426,14 +1443,14 @@ async fn read_notifications(
         );
     };
     let result = if request.ids.is_empty() {
-        sqlx::query("UPDATE gonvex_dashboard_notifications SET read_at=now() WHERE email=$1 AND read_at IS NULL")
+        sqlx::query("UPDATE gonvex_dashboard_notifications SET read_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE email=$1 AND read_at IS NULL")
             .bind(&actor.email)
             .execute(&mut **transaction.transaction())
             .await
     } else {
-        sqlx::query("UPDATE gonvex_dashboard_notifications SET read_at=now() WHERE email=$1 AND id=ANY($2) AND read_at IS NULL")
+        sqlx::query("UPDATE gonvex_dashboard_notifications SET read_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE email=$1 AND id IN (SELECT value FROM json_each($2)) AND read_at IS NULL")
             .bind(&actor.email)
-            .bind(&request.ids)
+            .bind(SqlJson(&request.ids))
             .execute(&mut **transaction.transaction())
             .await
     };
@@ -1533,12 +1550,27 @@ async fn manifest(
 struct MetricsQuery {
     #[serde(default)]
     project: String,
+    /// `profile` returns the profiler dump instead (no project needed).
+    #[serde(default)]
+    format: String,
 }
+
+/// Profiler dump (`docs/performance/profiler.md`). Operators only.
+async fn profile(State(runtime): State<Runtime>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize(&runtime, &headers, "projects:read").await {
+        return response;
+    }
+    Json(crate::profiling::profile_json(&runtime)).into_response()
+}
+
 async fn metrics(
     State(runtime): State<Runtime>,
     headers: HeaderMap,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
+    if query.format == "profile" {
+        return profile(State(runtime), headers).await;
+    }
     let project = if query.project.trim().is_empty() {
         headers
             .get("x-gonvex-project-id")
@@ -1564,16 +1596,87 @@ async fn metrics(
     }
 }
 
-async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
+/// Process memory by owner (perf): SQLite allocator, shared snapshot cache, V8
+/// heaps (summed over live isolates as of their last call). The rest of RSS is
+/// Rust heap, socket buffers and mapped code.
+fn memory_json(runtime: &Runtime) -> Value {
+    let cache = runtime.snapshot_cache_stats();
+    let (isolates, v8) = gonvex_module_runtime_v8::heap_tally();
+    let report = runtime.snapshot_cache_report();
+    let sparse = runtime.snapshot_cache_sparse_counts();
+    // Per collection path: entries, bytes, rows, hits, builds of live entries.
+    let mut by_path = std::collections::BTreeMap::<&str, [u64; 5]>::new();
+    for entry in &report {
+        let totals = by_path.entry(entry.path.as_str()).or_default();
+        totals[0] += 1;
+        totals[1] += entry.heap_bytes as u64;
+        totals[2] += entry.rows as u64;
+        totals[3] += entry.hits;
+        totals[4] += entry.builds;
+    }
+    let by_path = by_path
+        .into_iter()
+        .map(|(path, [entries, bytes, rows, hits, builds])| {
+            (path.to_owned(), json!({"entries": entries, "bytes": bytes, "rows": rows, "hits": hits, "builds": builds}))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let top = report
+        .iter()
+        .take(40)
+        .map(|entry| {
+            json!({"db": entry.database, "path": entry.path, "args": entry.args, "rows": entry.rows,
+                "bytes": entry.heap_bytes, "hits": entry.hits, "builds": entry.builds,
+                "revision": entry.revision, "ageSecs": entry.age_secs,
+                "observed": entry.observed, "admitted": entry.admitted, "scanned": entry.scanned})
+        })
+        .collect::<Vec<_>>();
+    let statements = if gonvex_store::statement_profile::enabled() {
+        gonvex_store::statement_profile::snapshot()
+            .into_iter()
+            .take(40)
+            .map(|(sql, stats)| {
+                json!({"sql": sql, "count": stats.count, "totalNs": stats.total_ns, "maxNs": stats.max_ns,
+                    "vmSteps": stats.vm_steps, "fullscanSteps": stats.fullscan_steps})
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    json!({
+        "sqliteUsedBytes": gonvex_store::sqlite_memory_used(),
+        "sqliteBudgetMiB": gonvex_store::sqlite_cache_budget_mib(),
+        "sqliteReaderOpens": gonvex_store::sqlite_reader_opens(),
+        "feedBacklog": crate::change_feed::backlog::metrics(),
+        "eventShares": crate::feed_share::metrics(),
+        "sqliteStatements": statements,
+        "snapshotCache": {"entries": cache.entries, "bytes": cache.bytes, "hits": cache.hits,
+            "builds": cache.builds, "rollForwards": cache.roll_forwards, "fallbacks": cache.fallbacks,
+            "evictions": cache.evictions, "keysSeen": runtime.snapshot_cache_keys_seen(),
+            "sparseDrops": sparse.0, "sparseSkips": sparse.1, "keyedInlineBuilds": cache.keyed_inline_builds,
+            "byPath": by_path, "top": top},
+        "replicaOpens": crate::open_reasons::json(),
+        "principalCache": runtime.principal_cache_stats(),
+        "v8": {"isolates": isolates, "totalHeapBytes": v8[0], "usedHeapBytes": v8[1],
+            "physicalBytes": v8[2], "externalBytes": v8[3], "mallocedBytes": v8[4]},
+    })
+}
+
+pub(crate) async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
     let control = runtime.inner.control_plane.read().await.clone()?;
     let mut transaction = control.begin_control_transaction(true).await.ok()?;
     let rows=sqlx::query(
-        r#"SELECT kind,path,count(*)::bigint AS calls,count(*) FILTER(WHERE outcome='error')::bigint AS errors,
-                  COALESCE(avg(client_duration_ms),0)::double precision AS average_duration_ms,
-                  COALESCE((array_agg(client_duration_ms ORDER BY created_at DESC) FILTER(WHERE client_duration_ms IS NOT NULL))[1],0)::double precision AS last_duration_ms,
-                  max(created_at) AS last_called_at
-           FROM gonvex_performance_events WHERE project_id=$1 AND created_at>now()-interval '24 hours'
-           GROUP BY kind,path"#,
+        r#"SELECT events.kind,events.path,count(*) AS calls,
+                  count(*) FILTER(WHERE events.outcome='error') AS errors,
+                  CAST(COALESCE(avg(events.client_duration_ms),0) AS REAL) AS average_duration_ms,
+                  CAST(COALESCE((SELECT latest.client_duration_ms FROM gonvex_performance_events latest
+                     WHERE latest.project_id=events.project_id AND latest.kind=events.kind
+                       AND latest.path=events.path AND latest.client_duration_ms IS NOT NULL
+                       AND latest.created_at>CAST(unixepoch('subsec')*1000 AS INTEGER)-86400000
+                     ORDER BY latest.created_at DESC LIMIT 1),0) AS REAL) AS last_duration_ms,
+                  max(events.created_at) AS last_called_at
+           FROM gonvex_performance_events events
+           WHERE events.project_id=$1 AND events.created_at>CAST(unixepoch('subsec')*1000 AS INTEGER)-86400000
+           GROUP BY events.project_id,events.kind,events.path"#,
     ).bind(project).fetch_all(&mut **transaction.transaction()).await.unwrap_or_default();
     let mut functions = serde_json::Map::new();
     if let Some(module) = runtime.inner.modules.project(project).await {
@@ -1581,11 +1684,42 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
             functions.insert(path.clone(),json!({"kind":definition.kind,"calls":0,"errors":0,"averageDurationMs":0,"lastDurationMs":0,"series":[]}));
         }
     }
+    // Client-reported telemetry (browser `client_duration_ms`), kept under
+    // `client`; a function nobody counted on the server keeps it at the top
+    // level as before.
     for row in rows {
-        functions.insert(row.get::<String,_>("path"),json!({"kind":row.get::<String,_>("kind"),"calls":row.get::<i64,_>("calls"),"errors":row.get::<i64,_>("errors"),"averageDurationMs":row.get::<f64,_>("average_duration_ms"),"lastDurationMs":row.get::<f64,_>("last_duration_ms"),"lastCalledAt":row.get::<Option<DateTime<Utc>>,_>("last_called_at"),"series":[]}));
+        let path = row.get::<String, _>("path");
+        let client = json!({"calls":row.get::<i64,_>("calls"),"errors":row.get::<i64,_>("errors"),"averageDurationMs":row.get::<f64,_>("average_duration_ms"),"lastDurationMs":row.get::<f64,_>("last_duration_ms"),"lastCalledAt":row_time_opt(&row,"last_called_at")});
+        let mut entry = client.clone();
+        entry["kind"] = json!(row.get::<String, _>("kind"));
+        entry["series"] = json!([]);
+        entry["client"] = client;
+        functions.insert(path, entry);
     }
-    let logs=sqlx::query("SELECT kind,path,outcome,error,client_duration_ms,reason,tenant_id,account_id,created_at,event_id FROM gonvex_performance_events WHERE project_id=$1 ORDER BY created_at DESC LIMIT 200").bind(project).fetch_all(&mut **transaction.transaction()).await.unwrap_or_default().into_iter().map(|row|json!({"time":row.get::<DateTime<Utc>,_>("created_at"),"operationId":row.get::<String,_>("event_id"),"project":project,"tenant":row.get::<String,_>("tenant_id"),"accountId":row.get::<String,_>("account_id"),"path":row.get::<String,_>("path"),"kind":row.get::<String,_>("kind"),"outcome":row.get::<String,_>("outcome"),"durationMs":row.get::<Option<f64>,_>("client_duration_ms").unwrap_or(0.0),"error":row.get::<String,_>("error"),"reason":row.get::<String,_>("reason"),"source":"client"})).collect::<Vec<_>>();
-    let scheduler=sqlx::query("SELECT status,count(*)::bigint AS count FROM gonvex_scheduled_jobs WHERE project_id=$1 GROUP BY status").bind(project).fetch_all(&mut **transaction.transaction()).await.unwrap_or_default();
+    // Server-side counters since process start (`gonvex_profiler::function`,
+    // a fixed table keyed by the slot assigned at module install): every
+    // call this runtime executed, whether or not a client reported it.
+    for row in gonvex_profiler::function::snapshot(Some(project)) {
+        use gonvex_profiler::function::FunctionField as F;
+        let calls = row.get(F::Invocations);
+        let ms = |ns: u64| ns as f64 / 1e6;
+        let entry = functions
+            .entry(row.path.clone())
+            .or_insert_with(|| json!({"kind":"","series":[]}));
+        entry["calls"] = json!(calls);
+        entry["errors"] = json!(row.get(F::Errors));
+        entry["cancelled"] = json!(row.get(F::Cancelled));
+        entry["averageDurationMs"] = json!(ms(row.get(F::TotalNs)) / calls.max(1) as f64);
+        entry["maxDurationMs"] = json!(ms(row.get(F::MaxNs)));
+        entry["lastDurationMs"] = json!(ms(row.get(F::LastNs)));
+        entry["totalDurationMs"] = json!(ms(row.get(F::TotalNs)));
+        entry["lastCalledAt"] = json!(millis_to_datetime(gonvex_profiler::unix_ms_of(
+            row.get(F::LastAtNs)
+        ) as i64));
+        entry["source"] = json!("server");
+    }
+    let logs=sqlx::query("SELECT kind,path,outcome,error,client_duration_ms,reason,tenant_id,account_id,created_at,event_id FROM gonvex_performance_events WHERE project_id=$1 ORDER BY created_at DESC LIMIT 200").bind(project).fetch_all(&mut **transaction.transaction()).await.unwrap_or_default().into_iter().map(|row|json!({"time":row_time(&row,"created_at"),"operationId":row.get::<String,_>("event_id"),"project":project,"tenant":row.get::<String,_>("tenant_id"),"accountId":row.get::<String,_>("account_id"),"path":row.get::<String,_>("path"),"kind":row.get::<String,_>("kind"),"outcome":row.get::<String,_>("outcome"),"durationMs":row.get::<Option<f64>,_>("client_duration_ms").unwrap_or(0.0),"error":row.get::<String,_>("error"),"reason":row.get::<String,_>("reason"),"source":"client"})).collect::<Vec<_>>();
+    let scheduler=sqlx::query("SELECT status,count(*) AS count FROM gonvex_scheduled_jobs WHERE project_id=$1 GROUP BY status").bind(project).fetch_all(&mut **transaction.transaction()).await.unwrap_or_default();
     let mut queued = 0_i64;
     let mut completed = 0_i64;
     for row in scheduler {
@@ -1596,7 +1730,7 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
         }
     }
     let crons = sqlx::query(
-        r#"SELECT cron_name,tenant_id,function_path,min(run_at) AS next_run,count(*)::bigint AS runs
+        r#"SELECT cron_name,tenant_id,function_path,min(run_at) AS next_run,count(*) AS runs
            FROM gonvex_scheduled_jobs
            WHERE project_id=$1 AND cron_name<>'' AND status='pending'
            GROUP BY cron_name,tenant_id,function_path
@@ -1614,7 +1748,7 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
             "tenant":row.get::<String,_>("tenant_id"),
             "function":row.get::<String,_>("function_path"),
             "schedule":"managed by active module",
-            "nextRun":row.get::<Option<DateTime<Utc>>,_>("next_run"),
+            "nextRun":row_time_opt(&row,"next_run"),
             "status":"scheduled",
             "runs":row.get::<i64,_>("runs"),
             "failures":0,
@@ -1623,8 +1757,8 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
     .collect::<Vec<_>>();
     let recent_jobs = sqlx::query(
         r#"SELECT function_path,cron_name,tenant_id,scheduled_for,completed_at,
-                  GREATEST(EXTRACT(EPOCH FROM (created_at-scheduled_for))*1000,0)::double precision AS lag_ms,
-                  GREATEST(EXTRACT(EPOCH FROM (completed_at-updated_at))*1000,0)::double precision AS duration_ms
+                  CAST(max(created_at-scheduled_for,0) AS REAL) AS lag_ms,
+                  CAST(COALESCE(max(completed_at-updated_at,0),0) AS REAL) AS duration_ms
            FROM gonvex_scheduled_jobs
            WHERE project_id=$1 AND status='completed'
            ORDER BY completed_at DESC NULLS LAST LIMIT 100"#,
@@ -1634,16 +1768,18 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|row| json!({
-        "time":row.get::<Option<DateTime<Utc>>,_>("completed_at"),
-        "project":project,
-        "tenant":row.get::<String,_>("tenant_id"),
-        "function":row.get::<String,_>("function_path"),
-        "cron":row.get::<String,_>("cron_name"),
-        "outcome":"completed",
-        "lagMs":row.get::<f64,_>("lag_ms"),
-        "durationMs":row.get::<f64,_>("duration_ms"),
-    }))
+    .map(|row| {
+        json!({
+            "time":row_time_opt(&row,"completed_at"),
+            "project":project,
+            "tenant":row.get::<String,_>("tenant_id"),
+            "function":row.get::<String,_>("function_path"),
+            "cron":row.get::<String,_>("cron_name"),
+            "outcome":"completed",
+            "lagMs":row.get::<f64,_>("lag_ms"),
+            "durationMs":row.get::<f64,_>("duration_ms"),
+        })
+    })
     .collect::<Vec<_>>();
     let websocket = runtime.inner.metrics.snapshot(project);
     let database = runtime.inner.pools.snapshot().await;
@@ -1671,7 +1807,7 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
         "reactiveDelayedByBootstrap":0,
     });
     Some(
-        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs}),
+        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs,"profiler":crate::profiling::summary_json(),"memory":memory_json(runtime)}),
     )
 }
 
@@ -1821,7 +1957,7 @@ async fn log_stream(
                        ORDER BY created_at,event_id LIMIT 200"#,
                 )
                 .bind(&project)
-                .bind(last_time)
+                .bind(last_time.timestamp_millis())
                 .bind(&last_id)
                 .fetch_all(&mut **transaction.transaction())
                 .await
@@ -1839,7 +1975,7 @@ async fn log_stream(
                 break;
             };
             for row in rows {
-                let created_at = row.get::<DateTime<Utc>, _>("created_at");
+                let created_at = row_time(&row,"created_at");
                 let event_id = row.get::<String, _>("event_id");
                 let log = json!({
                     "time":created_at,
@@ -1997,7 +2133,7 @@ async fn update_project(
         r#"UPDATE gonvex_runtime_projects SET
              name=COALESCE($2,name),database_mode=COALESCE($3,database_mode),
              error_tracking_enabled=COALESCE($4,error_tracking_enabled),
-             status=COALESCE($5,status),updated_at=now()
+             status=COALESCE($5,status),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
            WHERE id=$1 AND status NOT IN('deleted','disabled')
            RETURNING id,name,environment,database_name,database_mode,storage_bucket,status,
                      description,provisioned,runtime_created,test_tab,error_tracking_enabled,owner_email"#,
@@ -2031,7 +2167,10 @@ async fn delete_project(
         );
     }
     let Some(base_url) = runtime.inner.config.default_database_url.as_deref() else {
-        return error(StatusCode::BAD_REQUEST, "DATABASE_URL is not configured");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "database provisioning is not configured",
+        );
     };
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
         return error(
@@ -2074,7 +2213,7 @@ async fn rotate_project_key(
         );
     };
     match sqlx::query(
-        "UPDATE gonvex_runtime_projects SET project_key=$2,updated_at=now() WHERE id=$1",
+        "UPDATE gonvex_runtime_projects SET project_key=$2,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1",
     )
     .bind(&project)
     .bind(&project_key)
@@ -2115,7 +2254,7 @@ async fn get_project_env(
         );
     };
     match sqlx::query("SELECT name,value,updated_at FROM gonvex_project_env WHERE project_id=$1 ORDER BY name").bind(&project).fetch_all(&mut **transaction.transaction()).await {
-        Ok(rows)=>Json(json!({"variables":rows.into_iter().map(|row|json!({"name":row.get::<String,_>("name"),"value":row.get::<String,_>("value"),"source":"project","updatedAt":row.get::<DateTime<Utc>,_>("updated_at")})).collect::<Vec<_>>() })).into_response(),
+        Ok(rows)=>Json(json!({"variables":rows.into_iter().map(|row|json!({"name":row.get::<String,_>("name"),"value":row.get::<String,_>("value"),"source":"project","updatedAt":row_time(&row,"updated_at")})).collect::<Vec<_>>() })).into_response(),
         Err(_)=>error(StatusCode::SERVICE_UNAVAILABLE,"project environment is unavailable"),
     }
 }
@@ -2152,7 +2291,7 @@ async fn set_project_env(
             "Control Plane is unavailable",
         );
     };
-    let result=sqlx::query("INSERT INTO gonvex_project_env(project_id,name,value,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT(project_id,name) DO UPDATE SET value=EXCLUDED.value,updated_at=now()")
+    let result=sqlx::query("INSERT INTO gonvex_project_env(project_id,name,value,updated_at) VALUES($1,$2,$3,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(project_id,name) DO UPDATE SET value=EXCLUDED.value,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)")
       .bind(&project).bind(name).bind(request.value).execute(&mut **transaction.transaction()).await;
     if result.is_ok() && transaction.commit().await.is_ok() {
         Json(json!({"ok":true})).into_response()
@@ -2436,13 +2575,13 @@ async fn put_auth_provider(
         r#"INSERT INTO gonvex_auth_providers
            (project_id,provider,enabled,signup_mode,azure_tenant_id,client_id,client_secret_encrypted,
             issuer,audience,jwks_url,firebase_project_id,firebase_tenant_id,admin_credentials_encrypted,updated_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CAST(unixepoch('subsec')*1000 AS INTEGER))
            ON CONFLICT(project_id,provider) DO UPDATE SET enabled=EXCLUDED.enabled,signup_mode=EXCLUDED.signup_mode,
              azure_tenant_id=EXCLUDED.azure_tenant_id,client_id=EXCLUDED.client_id,
              client_secret_encrypted=COALESCE(EXCLUDED.client_secret_encrypted,gonvex_auth_providers.client_secret_encrypted),
              issuer=EXCLUDED.issuer,audience=EXCLUDED.audience,jwks_url=EXCLUDED.jwks_url,
              firebase_project_id=EXCLUDED.firebase_project_id,firebase_tenant_id=EXCLUDED.firebase_tenant_id,
-             admin_credentials_encrypted=COALESCE(EXCLUDED.admin_credentials_encrypted,gonvex_auth_providers.admin_credentials_encrypted),updated_at=now()"#,
+             admin_credentials_encrypted=COALESCE(EXCLUDED.admin_credentials_encrypted,gonvex_auth_providers.admin_credentials_encrypted),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
     ).bind(&project).bind(&provider).bind(enabled).bind(signup_mode).bind(azure_tenant).bind(client_id).bind(client_secret)
       .bind(issuer).bind(audience).bind(jwks_url).bind(firebase_project).bind(firebase_tenant).bind(admin_credentials)
       .execute(&mut **transaction.transaction()).await;
@@ -2452,7 +2591,7 @@ async fn put_auth_provider(
             "provider configuration could not be stored",
         );
     }
-    if sqlx::query("UPDATE gonvex_runtime_projects SET auth_mode=$2,updated_at=now() WHERE id=$1")
+    if sqlx::query("UPDATE gonvex_runtime_projects SET auth_mode=$2,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1")
         .bind(&project)
         .bind(auth_mode)
         .execute(&mut **transaction.transaction())
@@ -2574,10 +2713,10 @@ async fn put_google_auth(
             "Control Plane is unavailable",
         );
     };
-    let ok=sqlx::query("INSERT INTO gonvex_auth_providers(project_id,provider,enabled,signup_mode) VALUES($1,'google',TRUE,$2) ON CONFLICT(project_id,provider) DO UPDATE SET enabled=TRUE,signup_mode=EXCLUDED.signup_mode,updated_at=now()")
+    let ok=sqlx::query("INSERT INTO gonvex_auth_providers(project_id,provider,enabled,signup_mode) VALUES($1,'google',TRUE,$2) ON CONFLICT(project_id,provider) DO UPDATE SET enabled=TRUE,signup_mode=EXCLUDED.signup_mode,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)")
       .bind(&project).bind(signup).execute(&mut **transaction.transaction()).await.is_ok()
       &&sqlx::query("INSERT INTO gonvex_auth_redirect_uris(project_id,provider,redirect_uri) VALUES($1,'google',$2) ON CONFLICT DO NOTHING").bind(&project).bind(&redirect).execute(&mut **transaction.transaction()).await.is_ok()
-      &&sqlx::query("UPDATE gonvex_runtime_projects SET auth_mode=CASE WHEN auth_mode IN('firebase','external-oidc') THEN 'hybrid' ELSE 'gonvex-native' END,updated_at=now() WHERE id=$1").bind(&project).execute(&mut **transaction.transaction()).await.is_ok()
+      &&sqlx::query("UPDATE gonvex_runtime_projects SET auth_mode=CASE WHEN auth_mode IN('firebase','external-oidc') THEN 'hybrid' ELSE 'gonvex-native' END,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1").bind(&project).execute(&mut **transaction.transaction()).await.is_ok()
       &&transaction.commit().await.is_ok();
     if ok {
         get_google_auth(State(runtime), Path(project), headers).await
@@ -2618,7 +2757,7 @@ async fn delete_google_auth(
         );
     };
     let result = if query.redirect_uri.trim().is_empty() {
-        sqlx::query("UPDATE gonvex_auth_providers SET enabled=FALSE,updated_at=now() WHERE project_id=$1 AND provider='google'").bind(&project).execute(&mut **transaction.transaction()).await
+        sqlx::query("UPDATE gonvex_auth_providers SET enabled=FALSE,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND provider='google'").bind(&project).execute(&mut **transaction.transaction()).await
     } else {
         let redirect =
             match crate::native_auth::normalize_redirect_for_configuration(&query.redirect_uri) {
@@ -2637,7 +2776,7 @@ async fn delete_google_auth(
     }
 }
 
-fn provider_json(provider: &str, row: sqlx::postgres::PgRow) -> Value {
+fn provider_json(provider: &str, row: sqlx::sqlite::SqliteRow) -> Value {
     json!({"provider":provider,"authMode":row.get::<String,_>("auth_mode"),"enabled":row.get::<bool,_>("enabled"),"signupMode":row.get::<String,_>("signup_mode"),"azureTenantId":row.get::<String,_>("azure_tenant_id"),"clientId":row.get::<String,_>("client_id"),"hasClientSecret":row.get::<bool,_>("has_client_secret"),"issuer":row.get::<String,_>("issuer"),"audience":row.get::<String,_>("audience"),"jwksUrl":row.get::<String,_>("jwks_url"),"firebaseProjectId":row.get::<String,_>("firebase_project_id"),"firebaseTenantId":row.get::<String,_>("firebase_tenant_id"),"hasAdminCredentials":row.get::<bool,_>("has_admin_credentials")})
 }
 fn supported_provider(value: &str) -> bool {
@@ -2735,7 +2874,7 @@ async fn error_groups(
             "error store is unavailable",
         );
     };
-    let rows=sqlx::query("SELECT * FROM gonvex_error_groups WHERE project_id=$1 AND ($2='' OR status=$2) AND ($3='' OR level=$3) AND ($4='' OR releases ? $4) ORDER BY last_seen DESC LIMIT 500").bind(&project).bind(query.status.trim()).bind(normalize_error_level_filter(&query.level)).bind(query.release.trim()).fetch_all(&mut **transaction.transaction()).await;
+    let rows=sqlx::query("SELECT * FROM gonvex_error_groups WHERE project_id=$1 AND ($2='' OR status=$2) AND ($3='' OR level=$3) AND ($4='' OR EXISTS(SELECT 1 FROM json_each(releases) WHERE key=$4)) ORDER BY last_seen DESC LIMIT 500").bind(&project).bind(query.status.trim()).bind(normalize_error_level_filter(&query.level)).bind(query.release.trim()).fetch_all(&mut **transaction.transaction()).await;
     let releases=sqlx::query_scalar::<_,String>("SELECT release FROM gonvex_error_events WHERE project_id=$1 AND release<>'' GROUP BY release ORDER BY max(occurred_at) DESC,release DESC").bind(&project).fetch_all(&mut **transaction.transaction()).await.unwrap_or_default();
     match rows{Ok(rows)=>Json(json!({"groups":rows.into_iter().map(error_group_json).collect::<Vec<_>>(),"releases":releases})).into_response(),Err(_)=>error(StatusCode::SERVICE_UNAVAILABLE,"error store is unavailable")}
 }
@@ -2881,8 +3020,8 @@ async fn load_error_group(
         .map(|row| row.map(error_group_json))
         .map_err(|_| ())
 }
-fn error_group_json(row: sqlx::postgres::PgRow) -> Value {
-    json!({"fingerprint":row.get::<String,_>("fingerprint"),"project":row.get::<String,_>("project_id"),"title":row.get::<String,_>("title"),"culprit":row.get::<String,_>("culprit"),"level":row.get::<String,_>("level"),"status":row.get::<String,_>("status"),"priority":row.get::<String,_>("priority"),"assignee":row.get::<String,_>("assignee"),"firstSeen":row.get::<DateTime<Utc>,_>("first_seen"),"lastSeen":row.get::<DateTime<Utc>,_>("last_seen"),"count":row.get::<i64,_>("event_count"),"tenants":row.get::<SqlJson<Value>,_>("tenants").0,"releases":row.get::<SqlJson<Value>,_>("releases").0,"environments":row.get::<SqlJson<Value>,_>("environments").0,"accounts":row.get::<SqlJson<Value>,_>("accounts").0,"devices":row.get::<SqlJson<Value>,_>("devices").0,"latest":row.get::<SqlJson<Value>,_>("latest_event").0,"regression":row.get::<bool,_>("regression")})
+fn error_group_json(row: sqlx::sqlite::SqliteRow) -> Value {
+    json!({"fingerprint":row.get::<String,_>("fingerprint"),"project":row.get::<String,_>("project_id"),"title":row.get::<String,_>("title"),"culprit":row.get::<String,_>("culprit"),"level":row.get::<String,_>("level"),"status":row.get::<String,_>("status"),"priority":row.get::<String,_>("priority"),"assignee":row.get::<String,_>("assignee"),"firstSeen":row_time(&row,"first_seen"),"lastSeen":row_time(&row,"last_seen"),"count":row.get::<i64,_>("event_count"),"tenants":row.get::<SqlJson<Value>,_>("tenants").0,"releases":row.get::<SqlJson<Value>,_>("releases").0,"environments":row.get::<SqlJson<Value>,_>("environments").0,"accounts":row.get::<SqlJson<Value>,_>("accounts").0,"devices":row.get::<SqlJson<Value>,_>("devices").0,"latest":row.get::<SqlJson<Value>,_>("latest_event").0,"regression":row.get::<bool,_>("regression")})
 }
 fn project_header_or_query(headers: &HeaderMap, query: &str) -> String {
     if query.trim().is_empty() {
@@ -2938,7 +3077,7 @@ async fn project_key_matches(runtime: &Runtime, headers: &HeaderMap, project: &s
         .unwrap_or(false)
 }
 
-fn project_json(row: sqlx::postgres::PgRow) -> Value {
+fn project_json(row: sqlx::sqlite::SqliteRow) -> Value {
     json!({
         "id":row.get::<String,_>("id"),"name":row.get::<String,_>("name"),"environment":row.get::<String,_>("environment"),
         "database":row.get::<String,_>("database_name"),"databaseMode":row.get::<String,_>("database_mode"),"storageBucket":row.get::<String,_>("storage_bucket"),
@@ -3175,14 +3314,14 @@ async fn verify_personal_token(runtime: &Runtime, token: &str) -> Option<Operato
     let row = sqlx::query(
         r#"SELECT owner_email,permissions FROM gonvex_account_access_tokens
            WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL
-             AND (expires_at IS NULL OR expires_at>now()) FOR UPDATE"#,
+             AND (expires_at IS NULL OR expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER))"#,
     )
     .bind(id)
     .bind(sha256_hex(token.as_bytes()))
     .fetch_optional(&mut **transaction.transaction())
     .await
     .ok()??;
-    sqlx::query("UPDATE gonvex_account_access_tokens SET last_used_at=now() WHERE id=$1")
+    sqlx::query("UPDATE gonvex_account_access_tokens SET last_used_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1")
         .bind(id)
         .execute(&mut **transaction.transaction())
         .await
@@ -3380,15 +3519,15 @@ fn normalize_permissions(
     Ok(values)
 }
 
-fn token_json(row: sqlx::postgres::PgRow) -> Value {
+fn token_json(row: sqlx::sqlite::SqliteRow) -> Value {
     json!({
         "id":row.get::<String,_>("id"),"name":row.get::<String,_>("name"),
         "prefix":row.get::<String,_>("token_prefix"),
         "permissions":row.get::<SqlJson<Vec<String>>,_>("permissions").0,
-        "createdAt":row.get::<DateTime<Utc>,_>("created_at"),
-        "expiresAt":row.get::<Option<DateTime<Utc>>,_>("expires_at"),
-        "lastUsedAt":row.get::<Option<DateTime<Utc>>,_>("last_used_at"),
-        "revokedAt":row.get::<Option<DateTime<Utc>>,_>("revoked_at"),
+        "createdAt":row_time(&row,"created_at"),
+        "expiresAt":row_time_opt(&row,"expires_at"),
+        "lastUsedAt":row_time_opt(&row,"last_used_at"),
+        "revokedAt":row_time_opt(&row,"revoked_at"),
     })
 }
 

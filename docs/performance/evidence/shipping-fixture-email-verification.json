@@ -1,0 +1,11 @@
+{
+  "scope": "owned gvcap auth clone only",
+  "emulator": "http://127.0.0.1:28199",
+  "project": "demo-whagons-e2e",
+  "syntheticAccount": "load-user-0@example.invalid",
+  "beforeEmailVerified": false,
+  "afterEmailVerified": true,
+  "method": "normal VERIFY_EMAIL OOB accounts:update completion",
+  "timestampUTC": "2026-11-05T05:43:43.632301+00:00",
+  "policyBypass": false
+}

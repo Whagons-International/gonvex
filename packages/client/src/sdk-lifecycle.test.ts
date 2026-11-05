@@ -226,6 +226,38 @@ it.each([false, true])("keeps current-owner needHashes and reset recovery workin
   expect(Socket.instances).toHaveLength(2);
 });
 
+it.each([false, true])("reconciles a live window on an unsolicited needHashes without dropping its rows, batch=%s", async batch => {
+  // The runtime keeps no per-client rows. When a principal change (or a
+  // bounded window move) cannot be decided from change images, it asks the
+  // client for its hashes on an already-ready subscription.
+  const client = makeClient();
+  client.subscribeReplica(reference, {}, vi.fn());
+  const capabilities: Record<string, number> = batch ? { replicaBatch: 1, replicaResume: 1 } : { replicaResume: 1 };
+  const socket = Socket.instances.at(-1)!;
+  await authenticate(socket, capabilities);
+  const [open] = await opened(socket);
+  const hashes = await replicaRowsHashes([{ id: "a", value: 1 }], "id");
+  const digest = replicaAggregateDigest(hashes);
+  socket.receive({ ...snapshot(open.id, 1), hashes, digest });
+  socket.receive({ type: "replica.ready", id: open.id, cursor: { epoch: "e", revision: 10 }, digest });
+  await settled(client);
+  socket.receive({ type: "replica.needHashes", id: open.id, path: reference.path });
+  await settled(client);
+  const reopened = await opened(socket, 2);
+  expect(reopened[1]).toMatchObject({
+    id: open.id, cursor: { epoch: "e", revision: 10 }, keys: ["a"], hashes, digest, fullIntegrity: true,
+  });
+  // Rows stay rendered while the reconciliation is in flight.
+  expect(client.localReplica.entity("tasks", "a")).toEqual({ id: "a", value: 1 });
+  const next = await replicaRowsHashes([{ id: "b", value: 2 }], "id");
+  socket.receive({ type: "replica.delta", id: open.id, cursor: { epoch: "e", revision: 12 }, path: reference.path,
+    upserts: [{ id: "b", value: 2 }], deleted: ["a"], digest: replicaAggregateDigest(next), truncated: false });
+  socket.receive({ type: "replica.ready", id: open.id, cursor: { epoch: "e", revision: 12 }, digest: replicaAggregateDigest(next) });
+  await settled(client);
+  expect(client.localReplica.entity("tasks", "b")).toEqual({ id: "b", value: 2 });
+  expect(opens(socket)).toHaveLength(2);
+});
+
 it("keeps public connect after close available", async () => {
   const client = makeClient();
   client.subscribeReplica(reference, {}, vi.fn());

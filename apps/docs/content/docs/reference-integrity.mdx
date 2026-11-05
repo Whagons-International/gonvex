@@ -4,7 +4,7 @@ description: Enforce application references across SQL writers and soft deletion
 ---
 
 Tenant migrations can declare relationships with
-`SELECT gonvex_declare_references(catalog::jsonb)`. Gonvex installs the generic
+`SELECT gonvex_declare_references(catalog)`, where `catalog` is JSON text. Gonvex installs the generic
 helpers before applying application migrations. Applications own table names,
 selection paths, lifecycle predicates and deletion policy; the runtime contains
 no application-specific relationship list.
@@ -25,7 +25,7 @@ SELECT gonvex_declare_references('{
     {"name":"spaces.team","source":"spaces","column":"teamId",
      "path":"$.teamId","target":"teams","state":"live","allowEmpty":true}
   ]
-}'::jsonb);
+}');
 ```
 
 New selected IDs must resolve. Deleting the final target, changing its key, or
@@ -36,12 +36,12 @@ Ordinary SQL, reducers and bulk row operations share this enforcement.
 `TRUNCATE` is rejected on declared tables.
 
 Enforcement uses transactionally maintained target tokens and reference edges
-with a native deferred PostgreSQL foreign key. This protects concurrent writers
-under READ COMMITTED and REPEATABLE READ, including stale snapshots. A failed
+with a deferred foreign key checked at commit. Each tenant database has one
+writer at a time, so no concurrent writer can act on a stale snapshot. A failed
 transaction leaves the application state unchanged.
 
 Installation inventories existing references without repairing application
-rows. The FK is initially `NOT VALID`: existing violations remain visible,
+rows. Existing violations are recorded rather than rejected: they remain visible,
 unchanged legacy edges survive unrelated edits, and new edges are enforced.
 `SELECT * FROM gonvex_reference_violations()` returns violations for an operator
 to review. Its results contain application identifiers and need the same access
@@ -71,6 +71,6 @@ keep the declaration and its coverage lint together.
 The internal `_gonvex_reference_*` tables are derived implementation state.
 Do not expose or write them through application APIs. Applications must not
 disable triggers or replace these constraints; privileged DDL is outside the
-ordinary-writer guarantee. Installation takes table locks and backfills the
-ledger, so measure its cost on a disposable representative snapshot before
+ordinary-writer guarantee. Installation runs in the single writer transaction and
+backfills the ledger, so measure its cost on a disposable representative snapshot before
 rolling out a large catalog.

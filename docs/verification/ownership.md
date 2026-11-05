@@ -1,5 +1,10 @@
 # Ownership across asynchronous work
 
+> Storage moved from PostgreSQL to SQLite on 2026-11-02 (see
+> [SQLite storage](../sqlite-storage.md)). Evidence below that names PostgreSQL
+> was established on the earlier backend and must be re-run on SQLite before it
+> is relied on for the current runtime.
+
 The owner of an operation is the outbox scope and its activation identity at
 invocation. Changing away and back to the same scope creates another activation;
 scope-string equality alone does not authorize an old callback. Closing the

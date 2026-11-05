@@ -1,5 +1,10 @@
 # Reducer receipts and synchronization barriers
 
+> Storage moved from PostgreSQL to SQLite on 2026-11-02 (see
+> [SQLite storage](../sqlite-storage.md)). Evidence below that names PostgreSQL
+> was established on the earlier backend and must be re-run on SQLite before it
+> is relied on for the current runtime.
+
 Authenticated reducer retries use a receipt in the routed tenant database. Its
 key is the account subject and logical intent key. The receipt claim, result and
 transactional business writes share one PostgreSQL transaction. A successful
@@ -134,38 +139,38 @@ The reducer does not run, and the SDK can retain the intent for recovery rather
 than report a permanent business rejection. The native ambiguity test checks
 both this classification and unchanged business and receipt counts.
 
-## PostgreSQL process-crash experiment
+## Runtime process-crash experiment
 
-The added ignored test `receipt_recovery_after_postgres_process_crash` is driven
-explicitly by `verification/backend-receipts/check_restart.py`. Ordinary test
-runs cannot establish this experiment. The required runtime workflow builds the
-exact test artifact and runs the coordinator, which rejects a missing
-coordinator, zero-test output, ignored execution and absent crash-recovery logs.
+With SQLite storage the tenant database lives inside the runtime process, so the
+crash boundary is the runtime process itself. The ignored test
+`receipt_recovery_after_process_crash` is driven explicitly by
+`verification/backend-receipts/check_restart.py`. Ordinary test runs cannot
+establish this experiment. The required runtime workflow builds the exact test
+artifact and runs the coordinator, which rejects a missing coordinator,
+zero-test output and ignored execution.
 
-For one schedule, the runtime commits a reducer effect and receipt, discards its
-reply and signals the boundary. For the other, a tenant transaction holds both
-an uncommitted effect and receipt, and a different connection witnesses neither.
-The driver kills only its owned PostgreSQL container with SIGKILL, restarts the
-same container and data, and waits for PostgreSQL to report crash recovery. It
-then resumes the runtime, which clears its old database pool before retrying the
-same intent with a new transport ID. Both schedules require exactly one business
-effect and receipt, the expected payload, and a repeated replay with a sufficient
-revision barrier. The driver requires fsync, full-page writes and synchronous
-commit to be enabled.
+For one schedule, the fixture commits a reducer effect and receipt, discards its
+reply and signals the boundary with the path of its tenant database file. For
+the other, a tenant transaction holds both an uncommitted effect and receipt.
+The driver SIGKILLs the fixture's process group, then starts a fresh fixture
+process (`GONVEX_RECEIPT_CRASH_PHASE=recover`) on the same owned data directory
+(`GONVEX_TEST_DATA_DIR`, `synchronous=full`). SQLite recovers the WAL on open;
+the fixture retries the same intent with a new transport ID. Both schedules
+require exactly one business effect and receipt for the committed case, none
+for the uncommitted case, the expected payload, and a repeated replay with a
+sufficient revision barrier.
 
-An evidence-integrity control deliberately deletes the committed business row
-after database recovery. Receipt replay must then fail the explicit business
+An evidence-integrity control deletes the committed receipt rows from the
+database file after the kill. Recovery must then fail the explicit business
 count assertion. This control tests the evidence check; it is not a production
-source mutant or a newly reproduced runtime defect.
+source mutant.
 
-The local native run passed both witnessed crash boundaries, rejected the
-missing coordinator and failed the deleted-business-row control at its intended
-count assertion. Its receipt binds the driver, runtime and module-host binaries,
-relevant source files, PostgreSQL image and durable settings. Earlier coordinator
-errors and a host startup timeout are excluded from this passing evidence.
-These selected Linux PostgreSQL process-crash checks trust the storage engine
-and filesystem. They do not test machine power loss, automatic connection
-recovery, HTTP/WebSocket tenant admission or SDK replica persistence.
+The earlier PostgreSQL version of this experiment (killing an owned database
+container while the runtime kept its pools) passed before the storage move and
+is retained in Git history. The SQLite schedule must be re-established once the
+Rust fixture implements the phase contract documented in `check_restart.py`.
+These checks trust SQLite and the filesystem. They do not test machine power
+loss, HTTP/WebSocket tenant admission or SDK replica persistence.
 
 ## Read-only reconciliation of a known acceptance
 
@@ -193,13 +198,8 @@ cannot synthesize this watermark. SDK recovery and the composed real storage
 experiment are described in [composed-sdk.md](composed-sdk.md).
 
 
-## Composed SDK recovery through existing pools
+## Composed SDK recovery through existing pools (retired)
 
-The supplemental [SDK PostgreSQL crash coordinator](composed-sdk.md#sdk-retirement-after-postgresql-process-crash)
-extends the committed lost-reply boundary through actual WebSocket admission,
-SQLite journal recovery, receipt lookup, replica persistence and retirement.
-The runtime process and pools survive the database SIGKILL. PostgreSQL witnesses
-one matching business row and receipt on both sides of recovery, and fresh SDK
-handles reconcile with one ordinary reducer call total. The earlier native
-coordinator still uses an explicit pool reset for its separate two-boundary test;
-this additional fixture records SQLx recovery through the existing pools.
+This PostgreSQL-only schedule (database SIGKILL while runtime pools survive) was
+removed with the move to SQLite; see
+[composed-sdk.md](composed-sdk.md#sdk-retirement-after-postgresql-process-crash-retired).
