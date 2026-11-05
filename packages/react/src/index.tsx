@@ -317,6 +317,8 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   );
   const [error, setError] = useState<string | null>(null);
   const [refreshRetryAt, setRefreshRetryAt] = useState(0);
+  const [authRecoveryPaused, setAuthRecoveryPaused] = useState(false);
+  const authRecoveryPausedRef = useRef(false);
   const [canonicalRefreshRequested, setCanonicalRefreshRequested] = useState(false);
   const [developerMode, setDeveloperMode] = useState<GonvexDeveloperModeState>(
     () => initialAuth.developer ? publicDeveloperMode(initialAuth.developer) : { active: false },
@@ -361,6 +363,10 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     persist = true,
     installClientAuth = true,
   ) => {
+    if (!next || next.accessToken !== sessionRef.current?.accessToken) {
+      authRecoveryPausedRef.current = false;
+      setAuthRecoveryPaused(false);
+    }
     sessionRef.current = next;
     const developer = developerModeRef.current;
     if (developer && next?.account.id !== developer.accountId) {
@@ -459,6 +465,8 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
 
   useEffect(() => props.client.onAuthError((message, details) => {
     if (details?.code === "auth_retry_exhausted") {
+      authRecoveryPausedRef.current = true;
+      setAuthRecoveryPaused(true);
       setIsLoading(false);
       setError(message);
       setSessionState("degraded");
@@ -546,6 +554,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     // A Firebase ID token is never persisted. The canonical Gonvex session is
     // installed only after the trusted host verifies it and resolves Account.
     const unsubscribe = adapter.onIdTokenChanged((identity) => {
+      if (authRecoveryPausedRef.current) return;
       const currentGeneration = ++generation;
       const authInvalidationVersion = authInvalidationVersionRef.current;
       if (!identity) {
@@ -691,6 +700,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   }, [hasExplicitInitialTenant, initialTenantId, installSession, props.client, props.externalAuth, props.projectId, storageKey]);
 
   const refreshSession = useCallback(async (force = false) => {
+    if (authRecoveryPausedRef.current) return null;
     if (refreshRef.current) return refreshRef.current;
     const authInvalidationVersion = authInvalidationVersionRef.current;
     let attemptedRefreshToken = "";
@@ -798,12 +808,12 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   }, [canonicalRefreshRequested, refreshSession]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || authRecoveryPaused) return;
     const scheduledAt = Math.max(session.expiresAt - 60_000, refreshRetryAt);
     const delay = Math.max(0, scheduledAt - Date.now());
     const timeout = window.setTimeout(() => { void refreshSession(); }, delay);
     return () => window.clearTimeout(timeout);
-  }, [refreshRetryAt, refreshSession, session]);
+  }, [authRecoveryPaused, refreshRetryAt, refreshSession, session]);
 
   // Keep the account tenant directory authoritative without a reducer+manual
   // refetch pair. The live Control Plane Query resumes on reconnect.

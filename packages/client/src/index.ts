@@ -1900,6 +1900,7 @@ export class GonvexClient {
   authenticate(auth: GonvexClientAuth): Promise<void> {
     this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
     this.applyAuth(auth);
+    if (this.authRetryExhausted) return Promise.reject(new GonvexClientError("Authentication recovery paused. Retry or sign in again.", { code: "auth" }));
     this.authFetchGeneration = Symbol();
     const promise = new Promise<void>((resolve, reject) => {
       this.managedAuthAttempt = { ids: new Set(), resolve, reject };
@@ -2021,7 +2022,7 @@ export class GonvexClient {
   }
 
   connect() {
-    if (this.updateRequired) return;
+    if (this.updateRequired || this.authRetryExhausted) return;
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
 
     this.flushTelemetry();
@@ -5062,7 +5063,10 @@ export class GonvexClient {
         if (kind === "action" && message.type === "action.error") {
           settle();
           this.emitTelemetryFromCall(kind, id, ref.path, "error", clientSentAtMs, message.trace, message.error);
-          if (message.code === "unauthenticated") this.notifyAuthError(message.error, true, message.code);
+          if (message.code === "unauthenticated") {
+            this.quarantineReplicaScope();
+            this.notifyAuthError(message.error, true, message.code);
+          }
           reject(new GonvexClientError(message.error, { code: message.code === "unauthenticated" ? "auth" : "server", path: ref.path, operation: kind }));
         }
       });
@@ -5505,6 +5509,7 @@ export class GonvexClient {
   }
 
   private sendAuth(force: boolean, options: { useFetcher?: boolean } = {}) {
+    if (this.authRetryExhausted) return;
     this.flushTelemetry();
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
