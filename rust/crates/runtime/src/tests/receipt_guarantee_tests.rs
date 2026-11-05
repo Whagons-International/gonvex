@@ -1902,11 +1902,17 @@ async fn quiet_open_cohort_socket(paged: bool, native: bool) {
             .execute(&mut *tx)
             .await
             .unwrap();
-        sqlx::query("SELECT pg_notify('gonvex_change_feed','{\"revision\":259}')")
-            .execute(&mut *tx)
+        tx.commit().await.unwrap();
+        f.runtime
+            .inner
+            .pools
+            .notify(
+                &f.session.route.database_url,
+                gonvex_store::feed::CHANGE_FEED_CHANNEL,
+                "{\"revision\":259}",
+            )
             .await
             .unwrap();
-        tx.commit().await.unwrap();
         let watermark = read(&mut socket).await;
         assert_eq!(watermark["type"], "replica.watermark");
         assert_eq!(watermark["revision"], 259);

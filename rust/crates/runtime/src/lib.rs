@@ -2689,12 +2689,12 @@ async fn websocket(
         {
             if let Ok(frame) = serde_json::from_str::<ClientMessage>(text) {
                 if !matches!(&frame, ClientMessage::Auth { .. })
-                    && !check_public_admission(
+                    && !Box::pin(check_public_admission(
                         &runtime,
                         admission,
                         scope,
                         public_frame_runs_tenant_code(&frame),
-                    )
+                    ))
                     .await
                 {
                     for response in public_admission_errors(frame) {
@@ -3363,7 +3363,9 @@ async fn websocket(
                     }
                     for call in calls {
                         if let (Some(admission), Some(scope)) = (&public_admission, &public_scope) {
-                            if !check_public_admission(&runtime, admission, scope, true).await {
+                            if !Box::pin(check_public_admission(&runtime, admission, scope, true))
+                                .await
+                            {
                                 let response = ReducerErrorClass::Rejected.reducer_error(
                                     call.id,
                                     Some(call.path),
