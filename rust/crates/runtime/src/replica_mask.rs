@@ -576,10 +576,12 @@ impl Runtime {
         let rows = match cached {
             Some(rows) => rows,
             None => {
-                let rows = self
-                    .read_affected_rows(session, subscription, affected, revision)
-                    .await?
-                    .map(Arc::new);
+                // One cache miss per shared affected-row read, rather than
+                // retaining SQL transaction state in every subscriber's task.
+                let rows =
+                    Box::pin(self.read_affected_rows(session, subscription, affected, revision))
+                        .await?
+                        .map(Arc::new);
                 let mut recent = recent.lock().unwrap();
                 if recent.len() >= 64 {
                     recent.pop_front();

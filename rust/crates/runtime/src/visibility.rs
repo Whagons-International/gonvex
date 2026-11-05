@@ -576,7 +576,9 @@ impl ParentAclRegistry {
             return Ok(index);
         }
         let receiver = subscribe().await;
-        let loaded = load(shape.clone()).await?;
+        // Only the cold single-flight owner loads an index. Warm lookups return
+        // above without allocating this snapshot future.
+        let loaded = Box::pin(load(shape.clone())).await?;
         let index = Arc::new(std::sync::RwLock::new(ParentAclIndex::maintained(
             loaded.epoch,
             loaded.revision,

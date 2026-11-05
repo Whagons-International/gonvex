@@ -602,7 +602,11 @@ impl PoolRegistry {
             .clone();
         // Concurrent callers for the same file share one open; a failed open
         // leaves the cell empty so the next caller retries.
-        cell.get_or_try_init(|| self.open(&key)).await.cloned()
+        // The initializer is constructed only on a cold miss. Keep its connection
+        // setup state out of every warm registry/commit/feed future.
+        cell.get_or_try_init(|| Box::pin(self.open(&key)))
+            .await
+            .cloned()
     }
 
     async fn open(&self, key: &str) -> Result<Database, DatabaseError> {
