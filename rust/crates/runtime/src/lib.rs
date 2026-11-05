@@ -1755,43 +1755,43 @@ async fn websocket(
     // Connection count changes, subscribed only while a live
     // `control.support.listTenants` query needs them.
     let mut presence_events: Option<broadcast::Receiver<RuntimeEvent>> = None;
-    let ready = ServerMessage::SessionReady {
-        project: None,
-        tenant: None,
-        replica: None,
-        capabilities: Some(ServerCapabilities {
-            replica_no_old_values: Some(1),
-            replica_field_patches: Some(1),
-            replica_snapshot_pages: Some(1),
-            replica_set_digest: Some(1),
-            replica_native_rows: Some(1),
-            replica_resume: Some(1),
-            query_resume: Some(1),
-            preserve_subscriptions: Some(1),
-            telemetry_batch: Some(1),
-            protocol_version: Some(PROTOCOL_VERSION),
-            runtime_version: Some(runtime.inner.config.runtime_version.clone()),
-            replica_batch: Some(1),
-            replica_integrity: Some(1),
-            query_batch: Some(1),
-            query_result_batch: Some(1),
-            reducer_batch: Some(1),
-            replica_watermark: Some(1),
-            reducer_receipt_lookup: Some(1),
-            control_watermark: Some(1),
-            replica_batch_frames: Some(1),
-            presence: presence_hub.enabled().then_some(1),
-        }),
-    };
-    if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
-        .await
-        .is_err()
+    // End the startup frame's storage before entering the persistent socket loop.
     {
-        return;
+        let ready = ServerMessage::SessionReady {
+            project: None,
+            tenant: None,
+            replica: None,
+            capabilities: Some(ServerCapabilities {
+                replica_no_old_values: Some(1),
+                replica_field_patches: Some(1),
+                replica_snapshot_pages: Some(1),
+                replica_set_digest: Some(1),
+                replica_native_rows: Some(1),
+                replica_resume: Some(1),
+                query_resume: Some(1),
+                preserve_subscriptions: Some(1),
+                telemetry_batch: Some(1),
+                protocol_version: Some(PROTOCOL_VERSION),
+                runtime_version: Some(runtime.inner.config.runtime_version.clone()),
+                replica_batch: Some(1),
+                replica_integrity: Some(1),
+                query_batch: Some(1),
+                query_result_batch: Some(1),
+                reducer_batch: Some(1),
+                replica_watermark: Some(1),
+                reducer_receipt_lookup: Some(1),
+                control_watermark: Some(1),
+                replica_batch_frames: Some(1),
+                presence: presence_hub.enabled().then_some(1),
+            }),
+        };
+        if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
+            .await
+            .is_err()
+        {
+            return;
+        }
     }
-
-    // SessionReady is startup-only; do not retain its large enum in the socket loop.
-    drop(ready);
 
     // Discards the tenant scope after the session's own Member changed. The
     // caller then sends `membership_changed_frames`.
