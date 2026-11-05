@@ -84,13 +84,15 @@ async fn oracle(
             ("member.id".into(), "alice".into()),
             ("account.id".into(), "account".into()),
             ("tenant.id".into(), "fixture-tenant".into()),
-        ]),
+        ])
+        .into(),
         role: "member".into(),
-        permissions: json!({}),
+        permissions: json!({}).into(),
         sets: BTreeMap::from([
             ("allowed".into(), tokens.clone()),
             ("blocked".into(), tokens),
-        ]),
+        ])
+        .into(),
         fingerprint: String::new(),
         inherited: BTreeMap::new(),
         indexes: BTreeMap::new(),
@@ -207,7 +209,7 @@ async fn oracle(
         }
         let mut resolved = resolved.clone();
         for (name, token) in [("flagX", "x"), ("flagZ", "z")] {
-            resolved.sets.insert(
+            std::sync::Arc::make_mut(&mut resolved.sets).insert(
                 name.into(),
                 if active.contains(&token) {
                     BTreeSet::from([token.to_string()])

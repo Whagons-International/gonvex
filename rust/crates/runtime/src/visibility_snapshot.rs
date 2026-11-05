@@ -28,7 +28,7 @@ pub(super) async fn resolve_derived(
             ))
         })?;
         if source.is_empty() {
-            resolved.sets.insert(name.clone(), BTreeSet::new());
+            Arc::make_mut(&mut resolved.sets).insert(name.clone(), BTreeSet::new());
             pending.remove(&name);
             continue;
         }
@@ -75,7 +75,7 @@ pub(super) async fn resolve_derived(
             .fetch_all(&mut **transaction.transaction())
             .await?;
         statements += 1;
-        resolved.sets.insert(
+        Arc::make_mut(&mut resolved.sets).insert(
             name.clone(),
             rows.into_iter()
                 .filter_map(|row| row.get::<Option<String>, _>(0))
@@ -317,7 +317,10 @@ mod tests {
             resolved.sets["aOrganizations"],
             BTreeSet::from(["org-a".into()])
         );
-        resolved.sets.get_mut("assigned").unwrap().clear();
+        Arc::make_mut(&mut resolved.sets)
+            .get_mut("assigned")
+            .unwrap()
+            .clear();
         assert_eq!(
             resolve_derived(&mut transaction, &plan, &mut resolved)
                 .await

@@ -3852,10 +3852,10 @@ mod tests {
                 indexes: Default::default(),
                 ephemeral_member: false,
                 revision: 1,
-                direct: BTreeMap::new(),
+                direct: BTreeMap::new().into(),
                 role: String::new(),
-                permissions: Value::Null,
-                sets: BTreeMap::new(),
+                permissions: Value::Null.into(),
+                sets: BTreeMap::new().into(),
                 fingerprint: String::new(),
             },
         )
@@ -3920,10 +3920,10 @@ mod tests {
             indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
-            direct: BTreeMap::new(),
+            direct: BTreeMap::new().into(),
             role: String::new(),
-            permissions: Value::Null,
-            sets: BTreeMap::new(),
+            permissions: Value::Null.into(),
+            sets: BTreeMap::new().into(),
             fingerprint: String::new(),
         };
         assert!(row_in_collection(
