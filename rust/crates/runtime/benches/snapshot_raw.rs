@@ -313,34 +313,36 @@ async fn run() {
             while admission.available_permits() > 0 {
                 held.push(admission.admit("hold".into(), "hold").await.unwrap());
             }
-            let before = AllocSnapshot::now();
-            let base = reset_peak();
-            let mut waiting = Vec::new();
-            let mut refused = 0;
-            let waker = futures_util::task::noop_waker();
-            let mut cx = Context::from_waker(&waker);
-            for i in 0..env("BENCH_QUEUE_ATTEMPTS", 5000) {
-                let mut future = Box::pin(
-                    fixture
-                        .runtime
-                        .open_replica(&session, request(&paths[i % paths.len()], json!({}), None)),
-                );
-                match future.as_mut().poll(&mut cx) {
-                    Poll::Pending => waiting.push(future),
-                    Poll::Ready(result) => {
-                        assert!(result.is_err());
-                        refused += 1;
+            {
+                let before = AllocSnapshot::now();
+                let base = reset_peak();
+                let mut waiting = Vec::new();
+                let mut refused = 0;
+                let waker = futures_util::task::noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                for i in 0..env("BENCH_QUEUE_ATTEMPTS", 5000) {
+                    let mut future =
+                        Box::pin(fixture.runtime.open_replica(
+                            &session,
+                            request(&paths[i % paths.len()], json!({}), None),
+                        ));
+                    match future.as_mut().poll(&mut cx) {
+                        Poll::Pending => waiting.push(future),
+                        Poll::Ready(result) => {
+                            assert!(result.is_err());
+                            refused += 1;
+                        }
                     }
                 }
-            }
-            let alloc = AllocSnapshot::now().since(before);
-            record(
-                "app_queue/bound",
-                json!({"cold": cold, "sameKey": same_key, "waiting": waiting.len(), "refused": refused,
+                let alloc = AllocSnapshot::now().since(before);
+                record(
+                    "app_queue/bound",
+                    json!({"cold": cold, "sameKey": same_key, "waiting": waiting.len(), "refused": refused,
                 "admissionWaiting": admission.waiting(), "allocatedBytes": alloc.allocated_bytes,
                 "liveBytes": alloc.live_bytes, "peakLiveBytes": peak_live_bytes() - base}),
-            );
-            drop(waiting);
+                );
+                drop(waiting);
+            }
             assert_eq!(admission.waiting(), (0, 0));
             drop(held);
             let recovered = fixture
