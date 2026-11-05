@@ -1,0 +1,57 @@
+{
+  "sourceCommit": "00158274846ce2db912539ee5ad59d25eff9a862",
+  "reviewedRuntimeCommit": "cc91423b3a7a4616fa34517abbe4371887574fe1",
+  "command": "cargo test --locked -p gonvex-runtime --release --features perf-fixture --test resume_permission_race -- --nocapture",
+  "cargoExit": 0,
+  "testResult": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "cases": [
+      {
+        "name": "SeeAllSpots",
+        "revokedRows": 247
+      },
+      {
+        "name": "TeamMembership",
+        "revokedRows": 308
+      },
+      {
+        "name": "MemberRoleAndPermissions",
+        "revokedRows": 301
+      }
+    ],
+    "writerRevisionBefore": 1,
+    "writerRevisionAfter": 2
+  },
+  "rawLog": {
+    "path": "/mnt/data/work/gonvex-reload-delta/race-test1.log",
+    "sha256": "3f0ac6f8fba8c60c08a819ab97c1fca1e50de8feedba666e4af71fc7787f553c"
+  },
+  "claim": {
+    "owner": "open-cost-reload-race-00158274",
+    "claim": "2026-11-05T05:35:17.867333+00:00",
+    "expected_end": "2026-11-05T05:50:17.867333+00:00",
+    "purpose": "targeted resume permission race compile/test only; no LTO benchmark/full suite",
+    "target": "/mnt/data/work/gonvex-open-cost/target"
+  },
+  "release": {
+    "owner": "open-cost-reload-race-00158274",
+    "claimed": "2026-11-05T05:35:17.867333+00:00",
+    "released": "2026-11-05T05:37:13.681318+00:00",
+    "unitState": "completed and no remaining unit",
+    "cargoExit": 0
+  },
+  "resources": {
+    "memory": "6G",
+    "cpus": 2,
+    "cpuQuota": "200%",
+    "compileCapsUnchanged": true,
+    "buildHeadroomPassed": true
+  },
+  "limitations": [
+    "No deterministic during-read index-advancement hook; not exercised",
+    "Read-snapshot correctness, not latest-permission-at-send-time atomicity",
+    "No runtime changes or new performance measurement"
+  ]
+}
