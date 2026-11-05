@@ -55,6 +55,7 @@ pub(crate) struct PlanCaches {
     /// `principal_change_concerns` returns early for any other table, which
     /// is nearly every data write.
     principal_tables: std::sync::OnceLock<BTreeSet<String>>,
+    principal_inputs: std::sync::OnceLock<BTreeMap<String, PrincipalInputs>>,
     /// The compiled program (`visibility_class`), built on first use.
     pub(crate) compiled: std::sync::OnceLock<Arc<crate::visibility_class::CompiledPlan>>,
     /// SHA-256 of the plan's version and set definitions: plans whose
@@ -845,6 +846,83 @@ pub fn inherited_tables(plan: &VisibilityPlan) -> BTreeSet<String> {
     tables
 }
 
+/// Plan-only input metadata; identity columns are checked separately for the
+/// current member and must not widen every permission join's dependencies.
+#[derive(Debug)]
+struct PrincipalInputs {
+    dependencies: VisibilityDependencies,
+    anchors: BTreeMap<String, BTreeSet<(String, String)>>,
+}
+
+/// Propagate context equalities through inner equijoins. A members occurrence
+/// joined on memberTeams.memberId = members.id is anchored even when the
+/// context constraint was declared only on memberTeams. Never infer an anchor
+/// from an unrelated join column (teamId, for example).
+fn principal_anchors(set: &VisibilitySet) -> BTreeMap<String, BTreeSet<(String, String)>> {
+    let base = if set.alias.is_empty() {
+        &set.table
+    } else {
+        &set.alias
+    };
+    let mut anchors = BTreeMap::<String, BTreeSet<(String, String)>>::new();
+    for constraint in &set.constraints {
+        if !constraint.context.is_empty() {
+            let alias = if constraint.table.is_empty() {
+                base
+            } else {
+                &constraint.table
+            };
+            anchors
+                .entry(alias.clone())
+                .or_default()
+                .insert((constraint.column.clone(), constraint.context.clone()));
+        }
+    }
+    let mut edges = Vec::new();
+    let mut previous = base.as_str();
+    for join in &set.joins {
+        let left = if join.left_alias.is_empty() {
+            previous
+        } else {
+            &join.left_alias
+        };
+        let right = if join.alias.is_empty() {
+            &join.table
+        } else {
+            &join.alias
+        };
+        edges.push((
+            (left, join.left_column.as_str()),
+            (right.as_str(), join.right_column.as_str()),
+        ));
+        previous = right;
+    }
+    loop {
+        let mut changed = false;
+        for (left, right) in &edges {
+            for (from, to) in [(left, right), (right, left)] {
+                let contexts: Vec<_> = anchors
+                    .get(from.0)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(column, _)| column == from.1)
+                    .map(|(_, context)| context.clone())
+                    .collect();
+                for context in contexts {
+                    changed |= anchors
+                        .entry(to.0.to_owned())
+                        .or_default()
+                        .insert((to.1.to_owned(), context));
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    anchors
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VisibilityDependencies {
     columns: BTreeMap<String, BTreeSet<String>>,
@@ -1003,7 +1081,7 @@ impl VisibilityPlan {
     }
 
     pub fn dependency_columns(&self) -> VisibilityDependencies {
-        self.dependency_columns_for_sets(None)
+        self.dependency_columns_for_sets(None, true)
     }
 
     /// Role-only branches can make row/set branches irrelevant for this member.
@@ -1020,7 +1098,7 @@ impl VisibilityPlan {
         resolved: &ResolvedVisibility,
     ) -> VisibilityDependencies {
         let sets = active_sets(self, &resolved.role);
-        self.dependency_columns_for_sets(Some(sets.as_ref()))
+        self.dependency_columns_for_sets(Some(sets.as_ref()), true)
     }
 
     /// Conservative row routing for legacy declarations. A changed occurrence
@@ -1098,6 +1176,26 @@ impl VisibilityPlan {
         false
     }
 
+    fn principal_inputs(&self) -> &BTreeMap<String, PrincipalInputs> {
+        self.active_sets_cache.0.principal_inputs.get_or_init(|| {
+            self.sets
+                .iter()
+                .map(|(name, set)| {
+                    (
+                        name.clone(),
+                        PrincipalInputs {
+                            dependencies: self.dependency_columns_for_sets(
+                                Some(&BTreeSet::from([name.clone()])),
+                                false,
+                            ),
+                            anchors: principal_anchors(set),
+                        },
+                    )
+                })
+                .collect()
+        })
+    }
+
     /// Version 2: does this change alter the member's principal, i.e. a
     /// principal set, a grant set's permission join, or the member row itself?
     /// Grant source rows are not principal inputs; they are patched in memory.
@@ -1131,9 +1229,11 @@ impl VisibilityPlan {
             let reads = (set.kind != "grant" && set.table == table)
                 || set.joins.iter().any(|join| join.table == table);
             reads
-                && self
-                    .dependency_columns_for_sets(Some(&BTreeSet::from([name.clone()])))
-                    .change_affects(table, operation, changed_columns)
+                && self.principal_inputs()[name].dependencies.change_affects(
+                    table,
+                    operation,
+                    changed_columns,
+                )
         })
     }
 
@@ -1163,7 +1263,7 @@ impl VisibilityPlan {
                         "id" | "account_id" | "status" | "role" | "permissions"
                     )
                 });
-            if names_member && relevant {
+            if relevant && (names_member || (old.is_null() && new.is_null())) {
                 return true;
             }
         }
@@ -1216,33 +1316,25 @@ impl VisibilityPlan {
             if !occurrences.iter().any(|(source, _)| *source == table) {
                 continue;
             }
-            let dependencies =
-                self.dependency_columns_for_sets(Some(&BTreeSet::from([name.clone()])));
+            let dependencies = &self.principal_inputs()[name].dependencies;
             if !dependencies.change_affects(table, operation, changed_columns) {
                 continue;
             }
+            if old.is_null() && new.is_null() {
+                return true;
+            }
             for (_, alias) in occurrences.iter().filter(|(source, _)| *source == table) {
-                let anchors = set
-                    .constraints
-                    .iter()
-                    .filter(|constraint| {
-                        !constraint.context.is_empty()
-                            && (constraint.table == *alias
-                                || (constraint.table.is_empty() && *alias == base))
-                    })
-                    .collect::<Vec<_>>();
+                let inputs = &self.principal_inputs()[name];
+                let anchors = inputs.anchors.get(*alias);
                 // Unanchored permission occurrences (for example workspaceTeams
                 // reached through memberTeams) stay conservative: rare admin
                 // writes rebuild, ordinary data writes never reach this path.
-                if anchors.is_empty() {
+                let Some(anchors) = anchors else {
                     return true;
-                }
+                };
                 for row in [old, new].into_iter().filter(|row| !row.is_null()) {
-                    let excludes = anchors.iter().any(|anchor| {
-                        match (
-                            row.get(&anchor.column),
-                            resolved.direct.get(&anchor.context),
-                        ) {
+                    let excludes = anchors.iter().any(|(column, context)| {
+                        match (row.get(column), resolved.direct.get(context)) {
                             (Some(value), Some(expected)) => !scalar_is(value, expected),
                             _ => false,
                         }
@@ -1359,18 +1451,21 @@ impl VisibilityPlan {
     fn dependency_columns_for_sets(
         &self,
         active: Option<&BTreeSet<String>>,
+        include_member: bool,
     ) -> VisibilityDependencies {
         let mut columns = BTreeMap::<String, BTreeSet<String>>::new();
-        columns.insert(
-            "members".to_owned(),
-            BTreeSet::from([
-                "id".to_owned(),
-                "account_id".to_owned(),
-                "status".to_owned(),
-                "role".to_owned(),
-                "permissions".to_owned(),
-            ]),
-        );
+        if include_member {
+            columns.insert(
+                "members".to_owned(),
+                BTreeSet::from([
+                    "id".to_owned(),
+                    "account_id".to_owned(),
+                    "status".to_owned(),
+                    "role".to_owned(),
+                    "permissions".to_owned(),
+                ]),
+            );
+        }
         for (name, set) in &self.sets {
             if active.is_some_and(|names| !names.contains(name)) {
                 continue;
@@ -4646,3 +4741,7 @@ mod mask_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "visibility_principal_tests.rs"]
+mod principal_change_regression;
