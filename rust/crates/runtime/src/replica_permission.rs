@@ -491,6 +491,10 @@ async fn scan_local_window(
             "qualification":"Extra actual SELECT using exact main query/typed binds/SAME TX; SQLx profiler execution, not timed direct-batch execution; primary and allocation cases do not enable this probe"
         })).unwrap()).unwrap();
     }
+    #[cfg(all(test, feature = "starter-files"))]
+    if let Ok(path) = std::env::var("STARTER_QUERY_PAIR") {
+        sql_pair_probe::compare(tx, prepared, &sql, &values, &path).await?;
+    }
     let mut collector = WindowCollector::new(definition);
     // Use the normal replica's bounded batches on this SAME transaction. This
     // changes only transport from SQLite, not SQL, bind types or admission.
@@ -826,3 +830,7 @@ pub(crate) async fn visit_indexed_collection_window(
 ) -> Result<ReplicaWindow, LocalSnapshotError> {
     scan_local_window(tx, definition, prepared, args, visit).await
 }
+
+#[cfg(all(test, feature = "starter-files"))]
+#[path = "starter_files/sql_pair_probe.rs"]
+mod sql_pair_probe;
