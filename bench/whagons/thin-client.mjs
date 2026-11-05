@@ -134,7 +134,7 @@ class Subscription {
 
 export class ThinClient {
   static stats = { unsupported: {}, framesIn: 0, framesOut: 0, bytesIn: 0, snapshotPages: 0, reconnects: 0, reopens: 0, resets: 0, batches: 0, batchItems: 0,
-    replicaErrors: 0, replicaRetries: 0, replicaRecoveries: 0, replicaRecoveryMs: 0,
+    replicaEvents: [], replicaErrors: 0, replicaRetries: 0, replicaRecoveries: 0, replicaRecoveryMs: 0,
     presence: { snapshots: 0, patches: 0, changes: 0 } };
 
   // nativeRows defaults to false: the Whagons app's SDK (0.5.2-staging.31 +
@@ -421,6 +421,7 @@ export class ThinClient {
     const sub = this.byId.get(m.id);
     if (!sub) return;
     ThinClient.stats.replicaErrors++;
+    ThinClient.stats.replicaEvents.push({type:'refused',at:now(),path:sub.path});
     sub.failedAt ??= now();
     sub.error = new Error(m.error); sub.opening = false; sub.isUpToDate = false;
     sub.dropStaging(); sub.notify();
@@ -436,6 +437,7 @@ export class ThinClient {
       if (this.manuallyClosed || !this.authReady || this.socket?.readyState !== 1 || !sub.listeners.size || this.subscriptions.get(sub.key) !== sub) return;
       sub.opening = false;
       ThinClient.stats.replicaRetries++;
+      ThinClient.stats.replicaEvents.push({type:'retry',at:now(),path:sub.path});
       this.openSubscription(sub, true);
     }, delay);
   }
@@ -687,6 +689,7 @@ export class ThinClient {
     this.clearReplicaRetry(sub, true);
     if (sub.failedAt !== undefined) {
       ThinClient.stats.replicaRecoveries++;
+      ThinClient.stats.replicaEvents.push({type:'recovered',at:now(),path:sub.path,failedAt:sub.failedAt,ms:now()-sub.failedAt});
       ThinClient.stats.replicaRecoveryMs += now() - sub.failedAt;
       sub.failedAt = undefined;
     }

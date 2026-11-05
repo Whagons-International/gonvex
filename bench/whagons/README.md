@@ -342,3 +342,19 @@ and aggregate time from first failure to recovery. Recognized failures are not
 unsupported protocol frames. Repeated watcher notifications of the same error
 object count once. Results retain timestamped errors and separate ramp/steady
 errors; steady SLO uses errors and operation starts inside the common plateau.
+
+
+Latest gate definition (supersedes both uniform-ramp definitions above):
+`LOAD_SIGNIN_SCHEDULE=mixed-v1 LOAD_USERS=1000 LOAD_RAMP_SECONDS=900
+LOAD_SECONDS=300 LOAD_RELOADS_PER_USER_HOUR=1 LOAD_MIX=production`.
+Global IDs0–699 spread uniformly over [0,900)s; IDs700–774 arrive over
+[180,185)s,775–849 over [450,455)s,850–999 over [720,725)s. All eight shards
+rendezvous on one epoch before offered traffic; IDs keep the original production
+tenant assignments. Report each burst and the mixed ramp separately: auth and
+full-collection/presence/task readiness from planned arrival, operation latency,
+errors, pending operations, and refusal/retry/recovery events. Operations belong
+to their start window even if they complete later. Every burst and ramp must
+pass the same p95<500ms,p99<1s,<1% limits, plus common plateau qualification;
+no averaging away burst failures. Pure90s/pure900s comparisons are supplemental.
+The final app open set must be recaptured against the matching shipping module
+and actual patched SDK; old captured130-open set is not final qualification.

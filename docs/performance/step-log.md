@@ -1451,3 +1451,21 @@ NON-GATING only. Sign-in objective: 60–80 CPU-ms/user vs prior ~1.5 CPU-s/user
 One retry-enabled burst baseline is useful; do not repeat already-known collapse
 without new evidence. Final qualification still requires three quiet runs plus
 :00 and oracle/leak checks on the eventual candidate. No release freeze yet.
+
+
+### Latest clarification: mixed ramp plus bursts (supersedes BOTH uniform ramps)
+
+Final schedule to implement/verify before measurement: `mixed-v1`: IDs0–699
+uniformly over900s;700–774 over5s at180s;775–849 over5s at450s;850–999 over5s
+at720s. Shared epoch across shards; no duplicate users; original tenant skew.
+Then300s common plateau,1 phased reload/user/hour. Each burst's sign-in/full
+readiness and operation-start window must pass independently, including late
+completions and pending operations. Retain refusal/recovery events; all1000
+runtime restart is NON-GATING. Engineering sign-in60–80CPUms remains aspiration.
+
+Before baseline, parent requested current-staging814415ca0 collection recapture
+with matching module and shipping patched SDK; actual first-screen release and
+eventual deferred opens must settle. Old app7d97617cf capture is reference only.
+Shipping SQLite.1 patch contains deferral APIs absent from bare perf SDK; use
+actual patched shipping SDK in isolated packaging, not bare local client.
+No runtime architecture prototype/build authorized; unchanged7d01af5b baseline.
