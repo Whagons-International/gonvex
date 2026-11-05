@@ -116,6 +116,7 @@ class Subscription {
     this.listeners = new Set(); this.unsubscribeTimer = undefined;
     this.version = 0; this.cachedVersion = -1; this.cachedRows = undefined; this.notifyQueued = false;
     this.readyCursor = undefined; this.digest = undefined; this.error = undefined;
+    this.retryAttempt = 0; this.retryTimer = undefined; this.failedAt = undefined;
   }
   setRow(id, entry) { const old = this.rows.get(id); if (old === entry) { this.client.pool.release(entry); return; } this.rows.set(id, entry); this.client.pool.release(old); this.version++; }
   deleteRow(id) { const old = this.rows.get(id); if (!old) return; this.rows.delete(id); this.client.pool.release(old); this.version++; }
@@ -133,6 +134,7 @@ class Subscription {
 
 export class ThinClient {
   static stats = { unsupported: {}, framesIn: 0, framesOut: 0, bytesIn: 0, snapshotPages: 0, reconnects: 0, reopens: 0, resets: 0, batches: 0, batchItems: 0,
+    replicaErrors: 0, replicaRetries: 0, replicaRecoveries: 0, replicaRecoveryMs: 0,
     presence: { snapshots: 0, patches: 0, changes: 0 } };
 
   // nativeRows defaults to false: the Whagons app's SDK (0.5.2-staging.31 +
@@ -186,8 +188,8 @@ export class ThinClient {
   close() {
     this.manuallyClosed = true;
     clearTimeout(this.reconnectTimer); clearTimeout(this.openFlushTimer);
-    for (const sub of this.subscriptions.values()) { clearTimeout(sub.unsubscribeTimer); sub.clearRows(); sub.dropStaging(); }
-    this.subscriptions.clear(); this.byId.clear();
+    for (const sub of this.subscriptions.values()) { clearTimeout(sub.unsubscribeTimer); this.clearReplicaRetry(sub, true); sub.clearRows(); sub.dropStaging(); }
+    this.subscriptions.clear(); this.byId.clear(); this.pendingOpens.clear();
     for (const call of this.pending.values()) call.fail(new Error(`Client closed while waiting for ${call.kind} ${call.path}.`));
     this.pending.clear();
     try { this.socket?.close(); } catch {}
@@ -203,6 +205,7 @@ export class ThinClient {
   }
 
   dropConnectionState() {
+    clearTimeout(this.openFlushTimer); this.openFlushTimer = undefined; this.pendingOpens.clear();
     // Same contract as the SDK: tenant calls fail with "may or may not have been applied".
     for (const [id, call] of this.pending) {
       if (call.scope === 'control') continue;
@@ -211,6 +214,7 @@ export class ThinClient {
     }
     this.processedWatermark = 0; this.deferredWatermark = undefined;
     for (const sub of this.subscriptions.values()) {
+      this.clearReplicaRetry(sub, true);
       if (sub.id) this.byId.delete(sub.id);
       sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); sub.notify();
     }
@@ -375,10 +379,10 @@ export class ThinClient {
   }
 
   // ---- replica subscriptions --------------------------------------------------
-  openSubscription(sub) {
-    if (sub.opening || sub.id || this.subscriptions.get(sub.key) !== sub || sub.listeners.size === 0) return;
+  openSubscription(sub, retry = false) {
+    if (this.manuallyClosed || sub.retryTimer || sub.opening || (sub.id && !retry) || this.subscriptions.get(sub.key) !== sub || sub.listeners.size === 0) return;
     if (!this.authReady || !this.auth.token) return; // reopened from auth.result
-    sub.id = randomUUID(); sub.opening = true; sub.isUpToDate = false;
+    sub.id ??= randomUUID(); sub.opening = true; sub.isUpToDate = false;
     this.byId.set(sub.id, sub);
     this.pendingOpens.add(sub);
     if (!this.openFlushTimer) this.openFlushTimer = setTimeout(() => this.flushOpens(), 0);
@@ -393,6 +397,7 @@ export class ThinClient {
   releaseSubscription(sub) {
     sub.unsubscribeTimer = undefined;
     if (this.subscriptions.get(sub.key) !== sub || sub.listeners.size > 0) return;
+    this.clearReplicaRetry(sub, true);
     this.subscriptions.delete(sub.key); this.pendingOpens.delete(sub);
     if (sub.id) { this.byId.delete(sub.id); if (this.socket?.readyState === 1 && this.authReady) this.rawSend({ type: 'replica.close', id: sub.id }); }
     sub.clearRows(); sub.dropStaging();
@@ -400,10 +405,38 @@ export class ThinClient {
   }
   reopenAll() {
     for (const sub of this.subscriptions.values()) {
+      this.clearReplicaRetry(sub, true);
       if (sub.id) this.byId.delete(sub.id);
       sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging();
       if (sub.listeners.size > 0) { ThinClient.stats.reopens++; this.openSubscription(sub); }
     }
+  }
+
+  clearReplicaRetry(sub, reset = false) {
+    clearTimeout(sub.retryTimer); sub.retryTimer = undefined;
+    if (reset) sub.retryAttempt = 0;
+  }
+  onReplicaError(m) {
+    const sub = this.byId.get(m.id);
+    if (!sub) return;
+    ThinClient.stats.replicaErrors++;
+    sub.failedAt ??= now();
+    sub.error = new Error(m.error); sub.opening = false; sub.isUpToDate = false;
+    sub.dropStaging(); sub.notify();
+    this.scheduleReplicaRetry(sub);
+  }
+  scheduleReplicaRetry(sub) {
+    if (this.manuallyClosed || sub.retryTimer || !sub.listeners.size || this.subscriptions.get(sub.key) !== sub) return;
+    // SDK exponential backoff; bounded downward jitter disperses refused opens
+    // while retaining the requested hard 5 s maximum.
+    const delay = Math.min(250 * 2 ** Math.min(sub.retryAttempt++, 5), 5000) * (0.8 + Math.random() * 0.2);
+    sub.retryTimer = setTimeout(() => {
+      sub.retryTimer = undefined;
+      if (this.manuallyClosed || !this.authReady || this.socket?.readyState !== 1 || !sub.listeners.size || this.subscriptions.get(sub.key) !== sub) return;
+      sub.opening = false;
+      ThinClient.stats.replicaRetries++;
+      this.openSubscription(sub, true);
+    }, delay);
   }
 
   // ---- inbound ---------------------------------------------------------------
@@ -442,8 +475,8 @@ export class ThinClient {
       case 'replica.closed': return;
       case 'presence.snapshot': case 'presence.patch': case 'presence.error': return this.onPresence(m);
       case 'replica.needHashes': return this.onNeedHashes(m);
-      case 'replica.reset': { ThinClient.stats.resets++; const sub = this.byId.get(m.id); if (sub) { this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); this.openSubscription(sub); sub.notify(); } return; }
-      case 'replica.error': { const sub = this.byId.get(m.id); if (sub) { sub.error = new Error(m.error); sub.notify(); } this.unsupported('replica.error: ' + String(m.error).slice(0, 160)); return; }
+      case 'replica.reset': { ThinClient.stats.resets++; const sub = this.byId.get(m.id); if (sub) { this.clearReplicaRetry(sub, true); this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); this.openSubscription(sub); sub.notify(); } return; }
+      case 'replica.error': return this.onReplicaError(m);
       default: this.unsupported(m.type || 'untyped');
     }
   }
@@ -485,7 +518,7 @@ export class ThinClient {
       // Same as the SDK: authenticate again on this socket, then re-open collections.
       this.authReady = false;
       this.presenceDisconnected();
-      for (const sub of this.subscriptions.values()) { if (sub.id) this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); sub.notify(); }
+      for (const sub of this.subscriptions.values()) { this.clearReplicaRetry(sub, true); if (sub.id) this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); sub.notify(); }
       this.processedWatermark = 0; this.deferredWatermark = undefined;
       if (this.socket?.readyState === 1) this.sendAuth();
       return;
@@ -597,6 +630,7 @@ export class ThinClient {
     ThinClient.stats.needHashes = (ThinClient.stats.needHashes || 0) + 1;
     const sub = this.byId.get(m.id);
     if (!sub) return;
+    this.clearReplicaRetry(sub);
     sub.dropStaging();
     const cols = sub.ref.replica?.columns;
     const keys = [], hashes = {}, aggregate = Buffer.alloc(32);
@@ -649,6 +683,12 @@ export class ThinClient {
         else if (op.revision > snapshotRevision) this.applyChange(sub, op.change);
       }
     } else if (m.truncated !== undefined) sub.complete = m.truncated !== true;
+    this.clearReplicaRetry(sub, true);
+    if (sub.failedAt !== undefined) {
+      ThinClient.stats.replicaRecoveries++;
+      ThinClient.stats.replicaRecoveryMs += now() - sub.failedAt;
+      sub.failedAt = undefined;
+    }
     sub.readyCursor = m.cursor; sub.digest = m.digest; sub.opening = false; sub.isUpToDate = true; sub.error = undefined;
     sub.notify();
     this.drainDeferredWatermark();

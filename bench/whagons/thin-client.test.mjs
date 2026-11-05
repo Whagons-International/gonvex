@@ -250,3 +250,78 @@ test('needHashes on an open subscription reopens the same id with keys, hashes a
   assert.deepEqual(w.localReplicaResult(), [{ _id: 'b', name: 'B2' }]);
   assert.deepEqual(c.constructor.stats.unsupported, {});
 });
+
+test('refused opens back off with jitter, deduplicate, recover and release watermarks', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { c, sent } = connected();
+  const w = c.watchReplica(ref); w.onUpdate(() => {});
+  t.mock.timers.tick(1);
+  const sub = [...c.subscriptions.values()][0];
+  const before = { ...ThinClient.stats };
+  const delays = [];
+  t.mock.method(Math, 'random', () => 0.5);
+  for (const base of [250, 500, 1000, 2000, 4000, 5000, 5000]) {
+    const id = sub.id;
+    c.dispatch({ type: 'replica.error', id, error: 'too many waiting builds' });
+    const timer = sub.retryTimer;
+    c.dispatch({ type: 'replica.error', id, error: 'too many waiting builds' });
+    assert.equal(sub.retryTimer, timer, 'only one outstanding retry');
+    assert.equal(sub.isUpToDate, false);
+    const n = sent.length;
+    const delay = base * 0.9; delays.push(delay);
+    t.mock.timers.tick(delay - 1); assert.equal(sent.length, n);
+    t.mock.timers.tick(2); c.flushOpens();
+    assert.equal(sub.id, id, 'SDK retries the same logical subscription id');
+  }
+  c.onWatermark(20);
+  assert.equal(c.processedWatermark, 0);
+  c.dispatch({ type: 'replica.snapshot', id: sub.id, result: [{ _id: 'recovered' }], cursor: { epoch: 'e', revision: 20 } });
+  c.dispatch({ type: 'replica.ready', id: sub.id, truncated: false, cursor: { epoch: 'e', revision: 20 } });
+  assert.equal(w.status().isUpToDate, true);
+  assert.equal(sub.retryAttempt, 0);
+  assert.equal(sub.retryTimer, undefined);
+  assert.deepEqual(w.localReplicaResult(), [{ _id: 'recovered' }]);
+  assert.equal(c.processedWatermark, 20);
+  assert.equal(ThinClient.stats.replicaRetries - before.replicaRetries, 7);
+  assert.equal(ThinClient.stats.replicaRecoveries - before.replicaRecoveries, 1);
+  assert.equal(ThinClient.stats.unsupported['replica.error: too many waiting builds'], undefined);
+  c.close();
+});
+
+test('failed-open timers are cancelled on release, disconnect, reauth and close', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const lifecycle of ['release', 'disconnect', 'reauth', 'close']) {
+    const { c, sent } = connected(); c.watchReplica(ref);
+    t.mock.timers.tick(1); c.flushOpens();
+    const sub = [...c.subscriptions.values()][0];
+    c.dispatch({ type: 'replica.error', id: sub.id, error: 'refused' });
+    if (lifecycle === 'release') { sub.listeners.clear(); c.releaseSubscription(sub); }
+    if (lifecycle === 'disconnect') { c.authReady = false; c.dropConnectionState(); }
+    if (lifecycle === 'reauth') c.onAuthError({ id: 'membership-changed' });
+    if (lifecycle === 'close') c.close();
+    const n = sent.length;
+    assert.equal(sub.retryTimer, undefined);
+    t.mock.timers.tick(6000);
+    assert.equal(sent.length, n, lifecycle);
+    if (lifecycle === 'disconnect' || lifecycle === 'reauth') {
+      c.authReady = true; c.reopenAll(); t.mock.timers.tick(1); c.flushOpens();
+      assert.ok(sub.id); assert.equal(sub.opening, true);
+    }
+    c.close();
+  }
+});
+
+test('ready before retry deadline cancels retry and resets the backoff', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { c, sent } = connected(); const w = c.watchReplica(ref);
+  t.mock.timers.tick(1); c.flushOpens();
+  const sub = [...c.subscriptions.values()][0];
+  c.dispatch({ type: 'replica.error', id: sub.id, error: 'transient' });
+  c.dispatch({ type: 'replica.snapshot', id: sub.id, result: [], cursor: { epoch: 'e', revision: 1 } });
+  c.dispatch({ type: 'replica.ready', id: sub.id, truncated: false, cursor: { epoch: 'e', revision: 1 } });
+  const n = sent.length;
+  t.mock.timers.tick(6000);
+  assert.equal(sent.length, n); assert.equal(w.status().isUpToDate, true);
+  assert.equal(sub.retryAttempt, 0); assert.equal(sub.error, undefined);
+  c.close();
+});
