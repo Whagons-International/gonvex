@@ -291,12 +291,16 @@ async fn run() {
         if enabled("app_queue/") {
             // Populate shared bases first: cold-cache single-flight waits
             // precede snapshot admission and are a separate queue.
-            for path in &paths {
-                fixture
-                    .runtime
-                    .open_replica(&session, request(path, json!({}), None))
-                    .await
-                    .unwrap();
+            let cold = env("BENCH_QUEUE_COLD", 0) == 1;
+            let same_key = env("BENCH_QUEUE_SAME_KEY", 0) == 1;
+            if !cold {
+                for path in &paths {
+                    fixture
+                        .runtime
+                        .open_replica(&session, request(path, json!({}), None))
+                        .await
+                        .unwrap();
+                }
             }
             use std::future::Future;
             use std::task::{Context, Poll};
@@ -311,7 +315,7 @@ async fn run() {
             let mut refused = 0;
             let waker = futures_util::task::noop_waker();
             let mut cx = Context::from_waker(&waker);
-            for i in 0..5000 {
+            for i in 0..env("BENCH_QUEUE_ATTEMPTS", 5000) {
                 let mut future = Box::pin(
                     fixture
                         .runtime
@@ -328,13 +332,22 @@ async fn run() {
             let alloc = AllocSnapshot::now().since(before);
             record(
                 "app_queue/bound",
-                json!({"waiting": waiting.len(), "refused": refused,
+                json!({"cold": cold, "sameKey": same_key, "waiting": waiting.len(), "refused": refused,
                 "admissionWaiting": admission.waiting(), "allocatedBytes": alloc.allocated_bytes,
                 "liveBytes": alloc.live_bytes, "peakLiveBytes": peak_live_bytes() - base}),
             );
             drop(waiting);
             assert_eq!(admission.waiting(), (0, 0));
             drop(held);
+            let recovered = fixture
+                .runtime
+                .open_replica(&session, request(&paths[0], json!({}), None))
+                .await
+                .unwrap();
+            assert!(
+                recovered.subscription.is_some(),
+                "all queue tokens returned after cancellation"
+            );
             fixture.shutdown().await;
             return;
         }
