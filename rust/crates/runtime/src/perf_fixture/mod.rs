@@ -29,6 +29,7 @@
 pub mod data;
 pub mod fake_host;
 pub mod harness;
+pub mod offline;
 pub mod stalls;
 
 use std::collections::BTreeMap;

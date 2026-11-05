@@ -1,0 +1,58 @@
+//! Read-path-only module fixture over an owned copy of the synthetic lab DBs.
+use super::*;
+
+pub struct OfflineFixture {
+    pub runtime: Runtime,
+    _host: FakeModuleHost,
+}
+
+impl OfflineFixture {
+    /// The caller copies the lab baseline and rewrites its stored routing
+    /// URLs first. The marker prevents accidentally opening the shared source.
+    pub async fn start(directory: &Path) -> FixtureResult<Self> {
+        if !directory.join(".open-cost-owned").is_file() {
+            return Err("offline fixture requires an owned synthetic copy".into());
+        }
+        let host =
+            FakeModuleHost::start(&directory.join("host.sock"), fake_host::whagons_functions())?;
+        let mut overrides: BTreeMap<String, String> = std::env::vars()
+            .filter(|(name, _)| name.starts_with("GONVEX_"))
+            .collect();
+        overrides.insert("GONVEX_DATA_DIR".into(), directory.display().to_string());
+        overrides.insert("GONVEX_MODULE_HOST_ENABLED".into(), "true".into());
+        overrides.insert("GONVEX_MODULE_HOST_ENDPOINT".into(), host.endpoint());
+        overrides.insert("GONVEX_MODULE_HOST_IN_PROCESS".into(), "false".into());
+        overrides.remove("GONVEX_MODULE_HOST_BINARY");
+        let runtime = Runtime::new(Config::perf_from_lookup(|name| {
+            overrides.get(name).cloned()
+        })?);
+        runtime.start().await?;
+        Ok(Self {
+            runtime,
+            _host: host,
+        })
+    }
+
+    pub async fn session(
+        &self,
+        project: &str,
+        tenant: &str,
+        account: &str,
+    ) -> FixtureResult<TenantSession> {
+        let control = self
+            .runtime
+            .inner
+            .control_plane
+            .read()
+            .await
+            .clone()
+            .ok_or("no control plane")?;
+        Ok(control
+            .tenant_session_for_account(project, tenant, account)
+            .await?)
+    }
+
+    pub async fn shutdown(self) {
+        self.runtime.shutdown().await;
+    }
+}

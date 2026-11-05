@@ -269,6 +269,10 @@ fn main() {
 }
 
 async fn run() {
+    if std::env::var_os("BENCH_OFFLINE_DATA").is_some() {
+        run_offline().await;
+        return;
+    }
     let tasks: usize = env("BENCH_TASKS", 9_000);
     let members: usize = env("BENCH_MEMBERS", 78);
     let iterations: usize = env("BENCH_ITERS", 5);
@@ -545,4 +549,86 @@ async fn run() {
             );
         }
     }
+}
+
+/// Fixed gate collection set, independent of browser/socket/auth execution.
+async fn run_offline() {
+    use gonvex_runtime::perf_fixture::offline::OfflineFixture;
+    let directory = std::path::PathBuf::from(std::env::var("BENCH_OFFLINE_DATA").unwrap());
+    let fixture = OfflineFixture::start(&directory).await.unwrap();
+    let sessions: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("BENCH_OFFLINE_SESSIONS").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let captured: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("BENCH_OFFLINE_OPENS").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let mut specs = captured["opens"].as_array().unwrap().clone();
+    for path in WHAGONS_COLD_LOGIN {
+        if path == "notifications.listNotifications" || path == "presence.list" {
+            continue;
+        }
+        if !specs
+            .iter()
+            .any(|s| s["path"] == path && s["args"] == json!({}))
+        {
+            specs.push(json!({"path":path,"args":{}}));
+        }
+    }
+    let count = env("BENCH_ITERS", 5);
+    for identity in sessions.as_array().unwrap() {
+        let session = fixture
+            .session(
+                identity["project"].as_str().unwrap(),
+                identity["tenant"].as_str().unwrap(),
+                identity["account"].as_str().unwrap(),
+            )
+            .await
+            .unwrap();
+        let label = identity["label"].as_str().unwrap();
+        let mut tokens: Vec<Option<(ReplicaCursor, String)>> = Vec::new();
+        for phase in ["first", "reload"] {
+            let mut scenario = Scenario::start();
+            for iteration in 0..if phase == "first" { 1 } else { count } {
+                scenario
+                    .run(async {
+                        let mut next = Vec::new();
+                        for (i, spec) in specs.iter().enumerate() {
+                            let path = spec["path"].as_str().unwrap();
+                            let args: Value = serde_json::from_str(
+                                &serde_json::to_string(&spec["args"])
+                                    .unwrap()
+                                    .replace("$member", &session.member.id),
+                            )
+                            .unwrap();
+                            let token = if phase == "reload" {
+                                tokens[i].as_ref()
+                            } else {
+                                None
+                            };
+                            let opened = fixture
+                                .runtime
+                                .open_replica(&session, request(path, args, token))
+                                .await
+                                .unwrap_or_else(|e| panic!("{path}: {e}"));
+                            assert!(
+                                opened.subscription.is_some(),
+                                "{path} unexpectedly needs hashes"
+                            );
+                            next.push(ready_of(&opened.messages));
+                            std::hint::black_box(opened);
+                        }
+                        tokens = next;
+                    })
+                    .await;
+                std::hint::black_box(iteration);
+            }
+            scenario.finish(
+                &format!("offline/{label}/{phase}"),
+                json!({"opens":specs.len(),"cursorReload":phase=="reload"}),
+            );
+        }
+    }
+    fixture.shutdown().await;
 }
