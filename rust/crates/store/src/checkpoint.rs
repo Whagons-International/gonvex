@@ -23,7 +23,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 use libsqlite3_sys as ffi;
@@ -82,6 +82,10 @@ pub(crate) struct WalState {
     path: CString,
     every: u64,
     cap: u64,
+    /// Serialize our background checkpoint with the writer's cap fallback.
+    /// Otherwise a busy background checkpoint can make every cap attempt fail
+    /// while a fast writer keeps extending the WAL.
+    checkpoint_lock: Mutex<()>,
     /// Frames in the WAL after the last commit.
     frames: AtomicU64,
     /// Frame count at which the next background checkpoint is requested.
@@ -100,6 +104,7 @@ impl WalState {
             path: CString::new(path.as_os_str().as_encoded_bytes()).unwrap_or_default(),
             every,
             cap,
+            checkpoint_lock: Mutex::new(()),
             frames: AtomicU64::new(0),
             next_request: AtomicU64::new(every),
             next_inline: AtomicU64::new(cap),
@@ -215,6 +220,10 @@ fn run(receiver: mpsc::Receiver<Message>) {
                 let (_, connection) = &connections[&state.path];
                 let started = Instant::now();
                 let (mut log, mut copied) = (0, 0);
+                let _checkpoint = state
+                    .checkpoint_lock
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 unsafe {
                     ffi::sqlite3_wal_checkpoint_v2(
                         connection.0,
@@ -264,6 +273,13 @@ unsafe extern "C" fn wal_hook(
             gonvex_profiler::Stage::SqliteCheckpointInline,
             gonvex_profiler::Label::None,
         );
+        // The commit has released SQLite's writer lock before invoking the
+        // WAL hook. Wait for our in-flight background copy, then finish the
+        // uncopied tail before admitting the next writer transaction.
+        let _checkpoint = state
+            .checkpoint_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let rc = ffi::sqlite3_wal_checkpoint_v2(
             db,
             std::ptr::null(),
@@ -272,7 +288,7 @@ unsafe extern "C" fn wal_hook(
             std::ptr::null_mut(),
         );
         if rc == ffi::SQLITE_BUSY {
-            // A background checkpoint is still running: retry next commit.
+            // An external checkpoint can still hold SQLite's lock: retry next commit.
             state.next_inline.store(frames + 1, Ordering::Relaxed);
         }
     }
