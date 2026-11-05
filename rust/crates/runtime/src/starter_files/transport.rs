@@ -410,14 +410,19 @@ impl Runtime {
             &registered.registration.binding.scope.projection_version,
         )
         .await?;
+        let mut inspected_digest = ReplicaAggregate::new(false);
         let inspected_window = scan_local_window(
             &mut inspect,
             &registered.registration.definition,
             &prepared,
             &request.args,
-            |_| Ok(()),
+            |row| {
+                inspected_digest.add(&row.hash);
+                Ok(())
+            },
         )
         .await?;
+        let inspected_digest = inspected_digest.digest();
         inspect.commit().await?;
         if inspected_window.truncated
             || inspected_window.boundary.is_some()
@@ -495,8 +500,12 @@ impl Runtime {
                     let d = &registered.registration.definition;
                     // Nontruncated complete set only. Exact boundary proof is repeated
                     // using the normal v2 SQL scanner at commit, before any ready.
-                    if verified.rows != inspected_window.rows as u64 {
-                        return Err(io::Error::other("possibly truncated starter"));
+                    if verified.rows != inspected_window.rows as u64
+                        || verified.digest != inspected_digest
+                    {
+                        return Err(io::Error::other(
+                            "starter differs from fresh authorized SQL window",
+                        ));
                     }
                     let public = StarterOffer {
                         id: request.id.clone(),

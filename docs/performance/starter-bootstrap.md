@@ -61,6 +61,12 @@ that build. The live test blocks the build permit while checking normal ready.
   Any invalidation/cancel/expiry produces `replica.starterFallback` and at most
   one existing normal open. No second client subscription is created.
 
+Before any offer or piece payload, the verified file digest and row count must
+match the fresh authorized indexed SQL window. A self-consistent checksummed
+cache substituting an out-of-scope row is rejected before enqueue. This is an
+integrity/equality check in addition to exact source authority, not a client
+fingerprint or an authority substitute.
+
 Offers, each piece, publication and final commit revalidate current native
 session/account/member/route, physical database/epoch, exact canonical set,
 source/policy/projection/schema authority, ready generation, permission serial
@@ -164,8 +170,8 @@ Measured module result (three paired operations; medians, unoptimized runtime):
 
 | Measure | Normal cold client | Starter cold client |
 | --- | ---: | ---: |
-| Ready wall time | 498.6 ms | 2,490.9 ms |
-| Rust process CPU | 61.6 ms | 1,827.8 ms |
+| Ready wall time | 500.6 ms | 2,502.2 ms |
+| Rust process CPU | 61.4 ms | 1,877.3 ms |
 | JSON application bytes | 4,032,973 | 146,045 |
 
 This candidate reduces transferred application bytes and is slower in this
@@ -173,8 +179,8 @@ module measurement. It establishes no cold-load CPU/latency improvement. Normal
 operations benefit from existing server caches; the starter measurement includes
 fresh source/window checks and the final v2 proof on every operation. Raw rows
 occupy 4,021,989 bytes, encoded pieces 103,417 bytes and
-published disk files 138,193 bytes. Build plus provider registration
-cost 950.2 ms. Published bytes are the logical write cost;
+published disk files 138,197 bytes. Build plus provider registration
+cost 2,916.2 ms. Published bytes are the logical write cost;
 filesystem journal/block amplification was not measured. The peak SDK stage
 charge was 52,935,464 bytes and returned to zero after
 settlement. Whole Node RSS includes the SDK, committed cache and runtime, and

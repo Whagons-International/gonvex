@@ -850,3 +850,43 @@ async fn starter_missing_or_corrupt_pinned_piece_denies_bytes_and_cancels_once()
         );
     }
 }
+
+#[tokio::test]
+async fn starter_valid_checksums_cannot_replace_authorized_rows_before_offer() {
+    use sha2::{Digest, Sha256};
+    let hash = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let _env = Environment::set();
+    let f = fixture().await;
+    let path = std::fs::read_dir(f._artifacts.path().join("manifests"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut envelope: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // Preserve exact identity/serial/source authority and row count. Even a
+    // self-consistent checksummed cache cannot substitute out-of-scope key b.
+    let raw=b"{\"id\":\"a\",\"body\":\"first\",\"rank\":1}\n{\"id\":\"b\",\"body\":\"hidden\",\"rank\":2}\n";
+    let piece_hash = hash(raw);
+    std::fs::write(f._artifacts.path().join("pieces").join(&piece_hash), raw).unwrap();
+    envelope["manifest"]["pieces"] = json!([{"hash":piece_hash,"raw_hash":piece_hash,"compressed":false,"bytes":raw.len(),"raw_bytes":raw.len()}]);
+    let manifest: crate::starter_files::Manifest =
+        serde_json::from_value(envelope["manifest"].clone()).unwrap();
+    envelope["checksum"] = json!(hash(&serde_json::to_vec(&manifest).unwrap()));
+    std::fs::write(path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    let (mut c, s) = bob_connection(&f).await;
+    assert!(!matches!(
+        f.runtime.offer_starter(&mut c, &s, &cold(), false).await,
+        Ok(true)
+    ));
+    assert!(
+        c.pop().is_none(),
+        "a forged cache was offered before authorized SQL equality proof"
+    );
+}
