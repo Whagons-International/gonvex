@@ -461,3 +461,21 @@ budget qualification are separate from runtime SLO qualification. Preserve all
 references; a replay using one captured principal is a full-payload driver stress
 case, not proof of the production tenant/permission mix. See
 [driver budget evidence](../../docs/performance/harness-driver-budget.md).
+
+For an independent native Mac generator, use a new owned directory and lock,
+verify the Node binary and available headroom, and preserve the frozen framework,
+SDK/dependency and synthetic-fixture SHA receipts. A normal owned one-shot
+LaunchAgent (`RunAtLoad=true`, `KeepAlive=false`) avoids inheriting a background
+SSH session's scheduling policy. Do not use `launchctl submit` as a one-shot:
+its default can restart a completed measurement. Leave other Mac jobs untouched.
+
+Qualify the full 132-window cold/cached-row/cursor/digest model and 150/5s planned
+arrivals before live load. Separately prove forwarding connection density; a
+single bridge needs two descriptors per forwarded socket. Record the owned
+bridge/listener backlog and process descriptor limits, and monitor its heartbeat.
+Separate runtime/auth SSH forwards keep each owned Mac SSH process below its
+connection/descriptor limit. These helpers remain inside the arch3 aggregate
+CPU/RAM cap; the runtime retains its own exact one-CPU/2-GiB cap and affinity.
+Raw network/SSH delay stays in SLO measurements. Cross-host row timestamps need
+an explicit clock-uncertainty report; the older same-workstation result note is
+not applicable to a Mac/arch3 run.
