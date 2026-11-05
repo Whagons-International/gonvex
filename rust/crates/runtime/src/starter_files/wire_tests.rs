@@ -1263,3 +1263,26 @@ async fn starter_key_index_hidden_same_length_blob_key_is_not_repaired_after_pay
         "invalid source was marked ready by registration"
     );
 }
+
+#[tokio::test]
+async fn starter_timestamp_schema_stays_on_normal_transport() {
+    let _env = Environment::set();
+    let f = fixture().await;
+    let mut tx = gonvex_store::begin_transaction(&f.runtime.inner.pools, &f.url, false)
+        .await
+        .unwrap();
+    sqlx::raw_sql("ALTER TABLE tasks RENAME COLUMN body TO previous_body; ALTER TABLE tasks ADD COLUMN body TIMESTAMP_MICROS")
+        .execute(&mut **tx.transaction()).await.unwrap();
+    tx.commit().await.unwrap();
+    let error = f
+        .runtime
+        .register_local_starter_transport(&f.session, f.registration.clone(), f.store.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::replica::permission::LocalSnapshotError::Rejected(
+            "starter timestamp-micros codec is not qualified"
+        )
+    ));
+}

@@ -380,6 +380,14 @@ impl Runtime {
                     .find(|c| c.name == *key)
                     .ok_or(LocalSnapshotError::Rejected("projected column absent"))?;
                 let kind = match c.kind() {
+                    // The wire v1 codec has no qualified timestamp ordering/type tag.
+                    // Keep this collection on normal v2 instead of treating its
+                    // RFC3339 output as an ordinary sortable text column.
+                    gonvex_store::rows::JsonKind::TimestampMicros => {
+                        return Err(LocalSnapshotError::Rejected(
+                            "starter timestamp-micros codec is not qualified",
+                        ));
+                    }
                     gonvex_store::rows::JsonKind::Json => "json",
                     gonvex_store::rows::JsonKind::Boolean => "boolean",
                     gonvex_store::rows::JsonKind::Integer => "integer",
