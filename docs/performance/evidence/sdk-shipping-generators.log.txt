@@ -1,0 +1,14 @@
+Running as unit: gonvex-sdk-compose-generators-phase-a123f9e4870c.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T08:27:55.521906+00:00", "attempt": "3e91d72ec65845239595bc996ca9361e", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-generators-phase-a123f9e4870c.service", "event": "wait-start", "kind": "typecheck", "pid": 3085423, "schema": "coach.resources.v1", "start_ticks": "3054238", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-generators-phase-a123f9e4870c.service", "why": "SDK composition docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T08:27:55.522075+00:00", "attempt": "3e91d72ec65845239595bc996ca9361e", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-generators-phase-a123f9e4870c.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "typecheck", "outcome": "admitted", "pid": 3085423, "position": 0, "schema": "coach.resources.v1", "start_ticks": "3054238", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-generators-phase-a123f9e4870c.service", "why": "SDK composition docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+$ fumadocs-mdx && next typegen && tsc --noEmit
+[MDX] generated files in 10.763972000000024ms
+[MDX] generated files in 6.637457999999981ms
+Generating route types...
+✓ Types generated successfully
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 1688030, "exit_code": 0, "io_source": "unavailable", "memory_peak": 269807616, "wall_seconds": 1.299}, "arbitration": "kernel-v1", "at": "2026-11-05T08:27:56.841694+00:00", "attempt": "3e91d72ec65845239595bc996ca9361e", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-generators-phase-a123f9e4870c.service", "event": "lease-release", "exit_code": 0, "kind": "typecheck", "pid": 3085423, "schema": "coach.resources.v1", "start_ticks": "3054238", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-generators-phase-a123f9e4870c.service", "why": "SDK composition docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 1.457s
+             CPU time consumed: 1.799s
+                   Memory peak: 257.3M (swap: 0B)

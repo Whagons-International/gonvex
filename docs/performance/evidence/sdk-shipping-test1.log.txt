@@ -1,0 +1,91 @@
+Running as unit: gonvex-sdk-compose-test1-phase-ad953e4adc21.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T08:22:57.192297+00:00", "attempt": "0eef4361a583440b99fc603bfec5746d", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-test1-phase-ad953e4adc21.service", "event": "wait-start", "kind": "test", "pid": 3036461, "schema": "coach.resources.v1", "start_ticks": "3024405", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-test1-phase-ad953e4adc21.service", "why": "actual SDK artifact ownership /mnt/data/work/gonvex-sdk-composition"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T08:22:57.192577+00:00", "attempt": "0eef4361a583440b99fc603bfec5746d", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-test1-phase-ad953e4adc21.service", "elapsed_seconds": 0.001, "event": "wait-end", "kind": "test", "outcome": "admitted", "pid": 3036461, "position": 0, "schema": "coach.resources.v1", "start_ticks": "3024405", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-test1-phase-ad953e4adc21.service", "why": "actual SDK artifact ownership /mnt/data/work/gonvex-sdk-composition"}
+TAP version 13
+# Subtest: actual defer/release preserves checkpoints: before-hydration
+ok 1 - actual defer/release preserves checkpoints: before-hydration
+  ---
+  duration_ms: 26.690397
+  type: 'test'
+  ...
+# Subtest: actual defer/release preserves checkpoints: after-hydration
+ok 2 - actual defer/release preserves checkpoints: after-hydration
+  ---
+  duration_ms: 4.321572
+  type: 'test'
+  ...
+# Subtest: actual deferred unsubscribe cancels only its own intent
+ok 3 - actual deferred unsubscribe cancels only its own intent
+  ---
+  duration_ms: 4.563882
+  type: 'test'
+  ...
+# Subtest: deferred requests cannot resurrect after close
+ok 4 - deferred requests cannot resurrect after close
+  ---
+  duration_ms: 3.893725
+  type: 'test'
+  ...
+# Subtest: deferred requests cannot resurrect after scope-failure
+ok 5 - deferred requests cannot resurrect after scope-failure
+  ---
+  duration_ms: 2.647792
+  type: 'test'
+  ...
+# Subtest: deferred requests cannot resurrect after scope-replacement
+ok 6 - deferred requests cannot resurrect after scope-replacement
+  ---
+  duration_ms: 1.331124
+  type: 'test'
+  ...
+# Subtest: provisional deferrals bind on first valid admission, earlyRelease=false
+ok 7 - provisional deferrals bind on first valid admission, earlyRelease=false
+  ---
+  duration_ms: 3.000407
+  type: 'test'
+  ...
+# Subtest: provisional deferrals bind on first valid admission, earlyRelease=true
+ok 8 - provisional deferrals bind on first valid admission, earlyRelease=true
+  ---
+  duration_ms: 2.674832
+  type: 'test'
+  ...
+# Subtest: cancellation after release but before hydration keeps the original unsubscribe handle effective
+ok 9 - cancellation after release but before hydration keeps the original unsubscribe handle effective
+  ---
+  duration_ms: 2.76366
+  type: 'test'
+  ...
+# Subtest: same admitted scope reconnect retains its owner; identity retirement cannot reuse it
+ok 10 - same admitted scope reconnect retains its owner; identity retirement cannot reuse it
+  ---
+  duration_ms: 1.989478
+  type: 'test'
+  ...
+# Subtest: superseding an admitted owner with an equal scope string still retires old intents
+ok 11 - superseding an admitted owner with an equal scope string still retires old intents
+  ---
+  duration_ms: 1.676437
+  type: 'test'
+  ...
+# Subtest: hydration failure permanently cancels released admitted intents
+ok 12 - hydration failure permanently cancels released admitted intents
+  ---
+  duration_ms: 1.443436
+  type: 'test'
+  ...
+1..12
+# tests 12
+# suites 0
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 180.147628
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 255456, "exit_code": 0, "io_source": "unavailable", "memory_peak": 58253312, "wall_seconds": 0.232}, "arbitration": "kernel-v1", "at": "2026-11-05T08:22:57.431084+00:00", "attempt": "0eef4361a583440b99fc603bfec5746d", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-test1-phase-ad953e4adc21.service", "event": "lease-release", "exit_code": 0, "kind": "test", "pid": 3036461, "schema": "coach.resources.v1", "start_ticks": "3024405", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-test1-phase-ad953e4adc21.service", "why": "actual SDK artifact ownership /mnt/data/work/gonvex-sdk-composition"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 387ms
+             CPU time consumed: 370ms
+                   Memory peak: 55.5M (swap: 0B)

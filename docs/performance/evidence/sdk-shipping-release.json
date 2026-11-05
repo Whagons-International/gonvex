@@ -1,0 +1,16 @@
+{
+  "owner": "sdk-shipping-composition-ea5bb24e",
+  "released": "2026-11-05T08:30:00.506073+00:00",
+  "allOwnUnitsExited": true,
+  "finalNodeArtifactTests": 14,
+  "finalVitestArtifactTests": 26,
+  "directExits": {
+    "build2": 0,
+    "nodeArtifact2": 0,
+    "vitestArtifact2": 0,
+    "generators": 0,
+    "inventoryCyclesAudit": 0
+  },
+  "earlierReentrantRegressionExit": 1,
+  "browserServerEndpointOrAppInstall": false
+}

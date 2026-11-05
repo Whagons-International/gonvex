@@ -1,0 +1,319 @@
+diff --git a/mnt/data/work/gonvex-gate6-capture/app-sqlite/node_modules/.pnpm/@gonvex+client@0.5.2-sqlite.1_patch_hash=06786316f912c262f7638b8f3c82cff02a8787f71eabcafca84b4087a3333334/node_modules/@gonvex/client/dist/index.js b/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/index.js
+index 895c6d94..7070e682 100644
+--- a/mnt/data/work/gonvex-gate6-capture/app-sqlite/node_modules/.pnpm/@gonvex+client@0.5.2-sqlite.1_patch_hash=06786316f912c262f7638b8f3c82cff02a8787f71eabcafca84b4087a3333334/node_modules/@gonvex/client/dist/index.js
++++ b/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/index.js
+@@ -238,7 +238,11 @@ export class GonvexClient {
+     replicaScope = "";
+     hasAuthoritativeReplicaScope = false;
+     replicaDefinitionEpoch;
++    deferredReplicaSubscriptionOwners = new WeakMap();
+     replicaReady = Promise.resolve();
++    hydratedReplicaReady = this.replicaReady;
++    replicaOpenHydrations = new Map();
++    replicaOpenOwners = new WeakMap();
+     localSessionRestore = Promise.resolve();
+     localSessionStateValue = "unavailable";
+     localSessionHandlers = new Set();
+@@ -2241,6 +2245,9 @@ export class GonvexClient {
+             this.replicaOpenFlushTimer = undefined;
+         }
+         this.pendingReplicaOpens.clear();
++        this.replicaOpenHydrations.clear();
++        for (const open of this.deferredReplicaOpens) open.cancelled = true;
++        this.deferredReplicaOpens.length = 0;
+         if (this.querySubscribeFlushTimer) {
+             clearTimeout(this.querySubscribeFlushTimer);
+             this.querySubscribeFlushTimer = undefined;
+@@ -2756,16 +2763,20 @@ export class GonvexClient {
+         // could overwrite a result already accepted on the same connection.
+         return subscription.revisionSocketGeneration !== this.socketGeneration;
+     }
+-    subscribeReplicaTransport(ref, args = {}, onMessage, metadataOnly = false) {
++    subscribeReplicaTransport(ref, args = {}, onMessage, metadataOnly = false, deferredOwner) {
++        if (deferredOwner && !this.ownsDeferredReplicaOwner(deferredOwner)) return () => {};
+         if (this.controlOnly)
+             throw new Error("Control connections cannot subscribe to Replica Collections");
+         // Whagons patch: hold back opens the application ranked below its first
+         // screen. They start, in order, when releaseDeferredReplicaOpens() runs.
+         if (this.replicaOpenDeferral && this.replicaOpenDeferral(ref.path)) {
+-            const pending = { ref, args, onMessage, metadataOnly, cancelled: false, release: undefined };
++            const owner = this.deferredReplicaOwner();
++            const pending = { ref, args, onMessage, metadataOnly, cancelled: false, release: undefined,
++                phase: owner ? 'admitted' : 'provisional', owner, released: false, task: undefined };
+             this.deferredReplicaOpens.push(pending);
+             return () => {
+                 pending.cancelled = true;
++                this.deferredReplicaOpens = this.deferredReplicaOpens.filter(entry => entry !== pending);
+                 pending.release?.();
+             };
+         }
+@@ -2779,6 +2790,8 @@ export class GonvexClient {
+                 clearTimeout(existing.unsubscribeTimer);
+                 existing.unsubscribeTimer = undefined;
+             }
++            if (deferredOwner) this.deferredReplicaSubscriptionOwners.set(existing, deferredOwner);
++            else this.deferredReplicaSubscriptionOwners.delete(existing);
+             existing.listeners.add(onMessage);
+             // A reset may arrive during the retention grace period with no listeners.
+             // Its reopen was correctly deferred; the next subscriber must resume it.
+@@ -2814,6 +2827,7 @@ export class GonvexClient {
+         if (ref.replica) {
+             this.replica.registerReplicaCollection(key, ref.replica, asReplicaRow(args) ?? {});
+         }
++        if (deferredOwner) this.deferredReplicaSubscriptionOwners.set(subscription, deferredOwner);
+         this.replicaSubscriptions.set(key, subscription);
+         this.handlers.set(subscription.id, (message) => {
+             const scope = subscription.scope ?? this.replicaScope;
+@@ -2833,10 +2847,77 @@ export class GonvexClient {
+     /** Whagons patch: start every open held back by deferReplicaOpen. */
+     releaseDeferredReplicaOpens() {
+         this.replicaOpenDeferral = undefined;
+-        const pending = this.deferredReplicaOpens.splice(0);
+-        for (const open of pending) {
+-            if (!open.cancelled)
+-                open.release = this.subscribeReplicaTransport(open.ref, open.args, open.onMessage, open.metadataOnly);
++        for (const open of this.deferredReplicaOpens) open.released = true;
++        this.drainDeferredReplicaIntents();
++    }
++    deferredReplicaOwner() {
++        return this.hasAuthoritativeReplicaScope && !this.manuallyClosed
++            ? { scope: this.replicaScope, activation: this.sessionScopeGeneration }
++            : undefined;
++    }
++    ownsDeferredReplicaOwner(owner) {
++        return !this.manuallyClosed && this.hasAuthoritativeReplicaScope
++            && owner.scope === this.replicaScope && owner.activation === this.sessionScopeGeneration;
++    }
++    retireDeferredReplicaIntents() {
++        for (const open of this.deferredReplicaOpens) {
++            if (open.owner && !this.ownsDeferredReplicaOwner(open.owner)) open.cancelled = true;
++        }
++        this.deferredReplicaOpens = this.deferredReplicaOpens.filter(open => !open.cancelled);
++    }
++    bindDeferredReplicaIntents() {
++        const owner = this.deferredReplicaOwner();
++        if (!owner) return;
++        // Undefined means provisional: first admission binds it exactly once.
++        // An admitted stale owner is never reinterpreted as provisional.
++        for (const open of this.deferredReplicaOpens) {
++            if (!open.cancelled && open.phase === 'provisional') {
++                open.owner = owner;
++                open.phase = 'admitted';
++            }
++        }
++        this.drainDeferredReplicaIntents();
++    }
++    drainDeferredReplicaIntents() {
++        for (const open of [...this.deferredReplicaOpens]) {
++            if (open.cancelled || this.manuallyClosed
++                || (open.owner && !this.ownsDeferredReplicaOwner(open.owner))) {
++                open.cancelled = true;
++                this.deferredReplicaOpens = this.deferredReplicaOpens.filter(entry => entry !== open);
++                continue;
++            }
++            if (!open.released || !open.owner || open.task) continue;
++            const ready = this.replicaReady;
++            const task = { promise: Promise.resolve() };
++            open.task = task;
++            // Keep the deferred intent (and its original cancellation handle)
++            // until current-scope durable hydration is complete.
++            task.promise = ready.then(() => {
++                if (open.task !== task) return;
++                open.task = undefined;
++                if (open.cancelled || !this.deferredReplicaOpens.includes(open)) return;
++                if (!this.ownsDeferredReplicaOwner(open.owner)) {
++                    open.cancelled = true;
++                    this.deferredReplicaOpens = this.deferredReplicaOpens.filter(entry => entry !== open);
++                    return;
++                }
++                if (this.replicaReady !== ready) { this.drainDeferredReplicaIntents(); return; }
++                this.deferredReplicaOpens = this.deferredReplicaOpens.filter(entry => entry !== open);
++                open.release = this.subscribeReplicaTransport(open.ref, open.args,
++                    open.onMessage, open.metadataOnly, open.owner);
++                // A cached-snapshot observer can cancel/retire synchronously
++                // before subscribeReplicaTransport returns its unsubscribe.
++                if (open.cancelled || !this.ownsDeferredReplicaOwner(open.owner)) open.release?.();
++            }, () => {
++                if (open.task !== task) return;
++                open.task = undefined;
++                open.cancelled = true;
++                this.deferredReplicaOpens = this.deferredReplicaOpens.filter(entry => entry !== open);
++            }).catch(error => {
++                open.cancelled = true;
++                this.deferredReplicaOpens = this.deferredReplicaOpens.filter(entry => entry !== open);
++                if (open.owner && this.ownsDeferredReplicaOwner(open.owner)) this.rejectReplicaDirective(error);
++            });
+         }
+     }
+     subscribeReplica(ref, args = {}, onMessage) {
+@@ -3707,20 +3788,57 @@ export class GonvexClient {
+         this.sendReplicaOpen(subscription);
+     }
+     sendReplicaOpen(subscription) {
++        const deferredOwner = this.deferredReplicaSubscriptionOwners.get(subscription);
++        if (deferredOwner && !this.ownsDeferredReplicaOwner(deferredOwner)) return;
+         // Replica rows are tenant-authorized state. A hook can mount while the
+         // socket is connected but before session.ready/auth.result supplies the
+         // authoritative visibility scope. Opening in that gap produces a correct
+         // server rejection that is nevertheless transient and must not become a
+         // fatal React snapshot error. The directive handlers resume every retained
+         // subscription once the scope is active.
+-        if (!this.ownsReplicaSubscription(subscription) || this.authInFlight || !this.hasAuthoritativeReplicaScope
++        if (!this.ownsReplicaSubscription(subscription) || !this.isWebSocketConnected
++            || this.authInFlight || !this.hasAuthoritativeReplicaScope
+             || subscription.listeners.size === 0 || subscription.opening)
+             return;
++        const ready = this.replicaReady;
++        const owner = this.capturePublicationOwner();
++        const id = subscription.id, verification = subscription.verificationGeneration;
++        const authFrame = this.activeAuthFrameId, pendingAuth = this.latestAuthFrameId;
++        const current = () => owner() && this.replicaReady === ready
++            && this.activeAuthFrameId === authFrame && this.latestAuthFrameId === pendingAuth
++            && this.ownsReplicaSubscription(subscription) && subscription.id === id
++            && subscription.verificationGeneration === verification;
++        if (this.hydratedReplicaReady !== ready) {
++            const previous = this.replicaOpenHydrations.get(subscription);
++            if (previous?.current())
++                return;
++            const pending = { current, task: Promise.resolve() };
++            this.replicaOpenHydrations.set(subscription, pending);
++            // Only collection opens wait here. In particular, control RPCs and
++            // outbox journal admission must progress while durable rows hydrate.
++            pending.task = ready.then(() => {
++                if (this.replicaOpenHydrations.get(subscription) !== pending)
++                    return;
++                this.replicaOpenHydrations.delete(subscription);
++                if (current())
++                    this.sendReplicaOpen(subscription);
++            }, () => {
++                if (this.replicaOpenHydrations.get(subscription) === pending) {
++                    this.replicaOpenHydrations.delete(subscription);
++                }
++                // The scope activation owner reports failure; never send a cold open
++                // on behalf of a failed or superseded durable activation.
++            }).catch(error => {
++                if (current())
++                    this.rejectReplicaDirective(error);
++            });
++            return;
++        }
+         const requestScope = this.replicaScope;
+         subscription.scope = requestScope;
+         subscription.opening = true;
+         subscription.socketGeneration = this.socketGeneration;
+-        const open = this.replicaOpenRequest(subscription);
++        this.replicaOpenOwners.set(subscription, current);
+         if (this.serverCapabilities.replicaBatch === 1) {
+             this.pendingReplicaOpens.add(subscription);
+             if (!this.replicaOpenFlushTimer) {
+@@ -3728,7 +3846,7 @@ export class GonvexClient {
+             }
+             return;
+         }
+-        this.send({ type: "replica.open", ...open });
++        this.send({ type: "replica.open", ...this.replicaOpenRequest(subscription) });
+     }
+     replicaOpenRequest(subscription) {
+         if (!subscription.forceFullIntegrity && this.serverCapabilities.replicaResume === 1) {
+@@ -3762,20 +3880,33 @@ export class GonvexClient {
+         this.replicaOpenFlushTimer = undefined;
+         const subscriptions = Array.from(this.pendingReplicaOpens);
+         this.pendingReplicaOpens.clear();
+-        if (this.authInFlight || !this.hasAuthoritativeReplicaScope) {
+-            for (const subscription of subscriptions) {
+-                subscription.opening = false;
+-                subscription.socketGeneration = undefined;
++        const owners = new Map(subscriptions.map(subscription => [subscription, this.replicaOpenOwners.get(subscription)]));
++        const canFlush = (subscription) => this.replicaOpenOwners.get(subscription) === owners.get(subscription)
++            && owners.get(subscription)?.() === true
++            && this.isWebSocketConnected && !this.authInFlight && this.hasAuthoritativeReplicaScope
++            && this.hydratedReplicaReady === this.replicaReady
++            && subscription.scope === this.replicaScope
++            && subscription.socketGeneration === this.socketGeneration
++            && subscription.opening && subscription.listeners.size > 0;
++        const release = (subscription) => {
++            // A reentrant send may already have queued a replacement preparation.
++            if (this.replicaOpenOwners.get(subscription) !== owners.get(subscription))
++                return;
++            subscription.opening = false;
++            subscription.socketGeneration = undefined;
++        };
++        for (let offset = 0; offset < subscriptions.length; offset += maxReplicaBatchOpens) {
++            // Recheck per frame too: a transport callback can retire the owner
++            // synchronously while the previous batch is sent.
++            const opens = [];
++            for (const subscription of subscriptions.slice(offset, offset + maxReplicaBatchOpens)) {
++                if (canFlush(subscription))
++                    opens.push(this.replicaOpenRequest(subscription));
++                else
++                    release(subscription);
+             }
+-            return;
+-        }
+-        const opens = subscriptions
+-            .filter((subscription) => (subscription.opening
+-            && subscription.listeners.size > 0
+-            && this.replicaSubscriptions.get(subscription.key) === subscription))
+-            .map((subscription) => this.replicaOpenRequest(subscription));
+-        for (let offset = 0; offset < opens.length; offset += maxReplicaBatchOpens) {
+-            this.send({ type: "replica.openMany", opens: opens.slice(offset, offset + maxReplicaBatchOpens) });
++            if (opens.length)
++                this.send({ type: "replica.openMany", opens });
+         }
+     }
+     unsubscribeReplicaListener(key, listener) {
+@@ -3792,6 +3923,7 @@ export class GonvexClient {
+             latest.unsubscribeTimer = undefined;
+             this.clearReplicaRetry(latest);
+             this.pendingReplicaOpens.delete(latest);
++            this.replicaOpenHydrations.delete(latest);
+             latest.verificationGeneration = Symbol();
+             this.replicaSubscriptions.delete(key);
+             this.discardSnapshotPages(latest);
+@@ -3840,6 +3972,7 @@ export class GonvexClient {
+         }
+         const scope = directive.visibilityScope.trim();
+         if (this.hasAuthoritativeReplicaScope && this.replicaScope === scope && this.replicaDefinitionEpoch === directive.epoch) {
++            this.bindDeferredReplicaIntents();
+             await this.outboxJournalReady;
+             return;
+         }
+@@ -3852,6 +3985,7 @@ export class GonvexClient {
+         this.replicaDefinitionEpoch = directive.epoch;
+         this.hasAuthoritativeReplicaScope = true;
+         this.setReplicaReady(this.replica.activateScope(scope));
++        this.bindDeferredReplicaIntents();
+         this.rotateSubscriptionScopes();
+         // Subscriptions follow scope rotation, so this opens each resident
+         // dependency collection once per client, from cache first when offline.
+@@ -3871,8 +4005,15 @@ export class GonvexClient {
+     // await replicaReady still see the rejection; the stored promise itself must
+     // not surface as an unhandled rejection that kills Node processes.
+     setReplicaReady(ready) {
++        if (this.replicaReady === ready)
++            return;
+         this.replicaReady = ready;
+-        ready.catch(() => undefined);
++        this.hydratedReplicaReady = undefined;
++        this.replicaOpenHydrations.clear();
++        void ready.then(() => {
++            if (this.replicaReady === ready)
++                this.hydratedReplicaReady = ready;
++        }, () => undefined);
+     }
+     // Outbox restore awaits replicaReady, so it rejects the same way.
+     setOutboxReady(ready) {
+@@ -5105,6 +5246,7 @@ export class GonvexClient {
+     resetReplicaScopeState() {
+         this.receiptReconciliationGeneration = Symbol();
+         this.sessionScopeGeneration = Symbol();
++        this.retireDeferredReplicaIntents();
+         this.receiptReconciliations.clear();
+         this.openingReplicaWatermark = undefined;
+         this.snapshotDeferredFrames = [];
+@@ -6205,4 +6347,3 @@ function localIntentDependencies(transaction) {
+         writes: transaction.patches.map(patch => ({ entity: patch.entity, rowId: patch.rowId })),
+     };
+ }
+-//# sourceMappingURL=index.js.map
+\ No newline at end of file

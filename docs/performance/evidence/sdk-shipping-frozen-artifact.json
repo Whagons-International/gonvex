@@ -1,0 +1,28 @@
+{
+  "experimentalIdentity": "gonvex-sqlite1-hydration-experimental-candidate-2",
+  "path": "/mnt/data/work/gonvex-sdk-composition/candidate-2",
+  "compositionSourceCommit": "c2d283b75db12cc4f5bd35cffc97fa42a03adfb8",
+  "baselineClientJsSha256": "4f9ce8be47c21742b49d760ebf0c695da13ab4c2f814d6df5a7d843a416fa2b4",
+  "coreSourceCommit": "728b857e456d6d7a9f299883fdf1ba17c8e594b9",
+  "coreSourceSha256": "ba145626a010fde3be9ba8a48eb070c6ad5857ce7d2958a922837cdfec2893cd",
+  "existingPatchSha256": "06786316f912c262f7638b8f3c82cff02a8787f71eabcafca84b4087a3333334",
+  "transforms": {
+    "compose-shipping.mjs": "553174dacc81a549f169337d297850831f24065b7cbc6c1336f57c464a7b2ed7",
+    "deferred-owner-overlay.mjs": "bae7196384f4a2569643f134dae359126c1b3f9471fac25cdd64abf148d2e454"
+  },
+  "outputClientJsSha256": "60b2673135e0ffd245b2219fb8a18cd2f6add3ac98ccbfa6af9cb6f5ae20eb0a",
+  "payloadFileMapSha256": "392387f207e602ecf09bc5c3dff4fce9fd7a385bf62a5239676cdb4bbe71ae33",
+  "sidecarSha256": "55a89c75aded8c9fd360a43af63b39904ccddb083b7c5424d2a77dada45ac9e0",
+  "payloadHashDefinition": "SHA256 of JSON.stringify(outputFiles) in inventory order, excludes provenance sidecar and read-only dependency link",
+  "publicDeclarationSha256": "846db3843d5a36bc30013b8332e4ce7e9a46c98674b5c1b2046e4907c10ff9c5",
+  "changedFiles": [
+    "dist/index.js",
+    "dist/index.js.map (removed)"
+  ],
+  "unchangedPayloadFiles": 127,
+  "changedExistingMembers": 9,
+  "unchangedOriginalMembers": 312,
+  "addedPrivateMembers": 9,
+  "testsPassed": 40,
+  "observerCapture": "not performed; later explicit grant required"
+}

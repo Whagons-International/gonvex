@@ -1,0 +1,49 @@
+Running as unit: gonvex-sdk-compose-coretests2-phase-886ba10e5dfc.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T08:27:24.078028+00:00", "attempt": "a58bb1305ddd4c33bb04e22a6ac8b438", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-coretests2-phase-886ba10e5dfc.service", "event": "wait-start", "kind": "test", "pid": 3079038, "schema": "coach.resources.v1", "start_ticks": "3051093", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-coretests2-phase-886ba10e5dfc.service", "why": "composed SDK ownership cases /mnt/data/work/gonvex-sdk-composition"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T08:27:24.078204+00:00", "attempt": "a58bb1305ddd4c33bb04e22a6ac8b438", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-coretests2-phase-886ba10e5dfc.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "test", "outcome": "admitted", "pid": 3079038, "position": 0, "schema": "coach.resources.v1", "start_ticks": "3051093", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-coretests2-phase-886ba10e5dfc.service", "why": "composed SDK ownership cases /mnt/data/work/gonvex-sdk-composition"}
+
+ RUN  v4.1.6 /mnt/data/work/gonvex-sdk-composition/artifact-tests-2
+
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/revision-policy.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/ownership-policy.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/row-patch.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/snapshot-pages.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/replica-integrity.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/error-reporter.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/presence.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/optimistic.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/outbox.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/coalescing-policy.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/indexeddb-version.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/outbox-recovery.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/outbox-policy.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/local-replica.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/row-recency.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/resident-map.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/query-expression.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/kv-stores.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/kv-sequence.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/client-upgrades.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/browser-upgrades.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/indexeddb-replica.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/indexeddb-sequence.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/indexeddb-read-view.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/replica-record.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/signals.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/paged-read-view.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/external-auth.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/indexeddb-engine.js" points to missing source files
+Sourcemap for "/mnt/data/work/gonvex-sdk-composition/candidate-2/dist/control.js" points to missing source files
+ ✓ artifact-core.test.ts (26 tests) 485ms
+
+ Test Files  1 passed (1)
+      Tests  26 passed (26)
+   Start at  00:27:24
+   Duration  980ms (transform 310ms, setup 0ms, import 398ms, tests 485ms, environment 0ms)
+
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 1800036, "exit_code": 0, "io_source": "unavailable", "memory_peak": 359284736, "wall_seconds": 1.288}, "arbitration": "kernel-v1", "at": "2026-11-05T08:27:25.382881+00:00", "attempt": "a58bb1305ddd4c33bb04e22a6ac8b438", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-coretests2-phase-886ba10e5dfc.service", "event": "lease-release", "exit_code": 0, "kind": "test", "pid": 3079038, "schema": "coach.resources.v1", "start_ticks": "3051093", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-coretests2-phase-886ba10e5dfc.service", "why": "composed SDK ownership cases /mnt/data/work/gonvex-sdk-composition"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 1.446s
+             CPU time consumed: 1.915s
+                   Memory peak: 342.6M (swap: 0B)

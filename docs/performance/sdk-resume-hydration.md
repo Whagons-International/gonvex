@@ -202,3 +202,9 @@ shipping patch composition, browser, endpoint, app change, staging/production
 access, CI work or integration merge occurred. Core acceptance is complete;
 preserved shipping defer/release composition and observer recapture remain
 separate, unperformed acceptance steps.
+
+
+The separately granted shipping composition has now passed 40 actual-artifact
+tests; see [composition report and later capture plan](sdk-shipping-composition.md).
+That does not change the core source result above or establish an observed
+shipping cursor/CPU win. The actual app installation/observer remains pending.

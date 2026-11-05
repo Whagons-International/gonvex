@@ -1,9 +1,13 @@
-# Prepared shipping hydration composition (not executed)
+# Pinned shipping hydration composition
 
 Core source is tested at `728b857e`, evidence pushed as `14d3e6f8` on
-`perf/sdk-resume-hydration`. This directory is source-only preparation for a
-separate package build/test/observer grant. No composed package exists, no
-artifact test was run and no shipping behavior improvement is claimed.
+`perf/sdk-resume-hydration`. The initial source-only plan below was subsequently
+executed in an explicit composition grant: candidate 2 passed 14 Node artifact
+checks plus 26 actual-artifact ownership tests, with one reentrant cancellation
+fix in the overlay. See [frozen artifact and capture plan](../../docs/performance/sdk-shipping-composition.md).
+No app installation or observer capture has occurred. Earlier preparatory
+sections are retained as design history; current status/hashes/proof are in
+that final report and its provenance sidecar.
 
 `shipping-source-provenance.json` inventories the read-only installed
 `@gonvex/client@0.5.2-sqlite.1` from app `37ca8278b`, its full package file

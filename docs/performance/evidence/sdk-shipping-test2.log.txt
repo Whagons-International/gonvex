@@ -1,0 +1,103 @@
+Running as unit: gonvex-sdk-compose-test2-phase-71bb7b51c74e.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T08:27:23.592247+00:00", "attempt": "47b5dd63d2ad44a58c79487681cf891d", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-test2-phase-71bb7b51c74e.service", "event": "wait-start", "kind": "test", "pid": 3078866, "schema": "coach.resources.v1", "start_ticks": "3051046", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-test2-phase-71bb7b51c74e.service", "why": "actual SDK artifact ownership /mnt/data/work/gonvex-sdk-composition"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T08:27:23.592419+00:00", "attempt": "47b5dd63d2ad44a58c79487681cf891d", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-test2-phase-71bb7b51c74e.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "test", "outcome": "admitted", "pid": 3078866, "position": 0, "schema": "coach.resources.v1", "start_ticks": "3051046", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-test2-phase-71bb7b51c74e.service", "why": "actual SDK artifact ownership /mnt/data/work/gonvex-sdk-composition"}
+TAP version 13
+# Subtest: actual defer/release preserves checkpoints: before-hydration
+ok 1 - actual defer/release preserves checkpoints: before-hydration
+  ---
+  duration_ms: 22.501245
+  type: 'test'
+  ...
+# Subtest: actual defer/release preserves checkpoints: after-hydration
+ok 2 - actual defer/release preserves checkpoints: after-hydration
+  ---
+  duration_ms: 2.402368
+  type: 'test'
+  ...
+# Subtest: actual deferred unsubscribe cancels only its own intent
+ok 3 - actual deferred unsubscribe cancels only its own intent
+  ---
+  duration_ms: 3.394462
+  type: 'test'
+  ...
+# Subtest: deferred requests cannot resurrect after close
+ok 4 - deferred requests cannot resurrect after close
+  ---
+  duration_ms: 1.71545
+  type: 'test'
+  ...
+# Subtest: deferred requests cannot resurrect after scope-failure
+ok 5 - deferred requests cannot resurrect after scope-failure
+  ---
+  duration_ms: 1.988887
+  type: 'test'
+  ...
+# Subtest: deferred requests cannot resurrect after scope-replacement
+ok 6 - deferred requests cannot resurrect after scope-replacement
+  ---
+  duration_ms: 1.903095
+  type: 'test'
+  ...
+# Subtest: provisional deferrals bind on first valid admission, earlyRelease=false
+ok 7 - provisional deferrals bind on first valid admission, earlyRelease=false
+  ---
+  duration_ms: 2.447122
+  type: 'test'
+  ...
+# Subtest: provisional deferrals bind on first valid admission, earlyRelease=true
+ok 8 - provisional deferrals bind on first valid admission, earlyRelease=true
+  ---
+  duration_ms: 1.849053
+  type: 'test'
+  ...
+# Subtest: cancellation after release but before hydration keeps the original unsubscribe handle effective
+ok 9 - cancellation after release but before hydration keeps the original unsubscribe handle effective
+  ---
+  duration_ms: 1.873078
+  type: 'test'
+  ...
+# Subtest: same admitted scope reconnect retains its owner; identity retirement cannot reuse it
+ok 10 - same admitted scope reconnect retains its owner; identity retirement cannot reuse it
+  ---
+  duration_ms: 1.739887
+  type: 'test'
+  ...
+# Subtest: superseding an admitted owner with an equal scope string still retires old intents
+ok 11 - superseding an admitted owner with an equal scope string still retires old intents
+  ---
+  duration_ms: 1.087224
+  type: 'test'
+  ...
+# Subtest: hydration failure permanently cancels released admitted intents
+ok 12 - hydration failure permanently cancels released admitted intents
+  ---
+  duration_ms: 1.035166
+  type: 'test'
+  ...
+# Subtest: reentrant cached snapshot unsubscribe retains its original deferred cancellation handle
+ok 13 - reentrant cached snapshot unsubscribe retains its original deferred cancellation handle
+  ---
+  duration_ms: 2.426864
+  type: 'test'
+  ...
+# Subtest: reentrant cached snapshot scope retirement drops the returned handle and all sibling intents
+ok 14 - reentrant cached snapshot scope retirement drops the returned handle and all sibling intents
+  ---
+  duration_ms: 1.093435
+  type: 'test'
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 143.000244
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 224643, "exit_code": 0, "io_source": "unavailable", "memory_peak": 57798656, "wall_seconds": 0.193}, "arbitration": "kernel-v1", "at": "2026-11-05T08:27:23.804946+00:00", "attempt": "47b5dd63d2ad44a58c79487681cf891d", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-compose-test2-phase-71bb7b51c74e.service", "event": "lease-release", "exit_code": 0, "kind": "test", "pid": 3078866, "schema": "coach.resources.v1", "start_ticks": "3051046", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-compose-test2-phase-71bb7b51c74e.service", "why": "actual SDK artifact ownership /mnt/data/work/gonvex-sdk-composition"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 340ms
+             CPU time consumed: 334ms
+                   Memory peak: 55.1M (swap: 0B)
