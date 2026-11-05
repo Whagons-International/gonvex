@@ -381,9 +381,7 @@ impl Runtime {
         }
         for (scope, name, token) in &granted {
             if *scope == subscription.visibility.table {
-                subscription
-                    .resolved
-                    .sets
+                Arc::make_mut(&mut subscription.resolved.sets)
                     .entry(name.clone())
                     .or_default()
                     .insert(token.clone());
@@ -400,8 +398,7 @@ impl Runtime {
                     continue;
                 };
                 let parent_resolved = Arc::make_mut(&mut parent.resolved);
-                parent_resolved
-                    .sets
+                Arc::make_mut(&mut parent_resolved.sets)
                     .entry(name.clone())
                     .or_default()
                     .insert(token.clone());

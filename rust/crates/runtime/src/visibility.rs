@@ -175,10 +175,13 @@ pub struct ResolvedVisibility {
     // Set only by verified developer admission when no active Member exists.
     pub(crate) ephemeral_member: bool,
     pub revision: u64,
-    pub direct: BTreeMap<String, String>,
+    /// Immutable SQL principal payload shared only through the existing scoped
+    /// validated cache. Event/override writers must use Arc::make_mut so older
+    /// subscriptions and leases keep their own clock's authority unchanged.
+    pub direct: Arc<BTreeMap<String, String>>,
     pub role: String,
-    pub permissions: Value,
-    pub sets: BTreeMap<String, BTreeSet<String>>,
+    pub permissions: Arc<Value>,
+    pub sets: Arc<BTreeMap<String, BTreeSet<String>>>,
     pub fingerprint: String,
     /// Version 2 `inherits` parents, keyed by parent table: the parent's plan,
     /// this member's resolution of it, and the tenant-shared parent ACL index.
@@ -1741,7 +1744,7 @@ pub fn resolve_related_query(
         ));
     }
     let mut resolved = member.clone();
-    resolved.sets.clear();
+    Arc::make_mut(&mut resolved.sets).clear();
     resolved.fingerprint = visibility_fingerprint(
         plan,
         &resolved.direct,
@@ -1835,10 +1838,10 @@ async fn resolve_member(
     Ok(ResolvedVisibility {
         ephemeral_member,
         revision,
-        direct,
+        direct: direct.into(),
         role,
-        permissions,
-        sets,
+        permissions: permissions.into(),
+        sets: sets.into(),
         fingerprint,
         inherited: BTreeMap::new(),
         indexes: BTreeMap::new(),
@@ -2098,7 +2101,9 @@ pub fn recompute_derived(
                 .collect::<BTreeSet<_>>();
             // An empty resolved set still has to exist. SQL compilation must
             // distinguish "no grants" from a principal that was never loaded.
-            resolved.sets.entry(name.clone()).or_default();
+            if !resolved.sets.contains_key(name) {
+                Arc::make_mut(&mut resolved.sets).insert(name.clone(), BTreeSet::new());
+            }
             let previous = resolved.sets.get(name).cloned().unwrap_or_default();
             if previous != next {
                 let added = next.difference(&previous).cloned().collect::<BTreeSet<_>>();
@@ -2111,7 +2116,7 @@ pub fn recompute_derived(
                 } else {
                     changes.push((name.clone(), added, removed));
                 }
-                resolved.sets.insert(name.clone(), next);
+                Arc::make_mut(&mut resolved.sets).insert(name.clone(), next);
             }
         }
     }
@@ -3114,8 +3119,7 @@ mod tests {
             &[]
         ));
         assert!(!row_matches(&plan, &member, &serde_json::json!({})));
-        member
-            .sets
+        Arc::make_mut(&mut member.sets)
             .insert("assigned".to_owned(), BTreeSet::from(["task-1".to_owned()]));
         assert!(row_matches(&plan, &member, &serde_json::json!({})));
         let mut parameters = Vec::new();
@@ -3183,10 +3187,10 @@ mod tests {
             indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
-            direct: BTreeMap::new(),
+            direct: BTreeMap::new().into(),
             role: String::new(),
-            permissions: Value::Null,
-            sets: BTreeMap::new(),
+            permissions: Value::Null.into(),
+            sets: BTreeMap::new().into(),
             fingerprint: String::new(),
         };
         for expression in expressions {
@@ -3475,10 +3479,10 @@ mod tests {
             indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
-            direct: BTreeMap::from([("member.id".to_owned(), "member-1".to_owned())]),
+            direct: BTreeMap::from([("member.id".to_owned(), "member-1".to_owned())]).into(),
             role: role.to_owned(),
-            permissions: Value::Null,
-            sets: BTreeMap::new(),
+            permissions: Value::Null.into(),
+            sets: BTreeMap::new().into(),
             fingerprint: String::new(),
         }
     }
@@ -3554,8 +3558,7 @@ mod tests {
         }
         let task = serde_json::json!({"id":"task-1"});
         assert!(row_matches(&plan, &admin, &task));
-        admin
-            .sets
+        Arc::make_mut(&mut admin.sets)
             .insert("assigned".to_owned(), BTreeSet::from(["task-1".to_owned()]));
         assert!(row_matches(&plan, &admin, &task));
         // After the admitted role changes, the previously inactive dependency
@@ -3566,7 +3569,7 @@ mod tests {
             "delete",
             &[]
         ));
-        admin.sets.clear();
+        Arc::make_mut(&mut admin.sets).clear();
         assert!(!row_matches(&plan, &admin, &task));
         assert!(!plan.resolved_dependency_columns(&admin).change_affects(
             "taskShares",
@@ -3727,10 +3730,10 @@ mod tests {
             indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
-            direct: BTreeMap::new(),
+            direct: BTreeMap::new().into(),
             role: String::new(),
-            permissions: Value::Null,
-            sets: BTreeMap::new(),
+            permissions: Value::Null.into(),
+            sets: BTreeMap::new().into(),
             fingerprint: String::new(),
         };
         let mut predicate_parameters = Vec::new();
@@ -3807,10 +3810,11 @@ mod tests {
                 ("account.id".to_owned(), "account-1".to_owned()),
                 ("member.id".to_owned(), "member-1".to_owned()),
                 ("tenant.id".to_owned(), "tenant-1".to_owned()),
-            ]),
+            ])
+            .into(),
             role: "admin".to_owned(),
-            permissions: Value::Null,
-            sets: BTreeMap::new(),
+            permissions: Value::Null.into(),
+            sets: BTreeMap::new().into(),
             fingerprint: String::new(),
         };
         let mut parameters = Vec::new();
@@ -3905,7 +3909,7 @@ mod tests {
             {"operator":"and","children":[{"operator":"permission","value":"read"},{"operator":"permission","value":"write"}]}
         ]}));
         let mut member = dependency_member("admin");
-        member.direct.insert("account.id".into(), "admin".into());
+        Arc::make_mut(&mut member.direct).insert("account.id".into(), "admin".into());
         let mut parameters = vec![serde_json::json!("prefix")];
         let sql = compile_predicate(&plan, &member, "r", &mut parameters).unwrap();
         assert_eq!(
@@ -4033,18 +4037,23 @@ mod mask_tests {
                 ("member.id".to_owned(), id.to_owned()),
                 ("account.id".to_owned(), format!("acct-{id}")),
                 ("tenant.id".to_owned(), "t".to_owned()),
-            ]),
+            ])
+            .into(),
             role: "member".to_owned(),
-            permissions: json!({}),
+            permissions: json!({}).into(),
             sets: sets
                 .iter()
                 .map(|(name, values)| {
                     (
                         name.to_string(),
-                        values.iter().map(|value| value.to_string()).collect(),
+                        values
+                            .iter()
+                            .map(|value| value.to_string())
+                            .collect::<BTreeSet<_>>(),
                     )
                 })
-                .collect(),
+                .collect::<BTreeMap<_, _>>()
+                .into(),
             fingerprint: String::new(),
             inherited: BTreeMap::new(),
             indexes: BTreeMap::new(),
