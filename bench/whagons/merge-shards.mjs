@@ -64,6 +64,7 @@ const result = {
   presenceV2Users: sum('presenceV2Users'),
   connectedUsers: sum('connectedUsers'),
   snapshots: parts.flatMap(p => p.snapshots || []),
+  visibilityComparisons:parts.flatMap(p=>p.visibilityComparisons||[]),
   visibilityChecks: parts.reduce((a, p) => { for (const [k, v] of Object.entries(p.visibilityChecks || {})) a[k] = (a[k] || 0) + v; return a; }, {}),
   pathLatencyMs: Object.fromEntries(Object.entries(paths).map(([k, p]) => [k, { samples: p.durations.length, errors: p.errors, ...quantiles(p.durations) }])),
   collectionReadiness: parts.reduce((a,p)=>{for(const [k,v] of Object.entries(p.collectionReadiness||{}))a[k]=(a[k]||0)+v;return a;},{}),

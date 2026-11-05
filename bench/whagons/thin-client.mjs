@@ -387,7 +387,7 @@ export class ThinClient {
       localReplicaResult: () => { if (sub.error) throw sub.error; return sub.cachedVersion === -1 && sub.rows.size === 0 && !sub.isUpToDate && sub.version === 0 ? undefined : sub.result(); },
       /** Thin-client extra: O(1) row lookup by key (not part of the SDK surface). */
       localReplicaGet: (id) => sub.rows.get(String(id))?.value,
-      localReplicaState: () => { if (sub.error) throw sub.error; if (sub.version === 0 && !sub.isUpToDate) return undefined; return { completeness: sub.isUpToDate && sub.complete ? 'complete' : 'partial', isUpToDate: sub.isUpToDate }; },
+      localReplicaState: () => { if (sub.error) throw sub.error; if (sub.version === 0 && !sub.isUpToDate) return undefined; return { completeness: sub.isUpToDate && sub.complete ? 'complete' : 'partial', isUpToDate: sub.isUpToDate,computedRevision:sub.readyCursor?.revision }; },
       status: () => ({ isLoading: sub.version === 0 && !sub.isUpToDate, isUpToDate: sub.isUpToDate }),
       onUpdate: (handler) => {
         start(); clearTimeout(releaseTimer); releaseTimer = undefined;
@@ -500,6 +500,7 @@ export class ThinClient {
     sub.isUpToDate=false;
   }
   replicaSignature(ref,args={}){return windowKey(ref,args);}
+  replicaWindowState(ref,args={}){const sub=this.subscriptions.get(keyOf(ref.path,args));if(!sub)return;return {cursor:sub.readyCursor&&{...sub.readyCursor},ids:[...sub.rows.keys()],digest:sub.checksum.digest(sub.digest?.startsWith('xor1:')?'xor1':'sha256'),consistent:!!sub.checkpointConsistent&&!sub.staging&&!sub.opening,completeness:sub.complete?'complete':'partial',truncated:!!sub.snapshotTruncated};}
   cacheEvidence(signatures){return {cachedWindows:this.restoredWindows.size,cachedFullSetVerified:signatures.length>0&&[...this.restoredWindows.values()].some(w=>w.rows>0)&&signatures.every(k=>this.restoredWindows.has(k)),cachedRows:[...this.restoredWindows.values()].reduce((n,w)=>n+w.rows,0),authorityHash:sha(this.cacheBinding||''),expectedWindows:signatures.length,checkpointInventory:signatures.map(k=>({signatureHash:sha(k),...this.restoredWindows.get(k)}))};}
   checkpointOpen(sub,force=false){
     const base={id:sub.id,path:sub.path,args:sub.args};

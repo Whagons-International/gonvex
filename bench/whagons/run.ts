@@ -12,14 +12,15 @@ import { integrityWork } from './thin-checkpoint.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { loopback, quantiles, passRule } from './safety.mjs';
 import { memorySnapshotStaging } from './native-stage.mjs';
-import { installWireRecorder } from './wire-record.mjs';
+import { captureVisibility, compareVisibility } from './visibility-oracle.mjs';
+import { transportReplicaAuthority, installWireRecorder } from './wire-record.mjs';
 import { sdkArtifact } from './sdk-artifact.mjs';
 import { ThinCheckpointStore } from './thin-checkpoint.mjs';
 import { ThinClient, defaultPool as thinRowPool } from './thin-client.mjs';
 import { firstViewed, viewSetsFirstViewedAt, unmetTaskUpdate } from './task-expectations.mjs';
 
 async function main() {
- const harnessFiles=['run.ts','shards.sh','remote-shards.sh','stop-workers.mjs','worker-receipt.mjs','sdk-artifact.mjs','thin-client.mjs','thin-checkpoint.mjs','expanded-gate.mjs','mixed-gate.mjs','safety.mjs','native-stage.mjs','wire-record.mjs','shard-epoch.mjs','task-expectations.mjs'];
+ const harnessFiles=['run.ts','shards.sh','remote-shards.sh','stop-workers.mjs','worker-receipt.mjs','sdk-artifact.mjs','thin-client.mjs','thin-checkpoint.mjs','expanded-gate.mjs','mixed-gate.mjs','safety.mjs','native-stage.mjs','wire-record.mjs','visibility-oracle.mjs','shard-epoch.mjs','task-expectations.mjs'];
  const sourcePins=Object.fromEntries(await Promise.all(harnessFiles.map(async name=>[name,createHash('sha256').update(await readFile(new URL(name,import.meta.url))).digest('hex')])));
  const profileHash=createHash('sha256').update(JSON.stringify(sourcePins)).digest('hex');
  const app=process.env.WHAGONS_CHECKOUT!;
@@ -265,7 +266,7 @@ async function main() {
  const eventLoop=monitorEventLoopDelay({resolution:10});eventLoop.enable();
  const gcCost={count:0,wallMs:0,maxWallMs:0};const gcObserver=new PerformanceObserver(list=>{for(const e of list.getEntries()){gcCost.count++;gcCost.wallMs+=e.duration;gcCost.maxWallMs=Math.max(gcCost.maxWallMs,e.duration);}});gcObserver.observe({entryTypes:['gc']});
  const driverDiagnostics=()=>({eventLoopDelayMs:{p95:eventLoop.percentile(95)/1e6,p99:eventLoop.percentile(99)/1e6,max:eventLoop.max/1e6},gc:{...gcCost},integrityWork:{...integrityWork}});
- stopExtra=()=>{const u=process.cpuUsage(cpuAtStart),m=process.memoryUsage();return {presenceV2Users,collectionReadiness,visibilityChecks,snapshots,pendingQualification:{targetUsers:myTarget,notAttempted:myTarget-signIns.filter(x=>x.attemptedAt!==undefined).length,notAuthenticated:myTarget-signIns.filter(x=>x.authAt!==undefined).length,notFullyReadyEver:myTarget-signIns.filter(x=>x.readyAt!==undefined).length,pendingOperations:operationAttempts.filter(x=>!x.done).length},
+ stopExtra=()=>{const u=process.cpuUsage(cpuAtStart),m=process.memoryUsage();return {presenceV2Users,collectionReadiness,visibilityChecks,visibilityComparisons,snapshots,pendingQualification:{targetUsers:myTarget,notAttempted:myTarget-signIns.filter(x=>x.attemptedAt!==undefined).length,notAuthenticated:myTarget-signIns.filter(x=>x.authAt!==undefined).length,notFullyReadyEver:myTarget-signIns.filter(x=>x.readyAt!==undefined).length,pendingOperations:operationAttempts.filter(x=>!x.done).length},
   taskExpectations:{...expectationStats,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},
   schedule:{kind:scheduleStats.kind,fired:scheduleStats.fired,overflow:scheduleStats.overflow,skippedDuringReconnect:scheduleStats.skippedDuringReconnect,startLateMs:quantiles(scheduleStats.lateMs)},
   generatorCost:{...generatorCost,cpuSeconds:(u.user+u.system)/1e6,wallSeconds:(performance.now()-wallAtStart)/1000,peakRssBytes:Math.max(generatorCost.peakRssBytes,m.rss),peakHeapUsedBytes:Math.max(generatorCost.peakHeapUsedBytes,m.heapUsed)},
@@ -275,9 +276,10 @@ async function main() {
  const tenantCounts=new Map<string,number>();const ordinals=Array.from({length:target},(_,i)=>{const f=chooseTenant(i);const n=tenantCounts.get(f.tenant)||0;tenantCounts.set(f.tenant,n+1);return n;});
  // ---- Simulated users (load-realism audit 2026-11-03 plus Gabriel's direction:
  // heavier than production on the expensive paths). See README "Action mix".
- type Handle={i:number,email:string,member:string,tenant:string,tw:()=>any,admin:boolean,busy:boolean};
+ type Handle={i:number,email:string,member:string,tenant:string,tw:()=>any,c:()=>any,admin:boolean,busy:boolean};
  const tenantUsers=new Map<string,Handle[]>();
  const approvalQueue=new Map<string,string[]>();
+ const visibilityComparisons:any[]=[];
  const visibilityChecks={checked:0,converged:0,mismatched:0,noChange:0,additions:0,removals:0};
  const pick=<T,>(xs:T[],r:()=>number)=>xs[Math.floor(r()*xs.length)];
  const reconnectAt=(fraction:number)=>deadline-seconds*1000*(1-fraction);
@@ -288,30 +290,38 @@ async function main() {
  const refFor=(path:string)=>{const dot=path.indexOf('.');const ns=(api as any)[path.slice(0,dot)];const r=ns?.[path.slice(dot+1)];const ref=typeof r==='function'?r():r;if(!ref?.path)throw new Error('LOAD_APP_OPENS: no replica reference for '+path);return ref;};
  const mergeOpens=(base:[any,any][],opens:{path:string,args:any}[],member:string):[any,any][]=>{const seen=new Set(base.map(([r,a])=>r.path+'\0'+JSON.stringify(a)));const out=[...base];for(const o of opens){const args=JSON.parse(JSON.stringify(o.args).split('"$member"').join(JSON.stringify(member)));const key=o.path+'\0'+JSON.stringify(args);if(seen.has(key))continue;seen.add(key);out.push([refFor(o.path),args]);}return out;};
  const watchAll=(c:any,refs:[any,any][],onUpdate=()=>{})=>{const ws=refs.map(([ref,args])=>{const w=c.watchReplica(ref,args);const stop=w.onUpdate(()=>{try{w.localReplicaResult();onUpdate();}catch(e){error(e);}});return {w,stop};});return {ready:()=>ws.every(x=>x.w.status().isUpToDate&&x.w.localReplicaState()?.completeness==='complete'),close:()=>ws.forEach(x=>x.stop()),rows:(k:number)=>(ws[k].w.localReplicaResult()||[]) as any[]};};
- // The oracle: a fresh session computes the target's visible rows from scratch;
- // the target's long-lived replica (incrementally maintained) must converge to
- // exactly that set. A difference after 15 s is a leaked or missing row.
- const verifyVisibility=async(target:Handle,changedAt:number,before:Set<string>)=>{
+ // A fresh SDK is an authority oracle only at the same complete revision.
+ // Missing/cross-revision observations remain qualification failures, never passes.
+ const verifyVisibility=async(target:Handle,changedAt:number,before:Set<string>,mutation?:any)=>{
   if(target.busy)return;target.busy=true;visibilityChecks.checked++;
+  const principal={project:projectId,tenant:target.tenant,identity:target.email,member:target.member};
+  const record:any={id:randomUUID(),changedAt,path:api.tasks.recentWorkspaceTasks.path,args:{},principal,mutation,trace:[]};visibilityComparisons.push(record);
   let fresh:any;let stop=()=>{};
   try{
    fresh=await login(target.email,target.tenant,oracleKind);
+   const actualMember=fresh.grant.tenants.find((t:any)=>t.id===target.tenant)?.memberId;
+   if(actualMember!==target.member)throw Error('Visibility oracle authenticated a different principal');
    const fw=fresh.c.watchReplica(api.tasks.recentWorkspaceTasks,{});stop=fw.onUpdate(()=>{});
    const complete=(w:any)=>w.status().isUpToDate&&w.localReplicaState()?.completeness==='complete';
-   if(!await until(()=>complete(fw),60000)){visibilityChecks.mismatched++;error(new Error('Visibility oracle snapshot never completed'));return;}
-   const same=()=>{const a=ids(target.tw().localReplicaResult()||[]),b=ids(fw.localReplicaResult()||[]);return complete(target.tw())&&a.size===b.size&&[...a].every(x=>b.has(x));};
-   if(await until(same,15000)){
-    const after=ids(fw.localReplicaResult()||[]);
-    const delta=visibilityDelta(before,after);visibilityChecks.additions+=delta.additions;visibilityChecks.removals+=delta.removals;
-    if(after.size===before.size&&[...after].every(x=>before.has(x)))visibilityChecks.noChange++;
-    else{visibilityChecks.converged++;sample('visibility',Date.now()-changedAt,changedAt);}
+   const capture=(client:any,watch:any)=>captureVisibility({client,watch,ref:api.tasks.recentWorkspaceTasks,args:{},principal,authority:transportReplicaAuthority(client)});
+   if(!await until(()=>complete(fw),60000)){record.failure='fresh-window-not-ready';record.verdict=compareVisibility(capture(target.c(),target.tw()),capture(fresh.c,fw));visibilityChecks.mismatched++;error(new Error('Visibility oracle snapshot never completed'));return;}
+   let verdict:any;
+   const done=await until(()=>{
+    const left=capture(target.c(),target.tw()),right=capture(fresh.c,fw);
+    verdict=compareVisibility(left,right);record.trace.push({at:Date.now(),...verdict});if(record.trace.length>32)record.trace.shift();
+    // A certified mismatch is terminal; later catchup must not erase it.
+    return verdict.qualified;
+   },15000);
+   record.verdict=verdict;record.completedAt=Date.now();
+   if(done&&verdict.passed){
+    const after=ids(fw.localReplicaResult()||[]);const delta=visibilityDelta(before,after);visibilityChecks.additions+=delta.additions;visibilityChecks.removals+=delta.removals;
+    if(!delta.additions&&!delta.removals)visibilityChecks.noChange++;else{visibilityChecks.converged++;sample('visibility',Date.now()-changedAt,changedAt);}
    }else{
-    const a=ids(target.tw().localReplicaResult()||[]),b=ids(fw.localReplicaResult()||[]);
     visibilityChecks.mismatched++;
-    error(new Error(`Visibility mismatch after 15 s: ${[...a].filter(x=>!b.has(x)).length} leaked, ${[...b].filter(x=>!a.has(x)).length} missing`));
+    error(new Error(done?`Visibility matched-revision mismatch: ${verdict.extra.length} extra, ${verdict.missing.length} missing, ${verdict.changed.length} changed`:`Visibility oracle unqualified after 15 s: ${verdict?.reason||'no-complete-matched-window'}`));
    }
-  }catch(e){visibilityChecks.mismatched++;error(e);}
-  finally{stop();fresh?.c.close();target.busy=false;}
+  }catch(e){record.failure=String(e);visibilityChecks.mismatched++;error(e);}
+  finally{record.completedAt??=Date.now();stop();fresh?.c.close();target.busy=false;}
  };
  const jobs=Array.from({length:target},(_,i)=>(async()=>{
   if(!mine(i))return;
@@ -371,7 +381,7 @@ async function main() {
   if(!await plannedStart.run({at:performance.now()-Math.max(0,Date.now()-plannedAt),used:false},()=>connect('login'))){ready();return;}
   if(stopping){disconnect();ready();return;}users.push({close:()=>c.close()});
   const admin=(f.adminMemberIds||[]).includes(member),approver=(f.approverMemberIds||[]).includes(member);
-  const handle:Handle={i,email,member,tenant:f.tenant,tw:()=>tw,admin,busy:false};
+  const handle:Handle={i,email,member,tenant:f.tenant,tw:()=>tw,c:()=>c,admin,busy:false};
   (tenantUsers.get(f.tenant)??tenantUsers.set(f.tenant,[]).get(f.tenant)!).push(handle);
   ready();
   const periodicPending=new Set<Promise<unknown>>();
@@ -446,15 +456,15 @@ async function main() {
    const before=ids(target.tw().localReplicaResult()||[]);const mine=rows();
    const spot=pick((f.spotParents||[]) as string[],random),team=pick((f.teamIds||[]) as string[],random);
    const hidden=mine.filter(r=>!before.has(r._id)&&r.statusId!==f.completedStatusId);
-   const choice=random();let v:any;
-   if(choice<.2&&spot)v=await timed('permission',()=>reducer(c,api.members.assignMemberSpot,{memberId:target.member,spotId:spot}));
-   else if(choice<.35&&spot)v=await timed('permission',()=>reducer(c,api.members.removeMemberSpot,{memberId:target.member,spotId:spot}));
-   else if(choice<.5&&team){if(extras.rows(4).some((r:any)=>r.memberId===target.member&&r.teamId===team&&!r.deletedAt))return;v=await timed('permission',()=>reducer(c,api.members.addMemberTeam,{memberId:target.member,teamId:team,roleKey:'member'}));}
-   else if(choice<.65){const mt=extras.rows(4).find((r:any)=>r.memberId===target.member&&!r.deletedAt);if(!mt)return;v=await timed('permission',()=>reducer(c,api.members.removeMemberTeam,{id:mt._id}));}
-   else if(choice<.8&&hidden.length){const t=pick(hidden,random);const share=await timed('permission',()=>reducer(c,api.taskResources.shareTask,{taskId:t._id,sharedToUserId:target.member}));v=share;if(typeof share==='string'&&random()<.5)setTimeout(()=>launch(async()=>{const at=Date.now(),b=ids(target.tw().localReplicaResult()||[]);if(await timed('permission',()=>reducer(c,api.taskResources.revokeShare,{id:share}))!==undefined)await verifyVisibility(target,at,b);}),60000);}
-   else if(choice<.9&&hidden.length){const t=pick(hidden,random);v=await timed('permission',()=>reducer(c,api.tasks.assign,{taskId:t._id,userIds:[target.member]}));}
-   else{const t=pick(mine.filter(r=>before.has(r._id)&&r.spotId),random);if(!t||!f.spotChildren)return;v=await timed('permission',()=>reducer(c,api.tasks.setSpot,{taskId:t._id,spotId:pick(f.spotChildren as string[],random)}));}
-   if(v!==undefined)await verifyVisibility(target,Date.now(),before);
+   const choice=random();let v:any,mutation:any;const permission=(ref:any,args:any)=>{mutation={actorUser:i,actorMember:member,path:ref.path,args};return timed('permission',()=>reducer(c,ref,args));};
+   if(choice<.2&&spot)v=await permission(api.members.assignMemberSpot,{memberId:target.member,spotId:spot});
+   else if(choice<.35&&spot)v=await permission(api.members.removeMemberSpot,{memberId:target.member,spotId:spot});
+   else if(choice<.5&&team){if(extras.rows(4).some((r:any)=>r.memberId===target.member&&r.teamId===team&&!r.deletedAt))return;v=await permission(api.members.addMemberTeam,{memberId:target.member,teamId:team,roleKey:'member'});}
+   else if(choice<.65){const mt=extras.rows(4).find((r:any)=>r.memberId===target.member&&!r.deletedAt);if(!mt)return;v=await permission(api.members.removeMemberTeam,{id:mt._id});}
+   else if(choice<.8&&hidden.length){const t=pick(hidden,random);const share=await permission(api.taskResources.shareTask,{taskId:t._id,sharedToUserId:target.member});v=share;if(typeof share==='string'&&random()<.5)setTimeout(()=>launch(async()=>{const at=Date.now(),b=ids(target.tw().localReplicaResult()||[]);if(await permission(api.taskResources.revokeShare,{id:share})!==undefined)await verifyVisibility(target,at,b,{actorUser:i,actorMember:member,path:api.taskResources.revokeShare.path,args:{id:share}});}),60000);}
+   else if(choice<.9&&hidden.length){const t=pick(hidden,random);v=await permission(api.tasks.assign,{taskId:t._id,userIds:[target.member]});}
+   else{const t=pick(mine.filter(r=>before.has(r._id)&&r.spotId),random);if(!t||!f.spotChildren)return;v=await permission(api.tasks.setSpot,{taskId:t._id,spotId:pick(f.spotChildren as string[],random)});}
+   if(v!==undefined)await verifyVisibility(target,Date.now(),before,mutation);
   };
   // One explicit share/revoke cycle per shard, using ordinary app reducers.
   // Failure to find a genuinely hidden row is a missing case, never a pass.
@@ -468,12 +478,12 @@ async function main() {
    try{
     const at=Date.now();const share=await reducer(c,api.taskResources.shareTask,{taskId:row._id,sharedToUserId:target.member});
     if(typeof share!=='string')throw Error('Share did not return a revoke identifier');
-    await verifyVisibility(target,at,before);
+    await verifyVisibility(target,at,before,{actorUser:i,actorMember:member,path:api.taskResources.shareTask.path,args:{taskId:row._id,sharedToUserId:target.member}});
     const granted=ids(target.tw().localReplicaResult()||[]);
     cycle.granted=granted.has(row._id);cycle.grantMs=Date.now()-at;cycle.additions=visibilityDelta(before,granted).additions;
     await pause(10000);
     const revokedAt=Date.now();await reducer(c,api.taskResources.revokeShare,{id:share});
-    await verifyVisibility(target,revokedAt,granted);
+    await verifyVisibility(target,revokedAt,granted,{actorUser:i,actorMember:member,path:api.taskResources.revokeShare.path,args:{id:share}});
     const after=ids(target.tw().localReplicaResult()||[]);
     cycle.oldRowRemoved=!after.has(row._id);cycle.revoked=cycle.oldRowRemoved;cycle.revokeMs=Date.now()-revokedAt;cycle.removals=visibilityDelta(granted,after).removals;
     if(!cycle.granted||!cycle.oldRowRemoved)throw Error('Share/revoke old-row oracle failed');
@@ -563,7 +573,7 @@ async function main() {
  for(const e of lifecycle.events)if(e.type==='refused')error(Error('Replica open refused: '+e.path),e.at);
  const deployReloadWindowMs=[deadline-seconds*1000+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000,deadline-seconds*1000+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000+5000];
  const checkpointCost={kind:'process-local immutable row pool; per-user window membership',logicalBytes:checkpointStores.reduce((n,s)=>n+s.stats().bytes,0),peakLogicalBytesSum:checkpointStores.reduce((n,s)=>n+s.stats().peakBytes,0),users:checkpointStores.length,windows:checkpointStores.reduce((n,s)=>n+s.stats().windows,0),checkpointCpuSeconds:thinDrivers.reduce((n,c)=>n+c.checkpointCpuUs/1e6,0),rowPoolCanonicalBytes:[...thinRowPool.rows.values()].reduce((n,e)=>n+Buffer.byteLength(e.canonical),0),rowPoolAdditionalSerializationBytes:[...thinRowPool.rows.values()].reduce((n,e)=>n+(e.serializedValue!==e.canonical?Buffer.byteLength(e.serializedValue):0),0)};
- const result={driverDiagnostics:driverDiagnostics(),checkpointFailures:thin?ThinClient.stats.checkpointFailures:[],checkpointCost,artifactPins,deployReloadWindowMs,reloadEvents,permissionCycles,operationAttempts,replicaEvents:lifecycle.events,signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,presenceV2Users,collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,reconnectWindowMs:process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?null:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
+ const result={driverDiagnostics:driverDiagnostics(),checkpointFailures:thin?ThinClient.stats.checkpointFailures:[],checkpointCost,artifactPins,deployReloadWindowMs,reloadEvents,permissionCycles,operationAttempts,replicaEvents:lifecycle.events,signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,presenceV2Users,collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,visibilityComparisons,reconnectWindowMs:process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?null:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
  const steadyLatencyMs=Object.fromEntries(Object.keys(measurements).map(kind=>{const xs=(samples[kind]||[]).filter(x=>x.at>=deadline-seconds*1000&&x.at<deadline).map(x=>x.ms);return [kind,{samples:xs.length,...quantiles(xs)}];}));
  const phaseErrors=(start:number,end:number)=>Object.fromEntries([...new Set(errorEvents.filter(e=>e.at>=start&&e.at<end).map(e=>e.key))].map(key=>[key,errorEvents.filter(e=>e.key===key&&e.at>=start&&e.at<end).length]));
  const steadyErrors=phaseErrors(deadline-seconds*1000,deadline);

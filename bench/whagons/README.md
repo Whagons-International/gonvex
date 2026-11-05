@@ -239,11 +239,16 @@ another team.
 
 **Visibility oracle.** After every change, a fresh session for the affected
 member computes their rows from scratch; their long-lived replica must
-converge to exactly that set. `visibility` samples the time from the change to
-convergence when the change altered the member's rows. A difference after
-15 s (leaked or missing rows) is an error and fails the run regardless of the
-error budget. `visibilityChecks` counts checks, convergences, no-op changes and
-mismatches.
+converge to exactly that set at the same complete window cursor, principal and
+negotiated authority. The oracle independently checks row membership and digest,
+including values. `visibility` samples the time from the change to qualified
+convergence. A certified extra, missing or changed row fails immediately; failure
+to obtain a complete matched comparison within 15 s after the fresh snapshot
+also fails qualification. Cross-revision or pending observations never pass.
+`visibilityComparisons` preserves the path, canonical window/args, principal,
+mutation, authority, cursors, readiness, row hashes and bounded comparison trace
+in final and abort receipts. `visibilityChecks` counts checks, convergences,
+no-op changes and failures. See [the real-frame regression](VISIBILITY-ORACLE.md).
 
 **Reconnect wave.** About 30 % of users drop and re-open their session within
 10 s at the middle of the plateau (`reconnect` measures sign-in to a complete
