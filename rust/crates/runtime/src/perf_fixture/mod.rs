@@ -940,6 +940,53 @@ impl Fixture {
         Ok(())
     }
 
+    /// Install whole-table collections for the captured app's local-table
+    /// pattern. Uses real fixture schemas and visibility, with no host calls.
+    pub async fn install_local_collections(&self) -> FixtureResult<Vec<String>> {
+        let (mut manifest, _) = module_manifest_with(2, "export {};\n")?;
+        let source: Value = serde_json::from_str(MODULE_JSON)?;
+        let mut paths = Vec::new();
+        let pool = self
+            .pools()
+            .reader(&self.tenant(0).route.database_url)
+            .await?;
+        let mut connection = pool.acquire().await?;
+        for (table, plan) in source["visibility"].as_object().unwrap() {
+            let columns = gonvex_store::rows::table_columns(&mut connection, table).await?;
+            if columns.is_empty() {
+                continue;
+            }
+            let path = format!("__local.{table}");
+            manifest["module"]["functions"][&path] = json!({
+                "kind": "query", "delivery": "replica", "handler": "unused",
+                "args": {"kind": "object", "fields": {}},
+                "replica": {"table": table, "key": plan["key"],
+                    "columns": columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+                    "equalFilters": {}, "excludeWhenSet": [], "orderBy": "",
+                    "orderDirection": "asc", "mode": "eager",
+                    "maxRows": 10000, "maxBytes": 33554432}
+            });
+            paths.push(path);
+        }
+        drop(connection);
+        let hash =
+            crate::modules::canonical_artifact_hash(manifest["module"].as_object().unwrap())?;
+        manifest["module"]["hash"] = json!(hash);
+        self.runtime
+            .inner
+            .modules
+            .install(
+                &self.runtime.inner.module_host,
+                RuntimeManifestRecord {
+                    project_id: PROJECT_ID.to_owned(),
+                    module_hash: hash,
+                    manifest,
+                },
+            )
+            .await?;
+        Ok(paths)
+    }
+
     /// Orderly shutdown (runtime first, then the fake host and run files).
     pub async fn shutdown(self) {
         self.runtime.shutdown().await;

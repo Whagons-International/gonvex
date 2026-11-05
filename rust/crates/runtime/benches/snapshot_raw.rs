@@ -276,6 +276,78 @@ async fn run() {
         "fixture ({tasks} tasks, {members} members) ready in {:.1}s",
         started.elapsed().as_secs_f64()
     );
+    if enabled("app_local/") || enabled("app_queue/") {
+        let paths = fixture.install_local_collections().await.unwrap();
+        let session = fixture.session(
+            TENANT,
+            fixture.members_of_kind(TENANT, MemberKind::TeamSpots)[0],
+        );
+        if enabled("app_queue/") {
+            use std::future::Future;
+            use std::task::{Context, Poll};
+            let admission = gonvex_runtime::offload::SnapshotAdmission::global();
+            let mut held = Vec::new();
+            while admission.available_permits() > 0 {
+                held.push(admission.admit("hold".into(), "hold").await.unwrap());
+            }
+            let before = AllocSnapshot::now();
+            let base = reset_peak();
+            let mut waiting = Vec::new();
+            let mut refused = 0;
+            let waker = futures_util::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            for i in 0..5000 {
+                let mut future = Box::pin(
+                    fixture
+                        .runtime
+                        .open_replica(&session, request(&paths[i % paths.len()], json!({}), None)),
+                );
+                match future.as_mut().poll(&mut cx) {
+                    Poll::Pending => waiting.push(future),
+                    Poll::Ready(result) => {
+                        assert!(result.is_err());
+                        refused += 1;
+                    }
+                }
+            }
+            let alloc = AllocSnapshot::now().since(before);
+            record(
+                "app_queue/bound",
+                json!({"waiting": waiting.len(), "refused": refused,
+                "admissionWaiting": admission.waiting(), "allocatedBytes": alloc.allocated_bytes,
+                "liveBytes": alloc.live_bytes, "peakLiveBytes": peak_live_bytes() - base}),
+            );
+            drop(waiting);
+            assert_eq!(admission.waiting(), (0, 0));
+            drop(held);
+            fixture.shutdown().await;
+            return;
+        }
+        for phase in ["first", "warm"] {
+            let mut scenario = Scenario::start();
+            let count = if phase == "first" { 1 } else { iterations };
+            for _ in 0..count {
+                scenario
+                    .run(async {
+                        for path in &paths {
+                            let opened = fixture
+                                .runtime
+                                .open_replica(&session, request(path, json!({}), None))
+                                .await
+                                .unwrap_or_else(|e| panic!("{path}: {e}"));
+                            std::hint::black_box(opened);
+                        }
+                    })
+                    .await;
+            }
+            scenario.finish(
+                &format!("app_local/{phase}"),
+                json!({"collections": paths.len()}),
+            );
+        }
+        fixture.shutdown().await;
+        return;
+    }
     let runtime = fixture.runtime.clone();
     let kinds = [
         ("Admin", MemberKind::Admin),
