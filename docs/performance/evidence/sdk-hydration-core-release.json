@@ -1,0 +1,13 @@
+{
+  "owner": "sdk-resume-hydration-728b857e",
+  "released": "2026-11-05T06:50:09.086738+00:00",
+  "allUnitsExited": true,
+  "coreTestsPassed": 403,
+  "initialLifecycleExit": 1,
+  "initialLifecycleIssue": "persistence suite could not resolve @gonvex/client from adapter; test-only own-source alias repaired resolution",
+  "persistenceRerunExit": 0,
+  "typecheckExit": 0,
+  "focusedExit": 0,
+  "cyclesExit": 0,
+  "generatorsExit": 0
+}

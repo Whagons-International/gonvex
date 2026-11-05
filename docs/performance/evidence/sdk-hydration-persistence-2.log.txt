@@ -1,0 +1,34 @@
+Running as unit: gonvex-sdk-hydration-persistence-phase-e059691b16d1.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T06:48:11.602374+00:00", "attempt": "dfc989e75615455e919e7fb2845197f2", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-persistence-phase-e059691b16d1.service", "event": "wait-start", "kind": "test", "pid": 2181889, "schema": "coach.resources.v1", "start_ticks": "2455846", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-persistence-phase-e059691b16d1.service", "why": "SDK hydration persistence alias /mnt/data/work/gonvex-sdk-resume-hydration"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T06:48:11.602562+00:00", "attempt": "dfc989e75615455e919e7fb2845197f2", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-persistence-phase-e059691b16d1.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "test", "outcome": "admitted", "pid": 2181889, "position": 0, "schema": "coach.resources.v1", "start_ticks": "2455846", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-persistence-phase-e059691b16d1.service", "why": "SDK hydration persistence alias /mnt/data/work/gonvex-sdk-resume-hydration"}
+
+ RUN  v4.1.6 /home/gabriel/.t3/worktrees/gonvex/t3-06061a4a/packages/client
+
+(node:2181919) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/sdk-persistence-barrier.test.ts (99 tests) 26082ms
+   ✓ reconciles accepted work after returning from a different tenant database epoch, memory  305ms
+   ✓ recovers data before retirement, 'memory' knownAcceptance=false  1213ms
+   ✓ recovers data before retirement, 'legacy' knownAcceptance=false  1218ms
+   ✓ recovers data before retirement, 'engine' knownAcceptance=false  1221ms
+   ✓ recovers data before retirement, 'sqlite' knownAcceptance=false  1217ms
+   ✓ holds a recovery watermark until reopened data is durable, 'memory' laggingReady=false knownAcceptance=false  1212ms
+   ✓ holds a recovery watermark until reopened data is durable, 'memory' laggingReady=true knownAcceptance=false  1214ms
+   ✓ holds a recovery watermark until reopened data is durable, 'legacy' laggingReady=false knownAcceptance=false  1218ms
+   ✓ holds a recovery watermark until reopened data is durable, 'legacy' laggingReady=true knownAcceptance=false  1224ms
+   ✓ holds a recovery watermark until reopened data is durable, 'engine' laggingReady=false knownAcceptance=false  1223ms
+   ✓ holds a recovery watermark until reopened data is durable, 'engine' laggingReady=true knownAcceptance=false  1220ms
+   ✓ holds a recovery watermark until reopened data is durable, 'sqlite' laggingReady=false knownAcceptance=false  1216ms
+   ✓ holds a recovery watermark until reopened data is durable, 'sqlite' laggingReady=true knownAcceptance=false  1219ms
+
+ Test Files  1 passed (1)
+      Tests  99 passed (99)
+   Start at  22:48:11
+   Duration  27.02s (transform 519ms, setup 0ms, import 660ms, tests 26.08s, environment 0ms)
+
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 3051291, "exit_code": 0, "io_source": "unavailable", "memory_peak": 367325184, "wall_seconds": 27.313}, "arbitration": "kernel-v1", "at": "2026-11-05T06:48:38.922539+00:00", "attempt": "dfc989e75615455e919e7fb2845197f2", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-persistence-phase-e059691b16d1.service", "event": "lease-release", "exit_code": 0, "kind": "test", "pid": 2181889, "schema": "coach.resources.v1", "start_ticks": "2455846", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-persistence-phase-e059691b16d1.service", "why": "SDK hydration persistence alias /mnt/data/work/gonvex-sdk-resume-hydration"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 27.476s
+             CPU time consumed: 3.187s
+                   Memory peak: 350.3M (swap: 0B)

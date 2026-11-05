@@ -1,0 +1,56 @@
+Running as unit: gonvex-sdk-hydration-lifecycle-phase-e934c90dedc1.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T06:47:36.290881+00:00", "attempt": "55216191c8e14825991b98d62b3f96e4", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-lifecycle-phase-e934c90dedc1.service", "event": "wait-start", "kind": "test", "pid": 2176132, "schema": "coach.resources.v1", "start_ticks": "2452314", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-lifecycle-phase-e934c90dedc1.service", "why": "SDK hydration lifecycle regressions /mnt/data/work/gonvex-sdk-resume-hydration"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T06:47:36.291080+00:00", "attempt": "55216191c8e14825991b98d62b3f96e4", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-lifecycle-phase-e934c90dedc1.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "test", "outcome": "admitted", "pid": 2176132, "position": 0, "schema": "coach.resources.v1", "start_ticks": "2452314", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-lifecycle-phase-e934c90dedc1.service", "why": "SDK hydration lifecycle regressions /mnt/data/work/gonvex-sdk-resume-hydration"}
+
+ RUN  v4.1.6 /home/gabriel/.t3/worktrees/gonvex/t3-06061a4a/packages/client
+
+ ✓ src/index.test.ts (129 tests) 4137ms
+(node:2177208) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/sdk-persistence-barrier.test.ts (0 test)
+ ✓ src/cached-startup.test.ts (30 tests) 1603ms
+ ✓ src/sdk-delta-lifecycle.test.ts (12 tests) 1443ms
+ ✓ src/sdk-lifecycle.test.ts (12 tests) 2471ms
+   ✓ does not reopen after a needHashes observer closes the client, batch=false  361ms
+   ✓ does not reopen after a needHashes observer closes the client, batch=true  359ms
+   ✓ keeps current-owner needHashes and reset recovery working, batch=false  358ms
+   ✓ keeps current-owner needHashes and reset recovery working, batch=true  458ms
+   ✓ still reconnects an owned subscription after transport loss  358ms
+ ✓ src/control-watch-ownership.test.ts (34 tests) 675ms
+ ✓ src/control-watch-close-order.test.ts (4 tests) 909ms
+   ✓ scope clear survives a native WebSocket close observer running before-sdk  392ms
+   ✓ scope clear survives a native WebSocket close observer running after-sdk  358ms
+ ✓ src/outbox-settlement.test.ts (15 tests) 62ms
+ ✓ src/local-replica-hydration.test.ts (3 tests) 9ms
+ ✓ src/outbox-admission.test.ts (14 tests) 63ms
+ ✓ src/auth-generation.test.ts (4 tests) 143ms
+ ✓ src/outbox-recovery.test.ts (6 tests) 26ms
+ ✓ src/external-auth.test.ts (1 test) 4ms
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/sdk-persistence-barrier.test.ts [ src/sdk-persistence-barrier.test.ts ]
+Error: Cannot find package '@gonvex/client' imported from /home/gabriel/.t3/worktrees/gonvex/t3-06061a4a/packages/expo-sqlite/src/index.ts
+ ❯ ../expo-sqlite/src/index.ts:11:1
+      9|   ReplicaWindowWriteContext,
+     10| } from "@gonvex/client";
+     11| import {
+       | ^
+     12|   pagedReplicaReadView,
+     13|   mergeReplicaRecord,
+ ❯ src/sdk-persistence-barrier.test.ts:7:1
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 12 passed (13)
+      Tests  264 passed (264)
+   Start at  22:47:36
+   Duration  14.57s (transform 811ms, setup 0ms, import 1.60s, tests 11.54s, environment 1ms)
+
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 5833530, "exit_code": 1, "io_source": "unavailable", "memory_peak": 375590912, "wall_seconds": 14.901}, "arbitration": "kernel-v1", "at": "2026-11-05T06:47:51.198897+00:00", "attempt": "55216191c8e14825991b98d62b3f96e4", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-lifecycle-phase-e934c90dedc1.service", "event": "lease-release", "exit_code": 1, "kind": "test", "pid": 2176132, "schema": "coach.resources.v1", "start_ticks": "2452314", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-lifecycle-phase-e934c90dedc1.service", "why": "SDK hydration lifecycle regressions /mnt/data/work/gonvex-sdk-resume-hydration"}
+          Finished with result: exit-code
+Main processes terminated with: code=exited, status=1/FAILURE
+               Service runtime: 15.049s
+             CPU time consumed: 5.959s
+                   Memory peak: 358.1M (swap: 0B)

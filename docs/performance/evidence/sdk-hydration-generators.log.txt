@@ -1,0 +1,14 @@
+Running as unit: gonvex-sdk-hydration-generators-phase-8c8e898b54af.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T06:49:35.866541+00:00", "attempt": "677e96f320724f478381ed2dd6583bb7", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-generators-phase-8c8e898b54af.service", "event": "wait-start", "kind": "typecheck", "pid": 2194597, "schema": "coach.resources.v1", "start_ticks": "2464273", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-generators-phase-8c8e898b54af.service", "why": "SDK hydration docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T06:49:35.866730+00:00", "attempt": "677e96f320724f478381ed2dd6583bb7", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-generators-phase-8c8e898b54af.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "typecheck", "outcome": "admitted", "pid": 2194597, "position": 0, "schema": "coach.resources.v1", "start_ticks": "2464273", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-generators-phase-8c8e898b54af.service", "why": "SDK hydration docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+$ fumadocs-mdx && next typegen && tsc --noEmit
+[MDX] generated files in 2229.01973ms
+[MDX] generated files in 374.84197700000004ms
+Generating route types...
+✓ Types generated successfully
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 2062564, "exit_code": 0, "io_source": "unavailable", "memory_peak": 371396608, "wall_seconds": 8.373}, "arbitration": "kernel-v1", "at": "2026-11-05T06:49:44.247420+00:00", "attempt": "677e96f320724f478381ed2dd6583bb7", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-sdk-hydration-generators-phase-8c8e898b54af.service", "event": "lease-release", "exit_code": 0, "kind": "typecheck", "pid": 2194597, "schema": "coach.resources.v1", "start_ticks": "2464273", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-sdk-hydration-generators-phase-8c8e898b54af.service", "why": "SDK hydration docs generators /mnt/data/work/gonvex-reload-delta/docs"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 8.521s
+             CPU time consumed: 2.180s
+                   Memory peak: 354.1M (swap: 0B)

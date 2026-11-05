@@ -1,0 +1,20 @@
+const fs=require('fs'), cp=require('child_process'), path=require('path');
+const ts=require('/home/gabriel/work/gonvex-perf/integrate/node_modules/.pnpm/typescript@6.0.3/node_modules/typescript/lib/typescript.js');
+const base='2b7e2ff9f6950ea73a4659c284c9204262314574';
+const files=cp.execFileSync('git',['ls-files'],{encoding:'utf8'}).trim().split('\n').filter(f=>/^packages\/[^/]+\/src\//.test(f)&&/\.tsx?$/.test(f)&&!/(\.test\.|\.spec\.|\.d\.ts$)/.test(f));
+const fileSet=new Set(files), names=new Map();
+for(const f of cp.execFileSync('git',['ls-files','packages/*/package.json'],{encoding:'utf8'}).trim().split('\n')) if(f) names.set(JSON.parse(fs.readFileSync(f)).name,path.dirname(f)+'/src');
+function graph(rev){const edges=[];for(const file of files){let source;if(rev) {try{source=cp.execFileSync('git',['show',rev+':'+file],{encoding:'utf8',stdio:['pipe','pipe','pipe']});}catch{continue;}}else source=fs.readFileSync(file,'utf8');
+ const ast=ts.createSourceFile(file,source,ts.ScriptTarget.Latest,true);
+ const resolve=(spec)=>{let p;if(spec.startsWith('.'))p=path.posix.normalize(path.posix.join(path.posix.dirname(file),spec));else for(const [name,root] of names){if(spec===name)p=root+'/index';else if(spec.startsWith(name+'/'))p=root+'/'+spec.slice(name.length+1);if(p)break;}
+ if(!p)return; p=p.replace(/\.js$/,'');return [p,p+'.ts',p+'.tsx',p+'/index.ts'].find(p=>fileSet.has(p));};
+ const add=(literal)=>{if(literal&&ts.isStringLiteral(literal)){const to=resolve(literal.text);if(to)edges.push([file,to]);}};
+ const visit=n=>{if(ts.isImportDeclaration(n)){const c=n.importClause;const onlyType=c&&(c.isTypeOnly||(!c.name&&c.namedBindings&&ts.isNamedImports(c.namedBindings)&&c.namedBindings.elements.length>0&&c.namedBindings.elements.every(e=>e.isTypeOnly)));if(!onlyType)add(n.moduleSpecifier);}
+ else if(ts.isExportDeclaration(n)){const onlyType=n.isTypeOnly||(n.exportClause&&ts.isNamedExports(n.exportClause)&&n.exportClause.elements.length>0&&n.exportClause.elements.every(e=>e.isTypeOnly));if(!onlyType)add(n.moduleSpecifier);}
+ else if(ts.isCallExpression(n)&&n.expression.kind===ts.SyntaxKind.ImportKeyword)add(n.arguments[0]);ts.forEachChild(n,visit);};visit(ast);}
+ const unique=[...new Set(edges.map(e=>JSON.stringify(e)))].sort().map(e=>JSON.parse(e));
+ const reachable=new Set(), stack=['packages/client/src/index.ts'];while(stack.length){const n=stack.pop();if(reachable.has(n))continue;reachable.add(n);for(const [a,b] of unique)if(a===n)stack.push(b);}
+ const scoped=unique.filter(([a])=>reachable.has(a));let next=0;const index=new Map(),low=new Map(),active=new Set(),pending=[],cycles=[];
+ function visit(n){index.set(n,next);low.set(n,next++);active.add(n);pending.push(n);for(const [a,b] of scoped)if(a===n){if(!index.has(b)){visit(b);low.set(n,Math.min(low.get(n),low.get(b)));}else if(active.has(b))low.set(n,Math.min(low.get(n),index.get(b)));}if(low.get(n)===index.get(n)){let group=[],m;do{m=pending.pop();active.delete(m);group.push(m);}while(m!==n);if(group.length>1||scoped.some(([a,b])=>a===n&&b===n))cycles.push(group.sort());}}
+ for(const n of reachable)if(!index.has(n))visit(n);return{revision:rev||'working-source-728b857e',modules:reachable.size,edges:scoped,cycles:cycles.sort()};}
+const before=graph(base),after=graph();const unchanged=JSON.stringify(before.edges)===JSON.stringify(after.edges);console.log(JSON.stringify({tool:'TypeScript 6 AST, internal static runtime imports/exports and literal dynamic imports; type-only edges excluded',scope:'transitive workspace runtime graph from packages/client/src/index.ts',before,after,unchangedRuntimeEdges:unchanged},null,2));if(!unchanged)process.exitCode=1;

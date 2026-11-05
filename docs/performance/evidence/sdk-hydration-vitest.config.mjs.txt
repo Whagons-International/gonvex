@@ -1,0 +1,6 @@
+export default {
+  root: '/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a/packages/client',
+  resolve: { alias: [{ find: /^@gonvex\/client$/, replacement: '/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a/packages/client/src/index.ts' }] },
+  cacheDir: '/mnt/data/work/gonvex-sdk-resume-hydration/vite-cache',
+  test: { maxWorkers: 2, fileParallelism: false, cache: false },
+};
