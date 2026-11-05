@@ -9,6 +9,7 @@ pub(crate) mod compile;
 mod delivery;
 mod diff;
 pub(crate) mod model;
+pub(crate) mod provider;
 pub(crate) mod query;
 mod roles;
 pub(crate) mod source;

@@ -2,6 +2,11 @@
 //! No normal provisioning path installs this schema. Row/group/role adapters,
 //! automatic application-table maintenance and live-feed publication are not
 //! implemented by this normalized relation store.
+pub mod decision;
+pub mod decision_diff;
+mod literal;
+pub mod program;
+
 use std::path::{Path, PathBuf};
 
 use sqlx::{Row, SqliteConnection};
@@ -65,9 +70,13 @@ async fn writer(tx: &mut TenantTransaction) -> Result<(), DatabaseError> {
 /// Explicit fixture setup; NEVER invoked by ordinary store provisioning.
 async fn install_local_inner(tx: &mut TenantTransaction) -> Result<String, DatabaseError> {
     writer(tx).await?;
-    sqlx::raw_sql(include_str!("permission_indexes/schema.sql"))
-        .execute(&mut **tx.transaction())
-        .await?;
+    sqlx::raw_sql(concat!(
+        include_str!("permission_indexes/schema.sql"),
+        "\n",
+        include_str!("permission_indexes/decision.sql")
+    ))
+    .execute(&mut **tx.transaction())
+    .await?;
     sqlx::query("INSERT INTO _gonvex_permission_identity(singleton,instance_id,physical_key) VALUES(1,?1,?2) ON CONFLICT DO NOTHING")
         .bind(uuid::Uuid::new_v4().to_string()).bind(physical_key(&require_local(tx.transaction()).await?)?).execute(&mut **tx.transaction()).await?;
     // Every mutation dirties readiness even when a caller bypasses the helper.
@@ -78,6 +87,17 @@ async fn install_local_inner(tx: &mut TenantTransaction) -> Result<String, Datab
         "_gonvex_permission_memberships",
         "_gonvex_permission_row_supports",
         "_gonvex_permission_row_atom_supports",
+        "_gonvex_permission_decision_nodes",
+        "_gonvex_permission_decision_edges",
+        "_gonvex_permission_decision_anchors",
+        "_gonvex_permission_decision_dependencies",
+        "_gonvex_permission_decision_unanchored",
+        "_gonvex_permission_program_rows",
+        "_gonvex_permission_program_principals",
+        "_gonvex_permission_program_row_deltas",
+        "_gonvex_permission_program_principal_deltas",
+        "_gonvex_permission_program_resets",
+        "_gonvex_permission_programs",
     ] {
         for operation in ["INSERT", "UPDATE", "DELETE"] {
             let image = if operation == "DELETE" { "OLD" } else { "NEW" };
@@ -272,6 +292,27 @@ pub enum SourceChange {
     },
 }
 
+/// Legacy fixture helpers cannot mint or replace the authority of a compiled
+/// source program. Its private maintainer owns facts and publication together.
+async fn legacy_scope(tx: &mut TenantTransaction, scope: i64) -> Result<(), DatabaseError> {
+    writer(tx).await?;
+    let installed:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_permission_programs')").fetch_one(&mut **tx.transaction()).await?;
+    if installed != 0 {
+        let compiled: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _gonvex_permission_programs WHERE scope_id=?1)",
+        )
+        .bind(scope)
+        .fetch_one(&mut **tx.transaction())
+        .await?;
+        if compiled != 0 {
+            return Err(invalid(
+                "legacy normalized helpers cannot mutate/seal compiled source authority",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// All replacements share the caller's writer transaction. Distinct sources
 /// retain alternate supports; SQL views deduplicate effective membership.
 pub async fn apply(
@@ -279,7 +320,11 @@ pub async fn apply(
     scope: i64,
     changes: &[SourceChange],
 ) -> Result<(), DatabaseError> {
-    let result = apply_inner(tx, scope, changes).await;
+    let result = async {
+        legacy_scope(tx, scope).await?;
+        apply_inner(tx, scope, changes).await
+    }
+    .await;
     if result.is_err() {
         tx.mark_failed("permission index batch failed");
     }
@@ -420,6 +465,7 @@ pub(crate) async fn finalize_local(connection: &mut SqliteConnection) -> Result<
         return Ok(());
     }
     instance(connection).await?;
+    program::maintain(connection).await?;
     sqlx::query("UPDATE _gonvex_permission_scopes SET phase='ready',covered_revision=(SELECT revision FROM _gonvex_sync_clock WHERE singleton=1) WHERE phase='pending' AND NOT EXISTS(SELECT 1 FROM _gonvex_permission_sources s WHERE s.scope_id=_gonvex_permission_scopes.scope_id AND s.generation=_gonvex_permission_scopes.generation AND s.complete=0) AND instance_id=(SELECT instance_id FROM _gonvex_permission_identity WHERE singleton=1) AND epoch=(SELECT epoch FROM _gonvex_sync_clock WHERE singleton=1)")
         .execute(connection).await?;
     Ok(())
@@ -452,7 +498,11 @@ pub async fn register_sources(
     scope: i64,
     sources: &[(String, String)],
 ) -> Result<(), DatabaseError> {
-    let result = register_sources_inner(tx, scope, sources).await;
+    let result = async {
+        legacy_scope(tx, scope).await?;
+        register_sources_inner(tx, scope, sources).await
+    }
+    .await;
     if result.is_err() {
         tx.mark_failed("permission index register_sources failed");
     }
@@ -460,7 +510,11 @@ pub async fn register_sources(
 }
 
 pub async fn seal(tx: &mut TenantTransaction, scope: i64) -> Result<(), DatabaseError> {
-    let result = seal_inner(tx, scope).await;
+    let result = async {
+        legacy_scope(tx, scope).await?;
+        seal_inner(tx, scope).await
+    }
+    .await;
     if result.is_err() {
         tx.mark_failed("permission index seal failed");
     }
