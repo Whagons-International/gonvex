@@ -9,10 +9,10 @@ import { LocalReplica,MemoryLocalReplicaStorage,type StarterPromotionGuard,type 
 const stages:StarterStage[]=[];
 afterEach(()=>stages.splice(0).forEach(s=>s.dispose()));
 function hash(b:Uint8Array){return createHash("sha256").update(b).digest("hex");}
-async function fixture(rows:JsonValue[]=[{id:"a",body:"first"}],budget=new StarterBudget()) {
+async function fixture(rows:JsonValue[]=[{id:"a",body:"first"}],budget=new StarterBudget(),columnTypes:StarterOffer["columnTypes"]={id:"text",body:"text"}) {
  const raw=new TextEncoder().encode(rows.map(r=>JSON.stringify(r)).join("\n")+"\n");
  const full=deflateRawSync(raw,{level:1,windowBits:12,finishFlush:constants.Z_SYNC_FLUSH});const bytes=full.subarray(0,-4);
- const offer:StarterOffer={type:"replica.starterOffer",id:"open",offerId:"opaque",version:1,expiresAt:Date.now()+60000,cursor:{epoch:"e",revision:2},key:"id",path:"tasks.all",scope:"tenant",visibilityScope:"visible",orderBy:"id",orderDirection:"asc",mode:"eager",maxRows:100000,maxBytes:0,truncated:false,digest:replicaAggregateDigest(await replicaRowsHashes(rows,"id")),rows:rows.length,args:{},serializedDefinition:JSON.stringify({table:"tasks",key:"id",columns:["id","body"],orderBy:"id",orderDirection:"asc",mode:"eager",maxRows:100000,maxBytes:0}),format:1,encoding:"json-lines-pmd-level1-window12-no-context-v1",columnTypes:{id:"text",body:"text"},pieces:[{index:0,hash:hash(bytes),rawHash:hash(raw),bytes:bytes.length,rawBytes:raw.length,compressed:true}]};
+ const offer:StarterOffer={type:"replica.starterOffer",id:"open",offerId:"opaque",version:1,expiresAt:Date.now()+60000,cursor:{epoch:"e",revision:2},key:"id",path:"tasks.all",scope:"tenant",visibilityScope:"visible",orderBy:"id",orderDirection:"asc",mode:"eager",maxRows:100000,maxBytes:0,truncated:false,digest:replicaAggregateDigest(await replicaRowsHashes(rows,"id")),rows:rows.length,args:{},serializedDefinition:JSON.stringify({table:"tasks",key:"id",columns:["id","body"],orderBy:"id",orderDirection:"asc",mode:"eager",maxRows:100000,maxBytes:0}),format:1,encoding:"json-lines-pmd-level1-window12-no-context-v1",columnTypes,pieces:[{index:0,hash:hash(bytes),rawHash:hash(raw),bytes:bytes.length,rawBytes:raw.length,compressed:true}]};
  const stage=new StarterStage(offer,nodeStarterInflater,budget);stages.push(stage);
  const piece={type:"replica.starterPiece" as const,id:offer.id,offerId:offer.offerId,index:0,data:Buffer.from(bytes).toString("base64")};
  return {stage,offer,piece,budget};
@@ -129,4 +129,91 @@ it('rejects oversized catchup rows and delete-key buffers before serializing cop
  expect(()=>f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:3},upserts:[{id:'a',body:'x'.repeat(300000)}]})).toThrow();
  expect(()=>f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:3},deleted:['x'.repeat(6*1024*1024)]})).toThrow();
  f.stage.dispose();expect(f.budget.usage().chargedBytes).toBe(0);
+});
+
+function cryptoGate(last:number) {
+ let enter!:()=>void,release!:()=>void,calls=0;
+ const entered=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>release=r);
+ const native=globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
+ const spy=vi.spyOn(globalThis.crypto.subtle,'digest').mockImplementation(async(algorithm,data)=>{
+  const value=await native(algorithm,data);if(++calls===last){enter();await gate;}return value;
+ });
+ return {entered,release:()=>release(),restore:()=>spy.mockRestore()};
+}
+it('reuses only immutable stage-owned hashes across metadata-only catchup and still rejects corrupt ready',async()=>{
+ const f=await fixture([{id:'b',body:'second'},{id:'a',body:'first'}]);await f.stage.piece(f.piece);
+ const spy=vi.spyOn(globalThis.crypto.subtle,'digest');
+ try {
+  await f.stage.seal();expect(spy).toHaveBeenCalledTimes(2);
+  f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:3}});
+  await expect(f.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:4},digest:'xor1:'+'0'.repeat(64),truncated:false})).rejects.toThrow('integrity');
+  const snapshot=await f.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:4},digest:f.offer.digest,truncated:false});
+  expect(spy).toHaveBeenCalledTimes(2);expect(snapshot.result).toEqual([{id:'a',body:'first'},{id:'b',body:'second'}]);
+  expect(f.budget.usage().rowHashCalls).toBe(2);expect(f.budget.usage().memoReuses).toBe(2);
+ } finally {spy.mockRestore();}
+});
+it('cannot install seal memo after interleaved mutation attempt at the last crypto await',async()=>{
+ const f=await fixture();await f.stage.piece(f.piece);const gate=cryptoGate(1);
+ try {
+  const pending=f.stage.seal();await gate.entered;
+  expect(()=>f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:2},upserts:[{id:'a',body:'changed'}]})).toThrow();
+  gate.release();await expect(pending).rejects.toThrow('mutated');
+  await expect(f.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:4},digest:f.offer.digest})).rejects.toThrow('ready');
+  expect(f.budget.usage().memoReuses).toBe(0);
+ } finally {gate.release();gate.restore();}
+});
+it('holds async seal hash/row charges through retirement until crypto settles',async()=>{
+ const f=await fixture();await f.stage.piece(f.piece);const gate=cryptoGate(1);
+ try {
+  const pending=f.stage.seal();await gate.entered;f.stage.dispose();expect(f.budget.usage().stages).toBe(1);
+  expect(()=>f.budget.acquire(f.budget.maxBytes)).toThrow('budget');
+  gate.release();await expect(pending).rejects.toThrow('retired');expect(f.budget.usage().chargedBytes).toBe(0);
+ } finally {gate.release();gate.restore();}
+});
+it('copies nested delta rows and invalidates the entire memo for equal-cursor replacement',async()=>{
+ const f=await fixture([{id:'a',body:{nested:{value:'before'}}}],new StarterBudget(),{id:'text',body:'json'});
+ await f.stage.piece(f.piece);await f.stage.seal();
+ const row={id:'a',body:{nested:{value:'owned'}}};
+ f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:2},upserts:[row]});
+ row.body.nested.value='external-alias';
+ const expected={id:'a',body:{nested:{value:'owned'}}},digest=replicaAggregateDigest(await replicaRowsHashes([expected],'id'));
+ const snapshot=await f.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:3},digest});
+ expect(snapshot.result).toEqual([expected]);expect(f.budget.usage().rowHashCalls).toBe(2);expect(f.budget.usage().memoReuses).toBe(0);
+ expect(Object.isFrozen((snapshot.result as any)[0].body.nested)).toBe(true);
+});
+it('delete/reinsert and reordered catchup parts fully recompute even when the final set is identical',async()=>{
+ const rows=[{id:'a',body:'first'},{id:'b',body:'last'}],f=await fixture(rows);await f.stage.piece(f.piece);await f.stage.seal();
+ f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:2},deleted:['a','b']});
+ f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:2},upserts:[rows[1]!,rows[0]!]});
+ await f.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:3},digest:f.offer.digest});
+ expect(f.budget.usage().rowHashCalls).toBe(4);expect(f.budget.usage().memoReuses).toBe(0);
+});
+it('freezes an owned projection/window/scope/hash mode and cannot share memo with another stage',async()=>{
+ const f=await fixture();await f.stage.piece(f.piece);await f.stage.seal();
+ f.offer.visibilityScope='another';f.offer.scope='another';f.offer.orderDirection='desc';f.offer.columnTypes.body='json';f.offer.digest='sha256:untrusted';
+ expect(f.stage.offer.visibilityScope).toBe('visible');expect(f.stage.offer.scope).toBe('tenant');expect(f.stage.offer.orderDirection).toBe('asc');expect(f.stage.offer.columnTypes.body).toBe('text');
+ expect(()=>{f.stage.offer.columnTypes.body='json';}).toThrow();expect(()=>Object.assign(f.stage.offer,{digest:'sum1:untrusted'})).toThrow();
+ const g=await fixture();await g.stage.piece(g.piece);
+ await expect(g.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:4},digest:f.stage.offer.digest})).rejects.toThrow('ready');
+ expect(g.budget.usage().memoReuses).toBe(0);
+});
+it('rejects interleaved data mutation and advanced metadata watermark during a recomputed promotion',async()=>{
+ const f=await fixture();await f.stage.piece(f.piece);await f.stage.seal();
+ f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:3},upserts:[{id:'a',body:'updated'}]});
+ const digest=replicaAggregateDigest(await replicaRowsHashes([{id:'a',body:'updated'}],'id')),gate=cryptoGate(1);
+ try {
+  const pending=f.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:4},digest});await gate.entered;
+  f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:5}});gate.release();await expect(pending).rejects.toThrow('ready');
+ } finally {gate.release();gate.restore();}
+});
+it('aborts recomputed promotion on a same-key mutation during crypto and bounds concurrent hash work',async()=>{
+ const f=await fixture();await f.stage.piece(f.piece);await f.stage.seal();
+ f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:3},upserts:[{id:'a',body:'first change'}]});
+ const digest=replicaAggregateDigest(await replicaRowsHashes([{id:'a',body:'first change'}],'id')),gate=cryptoGate(1);
+ try {
+  const pending=f.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:4},digest});await gate.entered;
+  await expect(f.stage.promote({type:'replica.ready',id:'open',cursor:{epoch:'e',revision:4},digest})).rejects.toThrow('pending');
+  f.stage.delta({type:'replica.delta',id:'open',cursor:{epoch:'e',revision:3},upserts:[{id:'a',body:'second change'}]});
+  gate.release();await expect(pending).rejects.toThrow('mutated');expect(f.budget.usage().memoReuses).toBe(0);
+ } finally {gate.release();gate.restore();}
 });

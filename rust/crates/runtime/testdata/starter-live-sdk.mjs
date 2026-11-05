@@ -15,7 +15,11 @@ class Socket extends Native {
 globalThis.WebSocket=Socket;
 const lines=[],lineWait=[];const rl=createInterface({input:process.stdin});rl.on('line',l=>{if(lineWait.length)lineWait.shift()(l);else lines.push(l);});
 const line=()=>lines.length?Promise.resolve(lines.shift()):new Promise(r=>lineWait.push(r));
-const benchmarking=mode.startsWith('benchmark-');let promotionNs=0,codecNs=0;
+const benchmarking=mode.startsWith('benchmark-');let promotionNs=0,codecNs=0,cryptoCalls=0,cryptoInputBytes=0;
+// Count actual native WebCrypto calls in BOTH frozen A-only and candidate SDKs.
+// No row contents retained; the same wrapper overhead applies to both cases.
+const subtle=globalThis.crypto.subtle,nativeDigest=subtle.digest.bind(subtle);
+if(benchmarking)subtle.digest=(algorithm,data)=>{cryptoCalls++;cryptoInputBytes+=data.byteLength;return nativeDigest(algorithm,data);};
 class Storage extends MemoryLocalReplicaStorage {async promoteStarterWindow(...args){const t=process.hrtime.bigint();try{return await super.promoteStarterWindow(...args);}finally{promotionNs+=Number(process.hrtime.bigint()-t);}}}
 const storage=new Storage();let staged=0,client,previousReady;const start=process.hrtime.bigint(),beforeUsage=process.resourceUsage(),beforeMemory=process.memoryUsage();
 const ref={kind:'query',path:'tasks.all',delivery:'replica',replica:{table:'tasks',key:'id',columns:['id','body','rank'],maxRows:10000}};
@@ -36,7 +40,7 @@ try {
  const readyNs=Number(process.hrtime.bigint()-start);
  await new Promise(resolve=>setImmediate(resolve));
  const rows=client.localReplica.entityRows('tasks');if(benchmarking){assert.equal(rows.length,9002);assert(!rows.some(r=>r.id==='b'));}else assert.deepEqual(rows.map(r=>r.id).sort(),mode==='revoke-before-piece'?['c']:['a','c']);assert(!JSON.stringify(rows).includes('private-secret'));
- if(benchmarking){const after=process.resourceUsage();console.log('BENCH '+JSON.stringify({mode,totalNs:readyNs,codecNs,promotionNs,rows:rows.length,staged,clientCpuUs:after.userCPUTime+after.systemCPUTime-beforeUsage.userCPUTime-beforeUsage.systemCPUTime,heapBefore:beforeMemory.heapUsed,heapAfter:process.memoryUsage().heapUsed,maxRSSKiB:after.maxRSS,stats:client.starterBootstrapStats(),wireJsonBytes:received.reduce((n,m)=>n+Buffer.byteLength(JSON.stringify(m)),0)}));assert.equal(staged>0,mode==='benchmark-starter');
+ if(benchmarking){const after=process.resourceUsage();console.log('BENCH '+JSON.stringify({mode,totalNs:readyNs,codecNs,promotionNs,cryptoCalls,cryptoInputBytes,rows:rows.length,staged,clientCpuUs:after.userCPUTime+after.systemCPUTime-beforeUsage.userCPUTime-beforeUsage.systemCPUTime,heapBefore:beforeMemory.heapUsed,heapAfter:process.memoryUsage().heapUsed,maxRSSKiB:after.maxRSS,stats:client.starterBootstrapStats(),wireJsonBytes:received.reduce((n,m)=>n+Buffer.byteLength(JSON.stringify(m)),0)}));assert.equal(staged>0,mode==='benchmark-starter');
  } else if(mode==='bootstrap') {
    assert.equal(staged,1);assert.equal(received.filter(x=>x.type==='replica.starterOffer').length,1);assert.equal(received.filter(x=>x.type==='replica.snapshot'||x.type==='replica.snapshotPage').length,0);
    assert(first.cursor.revision>received.find(x=>x.type==='replica.starterOffer').cursor.revision,'unrelated revision not caught up');
