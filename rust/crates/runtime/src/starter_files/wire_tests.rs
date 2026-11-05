@@ -221,6 +221,12 @@ async fn starter_live_sdk_negotiates_promotes_catches_up_and_normally_resumes() 
         .await
         .unwrap();
     });
+    // Explicit ignored-test runner injection for a native-browser harness.
+    // Fixture authority, native sessions, writer mutations and SQL/XOR oracles
+    // stay here; this cannot register a provider or enable a production route.
+    let runner = std::env::var_os("STARTER_LIVE_SDK_RUNNER").unwrap_or_else(|| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/starter-live-sdk.mjs").into()
+    });
     for mode in [
         "old-client",
         "bootstrap",
@@ -232,10 +238,7 @@ async fn starter_live_sdk_negotiates_promotes_catches_up_and_normally_resumes() 
             if mode == "old-server" { "0" } else { "1" },
         );
         let mut child = tokio::process::Command::new("node")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/testdata/starter-live-sdk.mjs"
-            ))
+            .arg(&runner)
             .env(
                 "STARTER_SDK_CLIENT_ARTIFACT",
                 std::env::var("STARTER_SDK_CLIENT_ARTIFACT")
