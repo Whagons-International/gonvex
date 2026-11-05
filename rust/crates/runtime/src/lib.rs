@@ -1843,39 +1843,48 @@ async fn websocket(
         // Run before select: open completion and legacy page delivery both
         // continue the loop, and a quiet socket may never send another frame.
         if opening_cohort_dirty && tenant_session.is_some() {
-            let mut epochs = replicas
-                .values()
-                .map(|s| s.cursor.epoch.as_str())
-                .chain(live_queries.values().map(|s| s.epoch.as_str()));
-            if let Some(epoch) = epochs.next() {
-                // Mixed database epochs cannot share a numeric certificate.
-                // Reconnect re-admits all subscriptions in the current epoch.
-                if epochs.any(|other| other != epoch) {
-                    return;
-                }
-            }
-            if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
-                pending_replica_opens.is_empty()
-                    && replica_opens.is_empty()
-                    && legacy_snapshot_delivery.is_empty()
-                    && snapshot_delivery.is_empty(),
-                replicas
+            // Cohort certification runs only after opens/delivery progress.
+            // Keep its epoch iterator and send state off every socket's future.
+            let healthy = Box::pin(async {
+                let mut epochs = replicas
                     .values()
-                    .map(|s| s.cursor.revision)
-                    .chain(live_queries.values().map(|s| s.computed_revision)),
-                sent_replica_revision,
-                opening_cohort_dirty,
-            ) {
-                if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
-                    .await
-                    .is_err()
-                {
-                    return;
+                    .map(|s| s.cursor.epoch.as_str())
+                    .chain(live_queries.values().map(|s| s.epoch.as_str()));
+                if let Some(epoch) = epochs.next() {
+                    // Mixed database epochs cannot share a numeric certificate.
+                    // Reconnect re-admits all subscriptions in the current epoch.
+                    if epochs.any(|other| other != epoch) {
+                        return false;
+                    }
                 }
-                if let ServerMessage::ReplicaWatermark { revision } = watermark {
-                    sent_replica_revision = revision;
-                    opening_cohort_dirty = false;
+                if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
+                    pending_replica_opens.is_empty()
+                        && replica_opens.is_empty()
+                        && legacy_snapshot_delivery.is_empty()
+                        && snapshot_delivery.is_empty(),
+                    replicas
+                        .values()
+                        .map(|s| s.cursor.revision)
+                        .chain(live_queries.values().map(|s| s.computed_revision)),
+                    sent_replica_revision,
+                    opening_cohort_dirty,
+                ) {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
+                        .await
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    if let ServerMessage::ReplicaWatermark { revision } = watermark {
+                        sent_replica_revision = revision;
+                        opening_cohort_dirty = false;
+                    }
                 }
+                true
+            })
+            .await;
+            if !healthy {
+                return;
             }
         }
         let preparing_replicas = !replica_opens.is_empty();
@@ -1997,7 +2006,7 @@ async fn websocket(
                     if outcome.as_ref().ok().and_then(|(_, subscription)| subscription.as_ref())
                         .is_some_and(|(_, subscription)| subscription.cursor.revision < sent_replica_revision) {
                         let Some(session) = tenant_session.as_ref() else { return; };
-                        let Ok(clock) = Box::pin(change_feed::read_clock(&runtime.inner.pools, &session.route)).await else { return; };
+                        let Ok(clock) = change_feed::read_clock(&runtime.inner.pools, &session.route).await else { return; };
                         // An epoch rollback cannot catch up to the old numeric
                         // barrier. Reconnect instead of spinning preparations.
                         if clock.revision < sent_replica_revision { return; }
@@ -2689,12 +2698,12 @@ async fn websocket(
         {
             if let Ok(frame) = serde_json::from_str::<ClientMessage>(text) {
                 if !matches!(&frame, ClientMessage::Auth { .. })
-                    && !Box::pin(check_public_admission(
+                    && !check_public_admission(
                         &runtime,
                         admission,
                         scope,
                         public_frame_runs_tenant_code(&frame),
-                    ))
+                    )
                     .await
                 {
                     for response in public_admission_errors(frame) {
