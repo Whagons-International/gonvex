@@ -1997,7 +1997,7 @@ async fn websocket(
                     if outcome.as_ref().ok().and_then(|(_, subscription)| subscription.as_ref())
                         .is_some_and(|(_, subscription)| subscription.cursor.revision < sent_replica_revision) {
                         let Some(session) = tenant_session.as_ref() else { return; };
-                        let Ok(clock) = change_feed::read_clock(&runtime.inner.pools, &session.route).await else { return; };
+                        let Ok(clock) = Box::pin(change_feed::read_clock(&runtime.inner.pools, &session.route)).await else { return; };
                         // An epoch rollback cannot catch up to the old numeric
                         // barrier. Reconnect instead of spinning preparations.
                         if clock.revision < sent_replica_revision { return; }

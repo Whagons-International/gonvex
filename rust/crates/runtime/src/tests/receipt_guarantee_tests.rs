@@ -1851,7 +1851,8 @@ async fn quiet_open_cohort_socket(paged: bool, native: bool) {
             return;
         };
         f.enable_sdk_session().await;
-        sqlx::query("INSERT INTO receipt_records SELECT repeat('x',5000)||n,n FROM generate_series(1,100) n")
+        sqlx::query("WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<100) INSERT INTO receipt_records SELECT $1 || n,n FROM numbers")
+            .bind("x".repeat(5000))
             .execute(&f.pool).await.unwrap();
         sqlx::query("UPDATE _gonvex_sync_clock SET revision=258")
             .execute(&f.pool)
