@@ -208,3 +208,45 @@ costs were not measured; source ingestion currently rebuilds full logical batche
 and scopes conservatively reject stale coverage. Content-only writes must not
 change the canonical Member identity atom set. No live feed, network selector,
 production-data processing or staging schema migration was enabled.
+
+
+## Resumed backend verification, 2026-11-05 UTC
+
+Fresh atomic claim at **08:07:37 UTC**, hard end 08:37:37, stop margin 08:34:37.
+The feature-on check now passes with direct Cargo exit 0. Both new local oracle
+fixtures pass: real projected SQL snapshots/windows/messages versus v2, and
+signed relational source→stable Member identity grants/row facts→SQL snapshot.
+The seven-test focused filter passes. Full feature-on tests: runtime **406 passed,
+0 failed, 8 ignored**; store **44 passed, 0 failed**. Full default-off tests:
+runtime **397 passed, 0 failed, 8 ignored**; store **44 passed, 0 failed**.
+Clippy with redundant-clone warnings enabled exits 0; warnings remain, including
+unused experimental private entrypoints and existing large-error/deprecation/style
+warnings. No compiler or correctness fix was needed; only Rust formatting and
+cfg-test module ordering changed during this resumed verification.
+
+All heavy phases used unchanged resource gates, actual `/mnt/data` targets and
+fresh headroom checks. No dependency installation or network fetch occurred.
+Dashboard/template codegen reran successfully with original project IDs and
+produced no tracked changes. Docs typecheck/metadata regeneration passes after
+selecting the existing cached pnpm (the first invocation rejected an absent fresh
+cache with network disabled). Previously passing SDK/CLI builds and five JS tests
+were not repeated; their TypeScript inputs and honest artifact provenance remain
+unchanged from checkpoint bd8720da.
+
+TypeScript AST runtime import/export/dynamic-import comparison against exact base
+e5812dfb excludes type-only edges: **2 existing cyclic edges before and after,
+0 new cyclic runtime edges**. Rust Cargo manifests/dependency declarations are
+unchanged from verified stage2; new source/query/model imports remain one-way.
+Changed Rust formatting and whitespace checks pass. Replica's known base-format
+drift is isolated: removing the three-line new module declaration reproduces the
+exact pinned base bytes. Historical whole-workspace formatting failures remain
+as previously proved; no unrelated reformatting was performed.
+
+This validates synthetic local supported TEXT source/cold-window correctness,
+not 40 actual serving paths. Exact physical Whagons schemas, the two real explicit-
+key candidate routes, unsupported collection/adapters and the complete converted
+production-copy oracle remain pending. Omitted-order bindings still reject;
+there is no implicit `_id ASC` or new planner-prefix acceptance. Live serving,
+feed activation and app/client migrations remain disabled. No query/write/disk/
+memory benchmark or capacity claim was produced. Full commands/direct exits and
+coverage limits are in `permission-primitives-stage3-resume-results.json`.

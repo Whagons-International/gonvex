@@ -1,0 +1,252 @@
+{
+  "base": "e5812dfbcf27eca83ed0c224f40e954df91b4170",
+  "sourceCheckpoint": "bd8720dadea70d1a2c00a632cb547b9053e06eff",
+  "ownership": {
+    "owner": "permission-stage3-resume-t3-39f509f6",
+    "claimed_at": "2026-11-05T08:07:37.781885+00:00",
+    "hard_end": "2026-11-05T08:37:37.781885+00:00",
+    "stop_margin": "2026-11-05T08:34:37.781885+00:00"
+  },
+  "results": {
+    "check-on": {
+      "command": [
+        "cargo",
+        "check",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--features",
+        "permission-primitives",
+        "--tests"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/rust",
+      "start": "2026-11-05T08:07:50.621342+00:00",
+      "end": "2026-11-05T08:08:10.871498+00:00",
+      "exit": 0
+    },
+    "focused": {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "--lib",
+        "--features",
+        "permission-primitives",
+        "permission_",
+        "--",
+        "--test-threads=1"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6/rust",
+      "start": "2026-11-05T08:08:22.658057+00:00",
+      "end": "2026-11-05T08:09:59.222525+00:00",
+      "exit": 0,
+      "testCounts": [
+        {
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    "full-on": {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--features",
+        "permission-primitives",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "testCounts": [
+        {
+          "passed": 406,
+          "failed": 0,
+          "ignored": 8
+        },
+        {
+          "passed": 44,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    "full-off": {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "testCounts": [
+        {
+          "passed": 397,
+          "failed": 0,
+          "ignored": 8
+        },
+        {
+          "passed": 44,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    "clippy": {
+      "command": [
+        "cargo",
+        "clippy",
+        "--offline",
+        "-p",
+        "gonvex-runtime",
+        "-p",
+        "gonvex-store",
+        "--lib",
+        "--features",
+        "permission-primitives",
+        "--",
+        "-W",
+        "clippy::redundant_clone"
+      ],
+      "exit": 0
+    },
+    "dashboard": {
+      "command": [
+        "node",
+        "packages/gonvex/dist/index.js",
+        "codegen",
+        "--project",
+        "apps/dashboard",
+        "--project-id",
+        "d49bf233-9a6e-419e-8aef-1778dba8cef7"
+      ],
+      "exit": 0
+    },
+    "template": {
+      "command": [
+        "node",
+        "packages/gonvex/dist/index.js",
+        "codegen",
+        "--project",
+        "templates/vite-react",
+        "--project-id",
+        "701afa6f-0a89-404f-afa8-30c314981ad3"
+      ],
+      "exit": 0
+    },
+    "docs-retry": {
+      "command": [
+        "env",
+        "COREPACK_HOME=/mnt/data/work/gonvex-permission-stage3/cache/node/corepack",
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "--filter",
+        "@gonvex/docs",
+        "typecheck"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T08:16:44.195398+00:00",
+      "end": "2026-11-05T08:16:46.139103+00:00",
+      "exit": 0
+    },
+    "cycles": {
+      "command": [
+        "node",
+        "/mnt/data/work/gonvex-permission-stage3-resume/cycles.mjs"
+      ],
+      "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+      "start": "2026-11-05T08:17:18.150955+00:00",
+      "end": "2026-11-05T08:17:19.458161+00:00",
+      "exit": 0
+    }
+  },
+  "activation": false,
+  "performanceMeasured": false,
+  "productionDataRead": false,
+  "cycles": {
+    "command": [
+      "node",
+      "/mnt/data/work/gonvex-permission-stage3-resume/cycles.mjs"
+    ],
+    "cwd": "/home/gabriel/.t3/worktrees/gonvex/t3-39f509f6",
+    "start": "2026-11-05T08:17:18.150955+00:00",
+    "end": "2026-11-05T08:17:19.458161+00:00",
+    "exit": 0
+  },
+  "format": {
+    "base": "e5812dfbcf27eca83ed0c224f40e954df91b4170",
+    "checkedFiles": [
+      "rust/crates/runtime/src/lib.rs",
+      "rust/crates/runtime/src/modules.rs",
+      "rust/crates/runtime/src/permissions/compile.rs",
+      "rust/crates/runtime/src/permissions/delivery.rs",
+      "rust/crates/runtime/src/permissions/diff.rs",
+      "rust/crates/runtime/src/permissions/mod.rs",
+      "rust/crates/runtime/src/permissions/model.rs",
+      "rust/crates/runtime/src/permissions/query.rs",
+      "rust/crates/runtime/src/permissions/roles.rs",
+      "rust/crates/runtime/src/permissions/source.rs",
+      "rust/crates/runtime/src/permissions/tests.rs",
+      "rust/crates/runtime/src/replica_permission.rs",
+      "rust/crates/runtime/src/tests/permission_replica.rs",
+      "rust/crates/store/src/lib.rs",
+      "rust/crates/store/src/permission_indexes.rs"
+    ],
+    "rustfmtExit": 0,
+    "replicaOnlyAddedProperModuleDeclaration": true,
+    "wholeWorkspaceKnownBaseFailures": "docs/performance/permission-primitives-format-baseline.json",
+    "newSourceOnlyChanges": "modules.rs whitespace and cfg-test module ordering only"
+  },
+  "generatorsChangedFiles": [],
+  "cargoManifestsUnchangedSinceStage2": true,
+  "rustNormalModuleEdges": {
+    "modules": [
+      "permissions/source"
+    ],
+    "permissions/source": [
+      "compile",
+      "model",
+      "query"
+    ],
+    "query": [
+      "compile",
+      "model"
+    ],
+    "compile": [
+      "model"
+    ],
+    "replica_permission": [
+      "modules",
+      "query",
+      "source"
+    ],
+    "store/permission_indexes": [
+      "store/rows"
+    ]
+  },
+  "rustDependencyCycleNote": "No new crate dependency edges; manifests unchanged since verified stage2. Internal additions keep source/query/model imports one-way; child replica module uses parent helpers.",
+  "JSInputsUnchanged": true,
+  "remainingAcceptance": [
+    "Actual Whagons collection/schema/route oracle coverage",
+    "unordered collections remain rejected",
+    "live commit/admission lease barrier and recipient/candidate completeness",
+    "query/write/disk/memory costs",
+    "authorized converted full-copy differential gate"
+  ]
+}

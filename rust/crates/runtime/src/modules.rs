@@ -169,7 +169,10 @@ impl ModuleRegistry {
     #[cfg(all(test, feature = "permission-primitives"))]
     pub(crate) async fn install_permission_fixture(&self, module: ProjectModule) {
         let _activation = self.activation_gate.write().await;
-        self.projects.write().await.insert(module.project_id.clone(), Arc::new(module));
+        self.projects
+            .write()
+            .await
+            .insert(module.project_id.clone(), Arc::new(module));
     }
 
     pub fn new() -> Self {
@@ -191,11 +194,18 @@ impl ModuleRegistry {
                 message: "manifest has no TypeScript module".to_owned(),
             })?;
         #[cfg(feature = "permission-primitives")]
-        let primitive_manifest = module.get("permissionPrimitives").filter(|x| !x.is_null()).cloned().map(Arc::new);
+        let primitive_manifest = module
+            .get("permissionPrimitives")
+            .filter(|x| !x.is_null())
+            .cloned()
+            .map(Arc::new);
         #[cfg(feature = "permission-primitives")]
         if let Some(value) = &primitive_manifest {
-            crate::permissions::source::Manifest::parse(value).map_err(|error| ModuleRegistryError::InvalidArtifact {
-                project: project.clone(), message: error.to_string(),
+            crate::permissions::source::Manifest::parse(value).map_err(|error| {
+                ModuleRegistryError::InvalidArtifact {
+                    project: project.clone(),
+                    message: error.to_string(),
+                }
             })?;
         }
         let migrations = migrations_from_module(module).map_err(|message| {
@@ -310,7 +320,9 @@ impl ModuleRegistry {
         {
             let mut manifests = self.permission_manifests.write().await;
             manifests.retain(|(id, _), _| id != &project);
-            if let Some(value) = primitive_manifest { manifests.insert((project.clone(), generation), value); }
+            if let Some(value) = primitive_manifest {
+                manifests.insert((project.clone(), generation), value);
+            }
         }
         self.failures.write().await.remove(&project);
         Ok(installed)
@@ -338,14 +350,28 @@ impl ModuleRegistry {
 
     #[cfg(feature = "permission-primitives")]
     pub(crate) async fn permission_manifest(&self, lease: &ModuleCallLease) -> Option<Arc<Value>> {
-        self.permission_manifests.read().await.get(&(lease.project_id.clone(), lease.generation)).cloned()
+        self.permission_manifests
+            .read()
+            .await
+            .get(&(lease.project_id.clone(), lease.generation))
+            .cloned()
     }
 
     #[cfg(all(test, feature = "permission-primitives"))]
-    pub(crate) async fn install_permission_fixture_manifest(&self, module: ProjectModule, manifest: Value) {
+    pub(crate) async fn install_permission_fixture_manifest(
+        &self,
+        module: ProjectModule,
+        manifest: Value,
+    ) {
         let _activation = self.activation_gate.write().await;
-        self.permission_manifests.write().await.insert((module.project_id.clone(), module.generation), Arc::new(manifest));
-        self.projects.write().await.insert(module.project_id.clone(), Arc::new(module));
+        self.permission_manifests.write().await.insert(
+            (module.project_id.clone(), module.generation),
+            Arc::new(manifest),
+        );
+        self.projects
+            .write()
+            .await
+            .insert(module.project_id.clone(), Arc::new(module));
     }
 
     pub async fn counts(&self) -> (usize, usize) {
@@ -989,7 +1015,10 @@ pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, St
     {
         contract["permissionGrants"] = grants.clone();
     }
-    if let Some(primitives) = module.get("permissionPrimitives").filter(|value| !value.is_null()) {
+    if let Some(primitives) = module
+        .get("permissionPrimitives")
+        .filter(|value| !value.is_null())
+    {
         contract["permissionPrimitives"] = primitives.clone();
     }
     let bytes = canonical_json(&contract)?.into_bytes();
@@ -1065,11 +1094,16 @@ mod tests {
     fn signed_primitive_sources_and_dependency_certificate_change_artifact_authority() {
         let mut module = serde_json::json!({"generation":8,"entrypoint":"module.js","javascript":{"path":"module.js","hash":"abc"}});
         let base = canonical_artifact_hash(module.as_object().unwrap()).unwrap();
-        module["permissionPrimitives"] = serde_json::from_str(include_str!("../testdata/permission-source-text.json")).unwrap();
+        module["permissionPrimitives"] =
+            serde_json::from_str(include_str!("../testdata/permission-source-text.json")).unwrap();
         let source = canonical_artifact_hash(module.as_object().unwrap()).unwrap();
         assert_ne!(base, source);
-        module["permissionPrimitives"]["dependencies"]["self"][0]["columns"] = serde_json::json!(["id"]);
-        assert_ne!(source, canonical_artifact_hash(module.as_object().unwrap()).unwrap());
+        module["permissionPrimitives"]["dependencies"]["self"][0]["columns"] =
+            serde_json::json!(["id"]);
+        assert_ne!(
+            source,
+            canonical_artifact_hash(module.as_object().unwrap()).unwrap()
+        );
     }
 
     #[test]
