@@ -2,7 +2,7 @@
 import { createRequire } from 'node:module';
 import { readFile, writeFile, appendFile, realpath } from 'node:fs/promises';
 import { writeFileSync, renameSync } from 'node:fs';
-import { existsSync } from 'node:fs';
+import { shardEpoch } from './shard-epoch.mjs';
 import { mixedPlan, qualifyMixed } from './mixed-gate.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -195,21 +195,20 @@ async function main() {
  let started=Date.now();
  if(mixed&&shards>1){
   const root=process.env.LOAD_RESULT_ROOT;if(!root)throw Error('mixed shards require LOAD_RESULT_ROOT');
-  writeFileSync(root+'.ready-'+shard,'ready');
-  const barrierEnd=Date.now()+120000;
-  while(!Array.from({length:shards},(_,k)=>existsSync(root+'.ready-'+k)).every(Boolean)){if(Date.now()>barrierEnd)throw Error('Mixed schedule shard barrier timed out');await pause(50);}
-  if(shard===0)writeFileSync(root+'.schedule-start',String(Date.now()+2000));
-  while(!existsSync(root+'.schedule-start')){if(Date.now()>barrierEnd)throw Error('Mixed schedule epoch missing');await pause(20);}
-  started=Number(await readFile(root+'.schedule-start','utf8'));
+  started=await shardEpoch(root,'signin',shard,shards,Date.now()+2000);
  }
+
  let stopping=false;let aborted=false;let deadline=Infinity;let remaining=myTarget;
  process.on('SIGTERM',()=>{const plateauEnd=deadline;aborted=true;stopping=true;deadline=Date.now();const partial=(process.env.LOAD_RESULT||state+'.result')+'.partial.json';writeFileSync(partial+'.tmp',JSON.stringify({aborted:true,profileHash,targetUsers:myTarget,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),steadyStartMs:plateauEnd-seconds*1000,rawSamples:samples,rawPaths:perPath}));renameSync(partial+'.tmp',partial);});
  let presenceV2Users=0;
  const collectionReadiness={readyAtTeardown:0,notReadyAtTeardown:0};
- const ready=()=>{if(--remaining===0&&deadline===Infinity)deadline=Date.now()+seconds*1000;};
+ const ready=()=>{if(--remaining!==0||deadline!==Infinity)return;
+  if(mixed&&shards>1){void shardEpoch(process.env.LOAD_RESULT_ROOT!,'plateau',shard,shards,started+ramp*1000).then(epoch=>{if(deadline===Infinity)deadline=epoch+seconds*1000;}).catch(e=>{error(e);if(deadline===Infinity)deadline=Date.now()+seconds*1000;});}
+  else deadline=Math.max(Date.now(),mixed?started+ramp*1000:0)+seconds*1000;
+ };
  // A user that never finishes connecting must not hold the plateau forever: start it
  // ramp + 120 s after launch anyway and count the users still missing.
- setTimeout(()=>{if(deadline===Infinity&&!stopping){for(let k=0;k<remaining;k++)error(new Error('User not connected by ramp + 120 s'));deadline=Date.now()+seconds*1000;}},(ramp+120)*1000).unref?.();
+ setTimeout(()=>{if(deadline===Infinity&&!stopping){for(let k=0;k<remaining;k++)error(new Error('User not connected by ramp + 120 s'));deadline=Date.now()+seconds*1000;}},Math.max(0,started+(ramp+120)*1000-Date.now())).unref?.();
  // Preserve the seven observed tenant weights. An optional stress profile
  // activates the other nineteen tenants too; it is not the observed mix.
  // Default: production write skew (two tenants carry 78%). LOAD_ALL_TENANTS_ACTIVE
