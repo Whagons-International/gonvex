@@ -723,7 +723,9 @@ export class GonvexClient {
   private hasAuthoritativeReplicaScope = false;
   private replicaDefinitionEpoch?: string;
   private replicaReady: Promise<void> = Promise.resolve();
-  private hydratedReplicaReady?: Promise<void>;
+  // The initial promise has no durable activation to await. Construction
+  // replaces it via setReplicaReady before authoritative scopes are possible.
+  private hydratedReplicaReady: Promise<void> | undefined = this.replicaReady;
   private readonly replicaOpenHydrations = new Map<ReplicaSubscription, {
     current: () => boolean; task: Promise<void>;
   }>();
@@ -4009,24 +4011,30 @@ export class GonvexClient {
     this.replicaOpenFlushTimer = undefined;
     const subscriptions = Array.from(this.pendingReplicaOpens);
     this.pendingReplicaOpens.clear();
+    const owners = new Map(subscriptions.map(subscription =>
+      [subscription, this.replicaOpenOwners.get(subscription)] as const));
     const canFlush = (subscription: ReplicaSubscription) =>
-      this.replicaOpenOwners.get(subscription)?.() === true
+      this.replicaOpenOwners.get(subscription) === owners.get(subscription)
+      && owners.get(subscription)?.() === true
       && this.isWebSocketConnected && !this.authInFlight && this.hasAuthoritativeReplicaScope
       && this.hydratedReplicaReady === this.replicaReady
       && subscription.scope === this.replicaScope
       && subscription.socketGeneration === this.socketGeneration
       && subscription.opening && subscription.listeners.size > 0;
-    for (const subscription of subscriptions) {
-      if (!canFlush(subscription)) {
-        subscription.opening = false;
-        subscription.socketGeneration = undefined;
-      }
-    }
+    const release = (subscription: ReplicaSubscription) => {
+      // A reentrant send may already have queued a replacement preparation.
+      if (this.replicaOpenOwners.get(subscription) !== owners.get(subscription)) return;
+      subscription.opening = false;
+      subscription.socketGeneration = undefined;
+    };
     for (let offset = 0; offset < subscriptions.length; offset += maxReplicaBatchOpens) {
       // Recheck per frame too: a transport callback can retire the owner
       // synchronously while the previous batch is sent.
-      const opens = subscriptions.slice(offset, offset + maxReplicaBatchOpens)
-        .filter(canFlush).map(subscription => this.replicaOpenRequest(subscription));
+      const opens: ReplicaOpenRequest[] = [];
+      for (const subscription of subscriptions.slice(offset, offset + maxReplicaBatchOpens)) {
+        if (canFlush(subscription)) opens.push(this.replicaOpenRequest(subscription));
+        else release(subscription);
+      }
       if (opens.length) this.send({ type: "replica.openMany", opens });
     }
   }
