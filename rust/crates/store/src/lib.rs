@@ -32,6 +32,8 @@ pub mod checkpoint;
 mod data_dir;
 pub mod direct;
 pub mod json_rows;
+#[cfg(feature = "permission-primitives")]
+pub mod permission_indexes;
 pub use json_rows::{JsonRowBatch, JsonRows};
 mod sync_barrier;
 pub use sync_barrier::WAL_SYNCS;
@@ -1761,14 +1763,18 @@ impl TenantTransaction {
         }
         let provenance = self.provenance.clone();
         let stats = self.writer_stats.clone();
-        self.with_direct(move |conn| {
-            feed::finalize_direct(
-                conn,
-                &provenance,
-                stats.as_deref().map(|stats| &stats.has_feed),
-            )
-        })
-        .await
+        let notice = self
+            .with_direct(move |conn| {
+                feed::finalize_direct(
+                    conn,
+                    &provenance,
+                    stats.as_deref().map(|stats| &stats.has_feed),
+                )
+            })
+            .await?;
+        #[cfg(feature = "permission-primitives")]
+        permission_indexes::finalize_local(self.transaction()).await?;
+        Ok(notice)
     }
 
     /// Commits and returns the revision it published, if it changed rows.

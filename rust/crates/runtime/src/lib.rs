@@ -38,6 +38,8 @@ mod operations;
 mod operator_data;
 #[cfg(feature = "perf-fixture")]
 pub mod perf_fixture;
+#[cfg(feature = "permission-primitives")]
+mod permissions;
 pub mod presence;
 pub mod profiling;
 pub mod public_functions;

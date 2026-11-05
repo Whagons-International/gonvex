@@ -1,0 +1,32 @@
+[
+  {
+    "file": "rust/crates/runtime/src/open_reasons.rs",
+    "identical_to_base": true,
+    "sha256": "7a3365d95e0c26b0fda0e0bb0fb118c01bef5766e29179751d800cd477157458",
+    "base_rustfmt_exit": 1
+  },
+  {
+    "file": "rust/crates/runtime/src/replica.rs",
+    "identical_to_base": true,
+    "sha256": "10d5e4655936a677a33bc23f8688faabf18575a21432d419f51edcec7a28f56d",
+    "base_rustfmt_exit": 1
+  },
+  {
+    "file": "rust/crates/runtime/src/snapshot_cache.rs",
+    "identical_to_base": true,
+    "sha256": "5580daf6cac1e42284f4df29c65203ad99a01e2e0f7f5b7db4a7f0799bfd04b0",
+    "base_rustfmt_exit": 1
+  },
+  {
+    "file": "rust/crates/store/examples/reader_warm_bench.rs",
+    "identical_to_base": true,
+    "sha256": "ac3dfb0c75b23cc947f2a93047904534649b6eb00394a92e33c9bc369eb2ea0c",
+    "base_rustfmt_exit": 1
+  },
+  {
+    "file": "rust/crates/store/tests/reader_open_single_flight.rs",
+    "identical_to_base": true,
+    "sha256": "a088dfbbedef798aa38df90112c599d7f1a51b2bac75503b5a2fab6aa1108701",
+    "base_rustfmt_exit": 1
+  }
+]
