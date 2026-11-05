@@ -208,3 +208,27 @@ public HTTPS/WSS origin.
 ## Documentation
 
 Full docs live at https://whagons-international.github.io/gonvex/
+
+
+### Source migration dialect
+
+`gonvex.json` selects the schema introspection engine explicitly:
+
+```json
+{ "module": { "schemaDialect": "postgres" } }
+```
+
+The default is `sqlite`, preserving SQLite migration and declared-type behavior.
+`postgres` executes the original tenant migrations in embedded PGlite 0.5.8 with
+real `pg_trgm` and `pgcrypto` extensions. It does not rewrite SQL or convert types
+into SQLite affinities. Errors identify the migration. PG catalog metadata keeps
+exact types, nullability and default expressions. Composite constraints retain
+ordered `primaryKey` metadata and are marked `localKeyUnsupported: "composite"`;
+they cannot be synthesized as single-key Local Replica collections. Internal
+composite-key tables can still be described accurately for source codegen.
+
+The schema cache is keyed by compiler version, dialect, engine version and the
+full tenant migration contents. Changing dialect cannot reuse another engine's
+cache. This setting controls source metadata compilation, not database migration,
+server engine selection or permission activation. A PG source project needs an
+independently verified derived SQLite schema before SQLite runtime route oracles.

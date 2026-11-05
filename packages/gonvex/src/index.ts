@@ -59,6 +59,8 @@ type ProjectConfig = {
   /** Gonvex v2 accepts only "typescript". */
   language?: string;
   module?: {
+    /** Engine used to execute source migrations for local schema metadata. Defaults to sqlite. */
+    schemaDialect?: "sqlite" | "postgres";
     /** Project-relative module entrypoint. */
     entrypoint?: string;
     /** Project-relative ESM output path under gonvex/_build. */

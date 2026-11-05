@@ -26,7 +26,16 @@ async function loadSqlite(): Promise<SqliteModule> {
 
 /** Compile schema using SQLite itself, the engine tenants run on: apply the
  * migrations to an in-memory database and read the declared columns back. */
-export async function compileLocalSchema(migrations: readonly { name: string; sql: string }[]): Promise<LocalSchema> {
+export type SchemaDialect = "sqlite" | "postgres";
+/** PG constraint metadata is preserved even for internal tables that cannot
+ * participate in the single-key Local Replica contract. */
+export type CompiledLocalSchema = LocalSchema & Record<string, LocalSchema[string] & {
+  primaryKey?: string[]; localKeyUnsupported?: "composite";
+}>;
+
+export async function compileLocalSchema(migrations: readonly { name: string; sql: string }[], dialect: SchemaDialect = "sqlite"): Promise<CompiledLocalSchema> {
+  if (dialect === "postgres") return compilePostgresSchema(migrations);
+  if (dialect !== "sqlite") throw new Error(`Unsupported schema dialect: ${dialect}`);
   const { DatabaseSync } = await loadSqlite();
   const db = new DatabaseSync(":memory:");
   try {
@@ -44,7 +53,7 @@ export async function compileLocalSchema(migrations: readonly { name: string; sq
       table_name: string; column_name: string; type: string; not_null: number;
       column_default: string | null; primary_key: number;
     }[];
-    const schema: LocalSchema = {};
+    const schema: CompiledLocalSchema = {};
     for (const row of rows) {
       if (row.table_name.startsWith("_gonvex")) continue;
       const table = schema[row.table_name] ??= { key: "_id", columns: {} };
@@ -63,4 +72,50 @@ export async function compileLocalSchema(migrations: readonly { name: string; sq
     }
     return schema;
   } finally { db.close(); }
+}
+
+
+/** Execute original PG migrations in the embedded PostgreSQL engine. No SQL
+ * rewriting, failed-statement skipping, or conversion to SQLite affinities. */
+async function compilePostgresSchema(migrations: readonly { name: string; sql: string }[]): Promise<CompiledLocalSchema> {
+  const [{ PGlite }, { pg_trgm }, { pgcrypto }] = await Promise.all([
+    import("@electric-sql/pglite"), import("@electric-sql/pglite/contrib/pg_trgm"), import("@electric-sql/pglite/contrib/pgcrypto"),
+  ]);
+  const db = new PGlite({ extensions: { pg_trgm, pgcrypto } });
+  try {
+    await db.exec(`CREATE TABLE members (
+      id text PRIMARY KEY, account_id text NOT NULL UNIQUE, status text NOT NULL DEFAULT 'active',
+      display_name text NOT NULL DEFAULT '', avatar_url text NOT NULL DEFAULT '', role text NOT NULL DEFAULT 'member',
+      permissions jsonb NOT NULL DEFAULT '{}'::jsonb, membership_revision bigint NOT NULL DEFAULT 1,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    for (const migration of migrations) {
+      try { await db.exec(migration.sql); }
+      catch (error) { throw new Error(`PostgreSQL schema compilation failed in ${migration.name}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+    }
+    const { rows } = await db.query<{ table_name: string; column_name: string; type: string; nullable: boolean; column_default: string | null; primary_key: number | null; key_columns: number | null }>(`
+      SELECT c.relname AS table_name, a.attname AS column_name,
+        format_type(a.atttypid,a.atttypmod) AS type, NOT a.attnotnull AS nullable,
+        pg_get_expr(d.adbin,d.adrelid) AS column_default,
+        (SELECT k.position::int FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY k(attnum,position)
+          WHERE i.indrelid=c.oid AND i.indisprimary AND k.attnum=a.attnum) AS primary_key,
+        (SELECT i.indnkeyatts::int FROM pg_index i WHERE i.indrelid=c.oid AND i.indisprimary) AS key_columns
+      FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid
+      JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+      LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
+      WHERE n.nspname='public' AND c.relkind='r' ORDER BY c.relname,a.attnum`);
+    const schema: CompiledLocalSchema = {};
+    for (const row of rows) {
+      if (row.table_name.startsWith("_gonvex")) continue;
+      const table = schema[row.table_name] ??= { key: "_id", columns: {} };
+      if (row.primary_key !== null) {
+        (table.primaryKey ??= [])[row.primary_key - 1] = row.column_name;
+        if (row.key_columns === 1) table.key = row.column_name;
+        else table.localKeyUnsupported = "composite";
+      }
+      table.columns[row.column_name] = { type: row.type, nullable: row.nullable,
+        ...(row.column_default === null ? {} : { default: row.column_default }) };
+    }
+    return schema;
+  } finally { await db.close(); }
 }

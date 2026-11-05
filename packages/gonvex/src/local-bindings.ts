@@ -3,8 +3,7 @@ import { rolldown } from "rolldown";
 import { createHash } from "node:crypto";
 import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import type { LocalSchema } from "@gonvex/local-runtime/schema";
-import { compileLocalSchema } from "./local-schema.js";
+import { compileLocalSchema, type CompiledLocalSchema } from "./local-schema.js";
 import type { Manifest } from "./manifest-types.js";
 
 const runtimeGlobals = {
@@ -18,17 +17,22 @@ const runtimeGlobals = {
 const runtimeWrapper = `import { withReducerRuntimeGlobals } from "@gonvex/module-sdk/runtime-contract";
 const bindRuntimeGlobals = definition => Object.freeze({ ...definition, handler: (context, args) => withReducerRuntimeGlobals(context, () => definition.handler(context, args)) });`;
 
-export async function projectLocalSchema(root: string): Promise<LocalSchema> {
+export async function projectLocalSchema(root: string): Promise<CompiledLocalSchema> {
+  let config: { module?: { schemaDialect?: unknown } } = {};
+  try { config = JSON.parse(await readFile(join(root, "gonvex.json"), "utf8")); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const dialect = config.module?.schemaDialect ?? "sqlite";
+  if (dialect !== "sqlite" && dialect !== "postgres") throw new Error('gonvex.json module.schemaDialect must be "sqlite" or "postgres"');
   const migrationDirectory = join(root, "migrations");
-  const names = (await readdir(migrationDirectory).catch(() => [] as string[])).filter((name) => name.endsWith(".sql")).sort();
+  const names = (await readdir(migrationDirectory).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return [] as string[]; throw error; })).filter((name) => name.endsWith(".sql")).sort();
   const migrations = await Promise.all(names.map(async (name) => ({ name, sql: await readFile(join(migrationDirectory, name), "utf8") })));
   const tenantMigrations = migrations.filter(({ sql }) => !/gonvex:scope\s+(control|landlord)/.test(sql));
-  const digest = createHash("sha256").update("local-schema-v2-sqlite").update(JSON.stringify(tenantMigrations)).digest("hex");
+  const digest = createHash("sha256").update(`local-schema-v4-${dialect}-pglite-0.5.8`).update(JSON.stringify(tenantMigrations)).digest("hex");
   const cacheFile = join(root, "gonvex", "_build", `local-schema-${digest}.json`);
-  let schema: LocalSchema;
-  try { schema = JSON.parse(await readFile(cacheFile, "utf8")) as LocalSchema; }
+  let schema: CompiledLocalSchema;
+  try { schema = JSON.parse(await readFile(cacheFile, "utf8")) as CompiledLocalSchema; }
   catch {
-    schema = await compileLocalSchema(tenantMigrations);
+    schema = await compileLocalSchema(tenantMigrations, dialect);
     await mkdir(dirname(cacheFile), { recursive: true });
     await writeFile(cacheFile, JSON.stringify(schema));
   }

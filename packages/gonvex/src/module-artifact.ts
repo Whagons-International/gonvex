@@ -192,6 +192,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
         if (entry.dependencies?.liveQueryPlan?.table === table) entry.dependencies.liveQueryPlan.columns?.forEach((column) => columns.add(column));
       }
       if (!schema[table] || !columns.has(plan.key)) continue;
+      if (schema[table]!.localKeyUnsupported) throw new Error(`Local Replica ${table} requires a supported single-column row key; PostgreSQL composite constraint is preserved but unsupported`);
       const path = `__local.${table}`;
       if (functions[path]) throw new Error(`${path} uses the SDK-reserved local replica namespace`);
       functions[path] = {
