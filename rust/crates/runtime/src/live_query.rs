@@ -699,6 +699,11 @@ impl Runtime {
                     }
                 });
             if !relevant {
+                // Certify unchanged results too, but never hide a prior rerun
+                // that failed to cover a relevant transaction.
+                if subscription.computed_revision >= subscription.required_revision {
+                    subscription.computed_revision = event_revision;
+                }
                 continue;
             }
             self.inner.visibility_metrics.record_live_query_rerun();

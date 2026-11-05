@@ -1451,14 +1451,14 @@ async fn websocket(
     let mut feed = None;
     let mut feed_scheduler = FeedFirstScheduler::default();
     let mut sent_replica_revision = 0u64;
-    let mut sent_zero_bootstrap_watermark = false;
-    let mut replicas = BTreeMap::new();
+    let mut opening_cohort_dirty = false;
+    let mut replicas = BTreeMap::<String, replica::ReplicaSubscription>::new();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
     // Retain at most one decoded, transport-size-bounded frame. While it waits
     // for preparation capacity, stop reading further frames (TCP backpressure).
     // SQL preparations do not depend on socket input; auth timers remain live.
     let mut pending_replica_opens = VecDeque::<ReplicaOpenRequest>::new();
-    let mut live_queries = BTreeMap::new();
+    let mut live_queries = BTreeMap::<String, live_query::LiveQuerySubscription>::new();
     let mut control_queries = BTreeMap::new();
     let mut runtime_events = runtime.inner.runtime_events.subscribe();
     let mut auth_revalidation = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -1513,7 +1513,7 @@ async fn websocket(
             feed = None;
             feed_scheduler.reset();
             sent_replica_revision = 0;
-            sent_zero_bootstrap_watermark = false;
+            opening_cohort_dirty = false;
             runtime.inner.metrics.authenticated(
                 &connection_id,
                 &control::ControlConnection {
@@ -1530,6 +1530,44 @@ async fn websocket(
     }
 
     loop {
+        // Run before select: open completion and legacy page delivery both
+        // continue the loop, and a quiet socket may never send another frame.
+        if opening_cohort_dirty && tenant_session.is_some() {
+            let mut epochs = replicas
+                .values()
+                .map(|s| s.cursor.epoch.as_str())
+                .chain(live_queries.values().map(|s| s.epoch.as_str()));
+            if let Some(epoch) = epochs.next() {
+                // Mixed database epochs cannot share a numeric certificate.
+                // Reconnect re-admits all subscriptions in the current epoch.
+                if epochs.any(|other| other != epoch) {
+                    return;
+                }
+            }
+            if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
+                pending_replica_opens.is_empty()
+                    && replica_opens.is_empty()
+                    && legacy_snapshot_delivery.is_empty()
+                    && snapshot_delivery.is_empty(),
+                replicas
+                    .values()
+                    .map(|s| s.cursor.revision)
+                    .chain(live_queries.values().map(|s| s.computed_revision)),
+                sent_replica_revision,
+                opening_cohort_dirty,
+            ) {
+                if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if let ServerMessage::ReplicaWatermark { revision } = watermark {
+                    sent_replica_revision = revision;
+                    opening_cohort_dirty = false;
+                }
+            }
+        }
         let preparing_replicas = !replica_opens.is_empty();
         let admit_replica = pending_replica_opens.front().is_some_and(|request| {
             let bytes = replica_open_request_bytes(request);
@@ -1556,7 +1594,22 @@ async fn websocket(
                 continue;
             }
             opened = replica_opens.next(), if preparing_replicas => {
-                if let Some(outcome) = opened {
+                if let Some((mut request, outcome)) = opened {
+                    // A preparation captured before a previously sent barrier
+                    // must catch up before it can join the certified cohort.
+                    // Re-read a real snapshot; never relabel its ready cursor.
+                    if outcome.as_ref().ok().and_then(|(_, subscription)| subscription.as_ref())
+                        .is_some_and(|(_, subscription)| subscription.cursor.revision < sent_replica_revision) {
+                        let Some(session) = tenant_session.as_ref() else { return; };
+                        let Ok(clock) = change_feed::read_clock(&runtime.inner.pools, &session.route).await else { return; };
+                        // An epoch rollback cannot catch up to the old numeric
+                        // barrier. Reconnect instead of spinning preparations.
+                        if clock.revision < sent_replica_revision { return; }
+                        request.cursor = None;
+                        pending_replica_opens.push_back(request);
+                        continue;
+                    }
+                    let outcome = (request, outcome);
                     for response in install_replica_open_outcomes(&mut replicas, vec![outcome]) {
                         let response = if replica_snapshot_pages_enabled && !replica_native_rows_enabled {
                             let Some(response)=legacy_snapshot_delivery.admit(response) else {continue}; response
@@ -1596,7 +1649,7 @@ async fn websocket(
                     feed = None;
                     feed_scheduler.reset();
                     sent_replica_revision = 0;
-                    sent_zero_bootstrap_watermark = false;
+                    opening_cohort_dirty = false;
                     control_connection = control::ControlConnection {
                         connection_id: connection_id.clone(),
                         ..control::ControlConnection::default()
@@ -1708,6 +1761,8 @@ async fn websocket(
                                         }
                                     }
                                     if reset {
+                                        opening_cohort_dirty = false;
+                                        sent_replica_revision = 0;
                                         replicas.clear();
                                         replica_opens.clear();
                                         pending_replica_opens.clear();
@@ -1716,6 +1771,7 @@ async fn websocket(
                                     }
                                 }
                                 Err(error) => {
+                                    opening_cohort_dirty = false;
                                     for subscription in replicas.values() {
                                         let response = ServerMessage::ReplicaError {
                                             id: subscription.id.clone(),
@@ -1743,6 +1799,7 @@ async fn websocket(
                         continue;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        opening_cohort_dirty = false;
                         for subscription in replicas.values() {
                             let response = ServerMessage::ReplicaReset {
                                 id: subscription.id.clone(),
@@ -1763,7 +1820,7 @@ async fn websocket(
                         feed = None;
                         feed_scheduler.reset();
                         sent_replica_revision = 0;
-                        sent_zero_bootstrap_watermark = false;
+                        opening_cohort_dirty = false;
                         continue;
                     }
                     },
@@ -1797,6 +1854,7 @@ async fn websocket(
                     Ok(RuntimeEvent::ModuleReloaded { project_id })
                         if project_id == control_connection.project_id =>
                     {
+                        opening_cohort_dirty = false;
                         replicas.clear();
                         replica_opens.clear();
                         pending_replica_opens.clear();
@@ -2057,7 +2115,7 @@ async fn websocket(
                     feed = None;
                     feed_scheduler.reset();
                     sent_replica_revision = 0;
-                    sent_zero_bootstrap_watermark = false;
+                    opening_cohort_dirty = false;
                     tenant_session = None;
                     connected_client_contract = None;
                     control_connection = control::ControlConnection {
@@ -2258,7 +2316,7 @@ async fn websocket(
                         }
                         feed_scheduler.reset();
                         sent_replica_revision = 0;
-                        sent_zero_bootstrap_watermark = false;
+                        opening_cohort_dirty = false;
                     }
                     tenant_session = next_tenant_session;
                     control_connection = authenticated_control;
@@ -2413,7 +2471,7 @@ async fn websocket(
                         )
                     };
                     if let Some(subscription) = subscription {
-                        sent_zero_bootstrap_watermark = false;
+                        opening_cohort_dirty = true;
                         live_queries.insert(subscription.id.clone(), subscription);
                     }
                     record_connection_subscriptions(
@@ -2508,7 +2566,7 @@ async fn websocket(
                             )
                         };
                         if let Some(subscription) = subscription {
-                            sent_zero_bootstrap_watermark = false;
+                            opening_cohort_dirty = true;
                             live_queries.insert(subscription.id.clone(), subscription);
                         }
                         if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
@@ -2837,7 +2895,7 @@ async fn websocket(
                     }
                 }
                 Ok(ClientMessage::ReplicaOpen(request)) => {
-                    sent_zero_bootstrap_watermark = false;
+                    opening_cohort_dirty = true;
                     replica_opens.remove(&request.id);
                     snapshot_delivery.remove(&request.id);
                     legacy_snapshot_delivery.remove(&request.id);
@@ -2855,7 +2913,7 @@ async fn websocket(
                         }
                         continue;
                     }
-                    sent_zero_bootstrap_watermark = false;
+                    opening_cohort_dirty = true;
                     for request in opens {
                         replica_opens.remove(&request.id);
                         snapshot_delivery.remove(&request.id);
@@ -2919,6 +2977,7 @@ async fn websocket(
                     }
                 }
                 Ok(ClientMessage::ReplicaClose { id }) => {
+                    pending_replica_opens.retain(|request| request.id != id);
                     replica_opens.remove(&id);
                     legacy_snapshot_delivery.remove(&id);
                     replicas.remove(&id);
@@ -3053,30 +3112,6 @@ async fn websocket(
             }
             Message::Close(_) => break,
             _ => {}
-        }
-        if replica_native_rows_enabled && tenant_session.is_some() {
-            if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
-                snapshot_delivery.is_empty(),
-                replicas
-                    .values()
-                    .map(|s| s.cursor.revision)
-                    .chain(live_queries.values().map(|s| s.computed_revision)),
-                sent_replica_revision,
-                sent_zero_bootstrap_watermark,
-            ) {
-                if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let ServerMessage::ReplicaWatermark { revision } = watermark {
-                    sent_replica_revision = sent_replica_revision.max(revision);
-                    if revision == 0 {
-                        sent_zero_bootstrap_watermark = true;
-                    }
-                }
-            }
         }
     }
 }
@@ -3335,22 +3370,20 @@ async fn next_feed_event(
     }
 }
 
-/// A quiet tenant may never emit a change-feed event after authentication.
-/// Close its initial cohort once all native snapshots have been durably ACKed.
-/// The oldest subscribed snapshot is the only safe boundary: a newer snapshot
-/// cannot certify changes still queued for an older subscription.
+/// Certify each newly admitted cohort once, after every delivery barrier.
+/// Equal revisions matter: the earlier watermark may predate registration of
+/// an opening collection and cannot certify it on the client.
 fn bootstrap_watermark_after_sent_snapshots(
     snapshots_complete: bool,
     revisions: impl Iterator<Item = u64>,
     sent_revision: u64,
-    zero_already_sent: bool,
+    cohort_dirty: bool,
 ) -> Option<ServerMessage> {
-    if !snapshots_complete {
+    if !snapshots_complete || !cohort_dirty {
         return None;
     }
     let revision = revisions.min()?;
-    (revision > sent_revision || revision == 0 && sent_revision == 0 && !zero_already_sent)
-        .then_some(ServerMessage::ReplicaWatermark { revision })
+    (revision >= sent_revision).then_some(ServerMessage::ReplicaWatermark { revision })
 }
 
 fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
@@ -5670,32 +5703,37 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
     }
 
     #[test]
-    fn quiet_bootstrap_closes_only_after_acks_and_through_the_oldest_snapshot() {
-        assert!(
-            bootstrap_watermark_after_sent_snapshots(false, [100].into_iter(), 0, false).is_none()
-        );
-        assert!(bootstrap_watermark_after_sent_snapshots(true, [].into_iter(), 0, false).is_none());
+    fn quiet_cohort_certifies_equal_revision_once_after_every_delivery_barrier() {
+        for complete in [false, true] {
+            for dirty in [false, true] {
+                let result = bootstrap_watermark_after_sent_snapshots(
+                    complete,
+                    [259, 259].into_iter(),
+                    259,
+                    dirty,
+                );
+                assert_eq!(result.is_some(), complete && dirty);
+            }
+        }
         assert!(matches!(
-            bootstrap_watermark_after_sent_snapshots(true, [100].into_iter(), 0, false),
-            Some(ServerMessage::ReplicaWatermark { revision: 100 })
+            bootstrap_watermark_after_sent_snapshots(true, [259, 259].into_iter(), 259, true),
+            Some(ServerMessage::ReplicaWatermark { revision: 259 })
         ));
-        assert!(matches!(
-            bootstrap_watermark_after_sent_snapshots(true, [105, 100, 103].into_iter(), 0, false),
-            Some(ServerMessage::ReplicaWatermark { revision: 100 })
-        ));
+        // Actual snapshot 258 cannot be certified through 259.
         assert!(
-            bootstrap_watermark_after_sent_snapshots(true, [105, 100].into_iter(), 100, false)
+            bootstrap_watermark_after_sent_snapshots(true, [258, 259].into_iter(), 259, true)
                 .is_none()
         );
         assert!(
-            bootstrap_watermark_after_sent_snapshots(true, [105, 100].into_iter(), 102, false)
-                .is_none()
+            bootstrap_watermark_after_sent_snapshots(true, [].into_iter(), 259, true).is_none()
         );
         assert!(matches!(
-            bootstrap_watermark_after_sent_snapshots(true, [0].into_iter(), 0, false),
+            bootstrap_watermark_after_sent_snapshots(true, [0].into_iter(), 0, true),
             Some(ServerMessage::ReplicaWatermark { revision: 0 })
         ));
-        assert!(bootstrap_watermark_after_sent_snapshots(true, [0].into_iter(), 0, true).is_none());
+        assert!(
+            bootstrap_watermark_after_sent_snapshots(true, [0].into_iter(), 0, false).is_none()
+        );
     }
 
     #[test]
