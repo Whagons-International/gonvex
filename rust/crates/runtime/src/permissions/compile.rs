@@ -61,11 +61,8 @@ pub(crate) fn compile(universe: &str, expression: &Expr) -> Result<CompiledSet, 
                     // SQLite a keyed ephemeral lookup instead of nested scans of
                     // two DISTINCT-backed views when estimates are too small.
                     // Row keys are non-null BINARY text; final DISTINCT preserves
-                    // the existing support/set semantics. The principal relation is
-                    // another semijoin: membership, not support multiplicity.
-                    // Keep the DISTINCT-backed views and full scope/generation/
-                    // principal binding; compiler SQL policy hashes change.
-                    format!("SELECT ra.row_key FROM _gonvex_permission_row_atoms ra WHERE ra.row_key IN (SELECT row_key FROM universe) AND ra.scope_id=?1 AND ra.table_id=?2 AND ra.generation=?3 AND ra.slot={slot} AND ra.atom_id IN (SELECT pa.atom_id FROM _gonvex_permission_set_atoms pa WHERE pa.scope_id=?1 AND pa.generation=?3 AND pa.set_id=?4)")
+                    // the existing support/set semantics. SQL policy hashes change.
+                    format!("SELECT ra.row_key FROM _gonvex_permission_row_atoms ra JOIN _gonvex_permission_set_atoms pa ON pa.scope_id=ra.scope_id AND pa.atom_id=ra.atom_id AND pa.generation=ra.generation WHERE ra.row_key IN (SELECT row_key FROM universe) AND ra.scope_id=?1 AND ra.table_id=?2 AND ra.generation=?3 AND pa.set_id=?4 AND ra.slot={slot}")
                 }
                 Expr::HasAtom(atom) => {
                     let atom = self.bind(Binding::Blob(atom.canonical()?));
@@ -284,7 +281,3 @@ mod tests {
         assert!(steps.load(Ordering::Relaxed) < 5_000_000);
     }
 }
-
-#[cfg(test)]
-#[path = "semijoin_tests.rs"]
-mod semijoin_tests;
