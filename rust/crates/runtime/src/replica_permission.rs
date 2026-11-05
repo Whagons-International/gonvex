@@ -30,6 +30,8 @@ pub(crate) struct LocalSnapshotRegistration {
     generation: u64,
     artifact_hash: String,
     schema: String,
+    #[cfg(feature = "starter-files")]
+    shape_index_schema: Option<i64>,
     source_schemas: Vec<(String, String)>,
     source_guards: Vec<(String, String, String)>,
     manifest_identity: Option<Vec<u8>>,
@@ -63,11 +65,11 @@ async fn source_schema(
 ) -> Result<String, LocalSnapshotError> {
     #[cfg(all(test, feature = "starter-files"))]
     let profile = schema_profile::Probe::install(tx).await?;
-    {
+    let _physical = {
         #[cfg(all(test, feature = "starter-files"))]
         let _leaf = profile.as_ref().map(|p| p.leaf(0));
-        indexes::require_local(tx.transaction()).await?;
-    }
+        indexes::require_local(tx.transaction()).await?
+    };
     let schema: String = {
         #[cfg(all(test, feature = "starter-files"))]
         let _leaf = profile.as_ref().map(|p| p.leaf(1));
@@ -153,27 +155,35 @@ async fn source_schema(
     }
     #[cfg(all(test, feature = "starter-files"))]
     drop(validation);
+    #[cfg(feature = "starter-files")]
+    let shape_index = {
+        #[cfg(test)]
+        let _index_metadata = profile.as_ref().map(|p| p.leaf(7));
+        key_shape_index::inspect(tx, definition, &_physical).await?
+    };
     #[cfg(all(test, feature = "starter-files"))]
     let _shape_leaf = profile.as_ref().map(|p| p.leaf(3));
-    // SQL validation only, not a Rust authorization loop. TEXT affinity still
-    // permits BLOB storage; reject it rather than silently converting row IDs.
+    // Same predicate, twenty fresh semantic checks. Physical scan steps are
+    // measured separately: a verified native partial index can be empty.
     #[cfg(feature = "starter-files")]
     crate::starter_files::diagnostics::add(
         crate::starter_files::diagnostics::Site::RootShapeScans,
         1,
     );
-    let invalid: i64 = sqlx::query_scalar(&format!(
+    #[cfg(feature = "starter-files")]
+    let shape_sql = key_shape_index::query(definition, shape_index.as_ref())?;
+    #[cfg(not(feature = "starter-files"))]
+    let shape_sql = format!(
         "SELECT EXISTS(SELECT 1 FROM {} WHERE typeof({}) <> 'text' OR {}='' OR instr({},char(0))<>0)",
-        quote(&definition.table)?,
-        quote(&definition.key)?,
-        quote(&definition.key)?,
-        quote(&definition.key)?
-    ))
-    .fetch_one(&mut **tx.transaction())
-    .await?;
+        quote(&definition.table)?, quote(&definition.key)?, quote(&definition.key)?, quote(&definition.key)?);
+    let invalid: i64 = sqlx::query_scalar(&shape_sql)
+        .fetch_one(&mut **tx.transaction())
+        .await?;
     if invalid != 0 {
         return Err(LocalSnapshotError::Rejected("non-text or empty source key"));
     }
+    #[cfg(feature = "starter-files")]
+    let schema = key_shape_index::identity(schema, shape_index.as_ref());
     Ok(schema)
 }
 
@@ -225,6 +235,15 @@ impl Runtime {
             &projection_version(&definition, &schema),
         )
         .await?;
+        #[cfg(feature = "starter-files")]
+        if key_shape_index::capture_cookie(&mut tx, &definition)
+            .await?
+            .is_some()
+        {
+            return Err(LocalSnapshotError::Rejected(
+                "indexed shape requires explicit source writer registration",
+            ));
+        }
         tx.commit().await?;
         Ok(LocalSnapshotRegistration {
             binding,
@@ -232,6 +251,8 @@ impl Runtime {
             generation: module.generation,
             artifact_hash: module.artifact_hash.clone(),
             schema,
+            #[cfg(feature = "starter-files")]
+            shape_index_schema: None,
             source_schemas: Vec::new(),
             source_guards: Vec::new(),
             manifest_identity: None,
@@ -593,6 +614,8 @@ async fn verify_source_registration(
     tx: &mut TenantTransaction,
     registration: &LocalSnapshotRegistration,
 ) -> Result<(), LocalSnapshotError> {
+    #[cfg(feature = "starter-files")]
+    key_shape_index::verify_cookie(tx, registration.shape_index_schema).await?;
     if indexes::instance(tx.transaction()).await? != registration.binding.scope.database_instance {
         return Err(LocalSnapshotError::Rejected(
             "source registration belongs to another physical database",
@@ -692,6 +715,8 @@ impl Runtime {
             .begin_tenant_transaction(&session.route, false)
             .await?;
         let result=async{
+            #[cfg(feature = "starter-files")]
+            key_shape_index::install(&mut tx,&definition).await?;
             let schema=source_schema(&mut tx,&definition).await?;
             let mut source_schemas=BTreeMap::new();let mut changes=Vec::new();
             for source in &bound.sources {
@@ -725,10 +750,14 @@ impl Runtime {
             indexes::apply(&mut tx,scope_id,&changes).await?;
             indexes::seal(&mut tx,scope_id).await?;
             let generation=indexes::state(tx.transaction(),scope_id).await?.generation;
+            #[cfg(feature = "starter-files")]
+            let shape_index_schema=key_shape_index::capture_cookie(&mut tx,&definition).await?;
             Ok::<_,LocalSnapshotError>(LocalSnapshotRegistration{
                 #[cfg(feature = "starter-files")]
                 transport_proof: None,
                 binding:NormalizedBinding{scope_id,required_generation:generation,scope,universe:bound.collection.universe,expression:bound.expression,authority},
+                #[cfg(feature = "starter-files")]
+                shape_index_schema,
                 definition,generation:module.generation,artifact_hash:module.artifact_hash.clone(),schema,source_schemas,source_guards,manifest_identity:Some(manifest_identity),
             })
         }.await;
@@ -861,3 +890,7 @@ mod sql_pair_probe;
 #[cfg(all(test, feature = "starter-files"))]
 #[path = "starter_files/schema_profile.rs"]
 pub(crate) mod schema_profile;
+
+#[cfg(feature = "starter-files")]
+#[path = "starter_files/key_shape_index.rs"]
+pub(crate) mod key_shape_index;

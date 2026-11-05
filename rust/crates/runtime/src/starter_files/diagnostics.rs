@@ -41,7 +41,7 @@ const NAMES: [&str; N] = [
     "commit.sql",
     "commit.durability",
     "identity.serialize",
-    "root_shape.scans",
+    "root_shape.semantic_checks",
     "sql.rows",
     "format.rows",
     "encoded.read_bytes",

@@ -1118,3 +1118,148 @@ async fn starter_schema_shape_plan() {
     std::fs::write(std::env::var("STARTER_SCHEMA_PLAN").unwrap(),serde_json::to_vec_pretty(&json!({"sql":sql,"plan":plan,"physicalRows":rows,"invalid":valid,"qualification":"Separate EXPLAIN on actual synthetic tenant source; not included in profiled source_schema calls"})).unwrap()).unwrap();
     tx.rollback().await.unwrap();
 }
+
+#[tokio::test]
+async fn starter_key_index_ddl_retires_old_offer_before_any_piece_and_rebinds_explicitly() {
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let mut env = Environment::set();
+    env.0.push((
+        "GONVEX_STARTER_KEY_INDEX_LOCAL",
+        std::env::var_os("GONVEX_STARTER_KEY_INDEX_LOCAL"),
+    ));
+    std::env::set_var("GONVEX_STARTER_KEY_INDEX_LOCAL", "1");
+    for mutation in ["drop", "weaker", "same_ddl", "alter"] {
+        let f = fixture().await;
+        let (mut c, s) = bob_connection(&f).await;
+        let offer = offered(&f, &mut c, &s).await;
+        let mut tx = gonvex_store::begin_transaction(&f.runtime.inner.pools, &f.url, false)
+            .await
+            .unwrap();
+        use sqlx::Row;
+        let row=sqlx::query("SELECT name,sql FROM sqlite_schema WHERE type='index' AND name LIKE '_gonvex_starter_invalid_key_v1_%'").fetch_one(&mut **tx.transaction()).await.unwrap();
+        let name: String = row.get("name");
+        let ddl: String = row.get("sql");
+        if mutation == "alter" {
+            sqlx::query("ALTER TABLE tasks ADD COLUMN other TEXT")
+                .execute(&mut **tx.transaction())
+                .await
+                .unwrap();
+        } else {
+            sqlx::query(&format!(
+                "DROP INDEX {}",
+                gonvex_store::rows::quote_identifier(&name)
+            ))
+            .execute(&mut **tx.transaction())
+            .await
+            .unwrap();
+            if mutation == "weaker" {
+                sqlx::query(&format!(
+                    "CREATE INDEX {} ON tasks(id) WHERE id IS NULL",
+                    gonvex_store::rows::quote_identifier(&name)
+                ))
+                .execute(&mut **tx.transaction())
+                .await
+                .unwrap();
+            }
+            if mutation == "same_ddl" {
+                sqlx::query(&ddl)
+                    .execute(&mut **tx.transaction())
+                    .await
+                    .unwrap();
+            }
+        }
+        tx.commit().await.unwrap();
+        assert!(f
+            .runtime
+            .starter_piece(&mut c, &s, &offer.id, &offer.offer_id, 0)
+            .await
+            .is_err());
+        assert!(c.pop().is_none(), "DDL-retired proof emitted payload");
+        let (mut fresh, s) = bob_connection(&f).await;
+        assert!(!f
+            .runtime
+            .offer_starter(&mut fresh, &s, &cold(), false)
+            .await
+            .unwrap_or(false));
+        assert!(fresh.pop().is_none(), "DDL-retired proof offered payload");
+        assert!(f
+            .runtime
+            .open_replica_fresh(
+                &s,
+                serde_json::from_value(json!({"id":"normal","path":"tasks.all","args":{}}))
+                    .unwrap()
+            )
+            .await
+            .is_ok());
+        if mutation == "weaker" {
+            assert!(
+                f.runtime
+                    .install_local_source_permission_snapshot(&f.session, "tasks.all")
+                    .await
+                    .is_err(),
+                "writer trusted existing private index name"
+            );
+        } else {
+            let next = f
+                .runtime
+                .install_local_source_permission_snapshot(&f.session, "tasks.all")
+                .await
+                .unwrap();
+            assert!(f
+                .runtime
+                .open_local_permission_snapshot(
+                    &next,
+                    &s,
+                    serde_json::from_value(json!({"id":"new","path":"tasks.all","args":{}}))
+                        .unwrap()
+                )
+                .await
+                .is_ok());
+        }
+    }
+}
+
+#[tokio::test]
+async fn starter_key_index_hidden_same_length_blob_key_is_not_repaired_after_payload() {
+    let _lock = crate::permissions::LOCAL_TEST_ENV.lock().unwrap();
+    let mut env = Environment::set();
+    env.0.push((
+        "GONVEX_STARTER_KEY_INDEX_LOCAL",
+        std::env::var_os("GONVEX_STARTER_KEY_INDEX_LOCAL"),
+    ));
+    std::env::set_var("GONVEX_STARTER_KEY_INDEX_LOCAL", "1");
+    let f = fixture().await;
+    let (mut c, s) = bob_connection(&f).await;
+    let offer = offered(&f, &mut c, &s).await;
+    let mut tx = gonvex_store::begin_transaction(&f.runtime.inner.pools, &f.url, false)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET id=X'62' WHERE id='b'")
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(f
+        .runtime
+        .starter_piece(&mut c, &s, &offer.id, &offer.offer_id, 0)
+        .await
+        .is_err());
+    assert!(
+        c.pop().is_none(),
+        "hidden invalid row did not retire old payload"
+    );
+    let (mut fresh, s) = bob_connection(&f).await;
+    assert!(!f
+        .runtime
+        .offer_starter(&mut fresh, &s, &cold(), false)
+        .await
+        .unwrap_or(false));
+    assert!(fresh.pop().is_none());
+    assert!(
+        f.runtime
+            .install_local_source_permission_snapshot(&f.session, "tasks.all")
+            .await
+            .is_err(),
+        "invalid source was marked ready by registration"
+    );
+}

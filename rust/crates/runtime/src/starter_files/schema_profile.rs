@@ -7,7 +7,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed},
     Mutex,
 };
-const N: usize = 7;
+const N: usize = 8;
 const NAMES: [&str; N] = [
     "physical_admission",
     "ddl",
@@ -16,6 +16,7 @@ const NAMES: [&str; N] = [
     "rust_validation",
     "authority_serialization",
     "identity_key",
+    "key_index_metadata",
 ];
 static ENABLED: AtomicBool = AtomicBool::new(false);
 struct Metrics {
