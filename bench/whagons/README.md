@@ -371,11 +371,35 @@ start window. The normal p95 <500 ms, p99 <1000 ms and error rate <1% rules
 apply independently to that wave and the steady plateau.
 
 SDK clients reuse the public `MemoryLocalReplicaStorage` across fresh client
-instances. This exercises SDK cache hydration and cursor/digest negotiation;
-it measures no disk durability or browser startup. The result records windows
-actually loaded by the new SDK. Thin clients still open cold, so the usual
-8-SDK/992-thin profile **cannot qualify an all-user cached refresh**. No cold
-open is labeled cached. A full supported cached driver remains required.
+instances. Thin clients use a harness-owned `ThinCheckpointStore` in the same
+process. It owns separate principal/window memberships while reference counting
+shared immutable canonical row values. Store publication atomically replaces a
+complete checkpoint map; it makes no disk durability claim. The original
+8-SDK/992-thin mix remains intact.
+
+Each new driver authenticates normally before restoring its own cache, bound to
+origin, project, tenant, synthetic identity, server visibility scope, module/
+definition epoch, generated manifest hash and client contract. Canonical args
+and complete collection contracts identify windows. A reusable window contains
+every membership row, computed projected hashes/digest, hash mode and cursor.
+Staged pages, unvalidated mutations and failed opens cannot publish checkpoints.
+Transactions/deltas update members; an ordered ready/watermark publishes the
+consistent rows and cursor. A prune/reset, authority rotation or replacement
+snapshot removes cached-refresh evidence. `needHashes` sends actual held keys
+and computed hashes; a cold fallback remains cold in qualification.
+
+Every refresh result contains the expected window count and an inventory of
+signature hashes, row counts, membership hashes and cursors. Both drivers require
+every expected collection and every stored membership row. Empty/missing caches,
+incomplete pages and corrupt digests fail closed. All 1000 offered users must
+have complete cached evidence to qualify; no 1000-user load was run for this
+implementation checkpoint.
+
+Generator cost includes sampled RSS/heap/CPU, per-shard checkpoint CPU and
+logical cache bytes/windows, plus process-wide canonical row bytes. Logical
+bytes include repeated per-user memberships and are not an exact JS heap size;
+RSS remains the actual resident measurement. These are generator costs, separate
+from the runtime's one-vCPU/2-GiB budget. The lane remains capped at 6 GiB/2 CPUs.
 
 An elected admin in each represented tenant/shard attempts an ordinary app
 share/revoke cycle after 30 seconds of steady load. The chosen task must be

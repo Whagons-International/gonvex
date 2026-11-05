@@ -51,6 +51,7 @@ const steadyErrors = phaseErrors(steadyStartMs, steadyEndMs);
 const result = {
   ...Object.fromEntries(Object.entries(first).filter(([k]) => !['rawSamples', 'rawPaths', 'shard', 'snapshots'].includes(k))),
   shards: count,
+  checkpointFailures: parts.flatMap(p=>p.checkpointFailures||[]),
   reloadEvents: parts.flatMap(p=>p.reloadEvents||[]),
   permissionCycles: parts.flatMap(p=>p.permissionCycles||[]),
   signIns: parts.flatMap(p=>p.signIns||[]),
@@ -74,6 +75,8 @@ const result = {
   latencyMs,
   steadyLatencyMs,
 };
+result.checkpointCostByShard=parts.map((p,shard)=>({shard,...p.checkpointCost}));
+result.checkpointCost=Object.fromEntries(['logicalBytes','peakLogicalBytesSum','users','windows','checkpointCpuSeconds','rowPoolCanonicalBytes','rowPoolAdditionalSerializationBytes'].map(k=>[k,parts.reduce((n,p)=>n+(p.checkpointCost?.[k]||0),0)]));
 // Generator self-cost and thin-client counters, per shard and summed.
 if (parts.some(p => p.client?.kind !== first.client?.kind || p.schedule?.kind !== first.schedule?.kind)) errors['shards ran different client kinds or schedules'] = 1;
 result.generatorCostByShard = parts.map((p, k) => ({ shard: k, users: p.targetUsers, cpuSeconds: p.generatorCost?.cpuSeconds, wallSeconds: p.generatorCost?.wallSeconds, peakRssBytes: p.generatorCost?.peakRssBytes }));
@@ -94,7 +97,7 @@ if (parts.some(p => p.taskExpectations)) {
 const artifactMismatch=parts.some(p=>JSON.stringify(p.artifactPins)!==JSON.stringify(first.artifactPins));
 if(artifactMismatch)errors['shards ran different artifacts']=1;
 const rule = passRule({ ...result, errors: parts.every(p => p.errorEvents) ? steadyErrors : errors, latencyMs: steadyLatencyMs });
-Object.assign(result, { clientSloPassed: rule.passed && !artifactMismatch && !(result.visibilityChecks.mismatched > 0) && !(result.taskExpectations?.undeliveredOps > 0) && !(result.taskExpectations?.pendingSaveAtTeardown > 0) && !result.operationAttempts.some(a=>!a.done) && (!first.collectionReadiness || result.collectionReadiness.readyAtTeardown === result.targetUsers), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
+Object.assign(result, { clientSloPassed: rule.passed && !result.checkpointFailures.length && !artifactMismatch && !(result.visibilityChecks.mismatched > 0) && !(result.taskExpectations?.undeliveredOps > 0) && !(result.taskExpectations?.pendingSaveAtTeardown > 0) && !result.operationAttempts.some(a=>!a.done) && (!first.collectionReadiness || result.collectionReadiness.readyAtTeardown === result.targetUsers), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
 if (result.signinSchedule === 'mixed-v1') {
   if (parts.some(p=>p.scheduleStartedMs!==first.scheduleStartedMs)) errors['mixed schedule epoch mismatch']=1;
   result.mixedQualification=qualifyMixed({started:first.scheduleStartedMs,signIns:result.signIns,samples,errors:errorEvents,retries:result.replicaEvents,attempts:result.operationAttempts});

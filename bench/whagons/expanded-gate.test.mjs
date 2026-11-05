@@ -47,7 +47,7 @@ test('deploy refresh retains late completions and unfinished/errors in its offer
 });
 
 test('cached readiness requires every expected stored cursor and every visible row',()=>{
- const snapshot={liveQueries:{x:{entity:'tasks',completeness:'complete',cursor:{epoch:'e',revision:1},ids:['a']}},entities:{tasks:{a:{_id:'a'}}}};
+ const snapshot={liveQueries:{x:{entity:'tasks',key:'_id',completeness:'complete',cursor:{epoch:'e',revision:1},ids:['a']}},entities:{tasks:{a:{_id:'a'}}}};
  assert.equal(cachedFullSet(snapshot,['x']),true);
  assert.equal(cachedFullSet(snapshot,['x','missing']),false);
  delete snapshot.entities.tasks.a;

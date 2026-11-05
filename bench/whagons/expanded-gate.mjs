@@ -1,3 +1,4 @@
+import { sha, canonical, validCursor } from './thin-checkpoint.mjs';
 import { quantiles } from './safety.mjs';
 
 export function visibilityDelta(before, after) {
@@ -69,6 +70,13 @@ export function replicaLifecycle() {
 export function cachedFullSet(snapshot, signatures) {
   return signatures.length > 0 && signatures.every(key => {
     const w=snapshot?.liveQueries?.[key];
-    return w?.completeness==='complete' && !!w.cursor && w.ids.every(id=>snapshot.entities?.[w.entity]?.[id] !== undefined);
+    return w?.completeness==='complete' && validCursor(w.cursor) && w.ids.every(id=>snapshot.entities?.[w.entity]?.[id] !== undefined && String(snapshot.entities[w.entity][id][w.key])===id);
   });
+}
+
+export function sdkCacheEvidence(snapshot, signatures) {
+ const windows=signatures.map(signature=>({signatureHash:sha(signature),window:snapshot?.liveQueries?.[signature]}));
+ return {cachedWindows:Object.keys(snapshot?.liveQueries||{}).length,expectedWindows:signatures.length,
+  cachedFullSetVerified:cachedFullSet(snapshot,signatures)&&windows.some(x=>x.window.ids.length>0),
+  checkpointInventory:windows.map(({signatureHash,window:w})=>({signatureHash,rows:w?.ids.length,cursor:w?.cursor,digest:w?.aggregateDigest,membershipHash:w?sha(canonical([...w.ids].sort())):undefined}))};
 }

@@ -5,8 +5,8 @@
  * frames at the same points (auth, action.call, reducer.call, replica.openMany,
  * replica.snapshotAck, replica.close), so the server does the same work.
  * It skips the work that only matters inside a browser:
- *   - no LocalReplica normalization, durable staging or IndexedDB-like stores;
- *   - no client-side digest verification (the server's digest is kept as-is);
+ *   - no browser LocalReplica/IndexedDB; optional harness checkpoint storage
+ *     validates projected row hashes, membership, pages and authoritative scope;
  *   - rows are parsed once per process and shared between users who receive
  *     the same canonical row (RowPool), so thousands of users fit in one shard.
  *
@@ -24,7 +24,8 @@
  * control watermark, watermarks are deferred while a collection is opening,
  * opens are batched per event-loop turn, released collections close after the
  * SDK's 250 ms retention, and lost connections reconnect with the SDK's
- * backoff and re-open every collection from a full snapshot.
+ * backoff and re-open collections from complete validated checkpoints when
+ * checkpoint storage is configured (otherwise from full snapshots).
  *
  * Presence v2 (runtime capability `presence`, option `presenceV2`): like a v2
  * SDK, the client advertises `presence: 1`, reports its own state with `presence.set` only on
@@ -38,6 +39,7 @@
  * reported by the harness, so a protocol drift cannot pass silently.
  */
 import { randomUUID, createHash } from 'node:crypto';
+import { canonical, windowKey, integrity, validCursor, sha } from './thin-checkpoint.mjs';
 
 const ZERO_DIGEST = 'xor1:' + '0'.repeat(64);
 const MAX_BATCH_OPENS = 256;
@@ -59,6 +61,8 @@ function deviceInfo() {
     hardwareConcurrency: n.hardwareConcurrency };
 }
 
+const freezeRow=value=>{if(value&&typeof value==='object'&&!Object.isFrozen(value)){for(const child of Object.values(value))freezeRow(child);Object.freeze(value);}return value;};
+
 /** Process-wide intern table for immutable row values, reference counted. */
 export class RowPool {
   constructor() { this.rows = new Map(); this.stats = { parsed: 0, shared: 0 }; }
@@ -66,7 +70,8 @@ export class RowPool {
   acquire(canonical, value) {
     let entry = this.rows.get(canonical);
     if (entry) { entry.refs++; this.stats.shared++; return entry; }
-    entry = { canonical, value: value ?? JSON.parse(canonical), refs: 1 };
+    const row=freezeRow(value ?? JSON.parse(canonical));
+    entry = { canonical, value: row, serializedValue:JSON.stringify(row), refs: 1 };
     this.stats.parsed++;
     this.rows.set(canonical, entry);
     return entry;
@@ -103,11 +108,11 @@ function stableStringify(value) {
 
 export const defaultPool = new RowPool();
 const changeCache = new ChangeCache();
-const keyOf = (path, args) => path + '\u0000' + JSON.stringify(args ?? {});
+const keyOf = (path, args) => path + '\u0000' + canonical(JSON.parse(JSON.stringify(args ?? {})));
 
 class Subscription {
   constructor(client, ref, args) {
-    this.client = client; this.ref = ref; this.path = ref.path; this.args = args ?? {};
+    this.client = client; this.ref = freezeRow({path:ref.path,scope:ref.scope,delivery:ref.delivery,replica:ref.replica?JSON.parse(JSON.stringify(ref.replica)):undefined}); this.path = ref.path; this.args = freezeRow(JSON.parse(JSON.stringify(args ?? {})));
     this.entity = ref.replica?.table; this.keyField = ref.replica?.key || '_id';
     this.key = keyOf(this.path, this.args);
     this.id = undefined; this.opening = false; this.isUpToDate = false; this.complete = false;
@@ -134,7 +139,7 @@ class Subscription {
 
 export class ThinClient {
   static stats = { unsupported: {}, framesIn: 0, framesOut: 0, bytesIn: 0, snapshotPages: 0, reconnects: 0, reopens: 0, resets: 0, batches: 0, batchItems: 0,
-    replicaEvents: [], replicaErrors: 0, replicaRetries: 0, replicaRecoveries: 0, replicaRecoveryMs: 0,
+    checkpointFailures: [], replicaEvents: [], replicaErrors: 0, replicaRetries: 0, replicaRecoveries: 0, replicaRecoveryMs: 0,
     presence: { snapshots: 0, patches: 0, changes: 0 } };
 
   // nativeRows defaults to false: the Whagons app's SDK (0.5.2-staging.31 +
@@ -143,7 +148,11 @@ export class ThinClient {
   // presenceV2: advertise `presence: 1` (SDKs with presence v2 only; the
   // Whagons lab SDK 0.5.2-staging.31 does not, so it defaults to false).
   // batchFrames: advertise replicaBatchFrames (LOAD_THIN_BATCH_FRAMES=0 disables).
-  constructor(url, { project, clientContract = 1, pool = defaultPool, nativeRows = false, ackDelayMs = 0, presenceV2 = false, batchFrames = process.env.LOAD_THIN_BATCH_FRAMES !== '0' } = {}) {
+  constructor(url, { project, clientContract = 1, pool = defaultPool, nativeRows = false, ackDelayMs = 0, presenceV2 = false, batchFrames = process.env.LOAD_THIN_BATCH_FRAMES !== '0', checkpointStore, checkpointIdentity, modulePin } = {}) {
+    this.checkpointStore=checkpointStore;this.checkpointIdentity=checkpointIdentity;this.modulePin=modulePin;
+    if(checkpointStore&&(!checkpointIdentity||!modulePin))throw Error('checkpoint identity and exact module pin required');
+    for(const name of ['restoreCheckpoint','checkpointOpen','validateReady','validatePage','flushCheckpoints']){const run=this[name].bind(this);this[name]=(...args)=>{const at=process.cpuUsage();try{return run(...args);}finally{const cpu=process.cpuUsage(at);this.checkpointCpuUs+=cpu.user+cpu.system;}};}
+    this.cacheBinding=undefined;this.replicaDirective=undefined;this.batchDepth=0;this.checkpointDirty=new Set();this.restoredWindows=new Map();this.checkpointCpuUs=0;
     this.presenceV2 = presenceV2;
     this.url = url; this.project = project; this.pool = pool;
     // The SDK sends the generated contract's version number.
@@ -248,6 +257,7 @@ export class ThinClient {
   onTelemetry(handler) { this.telemetry.add(handler); return () => this.telemetry.delete(handler); }
 
   authenticate({ project, token, tenant }) {
+    if(this.checkpointStore&&(project&&project!==this.project||this.auth.tenant!==undefined&&tenant!==this.auth.tenant)){this.quarantineCache();}
     if (project) this.project = project;
     this.auth = { token, tenant };
     return new Promise((resolve, reject) => {
@@ -341,7 +351,8 @@ export class ThinClient {
   watchReplica(ref, args = {}) {
     const key = keyOf(ref.path, args);
     let sub = this.subscriptions.get(key);
-    if (!sub) { sub = new Subscription(this, ref, args); this.subscriptions.set(key, sub); }
+    if(this.checkpointStore&&sub&&windowKey(sub.ref,sub.args)!==windowKey(ref,args))throw Error('collection-contract-changed');
+    if (!sub) { sub = new Subscription(this, ref, args); this.subscriptions.set(key, sub);if(this.checkpointStore)this.restoreCheckpoint(sub); }
     const handlers = new Set();
     let started = false, releaseTimer;
     const listener = () => { for (const h of handlers) h(); };
@@ -391,7 +402,7 @@ export class ThinClient {
   flushOpens() {
     this.openFlushTimer = undefined;
     const opens = [...this.pendingOpens].filter(s => s.opening && s.listeners.size > 0 && this.subscriptions.get(s.key) === s)
-      .map(s => ({ id: s.id, path: s.path, args: s.args, digest: ZERO_DIGEST }));
+      .map(s => this.checkpointStore?this.checkpointOpen(s):({ id: s.id, path: s.path, args: s.args, digest: ZERO_DIGEST }));
     this.pendingOpens.clear();
     for (let i = 0; i < opens.length; i += MAX_BATCH_OPENS) this.send({ type: 'replica.openMany', opens: opens.slice(i, i + MAX_BATCH_OPENS) });
   }
@@ -420,6 +431,7 @@ export class ThinClient {
   onReplicaError(m) {
     const sub = this.byId.get(m.id);
     if (!sub) return;
+    if(this.checkpointStore){this.checkpointStore.invalidate(windowKey(sub.ref,sub.args));sub.cacheValidated=false;}
     ThinClient.stats.replicaErrors++;
     ThinClient.stats.replicaEvents.push({type:'refused',at:now(),path:sub.path});
     sub.failedAt ??= now();
@@ -442,6 +454,110 @@ export class ThinClient {
     }, delay);
   }
 
+  cacheFailure(error) {
+    ThinClient.stats.checkpointFailures.push({at:now(),error:error.message});
+    this.unsupported('checkpoint:'+error.message);
+    this.checkpointStore?.clear();this.checkpointDirty.clear();this.batchDepth=0;
+    for(const sub of this.subscriptions.values()){
+      this.clearReplicaRetry(sub,true);sub.dropStaging();sub.clearRows();sub.readyCursor=undefined;sub.cacheValidated=false;sub.restored=false;
+      sub.isUpToDate=false;sub.error=error;sub.opening=false;sub.notify();
+    }
+    this.authWaiter?.reject(error);this.authWaiter=undefined;
+    // Recover via a fresh authenticated transport, never a poisoned cursor.
+    this.socket?.close();
+  }
+  quarantineCache(){
+    this.checkpointStore?.clear();this.cacheBinding=undefined;this.replicaDirective=undefined;this.checkpointDirty.clear();this.restoredWindows.clear();
+    for(const sub of this.subscriptions.values())this.invalidateCheckpoint(sub,true);
+  }
+  activateCache(d){
+    if(!d||d.protocolVersion!==1||![d.scope,d.visibilityScope,d.epoch].every(s=>typeof s==='string'&&s.trim().length))throw Error('missing-authoritative-cache-scope');
+    const binding={origin:this.url,project:this.project,tenant:this.auth.tenant,identity:this.checkpointIdentity,contract:this.clientContract,module:this.modulePin,scope:d.visibilityScope,definitionEpoch:d.epoch};
+    const next=canonical(binding);
+    if(this.cacheBinding&&this.cacheBinding!==next)this.quarantineCache();
+    this.replicaDirective={...d};this.cacheBinding=this.checkpointStore.bind(binding);
+    for(const sub of this.subscriptions.values())if(!sub.rows.size&&!sub.readyCursor)this.restoreCheckpoint(sub);
+  }
+  restoreCheckpoint(sub){
+    if(!this.cacheBinding)return;
+    const saved=this.checkpointStore.load(windowKey(sub.ref,sub.args),this.cacheBinding,this.pool);
+    if(!saved)return;
+    sub.clearRows();sub.rows=saved.rows;sub.version++;sub.readyCursor=saved.cursor;sub.digest=saved.digest;sub.complete=true;sub.cacheValidated=true;sub.checkpointConsistent=true;sub.restored=true;
+    this.restoredWindows.set(windowKey(sub.ref,sub.args),{rows:saved.rows.size,cursor:{...saved.cursor},digest:saved.digest,membershipHash:sha(canonical([...saved.rows.keys()].sort()))});
+    // Cached rows are never server-current until a fresh ready validates them.
+    sub.isUpToDate=false;
+  }
+  replicaSignature(ref,args={}){return windowKey(ref,args);}
+  cacheEvidence(signatures){return {cachedWindows:this.restoredWindows.size,cachedFullSetVerified:signatures.length>0&&[...this.restoredWindows.values()].some(w=>w.rows>0)&&signatures.every(k=>this.restoredWindows.has(k)),cachedRows:[...this.restoredWindows.values()].reduce((n,w)=>n+w.rows,0),authorityHash:sha(this.cacheBinding||''),expectedWindows:signatures.length,checkpointInventory:signatures.map(k=>({signatureHash:sha(k),...this.restoredWindows.get(k)}))};}
+  checkpointOpen(sub,force=false){
+    const base={id:sub.id,path:sub.path,args:sub.args};
+    if(!this.cacheBinding||!sub.complete||!sub.checkpointConsistent||!validCursor(sub.readyCursor))return {...base,digest:ZERO_DIGEST};
+    const actual=integrity(sub.rows,sub.ref.replica?.columns,'xor1');
+    if(!force&&this.serverCapabilities.replicaResume===1)return {...base,cursor:{...sub.readyCursor},digest:actual.digest};
+    return {...base,cursor:{...sub.readyCursor},keys:[...sub.rows.keys()],hashes:actual.hashes,digest:actual.digest,fullIntegrity:true};
+  }
+  invalidateCheckpoint(sub,clear=false){
+    this.checkpointStore?.invalidate(windowKey(sub.ref,sub.args));this.checkpointDirty.add(sub);sub.checkpointConsistent=false;
+    if(clear){this.restoredWindows.delete(windowKey(sub.ref,sub.args));sub.dropStaging();sub.clearRows();sub.readyCursor=undefined;sub.digest=undefined;sub.complete=false;sub.cacheValidated=false;sub.restored=false;sub.isUpToDate=false;sub.notify();}
+  }
+  acceptCursor(sub,cursor){
+    if(!validCursor(cursor))throw Error('invalid-checkpoint-cursor');
+    if(sub.retiredEpochs?.has(cursor.epoch))return false;
+    const current=sub.readyCursor;
+    if(current&&current.epoch!==cursor.epoch){this.invalidateCheckpoint(sub,true);throw Error('unexpected-checkpoint-epoch');}
+    return !current||cursor.revision>=current.revision;
+  }
+  validateSnapshotStart(sub,m){
+    if(!validCursor(m.cursor)||m.key!==sub.keyField||m.path&&m.path!==sub.path)throw Error('invalid-checkpoint-snapshot');
+    if(sub.readyCursor?.epoch===m.cursor.epoch&&m.cursor.revision<sub.readyCursor.revision)throw Error('stale-snapshot-cursor');
+    if(m.snapshotId!==undefined&&(!m.snapshotId||m.visibilityScope!==this.replicaDirective?.visibilityScope||m.scope!==this.replicaDirective?.scope))throw Error('unscoped-snapshot-pages');
+    if(m.visibilityScope!==undefined&&m.visibilityScope!==this.replicaDirective?.visibilityScope)throw Error('snapshot-visibility-scope');
+    if(m.scope!==undefined&&m.scope!==this.replicaDirective?.scope)throw Error('snapshot-scope');
+    if(sub.readyCursor&&sub.readyCursor.epoch!==m.cursor.epoch){sub.retiredEpochs??=new Set();sub.retiredEpochs.add(sub.readyCursor.epoch);}
+    if(sub.retiredEpochs?.has(m.cursor.epoch))throw Error('retired-snapshot-epoch');
+  }
+  validatePage(sub,m,native){
+    const st=sub.staging;
+    if(st.last||m.sequence!==st.sequence||typeof m.last!=='boolean'||m.snapshotId!==st.snapshotId)throw Error('snapshot-page-order');
+    {
+      const a=st.meta;
+      if(m.key!==a.key||canonical(m.cursor)!==canonical(a.cursor)||m.scope!==a.scope||m.visibilityScope!==a.visibilityScope||m.truncated!==a.truncated||m.path!==a.path||['maxRows','maxBytes','mode','orderBy','orderDirection'].some(k=>m[k]!==a[k]))throw Error('snapshot-page-metadata');
+    }
+    const rows=native?m.canonicalRows.map(x=>JSON.parse(x)):m.result;
+    if(!Array.isArray(rows))throw Error('snapshot-page-rows');
+    if(m.snapshotId!==undefined&&((m.last&&typeof m.digest!=='string')||(!m.last&&(rows.length===0||m.digest!==undefined))))throw Error('snapshot-page-final-digest');
+    const seen=new Set(st.rows.keys());
+    st.bytes=(st.bytes||0)+Buffer.byteLength(JSON.stringify(rows));
+    if((m.snapshotId!==undefined&&rows.length>512)||((st.meta.maxRows??sub.ref.replica?.maxRows)>0&&st.rows.size+rows.length>(st.meta.maxRows??sub.ref.replica?.maxRows))||((st.meta.maxBytes??sub.ref.replica?.maxBytes)>0&&st.bytes>(st.meta.maxBytes??sub.ref.replica?.maxBytes)))throw Error('snapshot-page-budget');
+    for(const row of rows){const id=row?.[st.key];if(!['string','number'].includes(typeof id)||seen.has(String(id)))throw Error('snapshot-page-key');seen.add(String(id));}
+    st.sequence++;st.last=m.last;
+    st.lastDigest=m.digest;
+  }
+  validateReady(sub,m){
+    if(!validCursor(m.cursor)||!this.cacheBinding)throw Error('unscoped-ready');
+    const st=sub.staging;
+    if(!st&&!this.acceptCursor(sub,m.cursor))return false;
+    if(st&&(!st.last||st.meta.cursor.epoch!==m.cursor.epoch||st.revision>m.cursor.revision))throw Error('incomplete-snapshot-ready');
+    if(!st&&!sub.complete)throw Error('ready-without-complete-rows');
+    const rows=st?st.rows:sub.rows;
+    const actual=integrity(rows,sub.ref.replica?.columns,m.digest?.startsWith('xor1:')?'xor1':'sha256');
+    if(!m.digest||actual.digest!==m.digest)throw Error('ready-integrity-mismatch');
+    if(st?.lastDigest&&st.lastDigest!==actual.digest)throw Error('snapshot-page-digest');
+    if(st?.truncated||m.truncated){this.invalidateCheckpoint(sub);sub.cacheValidated=false;}
+    return true;
+  }
+  flushCheckpoints(){
+    if(!this.checkpointStore||!this.cacheBinding||this.batchDepth)return;
+    const windows=[];
+    for(const sub of this.checkpointDirty){
+      if(!sub.cacheValidated||!sub.checkpointConsistent||!sub.isUpToDate||!sub.complete||sub.opening||sub.staging||sub.error||!validCursor(sub.readyCursor))continue;
+      const mode=sub.digest?.startsWith('xor1:')?'xor1':'sha256';const actual=integrity(sub.rows,sub.ref.replica?.columns,mode);
+      windows.push({key:windowKey(sub.ref,sub.args),rows:sub.rows,pool:this.pool,keyField:sub.keyField,cursor:sub.readyCursor,hashes:actual.hashes,digest:actual.digest,mode,columns:sub.ref.replica?.columns,complete:true});
+    }
+    if(windows.length)this.checkpointStore.publish(windows);
+    this.checkpointDirty.clear();
+  }
+
   // ---- inbound ---------------------------------------------------------------
   receive(data) {
     ThinClient.stats.framesIn++;
@@ -450,7 +566,7 @@ export class ThinClient {
       if (typeof data === 'string') { ThinClient.stats.bytesIn += data.length; message = JSON.parse(data); }
       else { ThinClient.stats.bytesIn += data.byteLength; message = JSON.parse(Buffer.from(data).toString('utf8')); }
     } catch { this.unsupported('unparseable-frame'); return; }
-    this.dispatch(message);
+    try{this.dispatch(message);}catch(e){if(!this.checkpointStore)throw e;this.cacheFailure(e);}
   }
 
   unsupported(kind) { ThinClient.stats.unsupported[kind] = (ThinClient.stats.unsupported[kind] || 0) + 1; }
@@ -478,7 +594,8 @@ export class ThinClient {
       case 'replica.closed': return;
       case 'presence.snapshot': case 'presence.patch': case 'presence.error': return this.onPresence(m);
       case 'replica.needHashes': return this.onNeedHashes(m);
-      case 'replica.reset': { ThinClient.stats.resets++; const sub = this.byId.get(m.id); if (sub) { this.clearReplicaRetry(sub, true); this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); this.openSubscription(sub); sub.notify(); } return; }
+      case 'replica.reset': { if(this.checkpointStore){const sub=this.byId.get(m.id);if(sub)this.invalidateCheckpoint(sub,true);}
+        ThinClient.stats.resets++; const sub = this.byId.get(m.id); if (sub) { this.clearReplicaRetry(sub, true); this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); this.openSubscription(sub); sub.notify(); } return; }
       case 'replica.error': return this.onReplicaError(m);
       default: this.unsupported(m.type || 'untyped');
     }
@@ -486,6 +603,7 @@ export class ThinClient {
 
   /** Delivery v2: shared, stream-addressed items, one message per tick (same expansion as the SDK). */
   onBatch(m) {
+    this.batchDepth++;
     ThinClient.stats.batches++; ThinClient.stats.batchItems += m.items?.length ?? 0;
     for (const item of m.items ?? []) {
       if (item.type === 'replica.stream') {
@@ -504,10 +622,12 @@ export class ThinClient {
       }
     }
     if (typeof m.watermark === 'number') this.onWatermark(m.watermark);
+    this.batchDepth--;if(!this.batchDepth)this.flushCheckpoints();
   }
 
   onAuthResult(m) {
     if (m.id !== this.authInFlight) return;
+    if(this.checkpointStore&&this.auth.token)this.activateCache(m.result?.replica);
     this.authInFlight = undefined; this.authReady = true;
     this.presenceAuthenticated();
     const waiter = this.authWaiter; this.authWaiter = undefined;
@@ -517,7 +637,8 @@ export class ThinClient {
   }
   onAuthError(m) {
     if (m.id === 'membership-changed' || m.id === 'session-expired') {
-      if (['revoked', 'member_removed', 'account_disabled'].includes(m.code ?? '')) { this.unsupported('auth.revoked'); return; }
+      if(this.checkpointStore)this.quarantineCache();
+      if (['revoked', 'member_removed', 'account_disabled'].includes(m.code ?? '')) { this.unsupported('auth.revoked');if(this.checkpointStore){this.authReady=false;this.close();}return; }
       // Same as the SDK: authenticate again on this socket, then re-open collections.
       this.authReady = false;
       this.presenceDisconnected();
@@ -592,6 +713,7 @@ export class ThinClient {
     this.applyWatermark(d.revision);
   }
   applyWatermark(revision) {
+    if(this.checkpointStore){for(const sub of this.subscriptions.values())if(sub.cacheValidated&&!sub.opening&&sub.isUpToDate&&sub.readyCursor&&revision>=sub.readyCursor.revision){sub.readyCursor={...sub.readyCursor,revision};sub.checkpointConsistent=true;this.checkpointDirty.add(sub);}this.flushCheckpoints(true);}
     this.processedWatermark = Math.max(this.processedWatermark, revision);
     for (const call of [...this.pending.values()]) {
       if (call.committedRevision === undefined || call.committedRevision > this.processedWatermark) continue;
@@ -602,13 +724,15 @@ export class ThinClient {
   onSnapshotStart(m) {
     const sub = this.byId.get(m.id);
     if (!sub) return;
+    if(this.checkpointStore){this.invalidateCheckpoint(sub);this.validateSnapshotStart(sub,m);this.restoredWindows.delete(windowKey(sub.ref,sub.args));sub.readyCursor=undefined;}
     sub.dropStaging();
-    sub.staging = { snapshotId: m.snapshotId, rows: new Map(), truncated: m.truncated === true, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
+    sub.staging = { sequence:0,last:false,meta:m,snapshotId: m.snapshotId, rows: new Map(), truncated: m.truncated === true, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
   }
   onSnapshotPage(m) {
     ThinClient.stats.snapshotPages++;
     const sub = this.byId.get(m.id);
     if (sub?.staging && sub.staging.snapshotId === m.snapshotId) {
+      if(this.checkpointStore)this.validatePage(sub,m,true);
       const key = sub.staging.key;
       for (const canonical of m.canonicalRows) {
         const entry = this.pool.acquire(canonical);
@@ -635,6 +759,7 @@ export class ThinClient {
     if (!sub) return;
     this.clearReplicaRetry(sub);
     sub.dropStaging();
+    if(this.checkpointStore){sub.opening=true;sub.isUpToDate=false;sub.notify();if(this.authReady&&this.socket?.readyState===1)this.rawSend({type:'replica.openMany',opens:[this.checkpointOpen(sub,true)]});return;}
     const cols = sub.ref.replica?.columns;
     const keys = [], hashes = {}, aggregate = Buffer.alloc(32);
     for (const [key, entry] of sub.rows) {
@@ -656,10 +781,13 @@ export class ThinClient {
     ThinClient.stats.snapshotPages++;
     const sub = this.byId.get(m.id);
     if (!sub || !sub.opening) return;
+    if(this.checkpointStore&&sub.staging&&(sub.staging.snapshotId!==m.snapshotId||m.sequence===0))throw Error('snapshot-page-restart');
     if (!sub.staging || sub.staging.snapshotId !== m.snapshotId || m.sequence === 0) {
       sub.dropStaging();
-      sub.staging = { snapshotId: m.snapshotId, rows: new Map(), truncated: m.truncated === true, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
+      if(this.checkpointStore){this.invalidateCheckpoint(sub);this.validateSnapshotStart(sub,m);this.restoredWindows.delete(windowKey(sub.ref,sub.args));sub.readyCursor=undefined;}
+      sub.staging = { sequence:0,last:false,meta:m,snapshotId: m.snapshotId, rows: new Map(), truncated: m.truncated === true, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
     }
+    if(this.checkpointStore)this.validatePage(sub,m,false);
     const key = sub.staging.key;
     for (const row of m.result || []) {
       const entry = this.pool.acquireValue(row);
@@ -672,13 +800,15 @@ export class ThinClient {
   onReady(m) {
     const sub = this.byId.get(m.id);
     if (!sub) return;
+    if(this.checkpointStore&&!this.validateReady(sub,m))return;
+    let deferredCheckpoint=false;
     if (sub.staging) {
       // Activate the completed snapshot atomically.
-      const next = sub.staging.rows;
-      const deferred = sub.staging.deferred, snapshotRevision = sub.staging.revision; sub.staging = undefined;
+      const next = sub.staging.rows;sub.snapshotTruncated=sub.staging.truncated;
+      const deferred = sub.staging.deferred, snapshotRevision = sub.staging.revision;deferredCheckpoint=this.checkpointStore&&deferred.some(op=>op.delta||op.revision>snapshotRevision); sub.staging = undefined;
       const old = sub.rows; sub.rows = next; for (const entry of old.values()) this.pool.release(entry);
       sub.version++;
-      sub.complete = !(m.truncated === true);
+      sub.complete = !(m.truncated === true || (this.checkpointStore&&sub.snapshotTruncated));
       // Like the SDK, frames that arrived while the snapshot was staging apply
       // after activation, in arrival order.
       for (const op of deferred) {
@@ -693,8 +823,10 @@ export class ThinClient {
       ThinClient.stats.replicaRecoveryMs += now() - sub.failedAt;
       sub.failedAt = undefined;
     }
-    sub.readyCursor = m.cursor; sub.digest = m.digest; sub.opening = false; sub.isUpToDate = true; sub.error = undefined;
+    const newer=this.checkpointStore&&sub.readyCursor?.epoch===m.cursor?.epoch&&sub.readyCursor.revision>m.cursor.revision;
+    if(!newer){sub.readyCursor = m.cursor; sub.digest = m.digest;} sub.opening = false; sub.isUpToDate = true; sub.error = undefined;
     sub.notify();
+    if(this.checkpointStore){sub.cacheValidated=true;sub.checkpointConsistent=!deferredCheckpoint;this.checkpointDirty.add(sub);this.flushCheckpoints();}
     this.drainDeferredWatermark();
   }
   onDelta(m) {
@@ -704,6 +836,7 @@ export class ThinClient {
     this.applyDelta(sub, m);
   }
   applyDelta(sub, m) {
+    if(this.checkpointStore){if(!this.acceptCursor(sub,m.cursor))return;this.invalidateCheckpoint(sub);}
     if (m.canonicalUpserts) for (const canonical of m.canonicalUpserts) { const entry = this.pool.acquire(canonical); sub.setRow(String(entry.value[sub.keyField]), entry); }
     else if (m.upserts) for (const row of m.upserts) { const entry = this.pool.acquireValue(row); sub.setRow(String(entry.value[sub.keyField]), entry); }
     if (m.deleted) for (const id of m.deleted) sub.deleteRow(String(id));
@@ -717,12 +850,14 @@ export class ThinClient {
     // A collection that is staging a snapshot keeps the change and applies it
     // after activation (SDK deferSnapshotFrame); a change at or below the
     // snapshot's read revision is already contained in it.
+    if(this.checkpointStore&&!validCursor(m.cursor))throw Error('transaction-without-cursor');
     const revision = m.cursor?.revision ?? Infinity;
     const changes = m.canonicalChanges ? m.canonicalChanges.map((canonical) => changeCache.get(canonical)) : (m.changes || []).map(changeOf);
     for (const change of changes) {
       for (const sub of this.subscriptions.values()) {
         if (sub.entity !== change.entity) continue;
-        if (sub.staging) sub.staging.deferred.push({ revision, change });
+        if(this.checkpointStore&&sub.readyCursor&&sub.readyCursor.epoch!==m.cursor.epoch)throw Error('transaction-epoch-mismatch');
+        if (sub.staging) {sub.staging.deferred.push({ revision, change });if(this.checkpointStore)continue;}
         if (revision <= (sub.readyCursor?.revision ?? 0)) continue;
         this.applyChange(sub, change);
       }
@@ -730,6 +865,7 @@ export class ThinClient {
   }
   applyChange(sub, change) {
     if (!sub.rows.has(change.id)) return;
+    if(this.checkpointStore)this.invalidateCheckpoint(sub);
     if (change.operation === 'delete' || change.newCanonical === undefined) sub.deleteRow(change.id);
     else sub.setRow(change.id, this.pool.acquire(change.newCanonical, change.newValue));
     sub.notify();

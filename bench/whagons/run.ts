@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { readFile, writeFile, appendFile, realpath } from 'node:fs/promises';
 import { writeFileSync, renameSync } from 'node:fs';
 import { shardEpoch } from './shard-epoch.mjs';
-import { qualifyExpanded, visibilityDelta, replicaLifecycle, cachedFullSet } from './expanded-gate.mjs';
+import { qualifyExpanded, visibilityDelta, replicaLifecycle, sdkCacheEvidence } from './expanded-gate.mjs';
 import { mixedPlan, qualifyMixed } from './mixed-gate.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -11,11 +11,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { loopback, quantiles, passRule } from './safety.mjs';
 import { memorySnapshotStaging } from './native-stage.mjs';
 import { installWireRecorder } from './wire-record.mjs';
+import { ThinCheckpointStore } from './thin-checkpoint.mjs';
 import { ThinClient, defaultPool as thinRowPool } from './thin-client.mjs';
 import { firstViewed, viewSetsFirstViewedAt, unmetTaskUpdate } from './task-expectations.mjs';
 
 async function main() {
- const harnessFiles=['run.ts','thin-client.mjs','expanded-gate.mjs','mixed-gate.mjs','safety.mjs','native-stage.mjs','wire-record.mjs','shard-epoch.mjs','task-expectations.mjs'];
+ const harnessFiles=['run.ts','thin-client.mjs','thin-checkpoint.mjs','expanded-gate.mjs','mixed-gate.mjs','safety.mjs','native-stage.mjs','wire-record.mjs','shard-epoch.mjs','task-expectations.mjs'];
  const sourcePins=Object.fromEntries(await Promise.all(harnessFiles.map(async name=>[name,createHash('sha256').update(await readFile(new URL(name,import.meta.url))).digest('hex')])));
  const profileHash=createHash('sha256').update(JSON.stringify(sourcePins)).digest('hex');
  const app=process.env.WHAGONS_CHECKOUT!;
@@ -74,7 +75,9 @@ async function main() {
  const maxInFlightPerUser=Number(process.env.LOAD_MAX_INFLIGHT_PER_USER||16);
  const plannedStart=new AsyncLocalStorage<{at:number,used:boolean}>();
  const scheduleStats={kind:openLoop?'open':'closed',fired:0,overflow:0,skippedDuringReconnect:0,lateMs:[] as number[]};
- const client=(kind:string=clientKind,storage?:any)=>{if(kind==='thin'){const c=new ThinClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,nativeRows:nativeRequested,ackDelayMs:Number(process.env.LOAD_THIN_ACK_DELAY_MS||0),presenceV2});c.connect();return c;}const staging=sdkStaging?.client();const c=new GonvexClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,outbox:{enabled:false},...(storage?{localReplica:{storage}}:{}),...(staging?{nativeSnapshotStaging:staging.staging}:{})});c.connect();return c;};
+ const modulePin=createHash('sha256').update(await readFile(app+'/gonvex/_generated/manifest.json')).digest('hex');
+ const checkpointStores:any[]=[],thinDrivers:any[]=[];
+ const client=(kind:string=clientKind,storage?:any,identity?:string)=>{if(kind==='thin'){const c=new ThinClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,nativeRows:nativeRequested,ackDelayMs:Number(process.env.LOAD_THIN_ACK_DELAY_MS||0),presenceV2,...(storage?{checkpointStore:storage,checkpointIdentity:identity,modulePin}:{})});thinDrivers.push(c);c.connect();return c;}const staging=sdkStaging?.client();const c=new GonvexClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,outbox:{enabled:false},...(storage?{localReplica:{storage}}:{}),...(staging?{nativeSnapshotStaging:staging.staging}:{})});c.connect();return c;};
  let recordReducer:((path:string,ms:number,failed:boolean)=>void)|undefined;
  const reducer=async(c:any,ref:any,args:any)=>{const at=performance.now();try{const value=await c.reducer({...ref,localExecution:undefined},args,{offline:'reject'});recordReducer?.(ref.path,performance.now()-at,false);return value;}catch(e){recordReducer?.(ref.path,performance.now()-at,true);throw e;}};
  const identity=async(email:string)=>{
@@ -87,7 +90,7 @@ async function main() {
  // runtime grants presence v2, no presence/support heartbeat Reducers; transitions are
  // presence.set and delivery is timed from the presence feed (presence.patch).
  const login=async(email:string,tenant?:string,kind:string=clientKind,storage?:any)=>{
-  const c=client(kind,storage);
+  const c=client(kind,storage,email);
   try {
    const grant=await c.action(control.auth.exchangeExternalToken,{provider:'firebase',token:await identity(email),...(tenant?{tenantId:tenant}:{})});
    if(tenant) await c.authenticate({project:projectId,token:grant.accessToken,tenant});
@@ -242,7 +245,7 @@ async function main() {
  }
  // Generator self-cost, so SDK and thin clients can be compared per user.
  const generatorCost={samples:[] as any[],peakRssBytes:0,peakHeapUsedBytes:0} as any;const cpuAtStart=process.cpuUsage();const wallAtStart=performance.now();
- const costTimer=setInterval(()=>{const m=process.memoryUsage(),u=process.cpuUsage(cpuAtStart);generatorCost.peakRssBytes=Math.max(generatorCost.peakRssBytes,m.rss);generatorCost.peakHeapUsedBytes=Math.max(generatorCost.peakHeapUsedBytes,m.heapUsed);generatorCost.samples.push({at:Date.now(),rss:m.rss,heapUsed:m.heapUsed,cpuMs:(u.user+u.system)/1000});},5000);costTimer.unref();
+ const costTimer=setInterval(()=>{const m=process.memoryUsage(),u=process.cpuUsage(cpuAtStart);generatorCost.peakRssBytes=Math.max(generatorCost.peakRssBytes,m.rss);generatorCost.peakHeapUsedBytes=Math.max(generatorCost.peakHeapUsedBytes,m.heapUsed);generatorCost.samples.push({at:Date.now(),rss:m.rss,heapUsed:m.heapUsed,cpuMs:(u.user+u.system)/1000,checkpointLogicalBytes:checkpointStores.reduce((n,s)=>n+s.stats().bytes,0),checkpointWindows:checkpointStores.reduce((n,s)=>n+s.stats().windows,0),checkpointCpuSeconds:thinDrivers.reduce((n,c)=>n+c.checkpointCpuUs/1e6,0)});},5000);costTimer.unref();
  const metricTimer=shard!==0?undefined:setInterval(()=>{void fetch(url+'/dev/metrics?project='+encodeURIComponent(projectId),{headers:{authorization:'Bearer '+admin}}).then(r=>r.json()).then(x=>appendFile((process.env.LOAD_RESULT||state)+'.metrics.jsonl',JSON.stringify({at:Date.now(),metrics:{websocket:{accounts:x.websocket?.accounts,connections:x.websocket?.connections,subscriptions:x.websocket?.subscriptions},database:x.database,queryAdmission:x.queryAdmission}})+'\n')).catch(error);},10000);
  const tenantCounts=new Map<string,number>();const ordinals=Array.from({length:target},(_,i)=>{const f=chooseTenant(i);const n=tenantCounts.get(f.tenant)||0;tenantCounts.set(f.tenant,n+1);return n;});
  // ---- Simulated users (load-realism audit 2026-11-03 plus Gabriel's direction:
@@ -299,11 +302,12 @@ async function main() {
   // The reconnect wave replaces it mid-run.
   let c:any,member='',tw:any,stopPresence=()=>{},stopTasks=()=>{},extras:any,refreshTimer:any;
   let cachedWindows=0,loadedSnapshot:any,expectedCacheKeys:string[]=[];
-  const storage=expanded&&userKind(i,target)==='sdk'?new MemoryLocalReplicaStorage():undefined;
-  if(storage){const load=storage.load.bind(storage);storage.load=async(...args:any[])=>{const snap=await load(...args);loadedSnapshot=snap;cachedWindows=Object.keys(snap?.liveQueries||{}).length;return snap;};}
+  const storage=expanded?(userKind(i,target)==='sdk'?new MemoryLocalReplicaStorage():new ThinCheckpointStore()):undefined;
+  if(storage instanceof ThinCheckpointStore)checkpointStores.push(storage);
+  if(storage&&!(storage instanceof ThinCheckpointStore)){const load=storage.load.bind(storage);storage.load=async(...args:any[])=>{const snap=await load(...args);loadedSnapshot=snap;cachedWindows=Object.keys(snap?.liveQueries||{}).length;return snap;};}
   let reloadEvent:any;
   const allReady=()=>extras?.ready()&&tw?.status().isUpToDate&&tw?.localReplicaState()?.completeness==='complete'&&presenceReadyAt!==Infinity;
-  const maybeInitialReady=()=>{if(reloadEvent&&reloadEvent.readyAt===undefined&&allReady()){reloadEvent.cachedFullSetVerified=cachedFullSet(loadedSnapshot,expectedCacheKeys);reloadEvent.cachedWindows=cachedWindows;reloadEvent.readyAt=Date.now();sample('cachedReload',reloadEvent.readyAt-reloadEvent.plannedAt,reloadEvent.plannedAt);}if(signIn.readyAt===undefined&&allReady())signIn.readyAt=Date.now();};
+  const maybeInitialReady=()=>{if(reloadEvent&&reloadEvent.readyAt===undefined&&allReady()){Object.assign(reloadEvent,typeof c.cacheEvidence==='function'?c.cacheEvidence(expectedCacheKeys):sdkCacheEvidence(loadedSnapshot,expectedCacheKeys));reloadEvent.readyAt=Date.now();sample('cachedReload',reloadEvent.readyAt-reloadEvent.plannedAt,reloadEvent.plannedAt);}if(signIn.readyAt===undefined&&allReady())signIn.readyAt=Date.now();};
   // Runtime access tokens live 15 min (control.rs session_result): refresh 2 min
   // before expiry and re-authenticate the socket, as the SDK's session does.
   // Without it every session drops 15 min after sign-in.
@@ -329,6 +333,7 @@ async function main() {
    const baseRefs:[any,any][]=[api.workspaces.list,api.statuses.statuses,api.tags.tags,api.members.listMembers,api.members.listMemberTeams,api.taskResources.taskUsers,api.taskResources.taskTags,api.workspacePreferences.workspacePreferences].map(ref=>[ref,{}] as [any,any]);
    const refs=appOpens?mergeOpens(baseRefs,appOpens,member):baseRefs;
    expectedCacheKeys=typeof c.replicaSignature==='function'?[...refs,[api.tasks.recentWorkspaceTasks,{}],...(!(presenceV2&&c.presenceSupported?.())?[[api.presence.list,{}]]:[])].map(([ref,args])=>c.replicaSignature(ref,args)):[];
+   expectedCacheKeys=[...new Set(expectedCacheKeys)];
    extras=watchAll(c,refs,maybeInitialReady);
    const w=c.watchReplica(api.tasks.recentWorkspaceTasks,{});const q0=performance.now();let first=true;
    stopTasks=w.onUpdate(()=>{try{maybeInitialReady();
@@ -533,15 +538,17 @@ async function main() {
  for(const e of lifecycle.events)if(e.type==='refused')error(Error('Replica open refused: '+e.path),e.at);
  const deployReloadWindowMs=[deadline-seconds*1000+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000,deadline-seconds*1000+Number(process.env.LOAD_DEPLOY_RELOAD_OFFSET_SECONDS||120)*1000+5000];
  const artifactPins={harness:sourcePins,sdkEntry:createHash('sha256').update(await readFile(require.resolve('@gonvex/client'))).digest('hex'),appManifest:createHash('sha256').update(await readFile(app+'/gonvex/_generated/manifest.json')).digest('hex'),appApi:createHash('sha256').update(await readFile(app+'/gonvex/_generated/api.ts')).digest('hex'),appContract:createHash('sha256').update(executor).digest('hex'),appOpens:process.env.LOAD_APP_OPENS?createHash('sha256').update(await readFile(process.env.LOAD_APP_OPENS.startsWith('/')?process.env.LOAD_APP_OPENS:new URL(process.env.LOAD_APP_OPENS,import.meta.url))).digest('hex'):null};
- const result={artifactPins,deployReloadWindowMs,reloadEvents,permissionCycles,operationAttempts,replicaEvents:lifecycle.events,signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,presenceV2Users,collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,reconnectWindowMs:process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?null:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
+ const checkpointCost={kind:'process-local immutable row pool; per-user window membership',logicalBytes:checkpointStores.reduce((n,s)=>n+s.stats().bytes,0),peakLogicalBytesSum:checkpointStores.reduce((n,s)=>n+s.stats().peakBytes,0),users:checkpointStores.length,windows:checkpointStores.reduce((n,s)=>n+s.stats().windows,0),checkpointCpuSeconds:thinDrivers.reduce((n,c)=>n+c.checkpointCpuUs/1e6,0),rowPoolCanonicalBytes:[...thinRowPool.rows.values()].reduce((n,e)=>n+Buffer.byteLength(e.canonical),0),rowPoolAdditionalSerializationBytes:[...thinRowPool.rows.values()].reduce((n,e)=>n+(e.serializedValue!==e.canonical?Buffer.byteLength(e.serializedValue):0),0)};
+ const result={checkpointFailures:thin?ThinClient.stats.checkpointFailures:[],checkpointCost,artifactPins,deployReloadWindowMs,reloadEvents,permissionCycles,operationAttempts,replicaEvents:lifecycle.events,signinSchedule:mixed?'mixed-v1':'uniform',scheduleStartedMs:started,signIns,presenceV2Users,collectionReadiness,taskExpectations:{ops:expectationStats.ops,failedSaves:expectationStats.failedSaves,lateDelivered:expectationStats.lateDelivered,pendingSaveAtTeardown:expectationStats.pendingSaveAtTeardown,ownTaskViews:expectationStats.ownTaskViews,undeliveredOps:expectationStats.undeliveredOps.size,undelivered},schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,errorEvents,snapshots,visibilityChecks,reconnectWindowMs:process.env.LOAD_RELOADS_PER_USER_HOUR!==undefined?null:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,reloadsPerUserHour:process.env.LOAD_RELOADS_PER_USER_HOUR??null,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
  const steadyLatencyMs=Object.fromEntries(Object.keys(measurements).map(kind=>{const xs=(samples[kind]||[]).filter(x=>x.at>=deadline-seconds*1000&&x.at<deadline).map(x=>x.ms);return [kind,{samples:xs.length,...quantiles(xs)}];}));
  const phaseErrors=(start:number,end:number)=>Object.fromEntries([...new Set(errorEvents.filter(e=>e.at>=start&&e.at<end).map(e=>e.key))].map(key=>[key,errorEvents.filter(e=>e.key===key&&e.at>=start&&e.at<end).length]));
  const steadyErrors=phaseErrors(deadline-seconds*1000,deadline);
  Object.assign(result,{steadyErrors,rampErrors:phaseErrors(started,deadline-seconds*1000),steadyLatencyMs,qualificationLatencyScope:'steady plateau; operations started with all users connected'});
  const q:any=steadyLatencyMs;
- {const rule=passRule({latencyMs:q,presenceV2Users,errors:steadyErrors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed&&visibilityChecks.mismatched===0&&expectationStats.undeliveredOps.size===0&&expectationStats.pendingSaveAtTeardown===0&&!operationAttempts.some(a=>!a.done)&&collectionReadiness.readyAtTeardown===myTarget,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
+ {const rule=passRule({latencyMs:q,presenceV2Users,errors:steadyErrors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed&&ThinClient.stats.checkpointFailures.length===0&&visibilityChecks.mismatched===0&&expectationStats.undeliveredOps.size===0&&expectationStats.pendingSaveAtTeardown===0&&!operationAttempts.some(a=>!a.done)&&collectionReadiness.readyAtTeardown===myTarget,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
  if(mixed){const mixedQualification=qualifyMixed({started,signIns,samples,errors:errorEvents,retries:lifecycle.events,attempts:operationAttempts});Object.assign(result,{mixedQualification,clientSloPassed:result.clientSloPassed&&mixedQualification.every(w=>w.passed)});}
  if(expanded){const expandedQualification=qualifyExpanded({reloads:reloadEvents,targetUsers:myTarget,permissions:permissionCycles,samples,errors:errorEvents,attempts:operationAttempts,reloadWindow:deployReloadWindowMs});Object.assign(result,{expandedQualification,clientSloPassed:result.clientSloPassed&&expandedQualification.passed});}
+ for(const store of checkpointStores)store.clear();
  console.log(JSON.stringify(result));await writeFile(process.env.LOAD_RESULT||state+'.result',JSON.stringify(result,null,2));
  process.exit(0);
 }
