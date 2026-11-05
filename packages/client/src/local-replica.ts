@@ -119,7 +119,8 @@ export type ReplicaStoragePostImages = {
 /** Keys removed speculatively from RAM during a full window replacement.
  * Arbitrating storage must report their final live/null post-images even when
  * the window write succeeds. Exact-candidate adapters may ignore this input. */
-export type ReplicaWindowWriteContext = { removedIDs: readonly string[] };
+export type ReplicaWindowWriteContext = { removedIDs: readonly string[]; starterGuard?: StarterPromotionGuard };
+export type StarterPromotionGuard = { signal: AbortSignal; isCurrent: () => boolean };
 
 type ReplicaWriteReceipt = ReplicaMetadataCommit | ReplicaStorageCommit | ReplicaStoragePostImages;
 
@@ -172,6 +173,7 @@ export interface LocalReplicaStorage {
   advanceWatermark?(windows: readonly ReplicaWindow[], cursor: ReplicaCursor | undefined, scope?: ReplicaScope): Promise<void | ReplicaMetadataCommit>;
   /** Persist a normalized Query/Collection materialization atomically. */
   replaceSnapshot?(snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
+  promoteStarterWindow?(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope, projection: readonly ReplicaRow[], guard: StarterPromotionGuard): Promise<void | ReplicaStorageCommit | ReplicaStoragePostImages>;
   replaceWindow?(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope?: ReplicaScope, projection?:readonly ReplicaRow[], context?: ReplicaWindowWriteContext): Promise<void | ReplicaStorageCommit | ReplicaStoragePostImages>;
   applyWindowDelta?(
     window: ReplicaWindow,
@@ -440,6 +442,7 @@ export class LocalReplica implements LocalReplicaView {
   private application = Promise.resolve();
   private applicationRunning = false;
   private disposed = false;
+  private readonly starterPromotions = new Set<AbortController>();
   private readonly applicationJobs: Array<{ urgent: boolean; run: () => Promise<void>; cancel: () => void }> = [];
 
   private enqueueApplication<T>(run: () => Promise<T>, urgent = false): Promise<T> {
@@ -498,6 +501,7 @@ export class LocalReplica implements LocalReplicaView {
 
   /** Release a discarded client's in-memory state without deleting durable data. */
   dispose(): void {
+    for(const controller of this.starterPromotions)controller.abort();
     this.disposed = true;
     this.scopeLoaded = false;
     this.scopeActivationGeneration++;
@@ -548,6 +552,7 @@ export class LocalReplica implements LocalReplicaView {
     const nextScope = normalizeReplicaScope(scope);
     if (!forceReload && this.scopeLoaded && this.scopeValue === nextScope) return this.application;
     if (this.scopeActivation && this.scopeActivationName === nextScope) return this.scopeActivation;
+    for(const controller of this.starterPromotions)controller.abort();
     const generation = ++this.scopeActivationGeneration;
     this.scopeActivation = undefined;
     this.scopeActivationName = undefined;
@@ -1062,6 +1067,18 @@ export class LocalReplica implements LocalReplicaView {
     return application;
   }
 
+  starterPromotionSupported(): boolean { return !this.storage || this.storage.promoteStarterWindow !== undefined; }
+
+  /** One final-ready promotion, cancellable through the physical DB commit. */
+  promoteStarterWindow(input: Parameters<LocalReplica["materializeWindow"]>[0], signal: AbortSignal, isCurrent: () => boolean): Promise<void> {
+    const scope = this.scopeValue, activation = this.scopeActivationGeneration;
+    if(!this.starterPromotionSupported() || input.scope!==scope) return Promise.reject(new Error("starter-promotion-unsupported-scope"));
+    const controller=new AbortController(),abort=()=>controller.abort();
+    signal.addEventListener("abort",abort,{once:true});if(signal.aborted)controller.abort();this.starterPromotions.add(controller);
+    const guard = {signal:controller.signal,isCurrent:()=>!controller.signal.aborted && isCurrent() && this.scopeValue===scope && this.scopeActivationGeneration===activation};
+    return this.enqueueApplication(()=>this.materializeWindowNow({...input,scope,starterGuard:guard})).finally(()=>{this.starterPromotions.delete(controller);signal.removeEventListener("abort",abort);});
+  }
+
   /** Replace one server/cache window while retaining shared normalized entities. */
   replaceWindow(input: Parameters<LocalReplica["materializeWindow"]>[0]): Promise<void> {
     return this.materializeWindow(input);
@@ -1292,7 +1309,10 @@ export class LocalReplica implements LocalReplicaView {
     hashes?: Record<string, string>;
     removedIDs?: string[];
     scope?: ReplicaScope;
+    starterGuard?: StarterPromotionGuard;
   }, delta?: { upserts: ReplicaRow[]; deleted: string[] }) {
+    const assertStarter = () => { if(input.starterGuard && (!input.starterGuard.isCurrent() || input.starterGuard.signal.aborted)) throw new Error("starter-promotion-retired"); };
+    assertStarter();
     if (input.scope !== undefined && normalizeReplicaScope(input.scope) !== this.scopeValue) return;
     if (!input.signature.trim() || !input.entity.trim() || !input.key.trim()) {
       throw new Error("replica materialization requires signature, entity, and key");
@@ -1371,7 +1391,10 @@ export class LocalReplica implements LocalReplicaView {
     const rowsChanged = membershipChanged || changedRowIDs.size > 0;
     const writeScope = this.scopeValue;
     let metadataCommit: void | ReplicaWriteReceipt = undefined;
-    if (!epochChanged && this.storage?.applyWindowDelta && (delta || !rowsChanged)) {
+    if (input.starterGuard && this.storage) {
+      if(!this.storage.promoteStarterWindow)throw new Error("starter-promotion-storage-unsupported");
+      metadataCommit=await this.persist(()=>this.storage!.promoteStarterWindow!(window,snapshot,writeScope,input.rows,input.starterGuard!));
+    } else if (!epochChanged && this.storage?.applyWindowDelta && (delta || !rowsChanged)) {
       const writeDelta: ReplicaWindowDelta = delta ? {
         upserts: this.storage.supportsMembershipDeltas ? delta.upserts : delta.upserts.filter(row => changedRowIDs.has(String(row[input.key]))),
         deleted: delta.deleted,
@@ -1385,6 +1408,7 @@ export class LocalReplica implements LocalReplicaView {
     } else if (this.storage?.replaceSnapshot) {
       await this.persist(() => this.storage!.replaceSnapshot!(snapshot, writeScope));
     }
+    assertStarter();
     const effects = storagePublicationEffects();
     // The adapter can prove that this metadata commit immediately follows our
     // last reconciled sequence. Our next maps already contain that exact write.
@@ -1403,6 +1427,7 @@ export class LocalReplica implements LocalReplicaView {
         effects,
       });
     }
+    assertStarter();
     if (epochChanged) effects.reset = true;
     this.publishStorageEffects(effects);
     this.entities = nextEntities;
@@ -2185,6 +2210,12 @@ export class MemoryLocalReplicaStorage implements LocalReplicaStorage {
   }
   async replaceSnapshot(snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope) {
     this.values.set(normalizeReplicaScope(scope), cloneSnapshot(snapshot));
+  }
+  async promoteStarterWindow(_window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope, _projection: readonly ReplicaRow[], guard: StarterPromotionGuard) {
+    if(guard.signal.aborted || !guard.isCurrent())throw new Error("starter-promotion-retired");
+    const next=cloneSnapshot(snapshot);
+    if(guard.signal.aborted || !guard.isCurrent())throw new Error("starter-promotion-retired");
+    this.values.set(normalizeReplicaScope(scope),next);
   }
   async replaceWindow(_window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope) {
     this.values.set(normalizeReplicaScope(scope), cloneSnapshot(snapshot));

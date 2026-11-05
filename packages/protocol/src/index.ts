@@ -175,6 +175,7 @@ export type ReplicaDirective = {
 };
 
 export type ServerCapabilities = {
+  replicaStarterFiles?: 1;
   /** Can omit old transaction row images when the client advertises version 1. */
   replicaNoOldValues?: 1;
   /** Connection-local field patches, decoded before applying logical messages. */
@@ -238,6 +239,7 @@ export type ReducerCallRequest = {
 };
 
 export type ReplicaOpenRequest = {
+  starter?: { version: 1 };
   id: string;
   path: string;
   args: JsonValue;
@@ -259,6 +261,7 @@ export type ReplicaReady = {
 };
 
 export type ClientCapabilities = {
+  replicaStarterFiles?: 1;
   /** Applies transactions from its local base; does not require oldValue. */
   replicaNoOldValues?: 1;
   /** Connection-local field patches, decoded before applying logical messages. */
@@ -317,13 +320,27 @@ export type PresenceMember = {
   since: number;
 };
 
+export type StarterPiece = { index: number; hash: string; rawHash: string; compressed: boolean; bytes: number; rawBytes: number };
+export type StarterOffer = {
+  type: "replica.starterOffer"; id: string; offerId: string; version: 1; expiresAt: number;
+  cursor: ReplicaCursor; key: string; path: string; scope: string; visibilityScope: string;
+  orderBy: string; orderDirection: "asc" | "desc"; mode: "eager" | "progressive";
+  maxRows: number; maxBytes: number; truncated: false; digest: string; rows: number;
+  serializedDefinition: string; args: JsonValue;
+  format: 1; encoding: string; columnTypes: Record<string,string>; pieces: StarterPiece[];
+};
+
 export type ClientMessage =
+  | { type: "replica.starterPiece"; id: string; offerId: string; index: number }
+  | { type: "replica.starterCommit"; id: string; offerId: string; cursor: ReplicaCursor; digest: string }
+  | { type: "replica.starterCancel"; id: string; offerId: string }
   | { type: "auth"; clientContract?: number; id: string; token?: string; project?: string; tenant?: string; controlOnly?: boolean; public?: boolean; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
   | { type: "query.call"; id: string; path: string; args: JsonValue; scope?: ExecutionScope }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue; scope?: ExecutionScope; windowRevision?: string }
   | { type: "query.unsubscribe"; id: string }
   | {
     type: "replica.open";
+    starter?: { version: 1 };
     id: string;
     path: string;
     args: JsonValue;
@@ -393,6 +410,9 @@ export type ClientMessage =
 export type ReducerErrorClass = "rejected" | "transient" | "update_required" | "unauthenticated";
 
 export type ServerMessage =
+  | StarterOffer
+  | { type: "replica.starterPiece"; id: string; offerId: string; index: number; data: string }
+  | { type: "replica.starterFallback"; id: string; offerId?: string; reason: string }
 	| {
 		type: "query.batch";
 		messages: ServerMessage[];

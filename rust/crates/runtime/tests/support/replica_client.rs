@@ -203,6 +203,7 @@ impl ClientModel {
             None => None,
         };
         let mut request = ReplicaOpenRequest {
+            starter: None,
             id: id.into(),
             path: path.into(),
             args: entity_args.clone(),

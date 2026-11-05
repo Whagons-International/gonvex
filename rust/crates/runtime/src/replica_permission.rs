@@ -1,6 +1,6 @@
-//! Internal LOCAL snapshot experiment. No wire handler calls this module.
-//! Registration never installs schema, and the returned open has NO live
-//! subscription. A commit/admission lease barrier is required before activation.
+//! Internal LOCAL indexed snapshots. Default-off starter transport additionally
+//! requires a sealed complete-provider proof and fresh writer-ordered admission.
+//! Legacy snapshot registration alone never grants network authority.
 use super::*;
 use crate::permissions::query::{self, NormalizedBinding, ReadIdentity};
 use futures_util::TryStreamExt;
@@ -22,7 +22,7 @@ pub(crate) enum LocalSnapshotError {
 
 /// Owned, non-client registration. Exact module/physical schema and normalized
 /// binding are pinned; possession alone never bypasses same-read readiness.
-/// Deliberately no Runtime registry, app migration, SDK or network selector.
+/// This legacy binding alone is never a network or live-delivery capability.
 #[derive(Clone)]
 pub(crate) struct LocalSnapshotRegistration {
     binding: NormalizedBinding,
@@ -33,6 +33,8 @@ pub(crate) struct LocalSnapshotRegistration {
     source_schemas: Vec<(String, String)>,
     source_guards: Vec<(String, String, String)>,
     manifest_identity: Option<Vec<u8>>,
+    #[cfg(feature = "starter-files")]
+    transport_proof: Option<crate::starter_files::provider::CompleteProvider>,
 }
 
 pub(crate) struct LocalSnapshotResult {
@@ -205,6 +207,8 @@ impl Runtime {
             source_schemas: Vec::new(),
             source_guards: Vec::new(),
             manifest_identity: None,
+            #[cfg(feature = "starter-files")]
+            transport_proof: None,
         })
     }
 
@@ -420,6 +424,24 @@ async fn scan_local_window(
         ));
         sql.push_str(&format!(" LIMIT ?{}", offset + values.len()));
     }
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("STARTER_QUERY_PLAN") {
+        let explain = format!("EXPLAIN QUERY PLAN {sql}");
+        let mut plan = query::bind(prepared, &explain);
+        for parameter in values.iter().cloned() {
+            plan = parameter.bind(plan);
+        }
+        let rows = plan.fetch_all(&mut **tx.transaction()).await?;
+        let details: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get::<String, _>(3).unwrap())
+            .collect();
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&serde_json::json!({"sql":sql,"details":details})).unwrap(),
+        )
+        .unwrap();
+    }
     let mut query = query::bind(prepared, &sql);
     for parameter in values {
         query = parameter.bind(query);
@@ -578,6 +600,8 @@ impl Runtime {
             indexes::seal(&mut tx,scope_id).await?;
             let generation=indexes::state(tx.transaction(),scope_id).await?.generation;
             Ok::<_,LocalSnapshotError>(LocalSnapshotRegistration{
+                #[cfg(feature = "starter-files")]
+                transport_proof: None,
                 binding:NormalizedBinding{scope_id,required_generation:generation,scope,universe:bound.collection.universe,expression:bound.expression,authority},
                 definition,generation:module.generation,artifact_hash:module.artifact_hash.clone(),schema,source_schemas,source_guards,manifest_identity:Some(manifest_identity),
             })
@@ -673,11 +697,22 @@ impl Runtime {
     }
 }
 
-// Private starter adapter. This is deliberately separate from normal Replica
-// handlers until the bootstrap/catchup client contract is reviewed.
+// SQL/disk adapter. The separate default-off transport enforces the reviewed
+// bootstrap contract, sealed provider completeness and fresh enqueue barriers.
 #[cfg(feature = "starter-files")]
 #[path = "starter_files/adapter.rs"]
 pub(crate) mod starter_adapter;
+
+#[cfg(feature = "starter-files")]
+#[path = "starter_files/transport.rs"]
+pub(crate) mod transport;
+
+impl LocalSnapshotRegistration {
+    /// Trusted store maintenance locator; never an authorization capability.
+    pub(crate) fn index_scope(&self) -> i64 {
+        self.binding.scope_id
+    }
+}
 
 /// Read-only adapter boundary for independently compiled, fresh validated scans.
 /// Caller owns the SAME transaction for certificate validation and this visit.

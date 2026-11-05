@@ -23,7 +23,7 @@ fn now_ms() -> u64 {
         .try_into()
         .unwrap_or(u64::MAX)
 }
-async fn authority(
+pub(super) async fn authority(
     tx: &mut TenantTransaction,
     registration: &LocalSnapshotRegistration,
     session: &TenantSession,
@@ -118,6 +118,18 @@ impl Runtime {
                         .await?;
                     let a = authority(&mut tx, &registration, &session).await?;
                     tx.commit().await?;
+                    if let Ok(manifest) = runtime
+                        .read_local_starter(
+                            &registration,
+                            &session,
+                            &store,
+                            |_, _| Ok(()),
+                            collection_use,
+                        )
+                        .await
+                    {
+                        return Ok(manifest);
+                    }
                     if !store.enqueue_after_miss(&a) {
                         return Err(LocalSnapshotError::Rejected(
                             "starter queue full or singleflight",
@@ -178,12 +190,27 @@ impl Runtime {
             &registration.binding.scope.projection_version,
         )
         .await?;
+        let mut rows = 0usize;
+        let mut bytes = 0usize;
         scan_local_window(
             &mut tx,
             &registration.definition,
             &prepared,
             &serde_json::json!({}),
             |row| {
+                if registration.transport_proof.is_some() {
+                    rows += 1;
+                    bytes = bytes.saturating_add(
+                        serde_json::to_vec(&row.row)
+                            .map_err(|_| ReplicaError::InvalidArguments)?
+                            .len(),
+                    );
+                    if rows > crate::starter_files::format::MAX_ROWS as usize
+                        || bytes > crate::starter_files::format::MAX_TOTAL as usize
+                    {
+                        return Err(ReplicaError::InvalidArguments);
+                    }
+                }
                 build
                     .row(&row.row)
                     .map_err(|_| ReplicaError::InvalidArguments)
@@ -238,10 +265,21 @@ impl Runtime {
         .await
     }
 
-    async fn with_local_starter_admission<T>(
+    pub(super) async fn with_local_starter_admission<T>(
         &self,
         registration: &LocalSnapshotRegistration,
         session: &TenantSession,
+        use_starter: impl FnOnce(&Authority) -> io::Result<T>,
+    ) -> Result<T, LocalSnapshotError> {
+        self.with_local_starter_admission_guarded(registration, session, None, use_starter)
+            .await
+    }
+
+    pub(super) async fn with_local_starter_admission_guarded<T>(
+        &self,
+        registration: &LocalSnapshotRegistration,
+        session: &TenantSession,
+        native_auth: Option<(&str, &str, &str)>,
         use_starter: impl FnOnce(&Authority) -> io::Result<T>,
     ) -> Result<T, LocalSnapshotError> {
         // Module guard freezes activation until all bytes/publication complete.
@@ -277,6 +315,29 @@ impl Runtime {
                 return Err(LocalSnapshotError::Rejected("starter policy changed"));
             }
         }
+        if let Some(proof) = &registration.transport_proof {
+            let raw = self
+                .inner
+                .modules
+                .permission_manifest(&module)
+                .await
+                .ok_or(LocalSnapshotError::Rejected("transport source removed"))?;
+            let plan = module
+                .visibility
+                .get(&registration.definition.table)
+                .ok_or(LocalSnapshotError::Rejected("transport policy removed"))?;
+            if serde_json::to_vec(&raw).unwrap().as_slice() != proof.manifest()
+                || serde_json::to_vec(plan).unwrap().as_slice() != proof.plan()
+                || serde_json::to_vec(&registration.definition)
+                    .unwrap()
+                    .as_slice()
+                    != proof.definition()
+            {
+                return Err(LocalSnapshotError::Rejected(
+                    "complete provider authority changed",
+                ));
+            }
+        }
         let control = self
             .inner
             .control_plane
@@ -304,10 +365,28 @@ impl Runtime {
                 "landlord cannot be a starter tenant",
             ));
         }
+        let auth_expiry = if let Some((hash, project, account)) = native_auth {
+            if project != session.identity.project_id || account != session.identity.account.id {
+                return Err(LocalSnapshotError::Rejected("starter auth scope mismatch"));
+            }
+            let expiry:Option<i64>=sqlx::query_scalar("SELECT expires_at FROM gonvex_auth_sessions WHERE token_hash=?1 AND project_id=?2 AND account_id=?3 AND revoked_at IS NULL AND expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER)").bind(hash).bind(project).bind(account).fetch_optional(&mut *landlord).await?;
+            Some(
+                expiry
+                    .filter(|n| *n > 0)
+                    .ok_or(LocalSnapshotError::Rejected(
+                        "starter native session revoked/expired",
+                    ))? as u64,
+            )
+        } else {
+            None
+        };
         let mut tx = control
             .begin_tenant_transaction(&session.route, false)
             .await?;
-        let fresh = authority(&mut tx, registration, session).await?;
+        let mut fresh = authority(&mut tx, registration, session).await?;
+        if let Some(expiry) = auth_expiry {
+            fresh.valid_until_ms = fresh.valid_until_ms.min(expiry);
+        }
         let result = use_starter(&fresh).map_err(reject);
         // No writes are intended; rollback prevents accidental change publication.
         tx.rollback().await?;

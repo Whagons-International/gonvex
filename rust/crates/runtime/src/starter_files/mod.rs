@@ -1,5 +1,6 @@
 //! Versioned disk backend for the private indexed snapshot experiment.
-//! No HTTP, websocket, SDK selector or normal provisioning enables this module.
+//! Default-off transport is connection-scoped and requires a sealed source proof.
+//! No raw-content-hash endpoint or normal provisioning enables this module.
 //! Callers must hold the authoritative commit/admission lease while using
 //! `publish`/`read`; a digest is never an authorization capability.
 #![allow(dead_code)]
@@ -326,6 +327,30 @@ impl Store {
         }
         Ok(manifest)
     }
+    /// Transport-only read after the complete offered format was verified.
+    /// The exact immutable manifest is pinned, and every selected piece still
+    /// gets fresh authority + encoded integrity before its bounded enqueue.
+    pub(crate) fn read_pinned_piece(
+        &self,
+        expected: &Manifest,
+        index: usize,
+        mut current: impl FnMut() -> io::Result<Authority>,
+        mut visit: impl FnMut(&Piece, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let _guard = self.state.lock().unwrap();
+        let actual = self.load(&expected.identity)?;
+        if serde_json::to_vec(&actual)? != serde_json::to_vec(expected)?
+            || !self.usable(&actual, &current()?)
+        {
+            return Err(invalid());
+        }
+        let piece = actual.pieces.get(index).ok_or_else(invalid)?;
+        let bytes = self.read_piece(piece)?;
+        if !self.usable(&actual, &current()?) {
+            return Err(invalid());
+        }
+        visit(piece, &bytes)
+    }
     fn read_piece(&self, p: &Piece) -> io::Result<Vec<u8>> {
         if !valid_hash(&p.hash)
             || !valid_hash(&p.raw_hash)
@@ -596,4 +621,13 @@ impl Write for CappedWriter<'_> {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+pub(crate) mod format;
+
+pub(crate) mod provider;
+
+#[cfg(test)]
+pub(crate) fn capture_allocations(start: bool) -> (u64, u64) {
+    tests::capture_all(start)
 }

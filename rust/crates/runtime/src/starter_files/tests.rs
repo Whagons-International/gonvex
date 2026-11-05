@@ -1,9 +1,28 @@
 use super::*;
 use serde_json::json;
 struct CountingAlloc;
+static CAPTURE_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ALL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ALL_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn count_all(size: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if CAPTURE_ALL.load(Relaxed) {
+        ALL_COUNT.fetch_add(1, Relaxed);
+        ALL_BYTES.fetch_add(size as u64, Relaxed);
+    }
+}
+pub(super) fn capture_all(start: bool) -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    CAPTURE_ALL.store(false, Relaxed);
+    let value = (ALL_COUNT.swap(0, Relaxed), ALL_BYTES.swap(0, Relaxed));
+    CAPTURE_ALL.store(start, Relaxed);
+    value
+}
+
 thread_local! { static ALLOCS: std::cell::Cell<Option<(u64,u64)>> = const { std::cell::Cell::new(None) }; }
 unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        count_all(layout.size());
         let _ = ALLOCS.try_with(|c| {
             if let Some((n, b)) = c.get() {
                 c.set(Some((n + 1, b + layout.size() as u64)));
@@ -15,6 +34,7 @@ unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
         unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        count_all(size);
         let _ = ALLOCS.try_with(|c| {
             if let Some((n, b)) = c.get() {
                 c.set(Some((n + 1, b + size as u64)));
