@@ -705,14 +705,13 @@ impl Runtime {
             if !reset {
                 subscription.required_revision = subscription.required_revision.max(event_revision);
             }
-            match self
-                .execute_live_query_plan(
-                    session,
-                    &subscription.plan,
-                    &subscription.visibility,
-                    &subscription.args,
-                )
-                .await
+            match Box::pin(self.execute_live_query_plan(
+                session,
+                &subscription.plan,
+                &subscription.visibility,
+                &subscription.args,
+            ))
+            .await
             {
                 Ok(snapshot) => {
                     if snapshot.revision < subscription.required_revision {
