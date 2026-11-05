@@ -1,6 +1,7 @@
 //! Authenticated connection-scoped bootstrap. No public hash/file endpoint.
 use super::starter_adapter::authority;
 use super::*;
+use crate::starter_files::diagnostics::{Scope, Site};
 use crate::starter_files::{format, provider, Manifest, Store};
 use base64::Engine;
 use gonvex_protocol::{StarterOffer, StarterPiece};
@@ -410,6 +411,7 @@ impl Runtime {
             &registered.registration.binding.scope.projection_version,
         )
         .await?;
+        let sql_timing = Scope::new(Site::OfferSql);
         let mut inspected_digest = ReplicaAggregate::new(false);
         let inspected_window = scan_local_window(
             &mut inspect,
@@ -423,6 +425,7 @@ impl Runtime {
         )
         .await?;
         let inspected_digest = inspected_digest.digest();
+        drop(sql_timing);
         inspect.commit().await?;
         if inspected_window.truncated
             || inspected_window.boundary.is_some()
@@ -478,11 +481,14 @@ impl Runtime {
                     let mut sequence = 0;
                     // Obtain the authoritative manifest through a no-payload pass, then
                     // validate the exact raw representation under the same writer lease.
+                    let read_timing = Scope::new(Site::OfferRead);
                     let manifest = registered.store.read(
                         &fresh.identity,
                         || Ok(fresh.clone()),
                         |_, _| Ok(()),
                     )?;
+                    drop(read_timing);
+                    let format_timing = Scope::new(Site::OfferFormat);
                     let mut v =
                         format::Verifier::new(&registered.registration.definition, &manifest)?;
                     registered.store.read(
@@ -497,6 +503,8 @@ impl Runtime {
                         },
                     )?;
                     let verified = v.finish(&manifest)?;
+                    crate::starter_files::diagnostics::add(Site::FormatRows, verified.rows);
+                    drop(format_timing);
                     let d = &registered.registration.definition;
                     // Nontruncated complete set only. Exact boundary proof is repeated
                     // using the normal v2 SQL scanner at commit, before any ready.
@@ -626,6 +634,7 @@ impl Runtime {
             session,
             Some(auth.parts()),
             |fresh| {
+                let _read_timing = Scope::new(Site::PieceRead);
                 offer
                     .registered
                     .store
@@ -771,6 +780,7 @@ impl Runtime {
         // This policy certificate forbids all parents/joins/negative branches;
         // nevertheless obtain the NORMAL v2 resolved principal and SQL window,
         // not a normalized-set fingerprint or a client-provided digest.
+        let resolve_timing = Scope::new(Site::CommitResolve);
         let resolved = visibility::resolve_with_parents(
             &mut transaction,
             session,
@@ -783,6 +793,8 @@ impl Runtime {
         )
         .await
         .map_err(ReplicaError::from)?;
+        drop(resolve_timing);
+        let sql_timing = Scope::new(Site::CommitSql);
         let mut digest = ReplicaAggregate::new(false);
         let window = scan_window(
             &mut transaction,
@@ -796,6 +808,8 @@ impl Runtime {
             },
         )
         .await?;
+        crate::starter_files::diagnostics::add(Site::SqlRows, window.rows as u64);
+        drop(sql_timing);
         if window.truncated
             || window.boundary.is_some()
             || window.rows as u64 != offer.manifest.rows
@@ -827,7 +841,9 @@ impl Runtime {
         // Authoritative read commits before anchor installation. The landlord
         // writer lease excludes account disable; the tenant writer connection
         // remains exclusively held until COMMIT returns. No network await.
+        let durability_timing = Scope::new(Site::CommitDurability);
         transaction.commit().await?;
+        drop(durability_timing);
         // Reacquire and revalidate before enqueue: a tenant write may win the
         // commit->enqueue boundary. The cached anchor is installed only after
         // this final same-serial read, under the fresh writer lease.

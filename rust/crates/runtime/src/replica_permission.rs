@@ -134,6 +134,11 @@ async fn source_schema(
     }
     // SQL validation only, not a Rust authorization loop. TEXT affinity still
     // permits BLOB storage; reject it rather than silently converting row IDs.
+    #[cfg(feature = "starter-files")]
+    crate::starter_files::diagnostics::add(
+        crate::starter_files::diagnostics::Site::RootShapeScans,
+        1,
+    );
     let invalid: i64 = sqlx::query_scalar(&format!(
         "SELECT EXISTS(SELECT 1 FROM {} WHERE typeof({}) <> 'text' OR {}='' OR instr({},char(0))<>0)",
         quote(&definition.table)?,
@@ -460,6 +465,11 @@ async fn scan_local_window(
         }
     }
     drop(stream);
+    #[cfg(feature = "starter-files")]
+    crate::starter_files::diagnostics::add(
+        crate::starter_files::diagnostics::Site::SqlRows,
+        collector.window.rows as u64,
+    );
     Ok(collector.finish())
 }
 

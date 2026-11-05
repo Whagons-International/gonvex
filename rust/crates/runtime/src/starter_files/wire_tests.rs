@@ -687,7 +687,11 @@ async fn starter_live_module_benchmark() {
                 .unwrap()
                 .clear();
             gonvex_profiler::reset();
-            crate::starter_files::capture_allocations(true);
+            crate::raw_sites::reset();
+            crate::starter_files::diagnostics::reset(std::env::var_os("STARTER_DETAIL").is_some());
+            crate::starter_files::capture_allocations(
+                std::env::var("STARTER_ALLOC_PROFILE").as_deref() != Ok("0"),
+            );
             let cpu_start = process_cpu_ns();
             let output = tokio::process::Command::new("node")
                 .arg(concat!(
@@ -719,7 +723,7 @@ async fn starter_live_module_benchmark() {
                 .lock()
                 .unwrap()
                 .clone();
-            reports.push(json!({"repeat":repeat,"node":node,"server_stage_wall_ns":timings,"server_process_cpu_ns":server_cpu_ns,"server_alloc_count_requested_bytes":server_allocations,"fast_profiler":gonvex_profiler::snapshot().into_iter().filter(|s|s.count>0).map(|s|json!({"stage":s.name(),"label":format!("{:?}",s.label),"count":s.count,"sum_ns":s.sum,"max_ns":s.max})).collect::<Vec<_>>()}));
+            reports.push(json!({"repeat":repeat,"node":node,"raw_sites":crate::raw_sites::snapshot(),"detail":crate::starter_files::diagnostics::snapshot(),"server_stage_wall_ns":timings,"server_process_cpu_ns":server_cpu_ns,"server_alloc_count_requested_bytes":server_allocations,"fast_profiler":gonvex_profiler::snapshot().into_iter().filter(|s|s.count>0).map(|s|json!({"stage":s.name(),"label":format!("{:?}",s.label),"count":s.count,"sum_ns":s.sum,"max_ns":s.max})).collect::<Vec<_>>()}));
         }
     }
     fn files(path: &std::path::Path) -> Vec<(String, u64)> {
@@ -751,7 +755,7 @@ async fn starter_live_module_benchmark() {
             compressed_bytes += m.pieces.iter().map(|p| p.bytes).sum::<u64>();
         }
     }
-    let result = json!({"build_ns":f.build_ns,"raw_bytes":raw_bytes,"compressed_bytes":compressed_bytes,"server_resident_bytes":resident_bytes(),"qualification":"synthetic 9002 visible tasks, 400-byte extra descriptions; debug runtime, Node-only codec; warm server and OS, fresh client/storage each run; authority/window/format scan, native session checks, pieces, normal-v2 anchor scan included; timings are noisy wall ns/op, not 1-vCPU capacity; Rust allocation requests across all test-process threads (includes workers and fixture maintenance), excludes SQLite C and Node; RSS is whole Node process peak, SDK charges estimated retained JS, not hard RSS cap", "rows":9002,"reports":reports,"disk_files":disk,"disk_bytes":disk.iter().map(|x|x.1).sum::<u64>()});
+    let result = json!({"optimized":!cfg!(debug_assertions),"debug_assertions":cfg!(debug_assertions),"allocation_profile":std::env::var("STARTER_ALLOC_PROFILE").as_deref()!=Ok("0"),"build_ns":f.build_ns,"raw_bytes":raw_bytes,"compressed_bytes":compressed_bytes,"server_resident_bytes":resident_bytes(),"qualification":"synthetic 9002 visible tasks, 400-byte extra descriptions; runtime build profile described by optimized/debug_assertions fields, Node-only codec; warm server and OS, fresh client/storage each run; authority/window/format scan, native session checks, pieces, normal-v2 anchor scan included; timings are noisy wall ns/op, not 1-vCPU capacity; Rust allocation requests across all test-process threads (includes workers and fixture maintenance), excludes SQLite C and Node; RSS is whole Node process peak, SDK charges estimated retained JS, not hard RSS cap", "rows":9002,"reports":reports,"disk_files":disk,"disk_bytes":disk.iter().map(|x|x.1).sum::<u64>()});
     std::fs::write(
         std::env::var("STARTER_BENCH_RESULT").unwrap_or_else(|_| {
             "/mnt/data/work/gonvex-starter-bootstrap/module-benchmark.json".into()

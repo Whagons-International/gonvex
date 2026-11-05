@@ -1,5 +1,6 @@
 //! SQL streaming and fresh-authority admission for private local starters.
 use super::*;
+use crate::starter_files::diagnostics::{Scope, Site};
 use crate::starter_files::{Authority, Build, Identity, Manifest, Piece, Store};
 use std::{io, sync::Arc};
 
@@ -35,17 +36,24 @@ pub(super) async fn authority(
             "parameterized starter unsupported",
         ));
     }
+    let timing = Scope::new(Site::AuthoritySchema);
     let schema = source_schema(tx, &registration.definition).await?;
     if schema != registration.schema {
         return Err(LocalSnapshotError::Rejected("starter schema changed"));
     }
+    drop(timing);
+    let timing = Scope::new(Site::AuthoritySources);
     verify_source_registration(tx, registration).await?;
+    drop(timing);
+    let timing = Scope::new(Site::AuthorityGuards);
     indexes::verify_local_rows(
         tx.transaction(),
         registration.binding.scope_id,
         &registration.definition.table,
     )
     .await?;
+    drop(timing);
+    let timing = Scope::new(Site::AuthorityPrepare);
     let prepared = query::prepare_projection(
         tx,
         session,
@@ -54,6 +62,8 @@ pub(super) async fn authority(
         &projection_version(&registration.definition, &schema),
     )
     .await?;
+    drop(timing);
+    let _stamp = Scope::new(Site::AuthorityStamp);
     let clock = clock_in_transaction(tx).await?;
     let now = now_ms();
     Ok(Authority {
@@ -282,6 +292,7 @@ impl Runtime {
         native_auth: Option<(&str, &str, &str)>,
         use_starter: impl FnOnce(&Authority) -> io::Result<T>,
     ) -> Result<T, LocalSnapshotError> {
+        let module_timing = Scope::new(Site::AdmissionModule);
         // Module guard freezes activation until all bytes/publication complete.
         let module = self
             .inner
@@ -338,6 +349,8 @@ impl Runtime {
                 ));
             }
         }
+        drop(module_timing);
+        let native_timing = Scope::new(Site::AdmissionNative);
         let control = self
             .inner
             .control_plane
@@ -383,6 +396,7 @@ impl Runtime {
         let mut tx = control
             .begin_tenant_transaction(&session.route, false)
             .await?;
+        drop(native_timing);
         let mut fresh = authority(&mut tx, registration, session).await?;
         if let Some(expiry) = auth_expiry {
             fresh.valid_until_ms = fresh.valid_until_ms.min(expiry);

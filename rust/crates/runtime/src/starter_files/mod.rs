@@ -17,6 +17,7 @@ use std::{
     },
 };
 
+pub(crate) mod diagnostics;
 const FORMAT: u32 = 1;
 // Exactly the websocket level-1, 12-bit, raw RFC7692 no-context compressor.
 const ENCODING: &str = "json-lines-pmd-level1-window12-no-context-v1";
@@ -49,7 +50,10 @@ impl Identity {
         }
     }
     fn key(&self) -> String {
-        hash(&serde_json::to_vec(self).expect("identity"))
+        let _timing = diagnostics::Scope::new(diagnostics::Site::IdentitySerialize);
+        let bytes = serde_json::to_vec(self).expect("identity");
+        diagnostics::add(diagnostics::Site::IdentityBytes, bytes.len() as u64);
+        hash(&bytes)
     }
 }
 #[derive(Clone, Debug)]
@@ -363,6 +367,7 @@ impl Store {
             &self.root.join("pieces").join(&p.hash),
             self.limits.piece_bytes,
         )?;
+        diagnostics::add(diagnostics::Site::EncodedReadBytes, bytes.len() as u64);
         if bytes.len() as u64 != p.bytes || hash(&bytes) != p.hash {
             return Err(invalid());
         }
