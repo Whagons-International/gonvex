@@ -22,8 +22,9 @@ pub(crate) enum Site {
     FormatRows,
     EncodedReadBytes,
     IdentityBytes,
+    OfferVmSteps,
 }
-const N: usize = Site::IdentityBytes as usize + 1;
+const N: usize = Site::OfferVmSteps as usize + 1;
 const NAMES: [&str; N] = [
     "authority.schema",
     "authority.sources",
@@ -45,6 +46,7 @@ const NAMES: [&str; N] = [
     "format.rows",
     "encoded.read_bytes",
     "identity.serialized_bytes",
+    "offer.vm_steps",
 ];
 #[cfg(all(test, feature = "perf-fixture"))]
 mod implementation {

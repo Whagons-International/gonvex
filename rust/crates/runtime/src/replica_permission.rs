@@ -447,6 +447,50 @@ async fn scan_local_window(
         )
         .unwrap();
     }
+    #[cfg(all(test, feature = "starter-files"))]
+    if let Ok(path) = std::env::var("STARTER_QUERY_VM") {
+        // Separate profiling oracle: same SQL, values and read transaction.
+        // The direct batch worker owns its cancellation progress handler, so
+        // sample this SQLx execution instead of replacing that safety handler.
+        // This extra SELECT is excluded from primary CPU/allocation cases.
+        let steps = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let copy = steps.clone();
+        tx.transaction()
+            .lock_handle()
+            .await?
+            .set_progress_handler(1000, move || {
+                copy.fetch_add(1000, std::sync::atomic::Ordering::Relaxed);
+                true
+            });
+        let mut probe = query::bind(prepared, &sql);
+        for parameter in values.iter().cloned() {
+            probe = parameter.bind(probe);
+        }
+        let mut stream = probe.fetch(&mut **tx.transaction());
+        let mut rows = 0u64;
+        let outcome = async {
+            while stream.try_next().await?.is_some() {
+                rows += 1;
+            }
+            Ok::<_, sqlx::Error>(())
+        }
+        .await;
+        drop(stream);
+        tx.transaction()
+            .lock_handle()
+            .await?
+            .remove_progress_handler();
+        outcome?;
+        let steps = steps.load(std::sync::atomic::Ordering::Relaxed);
+        crate::starter_files::diagnostics::add(
+            crate::starter_files::diagnostics::Site::OfferVmSteps,
+            steps,
+        );
+        std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({
+            "vmStepsSampled":steps,"resolutionInstructions":1000,"outputRows":rows,
+            "qualification":"Extra actual SELECT using exact main query/typed binds/SAME TX; SQLx profiler execution, not timed direct-batch execution; primary and allocation cases do not enable this probe"
+        })).unwrap()).unwrap();
+    }
     let mut collector = WindowCollector::new(definition);
     // Use the normal replica's bounded batches on this SAME transaction. This
     // changes only transport from SQLite, not SQL, bind types or admission.
