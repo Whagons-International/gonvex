@@ -74,9 +74,11 @@ jobs:
           path: |
             ${{ runner.temp }}/native-sqlite/receipt.json
             ${{ runner.temp }}/native-sqlite/source.json
+            ${{ runner.temp }}/native-sqlite/launch.ndjson
             ${{ runner.temp }}/native-sqlite/events.ndjson
             ${{ runner.temp }}/native-sqlite/process-events.log
             ${{ runner.temp }}/native-sqlite/metro.log
             ${{ runner.temp }}/native-sqlite/device.log
             ${{ runner.temp }}/native-sqlite/startup.log
+            ${{ runner.temp }}/native-sqlite/native-logcat.log
           if-no-files-found: ignore

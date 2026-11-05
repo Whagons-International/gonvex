@@ -37,7 +37,9 @@ def main():
     native = {'runtime': digest(binary), 'moduleHost': digest(host)}
     paths = ['verification/backend-receipts/check_module_upgrade.py', 'verification/backend-receipts/check_restart.py',
              'verification/backend-receipts/check_sdk.py', 'verification/backend-receipts/sdk_module_upgrade.mjs',
-             'verification/backend-receipts/browser_module_upgrade_entry.mjs', '.github/workflows/runtime-regression.yml',
+             'verification/backend-receipts/browser_module_upgrade_entry.mjs',
+             'verification/backend-receipts/replica-frame-evidence.mjs',
+             'verification/backend-receipts/replica-frame-evidence.test.mjs', '.github/workflows/runtime-regression.yml',
              'rust/crates/runtime/src/tests/receipt_guarantee_tests.rs', 'rust/crates/runtime/src/lib.rs',
              'rust/crates/runtime/src/execution.rs', 'rust/crates/runtime/src/modules.rs', 'rust/crates/store/src/lib.rs',
              'rust/Cargo.lock', 'pnpm-lock.yaml']

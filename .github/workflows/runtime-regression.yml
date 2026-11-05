@@ -299,6 +299,7 @@ jobs:
           if-no-files-found: ignore
       - name: Require SDK identity and completeness through backend contract replacement
         run: |
+          node --test verification/backend-receipts/replica-frame-evidence.test.mjs
           python3 verification/backend-receipts/check_module_upgrade.py \
             --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
             --module-host rust/target/debug/gonvex-module-host \

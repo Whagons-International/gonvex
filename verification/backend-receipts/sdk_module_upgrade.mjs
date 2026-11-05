@@ -1,3 +1,4 @@
+import { hasHeldReplicaData } from './replica-frame-evidence.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -123,8 +124,7 @@ try {
       if (!lastState.lostResult) return false;
       assertCounterBarrier(lastState, staged.entries[0]);
       const accepted = lastState.entries.find(entry => entry.id === staged.entries[0].id);
-      const heldData = lastState.heldFrames.some(frame => ['replica.transaction', 'replica.delta', 'replica.snapshotPage'].includes(frame.type)
-        && frame.cursor?.revision >= lastState.lostResult.committedRevision);
+      const heldData = hasHeldReplicaData(lastState.heldFrames, lastState.lostResult.committedRevision, 'upgrade-intent');
       return accepted?.state === 'committed' && accepted.awaitingReplica === true && heldData;
     }, 'independently durable acceptance with actual replica data withheld');
     const accepted = lastState;
