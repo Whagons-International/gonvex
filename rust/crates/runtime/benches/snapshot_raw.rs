@@ -352,6 +352,10 @@ async fn run() {
             return;
         }
         for phase in ["first", "warm"] {
+            let before_stages: std::collections::BTreeMap<_, _> = gonvex_profiler::snapshot()
+                .into_iter()
+                .map(|s| (s.name(), (s.count, s.sum)))
+                .collect();
             let mut scenario = Scenario::start();
             let count = if phase == "first" { 1 } else { iterations };
             for _ in 0..count {
@@ -368,9 +372,15 @@ async fn run() {
                     })
                     .await;
             }
+            let stages: serde_json::Map<_, _> = gonvex_profiler::snapshot().into_iter()
+                .filter(|s| s.name().starts_with("snapshot."))
+                .filter_map(|s| {
+                    let (n, sum) = before_stages.get(s.name()).copied().unwrap_or_default();
+                    (s.count > n).then(|| (s.name().to_owned(), json!({"count": (s.count-n)/count as u64, "ns": (s.sum-sum)/count as u64})))
+                }).collect();
             scenario.finish(
                 &format!("app_local/{phase}"),
-                json!({"collections": paths.len()}),
+                json!({"collections": paths.len(), "stages": stages}),
             );
         }
         fixture.shutdown().await;
