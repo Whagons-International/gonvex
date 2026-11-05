@@ -39,3 +39,14 @@ test('challenge pass rule: p95/p99 bounds, error rate and plateau-optional kinds
  assert.equal(passRule({...base,errors:{x:1}},{}).passed,true,'1 failure in 101 operations is below 1%');
  assert.equal(passRule({...base,connectedUsers:4},{}).passed,false);
 });
+
+
+test('heartbeat samples are optional only when all target users negotiated presence v2', () => {
+ const latencyMs=Object.fromEntries(GATED_KINDS.filter(k=>!['heartbeat','query','login'].includes(k)).map(k=>[k,{samples:100,p95:100,p99:200}]));
+ const base={latencyMs,errors:{},connectedUsers:10,targetUsers:10,aborted:false};
+ assert.ok(passRule(base).failingKinds.includes('heartbeat'));
+ assert.ok(passRule({...base,presenceV2Users:9}).failingKinds.includes('heartbeat'));
+ assert.equal(passRule({...base,presenceV2Users:10}).passed,true);
+ const noDelivery={...latencyMs,delivery:{samples:0}};
+ assert.equal(passRule({...base,presenceV2Users:10,latencyMs:noDelivery}).passed,false);
+});

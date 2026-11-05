@@ -1417,7 +1417,8 @@ oracle and leak checks remain required. Runtime-restart storm is NON-GATING.
 Lab order authorized by parent: existing heap-growth recovery → short open-cost
 window → short reopen window → baseline. Honor current LAB_RUN_ACTIVE owner;
 no builds/measurements overlap, no runtime merges during the series. Heap
-ba54cee4 tests are unverified; do not integrate it on prior wrapper exit status.
+ba54cee4 full validation remains pending; recovered t4 output confirms 38 targeted
+tests passed after the earlier masked t2 failure. No runtime integration authorized.
 
 Harness follow-up **e242abe6** covers retry resumption when a listener returns
 inside retention. Focused verification: `node --test bench/whagons/*.test.mjs`
@@ -1428,3 +1429,11 @@ Baseline runner prepared at `/mnt/data/work/gonvex-gate6-baseline/case.sh`:
 atomic exclusive lock, pre-run pinned-core quiet check, resource/headroom gate,
 per-case data under `/mnt/data`, unchanged gate6 binaries. Not launched while
 heap holds its recovered reservation (expected end 03:41 UTC).
+
+Pre-baseline harness audit also found an existing qualification mismatch:
+`passRule` required heartbeat reducer samples even when all clients negotiated
+presence v2 and correctly sent no heartbeat reducers (Step 16 smoke has no
+steady heartbeat histogram). Qualification now exempts that empty kind **only
+when presenceV2Users equals targetUsers**. Presence delivery, reducers, saves,
+task delivery, error rate and connections remain gated. Mixed/legacy clients
+still require heartbeat samples. Focused tests: **29/29 Node**, **5/5 Python**.

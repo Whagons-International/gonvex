@@ -53,6 +53,7 @@ const result = {
   steadyStartMs,
   steadyEndMs,
   targetUsers: sum('targetUsers'),
+  presenceV2Users: sum('presenceV2Users'),
   connectedUsers: sum('connectedUsers'),
   snapshots: parts.flatMap(p => p.snapshots || []),
   visibilityChecks: parts.reduce((a, p) => { for (const [k, v] of Object.entries(p.visibilityChecks || {})) a[k] = (a[k] || 0) + v; return a; }, {}),
