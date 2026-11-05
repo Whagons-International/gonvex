@@ -22,7 +22,7 @@ const { LocalReplica } = await import(pathToFileURL(join(root, 'dist/local-repli
 const { replicaRowsHashes, replicaAggregateDigest } = await import(pathToFileURL(join(root, 'dist/replica-integrity.js')).href);
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
-async function fixture() {
+async function fixture({ provisional = false } = {}) {
   const storage = new MemoryLocalReplicaStorage();
   const seed = new LocalReplica(storage); await seed.activateScope('visible');
   const refs = ['empty', 'populated'].map(name => ({ kind: 'query', path: `tasks.${name}`, delivery: 'replica', replica: { table: 'tasks', key: 'id', columns: ['id'] } }));
@@ -38,13 +38,16 @@ async function fixture() {
   const client = new GonvexClient('ws://artifact-only.invalid/ws', { localReplica: { storage }, errorReporting: false, deferReplicaOpen: () => true });
   client.connect = () => {}; // Explicit transport sink, never an endpoint.
   await client.replicaReady;
-  client.replicaScope = 'visible'; client.hasAuthoritativeReplicaScope = true; client.isWebSocketConnected = true;
+  client.replicaScope = 'visible'; client.hasAuthoritativeReplicaScope = !provisional; client.isWebSocketConnected = true;
   client.serverCapabilities = { replicaBatch: 1, replicaResume: 1 };
   const frames = []; client.send = message => frames.push(message);
   client.setReplicaReady(client.replica.activateScope('visible')); await entered.promise;
   const stops = refs.map(ref => client.subscribeReplica(ref, {}, () => {}));
   assert.equal(client.deferredReplicaOpens.length, 2, 'actual shipping overlay must hold the subscriptions');
-  const waiters = () => Promise.all([...client.replicaOpenHydrations.values()].map(entry => entry.task));
+  const waiters = () => Promise.all([
+    ...[...client.replicaOpenHydrations.values()].map(entry => entry.task),
+    ...client.deferredReplicaOpens.map(entry => entry.task?.promise).filter(Boolean),
+  ]);
   const flush = () => { clearTimeout(client.replicaOpenFlushTimer); client.flushReplicaOpens(); };
   const opens = () => frames.flatMap(frame => frame.type === 'replica.open' ? [frame] : frame.type === 'replica.openMany' ? frame.opens : []);
   return { client, refs, stops, release, expected, waiters, flush, opens };
@@ -80,5 +83,66 @@ for (const retire of ['close', 'scope-failure', 'scope-replacement']) test(`defe
     const waiting = f.waiters(); f.release.resolve(); await waiting; await f.client.replicaReady.catch(() => undefined); f.flush();
     assert.equal(f.opens().length, 0); assert.equal(f.client.replicaOpenHydrations.size, 0);
     assert.equal(f.client.deferredReplicaOpens.length, 0);
+  } finally { f.release.resolve(); f.client.close(); }
+});
+
+for (const earlyRelease of [false, true]) test(`provisional deferrals bind on first valid admission, earlyRelease=${earlyRelease}`, async () => {
+  const f = await fixture({ provisional: true });
+  try {
+    assert(f.client.deferredReplicaOpens.every(entry => entry.phase === 'provisional' && entry.owner === undefined));
+    if (earlyRelease) { f.client.releaseDeferredReplicaOpens(); f.flush(); assert.equal(f.opens().length, 0); }
+    await f.client.activateReplicaDirective({ protocolVersion: 1, scope: 'tenant', visibilityScope: 'visible', epoch: 'e' });
+    assert(f.client.deferredReplicaOpens.every(entry => entry.phase === 'admitted' && entry.owner?.scope === 'visible'));
+    assert(f.client.deferredReplicaOpens.every(entry => entry.owner?.activation === f.client.sessionScopeGeneration));
+    if (!earlyRelease) f.client.releaseDeferredReplicaOpens();
+    const waiting = f.waiters(); f.release.resolve(); await waiting; f.flush();
+    assert.equal(f.opens().length, 2, 'initial login must not blanket-drop provisional requests');
+    for (const open of f.opens()) assert.deepEqual(open.cursor, f.expected.get(open.path).cursor);
+  } finally { f.release.resolve(); f.client.close(); }
+});
+
+test('cancellation after release but before hydration keeps the original unsubscribe handle effective', async () => {
+  const f = await fixture();
+  try {
+    f.client.releaseDeferredReplicaOpens(); const waiting = f.waiters(); f.stops[0]();
+    f.release.resolve(); await waiting; f.flush();
+    assert.equal(f.opens().length, 1); assert.equal(f.opens()[0].path, f.refs[1].path);
+  } finally { f.release.resolve(); f.client.close(); }
+});
+
+test('same admitted scope reconnect retains its owner; identity retirement cannot reuse it', async () => {
+  const f = await fixture();
+  try {
+    const owner = f.client.deferredReplicaOpens[0].owner;
+    f.client.socketGeneration = Symbol(); f.client.markReplicaSubscriptionsOutOfDate();
+    assert.equal(f.client.sessionScopeGeneration, owner.activation, 'ordinary reconnect does not retire the admitted scope');
+    f.client.releaseDeferredReplicaOpens(); const waiting = f.waiters(); f.release.resolve(); await waiting; f.flush();
+    assert.equal(f.opens().length, 2);
+    f.client.resumeReplicaSubscriptions(); f.flush();
+    assert.equal(f.opens().length, 4, 'retained listeners reopen on the same admitted owner');
+    f.client.resetReplicaScopeState(); f.client.replicaScope = 'new-identity';
+    f.client.resumeReplicaSubscriptions(); f.flush();
+    assert.equal(f.opens().length, 4, 'old deferred args never become a new identity intent');
+  } finally { f.release.resolve(); f.client.close(); }
+});
+
+test('superseding an admitted owner with an equal scope string still retires old intents', async () => {
+  const f = await fixture();
+  try {
+    f.client.releaseDeferredReplicaOpens(); const waiting = f.waiters();
+    f.client.resetReplicaScopeState(); // identity A -> B -> A is not the old admission.
+    f.release.resolve(); await waiting; f.flush();
+    assert.equal(f.opens().length, 0); assert.equal(f.client.deferredReplicaOpens.length, 0);
+  } finally { f.release.resolve(); f.client.close(); }
+});
+
+test('hydration failure permanently cancels released admitted intents', async () => {
+  const f = await fixture();
+  try {
+    f.client.releaseDeferredReplicaOpens(); const waiting = f.waiters();
+    const observed = f.client.replicaReady.catch(() => undefined);
+    f.release.reject(Error('durable scope failed')); await observed; await waiting;
+    f.client.releaseDeferredReplicaOpens(); f.flush();
+    assert.equal(f.opens().length, 0); assert.equal(f.client.deferredReplicaOpens.length, 0);
   } finally { f.release.resolve(); f.client.close(); }
 });

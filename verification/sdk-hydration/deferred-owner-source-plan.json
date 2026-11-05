@@ -1,0 +1,46 @@
+{
+  "status": "unexecuted source implementation only; no composed artifact or test result",
+  "baselineInventory": "shipping-source-provenance.json",
+  "coreEvidenceCommit": "14d3e6f84f7e59078b7ad145db2399707a4e783e",
+  "coreSourceCommit": "728b857e456d6d7a9f299883fdf1ba17c8e594b9",
+  "changedMembers": [
+    "deferredReplicaSubscriptionOwners (new private field)",
+    "subscribeReplicaTransport",
+    "releaseDeferredReplicaOpens",
+    "activateReplicaDirective",
+    "sendReplicaOpen",
+    "close",
+    "resetReplicaScopeState",
+    "retireDeferredReplicaIntents (new internal helper)",
+    "deferredReplicaOwner (new internal helper)",
+    "ownsDeferredReplicaOwner (new internal helper)",
+    "bindDeferredReplicaIntents (new internal helper)",
+    "drainDeferredReplicaIntents (new internal helper)"
+  ],
+  "sourceFiles": {
+    "deferred-owner-overlay.mjs": "e74a923d9fd7aa2cf1f4195ac13c1efa3149a3921f7b8c7232694dec9e6fedd3",
+    "shipping-artifact.check.mjs": "8b9a79a09e71369158d7dc697336ab873f3dd6048aaebd7e2fae5adca972ba0e",
+    "README.md": "00950781445c68b4da02a52a3b12edea90d924835f6becd9fb857198e467cdd3"
+  },
+  "expectedArtifactFilesChanged": [
+    "dist/index.js",
+    "dist/index.js.map (regenerate or explicitly remove stale map)"
+  ],
+  "composedIndexJsSha256": null,
+  "outputPackageTreeHash": null,
+  "artifactTestsExecuted": false,
+  "publicApiChanged": false,
+  "ownershipPhases": [
+    "provisional: no authoritative owner; preserved until first valid admission",
+    "admitted: immutable scope+session activation; never provisional again",
+    "cancelled: permanent boolean, removed from pending list; cannot resurrect"
+  ],
+  "futureRequiredProof": [
+    "all unchanged methods and files match pinned SQLite.1 package",
+    "every permitted changed member gets before/after hash",
+    "real artifact defer/release before/after first admission",
+    "same-scope reconnect and retained listener ownership",
+    "admitted identity retirement, cancellation and hydration failure",
+    "paired observer capture without removing any collection"
+  ]
+}
