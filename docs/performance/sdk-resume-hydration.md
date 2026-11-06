@@ -1,114 +1,83 @@
-# SDK resume hydration fence: source preparation
+# SDK resume hydration ownership
 
-Branch `perf/sdk-resume-hydration` starts at exact integration
-`2b7e2ff9f6950ea73a4659c284c9204262314574`, in the existing owned checkout.
-Reviewed runtime branch `perf/reload-delta` at `387ce467` is preserved. No runtime,
-app, wire contract, dependency, package version or built SDK artifact changes.
-This source patch and its tests are **uncompiled/unexecuted** pending an explicit
-lab grant after heap's release (its extended deadline alone is not a release).
+This staging follow-up starts at `512e61186d7c4abda40ceca329136e10761f6307`.
+It carries source commits `2743e0a0` and `728b857e` as separate, patch-identical
+commits `76a7fb2e` and `cd31d5e6`. Existing staging persistence-barrier tests and
+all newer base behavior are retained. No runtime, app feature, package version,
+wire contract or registry publication changes are included.
 
-The [shipping observation](shipping-sqlite1-capture.md) and Step 19 establish
-that all 41 missing warm cursors had same-scope stored checkpoints before the
-open and became available after hydration (37 empty / 4 populated). That
-observation authorizes this ordering fix; this branch has no new capture or
-whole-app CPU/capacity result.
+The original shipping observation found 41 cursorless warm opens whose
+same-scope checkpoints were already stored and became available after
+hydration. This ordering fix waits for the current durable `replicaReady`
+before constructing a collection resume request or adding it to an open batch.
+Per-subscription waiters share activation and collapse duplicate sends. Failed
+or obsolete hydration cannot fall back to a cursorless open.
 
-`sendReplicaOpen` now waits on the current durable `replicaReady` before
-constructing any resume request or entering the open batch. Per-subscription
-waiters share that activation and collapse duplicate calls. A successful
-activation marks only its own promise hydrated. After the wait, current
-publication/outbox/socket/scope ownership, auth-frame identity, subscription
-object/id/verification generation, connection, listeners and opening state
-must still permit the open. Replaced waiters cannot remove their successors.
-Close, final unsubscribe and replacement hydration discard pending ownership;
-failed or obsolete activations cannot fall back to cursorless opens.
+After hydration, construction and batch flush both recheck current scope,
+auth-frame identity, socket/connection generation, subscription object/id,
+verification generation, listeners, opening state and per-attempt ownership.
+Close, final unsubscribe and replacement activation discard pending ownership.
+An old waiter or a reentrant batch flush cannot clear or send its successor.
+A successful activation marks only its own readiness promise hydrated; an
+already-resolved promise and repeated setter calls still produce one open.
+Auth-deferred batches release unsent markers so the existing preserved
+subscription path can resume them.
 
-Batches construct requests only at flush, rechecking current hydration and
-owner per frame. An auth-deferred batch releases opening/socket markers so
-the existing preserved-subscription auth completion can resume it. The gate
-covers collection opens only: control queries/RPCs, journal admission and
-outbox bootstrap are not placed behind row hydration or behind a wait that
-needs their progress. Existing authentication admission rules are unchanged.
+Only collection opens wait for row hydration. Control RPCs, journal admission
+and outbox bootstrap retain the progress needed to complete startup. Existing
+capabilities, retry protocol and collection limits stay unchanged. Pending
+hydration work belongs to its current subscription/attempt and is discarded
+with that ownership.
 
-## Deterministic verification prepared, not yet run
+## Verification on staging
 
-`packages/client/src/sdk-resume-hydration.test.ts` controls real in-memory
-storage loading with explicit promises, then observes send/construction and
-flush. Fake timers drive only the actual batch timer; no elapsed-time sleeps
-or polling determine the ordering. Prepared cases:
+The tested SDK source is `cd31d5e6a2090469fc5aadc7bf1084f6a661a7e2`.
+Later edits to this document do not change its runtime source. All checks ran
+inside the owned 6 GiB / 2 CPU aggregate with memory/IO and /mnt headroom gates.
+Build output, caches, fixtures, browser profiles and reports live under
+`/mnt/data/work/gonvex-staging-followups-20261105`.
 
-- Forty-one stored checkpoints, alternating empty/nonempty, restored before
-  all opens; single and batched modes; duplicate sends collapse and one scope
-  load occurs. Every emitted request must carry the stored cursor/digest.
-- Auth frame, socket generation, scope, disconnect, unsubscribe, replacement
-  subscription, verification cancellation and close while hydration waits.
-- Ownership changes after hydration but before batch flush; no request may
-  even be constructed for a stale owner.
-- A retained subscription with no listeners, later listener return, auth
-  batch deferral/release with preserved subscriptions, replacement waiter,
-  rejected hydration, queued batch followed by scope failure, and a stale
-  promise completing after a newer readiness promise is installed.
-- Outbox journal admission completes while durable row activation is held.
+- All eight package builds/types and 1,085 client tests pass. This includes
+  deterministic deferred-storage tests for all 41 checkpoints, empty/populated
+  windows, duplicate sends, stale scopes/auth/sockets, cancellation, replacement
+  waiters, rejected hydration, listener return and outbox/control progress.
+- A 257-open batch crossing two frames tests reentrant auth/attempt replacement:
+  the old second frame neither sends nor clears a newly queued attempt.
+- OPFS types and 19 engine checks pass.
+- Actual Chromium IndexedDB storage, rollback, browser crash and upgrade recovery:
+  53 tests pass. Three additional native browser intent/query/control ownership
+  checks pass, retaining their stale-source and transaction-abort controls.
+- Compiled-source oracles pass: 12 watermark/readiness schedules and three source
+  controls, five intent schedules and two controls, 27 query schedules and nine
+  controls, 38 Control Query watch schedules and 12 controls. Every deliberate
+  stale-source mutation must fail its specified assertions; no control is waived.
+- Both configured projects' codegen and agent API output were regenerated and
+  are unchanged. Docs metadata/typecheck passes. Runtime import cycles remain
+  the same two pre-existing edges, with none added.
 
-The existing preserved-batch regression is adjusted to establish a connected,
-hydrated transport explicitly before invoking its private send methods.
+The private canonical source is an exact archive, not another checkout. The
+native receipt's read-only `git rev-parse` uses the existing owned checkout's
+GIT_DIR only after asserting that its HEAD equals that archive pin. Private
+browser launchers add `--disable-gpu` and retain their original finally-close;
+these safety overlays and their hashes are recorded outside the branch.
+Initial metadata/PATH setup failures are recorded separately. The metadata-hook
+per-step log was overwritten before archival; its incomplete receipt, observed
+error note and tool transcript remain. Corrected runs reached every assertion.
 
-After an explicit grant, use admitted `/mnt/data` targets/caches and headroom
-checks to run the client typecheck and focused Vitest hydration/resume tests.
-Then run relevant existing auth-generation, SDK lifecycle/delta lifecycle,
-persistence-barrier, control/outbox/cached-startup and storage hydration tests
-as indicated by failures/ownership changes. Required docs generators and an
-exact-base runtime import-cycle comparison precede pushing SDK source.
-No test command has been executed during heap's hold. Source whitespace
-checks pass; there is no passing test claim yet.
+## Shipping composition stays separately pinned
 
-## Shipping package composition is a separate acceptance step
+The historical SQLite.1 app still uses the approved composed candidate at
+`/mnt/data/work/gonvex-sdk-composition/candidate-2`, with entry SHA256
+`60b2673135e0ffd245b2219fb8a18cd2f6add3ac98ccbfa6af9cb6f5ae20eb0a` and 128-member
+payload map `392387f207e602ecf09bc5c3dff4fce9fd7a385bf62a5239676cdb4bbe71ae33`.
+Its authorization freeze is `2c784cc9`; that records the actual hydration core
+`728b857e` and composition `c2d283b7`. The shipped explicit defer/release patch
+is a separate dependency closure. This source PR neither replaces that artifact
+with a plain library build nor applies a PostgreSQL or optional starter overlay.
 
-Integration base `2b7e2ff9` contains **no subscription defer/release API**.
-Its existing pending batches and retained-listener ownership are fenced here.
-The actually shipped SQLite.1 package has an additional patch on which the app
-relies for explicit defer/release. Passing these base tests cannot establish
-that patched package's behavior, and replacing it with a plain base build
-would lose required behavior.
-
-Only after base test proof, prepare a separately identified isolated package
-that composes the existing shipping patch with this fence. Preserve its
-existing API and deferral semantics; record baseline package/patch/source
-hashes, exact composition diff, resulting artifact hash and source provenance.
-Check defer/release before and during hydration, nested/retained subscriptions,
-release after scope replacement or failure, cancellation, and auth-preserved
-batch handling. Failed/stale owners must leave no pending map or deferred
-request that a later release can resurrect. Do not infer new API authorization
-from the missing base API or silently ignore the shipping overlay.
-
-A later explicitly admitted observer recapture of that composed package must
-show all 41 proven stored-checkpoint paths opening with cursors, matching
-path/args/scope/generation and preserving the shipping collection set. Until
-then, no claim that the actual shipping cursor issue is fixed. No packaging,
-SDK installation into the app, endpoint, browser, staging/production access or
-application feature change was performed by this source-preparation step.
-
-## Source follow-up before the verification grant
-
-The initial `replicaReady` is a resolved placeholder. Its initial hydrated
-marker now refers to that same placeholder, avoiding an unmarked fulfilled
-promise in the field initialization. Construction always replaces it through
-`setReplicaReady` with the unauthorized initial scope activation before the
-client is exposed. The sole assignment enabling authoritative scope is in
-`activateReplicaDirective`, immediately followed synchronously by
-`setReplicaReady(activateScope(...))`. All later readiness assignments use
-that setter. Its fulfillment callback is registered before open waiters;
-reusing the same promise is a no-op. A prepared regression covers opening
-immediately after installing an already-resolved promise, repeated setter
-calls, exactly one construction/send and zero remaining waiters.
-
-Additional prepared tests exercise the public-control RPC send bypass while
-both auth and row hydration are held, plus 257 opens split across two frames.
-A first-frame transport callback changes auth ownership: the old second
-frame must not construct/send, and must release its unsent opening marker.
-If that callback instead queues a replacement attempt, the old flush must
-neither send it nor clear its pending/opening ownership. Per-attempt owners
-are captured when the flush begins and rechecked against the current weak-map
-owner per frame. This small source correction addresses that discovered
-unsent-marker case; it has not yet been executed. No build/test/packaging or
-new lab claim occurred during heap's reservation.
+The corrected 15cb oracle and frozen shipping composition separately passed
+1,056 matched-principal/authority/window/cursor/full-row comparisons against the
+staging OOM candidate, including cached opens and actual share/revoke. That is
+not a claim that this plain SDK build equals the composed shipping artifact.
+The original full Mac gate remains FAILED and immutable. No new full1k series,
+capacity, full Whagons/starter acceptance or permission-SLO pass is claimed.
