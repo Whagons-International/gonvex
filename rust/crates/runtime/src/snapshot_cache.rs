@@ -1444,7 +1444,7 @@ mod tests {
                 let keys: Vec<_> = paths.iter().map(|path| cache_key(path, &args)).collect();
                 #[cfg(feature = "perf-fixture")]
                 let live_base = crate::perf_fixture::harness::reset_peak();
-                let mut futures: Vec<_> = keys.iter().map(|key| Box::pin(cache.entry(key, || std::future::pending()))).collect();
+                let mut futures: Vec<_> = keys.iter().map(|key| Box::pin(cache.entry(key, std::future::pending))).collect();
                 let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
                 let start = Instant::now();
                 let mut pending = 0;
