@@ -564,9 +564,14 @@ impl Runtime {
             let Some(event) = events.pop() else {
                 return Ok(Vec::new());
             };
-            return self
-                .apply_feed_event_offloaded(session, subscriptions, event, prewarm, record)
-                .await;
+            return Box::pin(self.apply_feed_event_offloaded(
+                session,
+                subscriptions,
+                event,
+                prewarm,
+                record,
+            ))
+            .await;
         }
         let pool = offload();
         let tables: Vec<String> = events.iter().map(feed_tables).collect();
@@ -610,7 +615,9 @@ impl Runtime {
         };
         let owned = std::mem::take(subscriptions);
         let (owned, result, elapsed) = if inline {
-            apply(runtime, session.clone(), owned, events).await
+            // This otherwise makes every idle websocket retain the full
+            // inline application future, even when work runs on the pool.
+            Box::pin(apply(runtime, session.clone(), owned, events)).await
         } else {
             pool.spawn(gonvex_profiler::instrument(
                 gonvex_profiler::TaskKind::Feed,
