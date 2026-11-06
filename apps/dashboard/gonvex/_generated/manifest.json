@@ -1,6 +1,6 @@
 {
   "project": "dashboard",
-  "generatedAt": "2026-11-05T21:55:03.690Z",
+  "generatedAt": "2026-11-06T00:33:33.771Z",
   "functions": {
     "files.createUploadUrl": {
       "kind": "action",
