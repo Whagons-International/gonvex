@@ -324,6 +324,32 @@ jobs:
       - name: Lint Rust runtime
         working-directory: rust
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  duckdb:
+    name: Optional DuckDB analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: Enable pinned pnpm
+        run: corepack enable && corepack prepare pnpm@11.1.2 --activate
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+      - name: Build JavaScript packages
+        run: pnpm build:packages
       - name: Test optional DuckDB analysis
         working-directory: rust
         run: |
@@ -334,15 +360,17 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [test, policies, native]
+    needs: [test, policies, native, duckdb]
     runs-on: ubuntu-latest
     steps:
-      - name: Require runtime tests, Rust policy proofs and native storage checks
+      - name: Require runtime tests, Rust policy proofs, native storage and DuckDB checks
         env:
           RUNTIME_RESULT: ${{ needs.test.result }}
           POLICY_RESULT: ${{ needs.policies.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
+          DUCKDB_RESULT: ${{ needs.duckdb.result }}
         run: |
           test "$RUNTIME_RESULT" = success
           test "$POLICY_RESULT" = success
           test "$NATIVE_RESULT" = success
+          test "$DUCKDB_RESULT" = success
