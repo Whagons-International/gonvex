@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
 import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow, type PresenceFeedSnapshot } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
+import { validateColumnRequest, type ColumnProjection, type ColumnPageLimits, type ReplicaColumnPage } from "@gonvex/client";
 
 export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type PresenceFeedSnapshot } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
@@ -1931,6 +1932,34 @@ export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: st
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, entity, selectedIDs, version, cache, store]);
+}
+
+/** A bounded, read-only render projection of the existing Local Replica.
+ * No full-row clones, second cache or transport subscription.
+ * For transferable ownership, request a separate entityColumns() snapshot. */
+export function useEntityColumns(
+  entity: string,
+  ids: readonly string[],
+  projection: ColumnProjection,
+  limits: ColumnPageLimits,
+): ReplicaColumnPage {
+  const client = useGonvexClient();
+  validateColumnRequest(ids, projection, limits);
+  const idsKey = JSON.stringify(ids);
+  const projectionKey = JSON.stringify(projection);
+  // Retain only this active window; persistence hydration remains SDK-owned.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => client.retainReplicaEntities(entity, ids), [client, entity, idsKey]);
+  const version = useSyncExternalStore(
+    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
+    useCallback(() => `${client.localReplica.freshness()}:${ids.map(id => client.localReplica.entityVersion(entity, id)).join(',')}`,
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [client, entity, idsKey]),
+    () => '',
+  );
+  return useMemo(() => client.localReplica.entityColumns(entity, ids, projection, limits),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, entity, idsKey, projectionKey, limits.maxRows, limits.maxPayloadBytes, version]);
 }
 
 /** Read a persisted Live Query window without opening another server subscription. */
