@@ -593,10 +593,15 @@ pub struct CacheStats {
     pub bytes: u64,
     /// Keyed entries built inside the opening read (`keyed_inline`).
     pub keyed_inline_builds: u64,
+    pub cold_open_limit: usize,
+    pub cold_open_active: usize,
+    pub cold_open_peak: usize,
+    pub cold_open_refused: usize,
 }
 
 #[derive(Default)]
 pub struct SnapshotCache {
+    pub(crate) open_admission: crate::replica::open_admission::OpenAdmission,
     slots: Mutex<HashMap<Key, Slot>>,
     tick: AtomicU64,
     hits: AtomicU64,
@@ -660,7 +665,13 @@ impl SnapshotCache {
         let (count, bytes) = entries.fold((0, 0), |(count, bytes), entry| {
             (count + 1, bytes + entry.heap_bytes as u64)
         });
+        let (cold_open_limit, cold_open_active, cold_open_peak, cold_open_refused) =
+            self.open_admission.stats();
         CacheStats {
+            cold_open_limit,
+            cold_open_active,
+            cold_open_peak,
+            cold_open_refused,
             hits: self.hits.load(Relaxed),
             builds: self.builds.load(Relaxed),
             roll_forwards: self.roll_forwards.load(Relaxed),
@@ -1410,6 +1421,101 @@ pub(crate) async fn source_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "perf-fixture")]
+    #[global_allocator]
+    static PROBE_ALLOC: crate::perf_fixture::harness::CountingAlloc<mimalloc::MiMalloc> =
+        crate::perf_fixture::harness::CountingAlloc(mimalloc::MiMalloc);
+
+    /// Pure cache-entry futures: intentionally does not model sockets/encoding.
+    #[test]
+    fn cold_entry_pending_probe() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for distinct in [false, true] {
+                let cache = SnapshotCache::default();
+                let args = serde_json::json!({});
+                let paths: Vec<_> = (0..5000).map(|i| if distinct { format!("key-{i}") } else { "same".to_owned() }).collect();
+                let keys: Vec<_> = paths.iter().map(|path| cache_key(path, &args)).collect();
+                #[cfg(feature = "perf-fixture")]
+                let live_base = crate::perf_fixture::harness::reset_peak();
+                let mut futures: Vec<_> = keys.iter().map(|key| Box::pin(cache.entry(key, std::future::pending))).collect();
+                let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
+                let start = Instant::now();
+                let mut pending = 0;
+                for future in &mut futures {
+                    pending += usize::from(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+                }
+                eprintln!("cold_entry_pending_probe distinct={distinct} pending={pending} elapsed_ns={} future_bytes={} rss_kib={}", start.elapsed().as_nanos(), std::mem::size_of_val(futures[0].as_ref().get_ref()), std::fs::read_to_string("/proc/self/status").unwrap().lines().find(|l| l.starts_with("VmRSS:")).unwrap());
+                #[cfg(feature = "perf-fixture")]
+                eprintln!("pending_peak_allocated_live_bytes={}", crate::perf_fixture::harness::peak_live_bytes() - live_base);
+                assert_eq!(pending, 5000);
+                drop(futures);
+            }
+        });
+    }
+
+    /// Real cache single-flight futures, one first poll per offered open.
+    /// Refusals are dropped immediately, as the socket outcome consumer does.
+    #[cfg(feature = "perf-fixture")]
+    #[test]
+    fn cold_entry_guarded_retention_probe() {
+        use crate::perf_fixture::harness::{rss_bytes, AllocSnapshot};
+        use crate::replica::open_admission::OpenAdmission;
+        use std::future::Future;
+        use std::task::{Context, Poll};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for distinct in [false, true] {
+                for guarded in [false, true] {
+                    let mut cache = SnapshotCache::default();
+                    cache.open_admission = OpenAdmission::new(9);
+                    let args = serde_json::json!({});
+                    let paths: Vec<_> = (0..5000).map(|i| if distinct { format!("key-{i}") } else { "same".to_owned() }).collect();
+                    let keys: Vec<_> = paths.iter().map(|path| cache_key(path, &args)).collect();
+                    let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
+                    let before = AllocSnapshot::now();
+                    let rss_before = rss_bytes();
+                    let start = Instant::now();
+                    let mut pending = Vec::new();
+                    let mut refused = 0;
+                    for key in &keys {
+                        let mut future = Box::pin(async {
+                            let _permit = if guarded { Some(cache.open_admission.try_acquire()?) } else { None };
+                            cache.entry(key, || std::future::pending()).await
+                        });
+                        match future.as_mut().poll(&mut cx) {
+                            Poll::Pending => pending.push(future),
+                            Poll::Ready(Err(ReplicaError::Overloaded(_))) => refused += 1,
+                            _ => panic!("unexpected completed build"),
+                        }
+                    }
+                    let retained = AllocSnapshot::now().since(before);
+                    eprintln!("cache_retention distinct={distinct} guarded={guarded} pending={} refused={refused} elapsed_ns={} live_bytes={} allocated_bytes={} rss_before={rss_before:?} rss_after={:?}",pending.len(),start.elapsed().as_nanos(),retained.live_bytes,retained.allocated_bytes,rss_bytes());
+                    assert_eq!(pending.len(), if guarded { 9 } else { 5000 });
+                    assert_eq!(refused, if guarded { 4991 } else { 0 });
+                    if guarded {
+                        assert_eq!(cache.open_admission.stats().1, 9);
+                        cache.clear();
+                        cache.set_enabled(false);
+                        assert!(cache.open_admission.try_acquire().is_err(), "clear/toggle must not reset live ownership");
+                    }
+                    drop(pending);
+                    assert_eq!(cache.open_admission.stats().1, 0);
+                    let permit = cache.open_admission.try_acquire().unwrap();
+                    drop(permit);
+                }
+            }
+        });
+    }
 
     fn entry(bytes: usize) -> Arc<CacheEntry> {
         Arc::new(CacheEntry {
