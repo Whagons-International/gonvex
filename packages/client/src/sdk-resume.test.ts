@@ -209,8 +209,10 @@ it.each(["replica.ready", "replica.delta"])("does not accept %s when reconnect i
   expect(state.replica.getWindow("tasks").source).toBe("cache");
 });
 
-it("retries unsent subscription batches after a refresh preserves the existing subscriptions", () => {
+it("retries unsent subscription batches after a refresh preserves the existing subscriptions", async () => {
   const state = client() as any;
+  await state.replicaReady;
+  state.isWebSocketConnected = true;
   state.socketGeneration = 1;
   state.hasAuthoritativeReplicaScope = true;
   state.serverCapabilities = { queryBatch: 1, replicaBatch: 1 };
