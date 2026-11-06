@@ -339,6 +339,7 @@ mod tests {
         struct Payload(Option<tokio::sync::oneshot::Sender<()>>, Vec<u8>);
         impl Drop for Payload {
             fn drop(&mut self) {
+                assert_eq!(self.1.len(), 1 << 20);
                 if let Some(s) = self.0.take() {
                     let _ = s.send(());
                 }
