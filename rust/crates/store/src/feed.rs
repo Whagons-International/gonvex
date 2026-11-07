@@ -147,6 +147,7 @@ pub async fn finalize_known(
             known.store(true, Relaxed);
         }
     }
+    crate::record_views::flush(connection).await?;
     // Nothing staged (a read-only or no-op transaction): no revision. Uses
     // the partial index on pending rows.
     let staged: bool = sqlx::query_scalar(
@@ -274,6 +275,7 @@ pub(crate) fn finalize_direct(
     }
     // Nothing staged (a read-only or no-op transaction): no revision. Uses
     // the partial index on pending rows.
+    crate::record_views::flush_direct(connection)?;
     let staged = connection.query_i64(
         "SELECT EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL)",
         &[],

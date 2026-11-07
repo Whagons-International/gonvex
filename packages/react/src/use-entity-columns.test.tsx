@@ -3,7 +3,7 @@ import { type ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { columnPageReader, type GonvexClient } from '@gonvex/client';
 import { LocalReplica } from '../../client/src/local-replica.js';
-import { GonvexProvider, useEntityColumns } from './index.js';
+import { GonvexProvider, useEntityColumns, useEntityColumnsState } from './index.js';
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
@@ -56,4 +56,15 @@ it('fails closed when the identity scope changes', async () => {
   await act(async () => { await replica.activateScope('another-account'); vi.advanceTimersToNextFrame(); });
   expect(result.current.completeProjection).toBe(false);
   expect(columnPageReader(result.current).value('title',0)).toBeUndefined();
+});
+
+it('falls back within the byte limit and recovers after an optimistic rollback',async()=>{
+ const {replica,wrapper}=await mounted();
+ const {result}=renderHook(()=>useEntityColumnsState('tasks',['a'],{title:{kind:'string'}},{maxRows:200,maxPayloadBytes:100}),{wrapper});
+ expect(result.current.limited).toBe(false);
+ act(()=>{replica.applyOptimistic('large',[{entity:'tasks',rowId:'a',op:'patch',fields:{title:'x'.repeat(1000)}}]);vi.advanceTimersToNextFrame();});
+ expect(result.current).toEqual({limited:true,page:undefined});
+ act(()=>{replica.rejectCommand('large');vi.advanceTimersToNextFrame();});
+ expect(result.current.limited).toBe(false);
+ expect(columnPageReader(result.current.page!).value('title',0)).toBe('Before');
 });

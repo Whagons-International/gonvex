@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
 import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow, type PresenceFeedSnapshot } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
-import { validateColumnRequest, type ColumnProjection, type ColumnPageLimits, type ReplicaColumnPage } from "@gonvex/client";
+import { type ColumnProjection, type ColumnPageLimits, type ReplicaColumnPage } from "@gonvex/client";
 
 export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type PresenceFeedSnapshot } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
@@ -1937,14 +1937,17 @@ export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: st
 /** A bounded, read-only render projection of the existing Local Replica.
  * No full-row clones, second cache or transport subscription.
  * For transferable ownership, request a separate entityColumns() snapshot. */
-export function useEntityColumns(
+export type EntityColumnState = { page: ReplicaColumnPage; limited: false } | { page: undefined; limited: true };
+
+/** A bounded projection may exceed its byte budget. Record consumers can keep
+ * rendering the same replica without allocating an oversized column page. */
+export function useEntityColumnsState(
   entity: string,
   ids: readonly string[],
   projection: ColumnProjection,
   limits: ColumnPageLimits,
-): ReplicaColumnPage {
+): EntityColumnState {
   const client = useGonvexClient();
-  validateColumnRequest(ids, projection, limits);
   const idsKey = JSON.stringify(ids);
   const projectionKey = JSON.stringify(projection);
   // Retain only this active window; persistence hydration remains SDK-owned.
@@ -1957,9 +1960,22 @@ export function useEntityColumns(
       [client, entity, idsKey]),
     () => '',
   );
-  return useMemo(() => client.localReplica.entityColumns(entity, ids, projection, limits),
+  return useMemo(() => {
+    try { return {page:client.localReplica.entityColumns(entity, ids, projection, limits),limited:false} as const; }
+    catch(error){
+      if(error instanceof RangeError && error.message==='Column page payload budget exceeded')return{page:undefined,limited:true} as const;
+      throw error;
+    }
+  },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, entity, idsKey, projectionKey, limits.maxRows, limits.maxPayloadBytes, version]);
+}
+
+/** Required column page. Use useEntityColumnsState for a record fallback. */
+export function useEntityColumns(entity:string,ids:readonly string[],projection:ColumnProjection,limits:ColumnPageLimits):ReplicaColumnPage{
+  const state=useEntityColumnsState(entity,ids,projection,limits);
+  if(state.limited)throw new RangeError('Column page payload budget exceeded');
+  return state.page;
 }
 
 /** Read a persisted Live Query window without opening another server subscription. */

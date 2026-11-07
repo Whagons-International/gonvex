@@ -1033,6 +1033,18 @@ impl SqlCalls {
             Some(table) if quote_identifier(&table).is_ok() => Some(self.catalog_table(&table)?),
             _ => None,
         };
+        let projection = if target.is_none() {
+            sql_projection::kinds(statement, |table| {
+                let catalog = self.catalog_table(table)?;
+                Ok(catalog
+                    .column_order
+                    .iter()
+                    .filter_map(|name| catalog.columns.get(name).map(|kind| (name.clone(), *kind)))
+                    .collect())
+            })?
+        } else {
+            None
+        };
         let changes_schema = matches!(admitted.first_word.as_str(), "create" | "alter" | "drop");
         let sql = statement.trim();
         let result = self.run(|conn| {
@@ -1043,7 +1055,7 @@ impl SqlCalls {
                     .map(Parameter::as_bind)
                     .collect::<Vec<_>>();
                 statement.bind(&binds)?;
-                write_query_rows(&mut statement, target.as_deref())?
+                write_query_rows(&mut statement, target.as_deref(), projection.as_deref())?
             };
             if changes_schema {
                 conn.schema_changed();
@@ -1071,9 +1083,6 @@ impl SqlCalls {
     ) -> Result<Vec<u8>, String> {
         self.require_open()?;
         let row = object(row, "row")?;
-        if row.is_empty() {
-            return Err("an insert requires at least one column".to_owned());
-        }
         let mut values: BTreeMap<String, Value> = row.into_iter().collect();
         let catalog = self.catalog_table(table)?;
         let key = catalog.key.clone();
@@ -1100,13 +1109,21 @@ impl SqlCalls {
             }
         }
         let quoted_table = quote_identifier(table)?;
-        let columns = values
+        let mut columns = values
             .keys()
             .map(|column| quote_identifier(column))
             .collect::<Result<Vec<_>, _>>()?;
-        let placeholders = (1..=values.len())
+        let mut placeholders = (1..=values.len())
             .map(|index| format!("${index}"))
             .collect::<Vec<_>>();
+        if catalog.record_view {
+            for (column, expression) in &catalog.defaults {
+                if !values.contains_key(column) {
+                    columns.push(quote_identifier(column)?);
+                    placeholders.push(expression.clone());
+                }
+            }
+        }
         let statement = format!(
             "INSERT INTO {quoted_table} ({}) VALUES ({}) RETURNING *",
             columns.join(", "),
@@ -1116,7 +1133,7 @@ impl SqlCalls {
             .iter()
             .map(|(column, value)| catalog.parameter(column, value))
             .collect::<Result<Vec<_>, _>>()?;
-        self.run(|conn| returning_row(conn, &statement, &parameters, &catalog))
+        self.run(|conn| returning_record_row(conn, table, &statement, &parameters, &catalog))
     }
 
     fn update(
@@ -1150,7 +1167,7 @@ impl SqlCalls {
             .map(|(column, value)| catalog.parameter(column, value))
             .collect::<Result<Vec<_>, _>>()?;
         parameters.push(Parameter::scalar(&id)?);
-        self.run(|conn| returning_row(conn, &statement, &parameters, &catalog))
+        self.run(|conn| returning_record_row(conn, table, &statement, &parameters, &catalog))
     }
 
     fn delete(&mut self, table: &str, key: &str, id: Value) -> Result<Vec<u8>, String> {
@@ -1158,9 +1175,9 @@ impl SqlCalls {
         let key = self.resolve_table_key(table, key)?;
         let table = quote_identifier(table)?;
         require_row_id(&id)?;
-        let statement = format!("DELETE FROM {table} WHERE {key} = $1");
+        let statement = format!("DELETE FROM {table} WHERE {key} = $1 RETURNING 1");
         let parameter = Parameter::scalar(&id)?;
-        let deleted = self.run(|conn| Ok(conn.execute(&statement, &[parameter.as_bind()])?))?;
+        let deleted = self.run(|conn| count_returned(conn, &statement, &[parameter.as_bind()]))?;
         Ok(format!(r#"{{"deleted":{deleted}}}"#).into_bytes())
     }
 
@@ -1182,10 +1199,11 @@ impl SqlCalls {
         let table = quote_identifier(table)?;
         // One JSON array parameter instead of up to 10,000 placeholders
         // (SQLite's default variable limit is 32,766).
-        let statement =
-            format!("DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1))");
+        let statement = format!(
+            "DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1)) RETURNING 1"
+        );
         let ids = Value::Array(ids.clone()).to_string();
-        let deleted = self.run(|conn| Ok(conn.execute(&statement, &[Bind::Text(&ids)])?))?;
+        let deleted = self.run(|conn| count_returned(conn, &statement, &[Bind::Text(&ids)]))?;
         Ok(format!(r#"{{"deleted":{deleted}}}"#).into_bytes())
     }
 
@@ -1248,6 +1266,62 @@ impl SqlCalls {
             }
             Ok(rows)
         })?;
+        let record = if schema_name
+            .as_deref()
+            .is_none_or(|name| name.eq_ignore_ascii_case("main"))
+        {
+            self.run(|conn| {
+                if conn.query_i64("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_record_views')", &[])? != Some(1) { return Ok(None); }
+                let mut statement = conn.prepare("SELECT schema FROM _gonvex_record_views WHERE name=$1 COLLATE NOCASE")?;
+                statement.bind(&[Bind::Text(&table_name)])?;
+                if !statement.step()? { return Ok(None); }
+                let schema = serde_json::from_str::<Value>(statement.str(0).map_err(Failure::Decode)?).map_err(|error|Failure::Decode(error.to_string()))?;
+                Ok(Some(schema))
+            })?
+        } else {
+            None
+        };
+        if let Some(schema) = record {
+            let key_name = schema["key"]
+                .as_str()
+                .ok_or("record schema has no key")?
+                .to_owned();
+            let definitions = schema["columns"]
+                .as_object()
+                .ok_or("record schema has no columns")?;
+            let key_definition = definitions
+                .get(&key_name)
+                .ok_or("record key is not a column")?;
+            let mut columns = BTreeMap::new();
+            let mut defaults = BTreeMap::new();
+            for (name, definition) in definitions {
+                columns.insert(
+                    name.clone(),
+                    JsonKind::from_declared(
+                        definition["type"]
+                            .as_str()
+                            .ok_or("record column has no type")?,
+                    ),
+                );
+                if let Some(expression) = definition["default"].as_str() {
+                    defaults.insert(name.clone(), expression.to_owned());
+                }
+            }
+            let catalog = Arc::new(TableCatalog {
+                key: TableKey {
+                    column: key_name.clone(),
+                    data_type: key_definition["type"].as_str().map(str::to_owned),
+                    database_generated: defaults.contains_key(&key_name),
+                },
+                column_order: rows.iter().map(|row| row.0.clone()).collect(),
+                columns,
+                defaults,
+                record_view: true,
+            });
+            self.tables.insert(table.to_owned(), catalog.clone());
+            return Ok(catalog);
+        }
+        let column_order = rows.iter().map(|row| row.0.clone()).collect();
         let mut columns = BTreeMap::new();
         let mut keys = Vec::new();
         for (name, declared, position, has_default) in rows {
@@ -1275,7 +1349,13 @@ impl SqlCalls {
                 ));
             }
         };
-        let catalog = Arc::new(TableCatalog { key, columns });
+        let catalog = Arc::new(TableCatalog {
+            key,
+            columns,
+            column_order,
+            defaults: BTreeMap::new(),
+            record_view: false,
+        });
         self.tables.insert(table.to_owned(), catalog.clone());
         Ok(catalog)
     }
@@ -1286,6 +1366,9 @@ impl SqlCalls {
 struct TableCatalog {
     key: TableKey,
     columns: BTreeMap<String, JsonKind>,
+    column_order: Vec<String>,
+    defaults: BTreeMap<String, String>,
+    record_view: bool,
 }
 
 impl TableCatalog {
@@ -1296,6 +1379,45 @@ impl TableCatalog {
         }
         .map_err(|error| format!("column {column:?}: {error}"))
     }
+}
+
+fn count_returned(
+    conn: &mut DirectConn<'_>,
+    sql: &str,
+    parameters: &[Bind<'_>],
+) -> Result<usize, Failure> {
+    let mut statement = conn.prepare(sql)?;
+    statement.bind(parameters)?;
+    let mut count = 0;
+    while statement.step()? {
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn returning_record_row(
+    conn: &mut DirectConn<'_>,
+    table: &str,
+    sql: &str,
+    parameters: &[Parameter],
+    catalog: &TableCatalog,
+) -> Result<Vec<u8>, Failure> {
+    let result = returning_row(conn, sql, parameters, catalog)?;
+    if !catalog.record_view || result == b"null" {
+        return Ok(result);
+    }
+    let row: Value =
+        serde_json::from_slice(&result).map_err(|error| Failure::Decode(error.to_string()))?;
+    let key = row
+        .get(&catalog.key.column)
+        .ok_or_else(|| Failure::Decode("record write did not return its key".into()))?;
+    let parameter = Parameter::scalar(key).map_err(Failure::Decode)?;
+    let sql = format!(
+        "SELECT * FROM {} WHERE {}=$1",
+        quote_identifier(table).map_err(Failure::Decode)?,
+        quote_identifier(&catalog.key.column).map_err(Failure::Decode)?
+    );
+    returning_row(conn, &sql, &[parameter], catalog)
 }
 
 /// Runs an `INSERT/UPDATE … RETURNING *` and writes its first row (or
@@ -1335,6 +1457,7 @@ fn returning_row(
             .map_err(Failure::Decode)?;
     }
     out.push(b'}');
+    while statement.step()? {}
     Ok(out)
 }
 
@@ -1378,6 +1501,7 @@ fn sqlx_declared_kind(declared: Option<&str>) -> JsonKind {
 fn write_query_rows(
     statement: &mut direct::Stmt<'_>,
     target: Option<&TableCatalog>,
+    projection: Option<&[Option<JsonKind>]>,
 ) -> Result<Vec<u8>, Failure> {
     let mut out = Vec::with_capacity(256);
     out.push(b'[');
@@ -1391,8 +1515,10 @@ fn write_query_rows(
                     let mut key = Vec::with_capacity(name.len() + 3);
                     direct::write_str(&mut key, name);
                     key.push(b':');
-                    let kind = target
-                        .and_then(|table| table.columns.get(name).copied())
+                    let kind = projection
+                        .filter(|kinds| kinds.len() == statement.column_count())
+                        .and_then(|kinds| kinds[index])
+                        .or_else(|| target.and_then(|table| table.columns.get(name).copied()))
                         .or_else(|| {
                             statement
                                 .column_decltype(index)
@@ -1983,3 +2109,6 @@ mod tests {
 #[cfg(test)]
 #[path = "host_calls_parameter_tests.rs"]
 mod parameter_tests;
+
+#[path = "sql_projection.rs"]
+mod sql_projection;

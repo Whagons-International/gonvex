@@ -27,7 +27,9 @@ macro_rules! now_ms {
     };
 }
 
-pub mod capture;
+mod capture;
+pub mod record_views;
+pub use capture::CAPTURE_FUNCTION;
 pub mod checkpoint;
 mod data_dir;
 pub mod direct;
