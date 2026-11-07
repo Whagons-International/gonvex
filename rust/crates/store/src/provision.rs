@@ -1110,7 +1110,7 @@ pub(crate) fn install_change_feed_locked(
         if !bootstrap_matches(&mut tx, "infrastructure", &infrastructure_sql).await?
             || !infrastructure_present(&mut tx).await?
         {
-            crate::execute_script(&mut tx, &infrastructure_sql).await?;
+            sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&infrastructure_sql)).await?;
             record_bootstrap(&mut tx, "infrastructure", &infrastructure_sql).await?;
         }
         // One read each for every table's columns, every recorded receipt and
@@ -1222,22 +1222,32 @@ pub(crate) fn install_change_feed_locked(
                 )
             } else {
                 match records.get(&table) {
-                    Some(record) => crate::record_views::capture_triggers_sql(
-                        &table,
-                        &record.key_column,
-                        &record.name,
-                        columns
-                            .iter()
-                            .find(|column| column.name == record.key_column)
-                            .is_some_and(|column| column.declared.eq_ignore_ascii_case("INTEGER"))
-                            && record.schema["columns"]
-                                [record.schema["key"].as_str().unwrap_or("")]["type"]
-                                .as_str()
-                                .is_some_and(|kind| {
-                                    crate::rows::JsonKind::from_declared(kind)
-                                        == crate::rows::JsonKind::Text
-                                }),
-                    ),
+                    Some(record) => {
+                        if record.key_column != key {
+                            return Err(protocol(format!(
+                                "logical record {:?} declares storage key {:?}, but {:?} has primary key {:?}",
+                                record.name, record.key_column, table, key
+                            )));
+                        }
+                        crate::record_views::capture_triggers_sql(
+                            &table,
+                            &record.key_column,
+                            &record.name,
+                            columns
+                                .iter()
+                                .find(|column| column.name == record.key_column)
+                                .is_some_and(|column| {
+                                    column.declared.eq_ignore_ascii_case("INTEGER")
+                                })
+                                && record.schema["columns"]
+                                    [record.schema["key"].as_str().unwrap_or("")]["type"]
+                                    .as_str()
+                                    .is_some_and(|kind| {
+                                        crate::rows::JsonKind::from_declared(kind)
+                                            == crate::rows::JsonKind::Text
+                                    }),
+                        )
+                    }
                     None => feed::capture_triggers_sql(&table, &key, &columns),
                 }
             };
@@ -1245,22 +1255,18 @@ pub(crate) fn install_change_feed_locked(
             let receipt_matches = receipts.get(&receipt).map(String::as_str)
                 == Some(bootstrap_digest(&script).as_str());
             if !receipt_matches || !triggers_match(&triggers, &table, &script) {
-                crate::execute_script(&mut tx, &script).await?;
+                // No application writes occur during capture installation.
+                // Refresh once after the whole catalog is committed, rather
+                // than rescanning every table after each trigger group.
+                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&script)).await?;
                 record_bootstrap(&mut tx, &receipt, &script).await?;
             }
         }
         // A shared definition can be an entity in its own right and also
         // contribute fields to other logical records. Stage every dependent
         // record before its definition changes; native FKs prove the join.
-        let stale:Vec<String>=sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='trigger' AND name GLOB 'gonvex_record_dependency_*'").fetch_all(&mut *tx).await?;
-        for name in stale {
-            sqlx::query(&format!(
-                "DROP TRIGGER {}",
-                crate::rows::quote_identifier(&name)
-            ))
-            .execute(&mut *tx)
-            .await?;
-        }
+        let mut expected_dependencies = std::collections::HashSet::new();
+        let mut expected_receipts = std::collections::HashSet::new();
         let dependencies:Vec<(String,String,String,String,String,String)>=sqlx::query_as("SELECT source_table,source_column,owner_storage,owner_column,owner_direction,watch_columns FROM _gonvex_record_dependencies ORDER BY 1,2,3,4").fetch_all(&mut *tx).await?;
         for (source, source_key, owner_table, column, direction, watch_json) in dependencies {
             let inbound = direction == "inbound";
@@ -1308,7 +1314,40 @@ pub(crate) fn install_change_feed_locked(
                 Some(&namespace),
                 &watch,
             );
-            crate::execute_script(&mut tx, &sql).await?;
+            let names = ["insert", "update", "delete"]
+                .map(|event| format!("gonvex_record_dependency_{namespace}_{event}"));
+            expected_dependencies.extend(names.iter().cloned());
+            let receipt = format!("dependency:{namespace}");
+            expected_receipts.insert(receipt.clone());
+            if receipts.get(&receipt).map(String::as_str) != Some(bootstrap_digest(&sql).as_str())
+                || !named_triggers_match(&triggers, &source, &sql, &names)
+            {
+                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&sql)).await?;
+                record_bootstrap(&mut tx, &receipt, &sql).await?;
+            }
+        }
+
+        // Keep unchanged dependency triggers on warm boot, while removing
+        // triggers and receipts for relationships retired by a migration.
+        for (_, name) in triggers.keys() {
+            if name.starts_with("gonvex_record_dependency_")
+                && !expected_dependencies.contains(name)
+            {
+                sqlx::query(&format!(
+                    "DROP TRIGGER {}",
+                    crate::rows::quote_identifier(name)
+                ))
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        for name in receipts.keys() {
+            if name.starts_with("dependency:") && !expected_receipts.contains(name) {
+                sqlx::query("DELETE FROM _gonvex_sync_bootstrap WHERE name=$1")
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
 
         tx.commit().await?;
@@ -1436,8 +1475,21 @@ fn triggers_match(
     table: &str,
     script: &str,
 ) -> bool {
+    named_triggers_match(
+        installed,
+        table,
+        script,
+        &feed::capture_trigger_names(table),
+    )
+}
+
+fn named_triggers_match(
+    installed: &std::collections::HashMap<(String, String), String>,
+    table: &str,
+    script: &str,
+    names: &[String],
+) -> bool {
     let expected = trigger_statements(script);
-    let names = feed::capture_trigger_names(table);
     expected.len() == names.len()
         && names.iter().zip(expected).all(|(name, statement)| {
             installed

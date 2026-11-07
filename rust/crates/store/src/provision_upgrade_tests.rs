@@ -599,6 +599,24 @@ async fn derived_table_capture_is_owned_and_removes_old_capture_receipts() {
 }
 
 #[tokio::test]
+async fn logical_record_capture_rejects_a_nonexistent_storage_key_atomically() {
+    let database = Database::new("gonvex-record-invalid-key");
+    database.install().await.unwrap();
+    database.execute(r#"
+      CREATE TABLE searchDocuments(sourceId TEXT PRIMARY KEY,content TEXT);
+      INSERT INTO _gonvex_record_views(name,storage_table,key_column,schema)
+      VALUES('searchDocuments','searchDocuments','_id','{"key":"sourceId","columns":{"sourceId":{"type":"text"},"content":{"type":"text"}}}');
+    "#).await;
+    let error = database.install().await.unwrap_err();
+    assert!(
+        error.to_string().contains("declares storage key"),
+        "{error}"
+    );
+    assert_eq!(database.scalar("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='searchDocuments'").await, 0);
+    database.pools.close().await;
+}
+
+#[tokio::test]
 async fn normalized_records_capture_public_images_after_all_sql_changes_and_savepoint_rollback() {
     let database = Database::new("gonvex-records");
     database.install().await.unwrap();
@@ -744,6 +762,20 @@ async fn entity_definitions_capture_their_dependent_logical_records() {
  INSERT INTO _gonvex_record_dependencies(source_table,source_column,owner_storage,owner_column) VALUES('fields','_id','valueStorage','fieldId');
  "#).await;
     database.install().await.unwrap();
+    let version = database.schema_version().await;
+    database.install().await.unwrap();
+    assert_eq!(
+        database.schema_version().await,
+        version,
+        "warm dependency bootstrap must not rebuild triggers"
+    );
+    // Missing triggers are repaired even when their digest receipt is intact.
+    let trigger: String = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='trigger' AND name GLOB 'gonvex_record_dependency_*' LIMIT 1")
+        .fetch_one(&database.pools.reader(&database.url).await.unwrap()).await.unwrap();
+    database
+        .execute(&format!("DROP TRIGGER \"{trigger}\""))
+        .await;
+    database.install().await.unwrap();
     let mut tx = begin_transaction(&database.pools, &database.url, false)
         .await
         .unwrap();
@@ -772,6 +804,17 @@ async fn entity_definitions_capture_their_dependent_logical_records() {
             .scalar("SELECT count(*) FROM _gonvex_sync_changes WHERE table_name='fields'")
             .await,
         1
+    );
+    database
+        .execute("DELETE FROM _gonvex_record_dependencies")
+        .await;
+    database.install().await.unwrap();
+    assert_eq!(database.scalar("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name GLOB 'gonvex_record_dependency_*'").await, 0);
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_bootstrap WHERE name GLOB 'dependency:*'")
+            .await,
+        0
     );
     database.pools.close().await;
 }

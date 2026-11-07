@@ -474,13 +474,14 @@ async fn load_shapes(
     connection: &mut SqliteConnection,
 ) -> Result<HashMap<String, Arc<TableShape>>, DatabaseError> {
     let rows = sqlx::query(
-        r#"SELECT m.name, p.name, p.type, p.pk,
-                  (SELECT count(*) FROM pragma_table_info(m.name) AS k WHERE k.pk > 0)
-           FROM sqlite_schema AS m JOIN pragma_table_info(m.name) AS p
-           WHERE m.type = 'table'
-             AND EXISTS (SELECT 1 FROM sqlite_schema AS t
-                         WHERE t.type = 'trigger' AND t.tbl_name = m.name
-                           AND t.sql LIKE '%' || $1 || '(%')
+        r#"WITH captured AS MATERIALIZED (
+             SELECT DISTINCT tbl_name FROM sqlite_schema
+             WHERE type='trigger' AND sql LIKE '%' || $1 || '(%'
+           )
+           SELECT m.name, p.name, p.type, p.pk,
+                  sum(CASE WHEN p.pk > 0 THEN 1 ELSE 0 END) OVER (PARTITION BY m.name)
+           FROM captured AS c JOIN sqlite_schema AS m ON m.type='table' AND m.name=c.tbl_name
+           JOIN pragma_table_info(m.name) AS p
            ORDER BY m.name, p.cid"#,
     )
     .bind(CAPTURE_FUNCTION)
