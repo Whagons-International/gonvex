@@ -76,6 +76,7 @@ export * from "./client-upgrades.js";
 export * from "./browser-upgrades.js";
 export * from "./signals.js";
 export * from "./paged-read-view.js";
+export * from "./column-page.js";
 export {mergeReplicaRecord,type ReplicaRecordVersion,type VersionedReplicaRecord} from './replica-record.js';
 export * from "./external-auth.js";
 // Keep the mutable LocalReplica implementation private to GonvexClient. The
@@ -102,6 +103,7 @@ export {
   type ReplicaCollectionState,
   type ReplicaCollectionSubscriptionState,
   type ReplicaCollectionPlan,
+  type ReplicaColumnPage,
 } from "./local-replica.js";
 export * from "./query-expression.js";
 export * from "./indexeddb-replica.js";
@@ -147,6 +149,7 @@ function createLocalReplicaView(replica: LocalReplica): LocalReplicaView {
     windowRows: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.windowRows<T>(signature),
     entity: <T extends ReplicaRow = ReplicaRow>(entity: string, id: string) => replica.entity<T>(entity, id),
     entityBatch: <T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]) => replica.entityBatch<T>(entity, ids),
+    entityColumns: (entity, ids, projection, limits) => replica.entityColumns(entity, ids, projection, limits),
     entityRows: <T extends ReplicaRow = ReplicaRow>(entity: string) => replica.entityRows<T>(entity),
     entityCompleteness: (entity) => replica.entityCompleteness(entity),
     liveQuery: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.liveQuery<T>(signature),

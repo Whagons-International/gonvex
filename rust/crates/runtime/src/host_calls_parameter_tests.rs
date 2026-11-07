@@ -709,3 +709,66 @@ async fn no_op_commits_publish_no_revision_and_report_their_outcome() {
     assert!(outcome.outbox_written);
     assert_eq!(fixture.facts().await.revision, 2);
 }
+
+#[tokio::test]
+async fn logical_record_crud_preserves_defaults_json_scalars_and_final_values() {
+    let database = TestDatabase::new(r#"
+      CREATE TABLE _gonvex_record_views(name TEXT PRIMARY KEY,storage_table TEXT,key_column TEXT,schema TEXT NOT NULL);
+      CREATE TABLE storage(id TEXT PRIMARY KEY,label TEXT NOT NULL,payload BLOB,done BOOLEAN NOT NULL);
+      CREATE VIEW tasks AS SELECT id _id,upper(label) name,json(payload) payload,done FROM storage;
+      CREATE TRIGGER task_insert INSTEAD OF INSERT ON tasks BEGIN INSERT INTO storage VALUES(NEW._id,NEW.name,jsonb(NEW.payload),NEW.done); END;
+      CREATE TRIGGER task_update INSTEAD OF UPDATE ON tasks BEGIN UPDATE storage SET label=NEW.name,payload=jsonb(NEW.payload),done=NEW.done WHERE id=OLD._id; END;
+      CREATE TRIGGER task_delete INSTEAD OF DELETE ON tasks BEGIN DELETE FROM storage WHERE id=OLD._id; END;
+      INSERT INTO _gonvex_record_views VALUES('tasks','storage','id','{"key":"_id","columns":{"_id":{"type":"text"},"name":{"type":"text","default":"''shared''"},"payload":{"type":"json","default":"''0''"},"done":{"type":"boolean","default":"1"}}}');
+    "#).await;
+    let mut calls = database.calls(DatabaseCapability::Reducer).await;
+    let row = calls
+        .insert("tasks", serde_json::json!({}), Some("public-id".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        row,
+        serde_json::json!({"_id":"public-id","name":"SHARED","payload":0,"done":true})
+    );
+    let rows = calls
+        .query(
+            "SELECT payload AS scalar, done AS complete, 0 AS expression FROM tasks",
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        serde_json::json!([{"scalar":0,"complete":true,"expression":0}])
+    );
+    let joined=calls.query("WITH records AS (SELECT * FROM tasks) SELECT r.payload AS scalar,r.done AS complete FROM records r JOIN storage s ON s.id=r._id",Value::Null).await.unwrap();
+    assert_eq!(joined, serde_json::json!([{"scalar":0,"complete":true}]));
+    let row = calls
+        .update(
+            "tasks",
+            "",
+            serde_json::json!("public-id"),
+            serde_json::json!({"name":"changed","payload":false,"done":false}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        row,
+        serde_json::json!({"_id":"public-id","name":"CHANGED","payload":false,"done":false})
+    );
+    assert_eq!(
+        calls
+            .delete_many("tasks", "", serde_json::json!(["public-id", "missing"]))
+            .await
+            .unwrap(),
+        serde_json::json!({"deleted":1})
+    );
+    assert_eq!(
+        calls
+            .delete("tasks", "", serde_json::json!("missing"))
+            .await
+            .unwrap(),
+        serde_json::json!({"deleted":0})
+    );
+    calls.finish(true).await.unwrap();
+}

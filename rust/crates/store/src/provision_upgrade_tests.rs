@@ -12,6 +12,155 @@ struct Database {
     url: String,
 }
 
+#[tokio::test]
+async fn schema_retirement_finalizes_direct_statements_before_closing_the_writer() {
+    let database = Database::new("gonvex-schema-writer-retirement");
+    database.execute("CREATE TABLE parents(id TEXT PRIMARY KEY,value TEXT); INSERT INTO parents VALUES('p','before');").await;
+    database.install().await.unwrap();
+    let mut tx = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    tx.direct()
+        .await
+        .unwrap()
+        .run(|connection| connection.execute("UPDATE parents SET value='first' WHERE id='p'", &[]))
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        database
+            .pools
+            .writer_statement_stats(&database.url)
+            .await
+            .unwrap()
+            .cached
+            > 0
+    );
+    apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![SqlMigration::new(
+            "rebuild".into(),
+            MigrationScope::Tenant,
+            false,
+            "-- gonvex:foreign-key-rebuild\nALTER TABLE parents ADD COLUMN extra TEXT;".into(),
+        )],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        database
+            .pools
+            .writer_statement_stats(&database.url)
+            .await
+            .unwrap()
+            .cached,
+        0
+    );
+    let mut tx = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    tx.direct()
+        .await
+        .unwrap()
+        .run(|connection| connection.execute("UPDATE parents SET value='after' WHERE id='p'", &[]))
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        database
+            .pools
+            .writer_statement_stats(&database.url)
+            .await
+            .unwrap()
+            .cached
+            > 0
+    );
+    let value: String = sqlx::query_scalar("SELECT value FROM parents WHERE id='p'")
+        .fetch_one(&database.pools.reader(&database.url).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(value, "after");
+    database.pools.close().await;
+}
+
+#[tokio::test]
+async fn foreign_key_rebuild_preserves_cascading_children_and_restores_enforcement() {
+    let database = Database::new("gonvex-fk-rebuild");
+    database.execute("CREATE TABLE parents(id TEXT PRIMARY KEY); CREATE TABLE children(id TEXT PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE); INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c','p');").await;
+    let migration=SqlMigration::new("rebuild".into(),MigrationScope::Tenant,false,
+        "-- gonvex:foreign-key-rebuild\nCREATE TABLE parents_new(id TEXT PRIMARY KEY); INSERT INTO parents_new SELECT * FROM parents; DROP TABLE parents; ALTER TABLE parents_new RENAME TO parents;".into());
+    apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![migration],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    assert_eq!(database.scalar("SELECT count(*) FROM children").await, 1);
+    let pool = database.pools.pool(&database.url).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(sqlx::query("INSERT INTO children VALUES('bad','missing')")
+        .execute(&mut *connection)
+        .await
+        .is_err());
+    drop(connection);
+    database.pools.close().await;
+}
+
+#[tokio::test]
+async fn foreign_key_rebuild_rejects_existing_orphans_and_rolls_back_schema_and_receipt() {
+    let database = Database::new("gonvex-fk-rebuild-rollback");
+    database.execute("CREATE TABLE parents(id TEXT PRIMARY KEY); CREATE TABLE children(id TEXT PRIMARY KEY,parent TEXT); INSERT INTO children VALUES('legacy','missing');").await;
+    let migration=SqlMigration::new("rebuild".into(),MigrationScope::Tenant,false,
+        "-- gonvex:foreign-key-rebuild\nCREATE TABLE children_new(id TEXT PRIMARY KEY,parent TEXT REFERENCES parents(id)); INSERT INTO children_new SELECT * FROM children; DROP TABLE children; ALTER TABLE children_new RENAME TO children;".into());
+    let error = apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![migration],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("foreign-key rebuild rejected"),
+        "{error}"
+    );
+    assert_eq!(database.scalar("SELECT count(*) FROM children").await, 1);
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM pragma_foreign_key_list('children')")
+            .await,
+        0
+    );
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM gonvex_migrations WHERE name='rebuild'")
+            .await,
+        0
+    );
+    let pool = database.pools.pool(&database.url).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    database.pools.close().await;
+}
+
 impl Database {
     fn new(prefix: &str) -> Self {
         let dir = TestDir::new(prefix);
@@ -473,4 +622,272 @@ async fn change_capture_skips_fts_virtual_and_shadow_tables() {
             .await,
         0
     );
+}
+
+#[tokio::test]
+async fn derived_table_capture_is_owned_and_removes_old_capture_receipts() {
+    let database = Database::new("gonvex-derived");
+    database.execute("CREATE TABLE parents(id TEXT PRIMARY KEY); CREATE TABLE edges(id TEXT PRIMARY KEY,owner TEXT REFERENCES parents(id));").await;
+    database.install().await.unwrap();
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_bootstrap WHERE name='table:edges'")
+            .await,
+        1
+    );
+    database.execute("INSERT INTO _gonvex_table_options(name,capture,owner_table,owner_column) VALUES('edges','derived','parents','owner')").await;
+    database.install().await.unwrap();
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_bootstrap WHERE name='table:edges'")
+            .await,
+        0
+    );
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='edges'")
+            .await,
+        0
+    );
+    let mut transaction = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    sqlx::raw_sql("INSERT INTO parents VALUES('p'); INSERT INTO edges VALUES('e','p');")
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_changes WHERE table_name='edges'")
+            .await,
+        0
+    );
+    database
+        .execute("UPDATE _gonvex_table_options SET owner_column='absent' WHERE name='edges'")
+        .await;
+    let error = database.install().await.unwrap_err();
+    assert!(error.to_string().contains("owner foreign key"), "{error}");
+    database.pools.close().await;
+}
+
+#[tokio::test]
+async fn logical_record_capture_rejects_a_nonexistent_storage_key_atomically() {
+    let database = Database::new("gonvex-record-invalid-key");
+    database.install().await.unwrap();
+    database.execute(r#"
+      CREATE TABLE searchDocuments(sourceId TEXT PRIMARY KEY,content TEXT);
+      INSERT INTO _gonvex_record_views(name,storage_table,key_column,schema)
+      VALUES('searchDocuments','searchDocuments','_id','{"key":"sourceId","columns":{"sourceId":{"type":"text"},"content":{"type":"text"}}}');
+    "#).await;
+    let error = database.install().await.unwrap_err();
+    assert!(
+        error.to_string().contains("declares storage key"),
+        "{error}"
+    );
+    assert_eq!(database.scalar("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='searchDocuments'").await, 0);
+    database.pools.close().await;
+}
+
+#[tokio::test]
+async fn normalized_records_capture_public_images_after_all_sql_changes_and_savepoint_rollback() {
+    let database = Database::new("gonvex-records");
+    database.install().await.unwrap();
+    database.execute(r#"
+      INSERT INTO _gonvex_id_domains(_id,name) VALUES(1,'tasks');
+      INSERT INTO _gonvex_identity_keys(_id,domain,value) VALUES(10,1,'public-task');
+      INSERT INTO _gonvex_interned_text(_id,value) VALUES(1,'Shared title'),(2,'Other title');
+      CREATE TABLE taskStorage(_id INTEGER PRIMARY KEY REFERENCES _gonvex_identity_keys(_id),titleId INTEGER REFERENCES _gonvex_interned_text(_id),metadata BLOB,done BOOLEAN NOT NULL DEFAULT 0);
+      CREATE VIEW tasks AS SELECT i.value _id,t.value name,json(s.metadata) metadata,s.done FROM taskStorage s JOIN _gonvex_identity_keys i ON i._id=s._id LEFT JOIN _gonvex_interned_text t ON t._id=s.titleId;
+    "#).await;
+    let schema = serde_json::json!({"key":"_id","columns":{"_id":{"type":"text","nullable":false},"name":{"type":"text","nullable":false},"metadata":{"type":"json","nullable":true},"done":{"type":"boolean","nullable":false}}});
+    sqlx::query("INSERT INTO _gonvex_record_views(name,storage_table,key_column,schema) VALUES('tasks','taskStorage','_id',$1)")
+      .bind(schema.to_string()).execute(&database.pools.pool(&database.url).await.unwrap()).await.unwrap();
+    database.install().await.unwrap();
+    let mut transaction = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO taskStorage(_id,titleId,metadata) VALUES(10,1,jsonb('{\"nested\":[true,12]}'))").execute(&mut **transaction.transaction()).await.unwrap();
+    transaction.commit().await.unwrap();
+    let reader = database.pools.reader(&database.url).await.unwrap();
+    let inserted: serde_json::Value = serde_json::from_str(
+        &sqlx::query_scalar::<_, String>(
+            "SELECT new_value FROM _gonvex_sync_changes WHERE table_name='tasks'",
+        )
+        .fetch_one(&reader)
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        inserted,
+        serde_json::json!({"_id":"public-task","name":"Shared title","metadata":{"nested":[true,12]},"done":false})
+    );
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_changes WHERE table_name='taskStorage'")
+            .await,
+        0
+    );
+    let mut transaction = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    sqlx::raw_sql("UPDATE taskStorage SET titleId=2,done=1 WHERE _id=10; UPDATE taskStorage SET done=0 WHERE _id=10;").execute(&mut **transaction.transaction()).await.unwrap();
+    transaction.commit().await.unwrap();
+    let (old,new,changed):(String,String,String)=sqlx::query_as("SELECT old_value,new_value,changed_columns FROM _gonvex_sync_changes WHERE table_name='tasks' ORDER BY revision DESC LIMIT 1").fetch_one(&reader).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&old).unwrap()["name"],
+        "Shared title"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&new).unwrap()["name"],
+        "Other title"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&changed).unwrap(),
+        serde_json::json!(["name"])
+    );
+    let mut transaction = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    sqlx::raw_sql("SAVEPOINT draft; UPDATE taskStorage SET titleId=1 WHERE _id=10; ROLLBACK TO draft; RELEASE draft; UPDATE taskStorage SET done=1 WHERE _id=10;").execute(&mut **transaction.transaction()).await.unwrap();
+    transaction.commit().await.unwrap();
+    let changed:String=sqlx::query_scalar("SELECT changed_columns FROM _gonvex_sync_changes WHERE table_name='tasks' ORDER BY revision DESC LIMIT 1").fetch_one(&reader).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&changed).unwrap(),
+        serde_json::json!(["done"])
+    );
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_record_pending")
+            .await,
+        0
+    );
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM pragma_foreign_key_check")
+            .await,
+        0
+    );
+    // The guard also protects a raw writer which forgot transaction finalization.
+    assert!(sqlx::query("UPDATE taskStorage SET done=0 WHERE _id=10")
+        .execute(&database.pools.pool(&database.url).await.unwrap())
+        .await
+        .is_err());
+    assert_eq!(database.scalar("SELECT done FROM taskStorage").await, 1);
+    database.pools.close().await;
+}
+
+#[tokio::test]
+async fn normalized_owned_rows_capture_all_affected_owners_once() {
+    let database = Database::new("gonvex-owned-records");
+    database.install().await.unwrap();
+    database.execute(r#"
+ INSERT INTO _gonvex_id_domains VALUES(1,'tasks');
+ INSERT INTO _gonvex_identity_keys VALUES(10,1,'a'),(11,1,'b');
+ CREATE TABLE schedules(_id INTEGER PRIMARY KEY,value TEXT NOT NULL);
+ CREATE TABLE taskStorage(_id INTEGER PRIMARY KEY REFERENCES _gonvex_identity_keys(_id),scheduleId INTEGER REFERENCES schedules(_id));
+ CREATE TABLE details(_id INTEGER PRIMARY KEY,taskId INTEGER NOT NULL UNIQUE REFERENCES taskStorage(_id) ON DELETE CASCADE,value TEXT);
+ CREATE VIEW tasks AS SELECT i.value _id,s.value schedule,d.value detail FROM taskStorage t JOIN _gonvex_identity_keys i ON i._id=t._id LEFT JOIN schedules s ON s._id=t.scheduleId LEFT JOIN details d ON d.taskId=t._id;
+ INSERT INTO _gonvex_record_views VALUES('tasks','taskStorage','_id','{"key":"_id","columns":{"_id":{"type":"text"},"schedule":{"type":"text"},"detail":{"type":"text"}}}');
+ INSERT INTO _gonvex_table_options(name,capture,owner_table,owner_column,owner_direction) VALUES('schedules','owned','taskStorage','scheduleId','inbound'),('details','owned','taskStorage','taskId','outbound');
+ INSERT INTO schedules VALUES(1,'daily'); INSERT INTO taskStorage VALUES(10,1),(11,1); INSERT INTO details VALUES(1,10,'first');
+ "#).await;
+    database.install().await.unwrap();
+    let mut tx = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    sqlx::raw_sql("UPDATE schedules SET value='weekly'; UPDATE details SET value='second'; SAVEPOINT draft; UPDATE details SET value='discarded'; ROLLBACK TO draft; RELEASE draft;").execute(&mut **tx.transaction()).await.unwrap();
+    tx.commit().await.unwrap();
+    let reader = database.pools.reader(&database.url).await.unwrap();
+    let rows:Vec<(String,String,String)>=sqlx::query_as("SELECT row_id,old_value,new_value FROM _gonvex_sync_changes WHERE table_name='tasks' ORDER BY row_id").fetch_all(&reader).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    for (id, old, new) in rows {
+        let old: serde_json::Value = serde_json::from_str(&old).unwrap();
+        let new: serde_json::Value = serde_json::from_str(&new).unwrap();
+        assert_eq!(old["schedule"], "daily");
+        assert_eq!(new["schedule"], "weekly");
+        if id == "a" {
+            assert_eq!(old["detail"], "first");
+            assert_eq!(new["detail"], "second");
+        }
+    }
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_record_pending")
+            .await,
+        0
+    );
+    database.pools.close().await;
+}
+
+#[tokio::test]
+async fn entity_definitions_capture_their_dependent_logical_records() {
+    let database = Database::new("gonvex-dependent-records");
+    database.install().await.unwrap();
+    database.execute(r#"
+ INSERT INTO _gonvex_id_domains VALUES(1,'values'); INSERT INTO _gonvex_identity_keys VALUES(10,1,'value');
+ CREATE TABLE fields(_id INTEGER PRIMARY KEY,name TEXT NOT NULL); INSERT INTO fields VALUES(1,'Original');
+ CREATE TABLE valueStorage(_id INTEGER PRIMARY KEY REFERENCES _gonvex_identity_keys(_id),fieldId INTEGER NOT NULL REFERENCES fields(_id),value INTEGER);
+ INSERT INTO valueStorage VALUES(10,1,7);
+ CREATE VIEW valuesPublic AS SELECT i.value _id,f.name,v.value FROM valueStorage v JOIN _gonvex_identity_keys i ON i._id=v._id JOIN fields f ON f._id=v.fieldId;
+ INSERT INTO _gonvex_record_views VALUES('valuesPublic','valueStorage','_id','{"key":"_id","columns":{"_id":{"type":"text"},"name":{"type":"text"},"value":{"type":"integer"}}}');
+ INSERT INTO _gonvex_record_dependencies(source_table,source_column,owner_storage,owner_column) VALUES('fields','_id','valueStorage','fieldId');
+ "#).await;
+    database.install().await.unwrap();
+    let version = database.schema_version().await;
+    database.install().await.unwrap();
+    assert_eq!(
+        database.schema_version().await,
+        version,
+        "warm dependency bootstrap must not rebuild triggers"
+    );
+    // Missing triggers are repaired even when their digest receipt is intact.
+    let trigger: String = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='trigger' AND name GLOB 'gonvex_record_dependency_*' LIMIT 1")
+        .fetch_one(&database.pools.reader(&database.url).await.unwrap()).await.unwrap();
+    database
+        .execute(&format!("DROP TRIGGER \"{trigger}\""))
+        .await;
+    database.install().await.unwrap();
+    let mut tx = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fields SET name='Renamed' WHERE _id=1")
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let reader = database.pools.reader(&database.url).await.unwrap();
+    let (old, new): (String, String) = sqlx::query_as(
+        "SELECT old_value,new_value FROM _gonvex_sync_changes WHERE table_name='valuesPublic'",
+    )
+    .fetch_one(&reader)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&old).unwrap()["name"],
+        "Original"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&new).unwrap()["name"],
+        "Renamed"
+    );
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_changes WHERE table_name='fields'")
+            .await,
+        1
+    );
+    database
+        .execute("DELETE FROM _gonvex_record_dependencies")
+        .await;
+    database.install().await.unwrap();
+    assert_eq!(database.scalar("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name GLOB 'gonvex_record_dependency_*'").await, 0);
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_bootstrap WHERE name GLOB 'dependency:*'")
+            .await,
+        0
+    );
+    database.pools.close().await;
 }

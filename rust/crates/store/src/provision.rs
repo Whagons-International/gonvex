@@ -22,6 +22,7 @@ use super::{ControlPlane, DatabaseError, PoolRegistry, TenantRoute};
 /// one database: migrations, change-capture installation and reference
 /// declarations.
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+const SCHEMA_OPTIONS_SQL: &str = include_str!("schema_options.sql");
 
 pub(crate) const SCHEMA_LOCK: &str = "gonvex_sql_migrations";
 
@@ -836,6 +837,16 @@ impl ControlPlane {
             let _admission = self.pools.admit(&database_url).await?;
             let _schema = self.pools.lock(&database_url, SCHEMA_LOCK).await?;
             let mut connection = pool.acquire().await?;
+            if migrations.iter().any(rebuilds_foreign_keys) {
+                // Cancellation must never return a FK-disabled connection to
+                // the ordinary writer pool. This schema connection is retired.
+                self.pools
+                    .database(&database_url)
+                    .await?
+                    .statements
+                    .retire();
+                connection.close_on_drop();
+            }
             install_tenant_identity(&mut connection).await?;
             let notices =
                 apply_migrations_locked(&mut connection, &migrations, MigrationScope::Tenant)
@@ -922,6 +933,10 @@ pub(crate) fn apply_migrations<'a>(
         let pool = pools.pool(database_url).await?;
         let _schema = pools.lock(database_url, SCHEMA_LOCK).await?;
         let mut connection = pool.acquire().await?;
+        if migrations.iter().any(rebuilds_foreign_keys) {
+            pools.database(database_url).await?.statements.retire();
+            connection.close_on_drop();
+        }
         let (applied, notices) =
             apply_migrations_locked(&mut connection, &migrations, scope).await?;
         drop(connection);
@@ -935,6 +950,13 @@ pub(crate) fn apply_migrations<'a>(
 
 type AppliedMigrations = (Vec<String>, Vec<CommitNotice>);
 
+fn rebuilds_foreign_keys(migration: &SqlMigration) -> bool {
+    migration
+        .sql
+        .lines()
+        .any(|line| line.trim() == "-- gonvex:foreign-key-rebuild")
+}
+
 fn apply_migrations_locked<'a>(
     connection: &'a mut SqliteConnection,
     migrations: &'a [SqlMigration],
@@ -943,6 +965,7 @@ fn apply_migrations_locked<'a>(
     Box::pin(async move {
         if scope == MigrationScope::Tenant {
             super::reference_integrity::install(connection).await?;
+            crate::execute_script(&mut *connection, SCHEMA_OPTIONS_SQL).await?;
         }
         crate::execute_script(
             &mut *connection,
@@ -979,6 +1002,12 @@ fn apply_migrations_locked<'a>(
                 continue;
             }
             let started = Instant::now();
+            let rebuild = rebuilds_foreign_keys(migration);
+            if rebuild && (scope != MigrationScope::Tenant || migration.no_transaction) {
+                return Err(protocol(
+                    "foreign-key rebuild requires an atomic tenant migration",
+                ));
+            }
             let provenance = Provenance {
                 command_id: Some(format!("migration:{}", migration.name)),
                 channel: Some("system".to_owned()),
@@ -988,6 +1017,11 @@ fn apply_migrations_locked<'a>(
                 // `-- gonvex:no-transaction`: each statement commits on its own.
                 crate::execute_script(&mut *connection, &migration.sql).await?;
             }
+            if rebuild {
+                sqlx::query("PRAGMA foreign_keys=OFF")
+                    .execute(&mut *connection)
+                    .await?;
+            }
             let mut transaction = connection.begin().await?;
             let finished = async {
                 if !migration.no_transaction {
@@ -995,6 +1029,21 @@ fn apply_migrations_locked<'a>(
                 }
                 if scope == MigrationScope::Tenant {
                     super::reference_integrity::after_migration(&mut transaction).await?;
+                }
+                if rebuild {
+                    let invalid = sqlx::query(
+                        "SELECT \"table\",rowid,parent,fkid FROM pragma_foreign_key_check LIMIT 1",
+                    )
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+                    if let Some(row) = invalid {
+                        return Err(protocol(format!(
+                            "foreign-key rebuild rejected: {} -> {} (constraint {})",
+                            row.get::<String, _>("table"),
+                            row.get::<String, _>("parent"),
+                            row.get::<i64, _>("fkid")
+                        )));
+                    }
                 }
                 let notice = feed::finalize(&mut transaction, &provenance).await?;
                 sqlx::query(
@@ -1008,15 +1057,25 @@ fn apply_migrations_locked<'a>(
                 Ok::<_, DatabaseError>(notice)
             }
             .await;
-            match finished {
-                Ok(notice) => {
-                    transaction.commit().await?;
-                    notices.extend(notice);
-                }
+            let outcome = match finished {
+                Ok(notice) => transaction
+                    .commit()
+                    .await
+                    .map(|_| notice)
+                    .map_err(DatabaseError::from),
                 Err(error) => {
                     let _ = transaction.rollback().await;
-                    return Err(error);
+                    Err(error)
                 }
+            };
+            if rebuild {
+                sqlx::query("PRAGMA foreign_keys=ON")
+                    .execute(&mut *connection)
+                    .await?;
+            }
+            match outcome {
+                Ok(notice) => notices.extend(notice),
+                Err(error) => return Err(error),
             }
             applied.push(migration.name.clone());
         }
@@ -1053,18 +1112,28 @@ pub(crate) fn install_change_feed_locked(
     )
     .execute(&mut *tx)
     .await?;
-        if !bootstrap_matches(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?
+        let infrastructure_sql = format!("{SYNC_INFRASTRUCTURE_SQL}\n{SCHEMA_OPTIONS_SQL}");
+        if !bootstrap_matches(&mut tx, "infrastructure", &infrastructure_sql).await?
             || !infrastructure_present(&mut tx).await?
         {
-            crate::execute_script(&mut tx, SYNC_INFRASTRUCTURE_SQL).await?;
-            record_bootstrap(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?;
+            sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&infrastructure_sql)).await?;
+            record_bootstrap(&mut tx, "infrastructure", &infrastructure_sql).await?;
         }
         // One read each for every table's columns, every recorded receipt and
         // every installed trigger. Checking per table issued roughly
         // 4 statements x tables x tenants on every boot (51k statements for
         // 26 Whagons tenants); a warm boot now reads three result sets.
+        let invalid:Option<String>=sqlx::query_scalar("SELECT o.name FROM _gonvex_table_options o WHERE o.capture='derived' AND NOT EXISTS(SELECT 1 FROM pragma_foreign_key_list(o.name) f WHERE f.\"from\"=o.owner_column AND f.\"table\"=o.owner_table) LIMIT 1").fetch_optional(&mut *tx).await?;
+        if let Some(name) = invalid {
+            return Err(protocol(format!(
+                "derived table {name:?} must declare its owner foreign key"
+            )));
+        }
+        let records = crate::record_views::descriptors(&mut tx).await?;
+        let owned:std::collections::HashMap<String,(String,String,String)>=sqlx::query_as::<_,(String,String,String,String)>("SELECT name,owner_table,owner_column,owner_direction FROM _gonvex_table_options WHERE capture='owned'").fetch_all(&mut *tx).await?.into_iter().map(|(name,table,column,direction)|(name,(table,column,direction))).collect();
         let tables = application_tables(&mut tx).await?;
         let mut columns_by_table = all_table_columns(&mut tx).await?;
+        let owner_columns = columns_by_table.clone();
         let receipts: std::collections::HashMap<String, String> =
             sqlx::query_as::<_, (String, String)>(
                 "SELECT name, digest FROM _gonvex_sync_bootstrap",
@@ -1082,6 +1151,25 @@ pub(crate) fn install_change_feed_locked(
             .into_iter()
             .filter_map(|(table, name, sql)| sql.map(|sql| ((table, name), sql)))
             .collect();
+        let active: std::collections::HashSet<_> = tables.iter().map(String::as_str).collect();
+        for table in receipts
+            .keys()
+            .filter_map(|name| name.strip_prefix("table:"))
+            .filter(|name| !active.contains(name))
+        {
+            for name in feed::capture_trigger_names(table) {
+                sqlx::query(&format!(
+                    "DROP TRIGGER IF EXISTS {}",
+                    crate::rows::quote_identifier(&name)
+                ))
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query("DELETE FROM _gonvex_sync_bootstrap WHERE name=$1")
+                .bind(format!("table:{table}"))
+                .execute(&mut *tx)
+                .await?;
+        }
         for table in tables {
             let columns = columns_by_table.remove(&table).unwrap_or_default();
             let key = columns
@@ -1091,15 +1179,183 @@ pub(crate) fn install_change_feed_locked(
                 .ok_or_else(|| {
                     protocol(format!("change-feed table {table:?} has no primary key"))
                 })?;
-            let script = feed::capture_triggers_sql(&table, &key, &columns);
+            let script = if let Some((owner_table, owner_column, direction)) = owned.get(&table) {
+                let owner = records.get(owner_table).ok_or_else(|| {
+                    protocol(format!(
+                        "owned storage {table:?} needs a logical record owner"
+                    ))
+                })?;
+                let inbound = direction == "inbound";
+                let (from, to, column, target) = if inbound {
+                    (
+                        owner_table.as_str(),
+                        table.as_str(),
+                        owner_column.as_str(),
+                        key.as_str(),
+                    )
+                } else {
+                    (
+                        table.as_str(),
+                        owner_table.as_str(),
+                        owner_column.as_str(),
+                        owner.key_column.as_str(),
+                    )
+                };
+                let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_list($1) WHERE \"table\"=$2 AND \"from\"=$3 AND \"to\"=$4)").bind(from).bind(to).bind(column).bind(target).fetch_one(&mut *tx).await?;
+                if !valid {
+                    return Err(protocol(format!(
+                        "owned storage {table:?} must declare its owner relationship in SQL"
+                    )));
+                }
+                let integer = owner_columns.get(owner_table).is_some_and(|columns| {
+                    columns.iter().any(|column| {
+                        column.name == owner.key_column
+                            && column.declared.eq_ignore_ascii_case("INTEGER")
+                    })
+                }) && owner.schema["columns"]
+                    [owner.schema["key"].as_str().unwrap_or("")]["type"]
+                    .as_str()
+                    .is_some_and(|kind| {
+                        crate::rows::JsonKind::from_declared(kind) == crate::rows::JsonKind::Text
+                    });
+                crate::record_views::owned_capture_triggers_sql(
+                    &table,
+                    &key,
+                    owner,
+                    owner_column,
+                    inbound,
+                    integer,
+                )
+            } else {
+                match records.get(&table) {
+                    Some(record) => {
+                        if record.key_column != key {
+                            return Err(protocol(format!(
+                                "logical record {:?} declares storage key {:?}, but {:?} has primary key {:?}",
+                                record.name, record.key_column, table, key
+                            )));
+                        }
+                        crate::record_views::capture_triggers_sql(
+                            &table,
+                            &record.key_column,
+                            &record.name,
+                            columns
+                                .iter()
+                                .find(|column| column.name == record.key_column)
+                                .is_some_and(|column| {
+                                    column.declared.eq_ignore_ascii_case("INTEGER")
+                                })
+                                && record.schema["columns"]
+                                    [record.schema["key"].as_str().unwrap_or("")]["type"]
+                                    .as_str()
+                                    .is_some_and(|kind| {
+                                        crate::rows::JsonKind::from_declared(kind)
+                                            == crate::rows::JsonKind::Text
+                                    }),
+                        )
+                    }
+                    None => feed::capture_triggers_sql(&table, &key, &columns),
+                }
+            };
             let receipt = format!("table:{table}");
             let receipt_matches = receipts.get(&receipt).map(String::as_str)
                 == Some(bootstrap_digest(&script).as_str());
             if !receipt_matches || !triggers_match(&triggers, &table, &script) {
-                crate::execute_script(&mut tx, &script).await?;
+                // No application writes occur during capture installation.
+                // Refresh once after the whole catalog is committed, rather
+                // than rescanning every table after each trigger group.
+                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&script)).await?;
                 record_bootstrap(&mut tx, &receipt, &script).await?;
             }
         }
+        // A shared definition can be an entity in its own right and also
+        // contribute fields to other logical records. Stage every dependent
+        // record before its definition changes; native FKs prove the join.
+        let mut expected_dependencies = std::collections::HashSet::new();
+        let mut expected_receipts = std::collections::HashSet::new();
+        let dependencies:Vec<(String,String,String,String,String,String)>=sqlx::query_as("SELECT source_table,source_column,owner_storage,owner_column,owner_direction,watch_columns FROM _gonvex_record_dependencies ORDER BY 1,2,3,4").fetch_all(&mut *tx).await?;
+        for (source, source_key, owner_table, column, direction, watch_json) in dependencies {
+            let inbound = direction == "inbound";
+            let owner = records.get(&owner_table).ok_or_else(|| {
+                protocol(format!(
+                    "record dependency needs a logical owner: {owner_table:?}"
+                ))
+            })?;
+            let (from, to, target_key) = if inbound {
+                (&owner_table, &source, &source_key)
+            } else {
+                (&source, &owner_table, &owner.key_column)
+            };
+            let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_list($1) WHERE \"table\"=$2 AND \"from\"=$3 AND \"to\"=$4)").bind(from).bind(to).bind(&column).bind(target_key).fetch_one(&mut *tx).await?;
+            if !valid {
+                return Err(protocol(format!("record dependency {source:?} -> {owner_table:?} needs a native SQL relationship")));
+            }
+            let integer = owner_columns.get(&owner_table).is_some_and(|columns| {
+                columns.iter().any(|c| {
+                    c.name == owner.key_column && c.declared.eq_ignore_ascii_case("INTEGER")
+                })
+            }) && owner.schema["columns"][owner.schema["key"].as_str().unwrap_or("")]
+                ["type"]
+                .as_str()
+                .is_some_and(|kind| {
+                    crate::rows::JsonKind::from_declared(kind) == crate::rows::JsonKind::Text
+                });
+            let watch: Vec<String> = serde_json::from_str(&watch_json)
+                .map_err(|error| protocol(format!("invalid dependency columns: {error}")))?;
+            let valid_columns:i64=sqlx::query_scalar("SELECT count(*) FROM pragma_table_info($1) WHERE name IN (SELECT value FROM json_each($2))").bind(&source).bind(&watch_json).fetch_one(&mut *tx).await?;
+            if valid_columns != watch.len() as i64 {
+                return Err(protocol(format!(
+                    "record dependency references unknown or repeated columns on {source:?}"
+                )));
+            }
+            let namespace =
+                bootstrap_digest(&format!("{source}:{source_key}:{owner_table}:{column}"));
+            let sql = crate::record_views::owned_capture_triggers_sql_named(
+                &source,
+                &source_key,
+                owner,
+                &column,
+                inbound,
+                integer,
+                Some(&namespace),
+                &watch,
+            );
+            let names = ["insert", "update", "delete"]
+                .map(|event| format!("gonvex_record_dependency_{namespace}_{event}"));
+            expected_dependencies.extend(names.iter().cloned());
+            let receipt = format!("dependency:{namespace}");
+            expected_receipts.insert(receipt.clone());
+            if receipts.get(&receipt).map(String::as_str) != Some(bootstrap_digest(&sql).as_str())
+                || !named_triggers_match(&triggers, &source, &sql, &names)
+            {
+                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&sql)).await?;
+                record_bootstrap(&mut tx, &receipt, &sql).await?;
+            }
+        }
+
+        // Keep unchanged dependency triggers on warm boot, while removing
+        // triggers and receipts for relationships retired by a migration.
+        for (_, name) in triggers.keys() {
+            if name.starts_with("gonvex_record_dependency_")
+                && !expected_dependencies.contains(name)
+            {
+                sqlx::query(&format!(
+                    "DROP TRIGGER {}",
+                    crate::rows::quote_identifier(name)
+                ))
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        for name in receipts.keys() {
+            if name.starts_with("dependency:") && !expected_receipts.contains(name) {
+                sqlx::query("DELETE FROM _gonvex_sync_bootstrap WHERE name=$1")
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+
         tx.commit().await?;
         // The writer's capture hook must know the tables it now captures.
         crate::capture::refresh(connection).await?;
@@ -1120,6 +1376,7 @@ pub(crate) async fn application_tables(
              AND list.name NOT LIKE '\_gonvex%' ESCAPE '\'
              AND list.name NOT LIKE 'gonvex\_%' ESCAPE '\'
              AND list.name NOT LIKE 'sqlite\_%' ESCAPE '\'
+             AND NOT EXISTS(SELECT 1 FROM _gonvex_table_options o WHERE o.name=list.name AND o.capture NOT IN ('entity','owned'))
              AND NOT EXISTS (
                SELECT 1 FROM sqlite_schema virtual
                WHERE virtual.type='table' AND virtual.sql LIKE 'CREATE VIRTUAL TABLE%'
@@ -1137,23 +1394,33 @@ async fn infrastructure_present(connection: &mut SqliteConnection) -> Result<boo
         ("table", "_gonvex_sync_changes"),
         ("table", "_gonvex_sync_transactions"),
         ("table", "_gonvex_action_outbox"),
+        ("table", "_gonvex_schema_capabilities"),
+        ("table", "_gonvex_table_options"),
+        ("table", "_gonvex_id_domains"),
+        ("table", "_gonvex_identity_keys"),
+        ("table", "_gonvex_interned_text"),
+        ("table", "_gonvex_record_views"),
+        ("table", "_gonvex_record_dependencies"),
+        ("table", "_gonvex_record_pending"),
+        ("table", "_gonvex_record_guard"),
         ("index", "gonvex_sync_changes_revision"),
         ("index", "gonvex_sync_changes_pending"),
         ("index", "gonvex_sync_changes_created_at"),
         ("index", "gonvex_sync_changes_command"),
         ("index", "_gonvex_action_outbox_pending"),
     ];
-    for (kind, name) in REQUIRED {
-        let present: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type=$1 AND name=$2)",
-        )
-        .bind(kind)
-        .bind(name)
-        .fetch_one(&mut *connection)
-        .await?;
-        if !present {
-            return Ok(false);
-        }
+    let predicates = REQUIRED
+        .iter()
+        .map(|(kind, name)| format!("(type='{kind}' AND name='{name}')"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let count: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM sqlite_schema WHERE {predicates}"
+    ))
+    .fetch_one(&mut *connection)
+    .await?;
+    if count != REQUIRED.len() as i64 {
+        return Ok(false);
     }
     Ok(
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _gonvex_sync_clock WHERE singleton=1)")
@@ -1214,8 +1481,21 @@ fn triggers_match(
     table: &str,
     script: &str,
 ) -> bool {
+    named_triggers_match(
+        installed,
+        table,
+        script,
+        &feed::capture_trigger_names(table),
+    )
+}
+
+fn named_triggers_match(
+    installed: &std::collections::HashMap<(String, String), String>,
+    table: &str,
+    script: &str,
+    names: &[String],
+) -> bool {
     let expected = trigger_statements(script);
-    let names = feed::capture_trigger_names(table);
     expected.len() == names.len()
         && names.iter().zip(expected).all(|(name, statement)| {
             installed

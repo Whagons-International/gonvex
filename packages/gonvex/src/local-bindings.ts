@@ -1,3 +1,4 @@
+import{renderLocalDataModel}from'./local-data-model.js';
 import { nativeLocalBindings } from "./native-local-bindings.js";
 import { rolldown } from "rolldown";
 import { createHash } from "node:crypto";
@@ -23,7 +24,7 @@ export async function projectLocalSchema(root: string): Promise<LocalSchema> {
   const names = (await readdir(migrationDirectory).catch(() => [] as string[])).filter((name) => name.endsWith(".sql")).sort();
   const migrations = await Promise.all(names.map(async (name) => ({ name, sql: await readFile(join(migrationDirectory, name), "utf8") })));
   const tenantMigrations = migrations.filter(({ sql }) => !/gonvex:scope\s+(control|landlord)/.test(sql));
-  const digest = createHash("sha256").update("local-schema-v2-sqlite").update(JSON.stringify(tenantMigrations)).digest("hex");
+  const digest = createHash("sha256").update("local-schema-v4-record-views").update(JSON.stringify(tenantMigrations)).digest("hex");
   const cacheFile = join(root, "gonvex", "_build", `local-schema-${digest}.json`);
   let schema: LocalSchema;
   try { schema = JSON.parse(await readFile(cacheFile, "utf8")) as LocalSchema; }
@@ -35,10 +36,66 @@ export async function projectLocalSchema(root: string): Promise<LocalSchema> {
   return schema;
 }
 
+/**
+ * The condition under which a visibility predicate evaluates to `value` for a
+ * row, built only from identity terms and, for `true`, rows whose column equals
+ * an identity value (eqContext). Other row and set terms are unknown, so they
+ * never prove it.
+ */
+function provenForEveryRow(where:any, value:boolean):any {
+    switch (where?.operator) {
+        case "public":
+            return value;
+        case "eqContext":
+            return value && typeof where.column === "string" && typeof where.context === "string"
+                ? { operator: "eqContext", column: where.column, context: where.context } : false;
+        case "role":
+        case "permission": {
+            const term = { operator: where.operator, value: where.value };
+            return value ? term : { operator: "not", children: [term] };
+        }
+        case "not":
+            return where.children?.length === 1 ? provenForEveryRow(where.children[0], !value) : false;
+        case "and":
+        case "or": {
+            if (!where.children?.length)
+                return false;
+            const parts = where.children.map((child:any) => provenForEveryRow(child, value));
+            const every = (where.operator === "and") === value;
+            const decided = every ? false : true;
+            if (parts.includes(decided))
+                return decided;
+            const rest = parts.filter((part:any) => part !== !decided);
+            if (!rest.length)
+                return !decided;
+            return rest.length === 1 ? rest[0] : { operator: every ? "and" : "or", children: rest };
+        }
+        default:
+            return false;
+    }
+}
+/**
+ * Per local table, which rows its visibility plan provably admits for the
+ * caller: all of them, given identity terms, or those whose column equals an
+ * identity value. Only there can a complete replica window prove that a row
+ * does not exist; elsewhere it proves only what this member may see.
+ */
+export function unrestrictedVisibility(manifest:Manifest, tables:Iterable<string|undefined>):Record<string,unknown> {
+    const conditions:Record<string,unknown> = {};
+    for (const table of [...tables].sort()) {
+        if(!table)continue;
+        const condition = provenForEveryRow(manifest.visibility?.[table]?.where, true);
+        if (condition !== false)
+            conditions[table] = condition === true ? { operator: "public" } : condition;
+    }
+    return conditions;
+}
+
 export async function localBindings(root: string, manifest: Manifest): Promise<Record<string, string>> {
   const reducers = Object.entries(manifest.functions).filter(([, entry]) => entry.localExecution === 1);
-  if (!reducers.length) return {};
   const schema = await projectLocalSchema(root);
+  const dataModel=renderLocalDataModel(schema,manifest.functions);
+  if(!reducers.length)return{'dataModel.ts':dataModel};
   const generatedDirectory = join(root, "gonvex", "_generated");
   const imports = reducers.map(([, entry], index) => {
     let file = relative(generatedDirectory, resolve(root, entry.file)).replaceAll("\\", "/").replace(/\.(?:tsx?|mts|cts)$/, ".js");
@@ -97,10 +154,12 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
   });
   return {
     ...native,
+    "dataModel.ts":dataModel,
     "local-schema.ts": `${header}export const localSchema = ${JSON.stringify(schema)} as const;\n`,
     ...Object.fromEntries(Object.entries(webChunks).map(([name, code]) => [name, header + code])),
     "local-reducers.d.ts": `${header}import type { ReducerDefinition } from "@gonvex/module-sdk";\nexport declare const localReducers: Readonly<Record<string, () => Promise<ReducerDefinition<any, any>>>>;\n`,
     "local-runtime.ts": `${header}export {localRuntime} from "./local-executor.js";\n`,
-    "local-executor.ts": `${header}import { createPortableReducer } from "@gonvex/local-runtime/portable-client";\nimport { localSchema } from "./local-schema.js";\nimport { localReducers } from "./local-reducers.js";\nexport const localRuntime = { mode: "portable" as const, clientContract: ${JSON.stringify(clientContract)}, artifactHash: ${JSON.stringify(manifest.module.hash)}, tables: ${JSON.stringify(Object.keys(schema))}, collections: ${JSON.stringify(Object.entries(manifest.functions).filter(([path]) => path.startsWith("__local.")).map(([path, entry]) => ({kind:"query", path, delivery:"replica", replica:entry.replica})))} as const, localDependencies: ${JSON.stringify(localDependencies)} as const, create: () => createPortableReducer({schema: localSchema, reducers: localReducers, artifactHash: ${JSON.stringify(manifest.module.hash)}}) };\n`,
+    "local-visibility.ts": `${header}export const unrestrictedVisibility = ${JSON.stringify(unrestrictedVisibility(manifest, localTables))} as const;\n`,
+    "local-executor.ts": `${header}import { createPortableReducer } from "@gonvex/local-runtime/portable-client";\nimport { localSchema } from "./local-schema.js";\nimport { localReducers } from "./local-reducers.js";\nexport const localRuntime = { mode: "portable" as const, clientContract: ${JSON.stringify(clientContract)}, artifactHash: ${JSON.stringify(manifest.module.hash)}, tables: ${JSON.stringify(Object.keys(schema))}, collections: ${JSON.stringify(Object.entries(manifest.functions).filter(([path]) => path.startsWith("__local.")).map(([path, entry]) => ({kind:"query", path, delivery:"replica", replica:entry.replica})))} as const, localDependencies: ${JSON.stringify(localDependencies)} as const, unrestrictedVisibility: () => import("./local-visibility.js").then(module => module.unrestrictedVisibility), create: () => createPortableReducer({schema: localSchema, reducers: localReducers, artifactHash: ${JSON.stringify(manifest.module.hash)}}) };\n`,
   };
 }

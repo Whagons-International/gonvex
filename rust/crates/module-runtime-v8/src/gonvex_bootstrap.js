@@ -571,6 +571,18 @@
       });
     }
     if (granted.dbWrite) {
+      const records = new Map();
+      let hasRecords;
+      db.recordColumns = (table) => {
+        text("table",table);
+        if (!records.has(table)) records.set(table,(async () => {
+          hasRecords ??= db.query("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='_gonvex_record_views' AND type='table') AS present");
+          if (!(await hasRecords)[0]?.present) return undefined;
+          const [record] = await db.query("SELECT schema FROM _gonvex_record_views WHERE name=$1",[table]);
+          return record ? JSON.parse(record.schema).columns : undefined;
+        })());
+        return records.get(table);
+      };
       db.insert = (table, row, allocation) => hostCall({
         kind: "dbInsert",
         table: text("table", table),

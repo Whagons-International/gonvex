@@ -3,7 +3,7 @@
 React bindings for Gonvex.
 
 This package provides the provider and hooks used by generated Gonvex bindings:
-`useQuery`, `useQueryResult`, `useLiveQuery`, `useLiveQueryState`, `useReducer`, `useAction`, `useEntity`,
+`useQuery`, `useQueryResult`, `useLiveQuery`, `useLiveQueryState`, `useReducer`, `useAction`, `useEntity`, `useEntityColumns`,
 `useReplicaCollection`, `useReplicaCollectionState`, `useReplicaEntities`,
 `useRetainedLiveQuery`, `useControlQuery`, and auth-aware providers.
 
@@ -220,6 +220,29 @@ The provider keeps Firebase ID tokens in memory. It persists only the canonical
 Gonvex session, re-exchanges on Firebase token rotation, and restores that
 session after developer mode ends. Google, Microsoft, Apple, and password UX
 remain Firebase's responsibility when this adapter is configured.
+
+## Experimental hot-grid columns
+
+`useEntityColumns(entity, orderedIds, projection, limits)` reads selected scalar
+columns from the same Local Replica. It retains only the requested window,
+updates for its optimistic/confirmed edits and scope changes, and releases rows
+when the window changes or unmounts. Keep collection/Live Query membership as IDs.
+
+```tsx
+const page = useEntityColumns('items', orderedIds, {
+  title: { kind: 'string' },
+  done: { kind: 'boolean' },
+}, { maxRows: 200, maxPayloadBytes: 64 * 1024 });
+const cells = useMemo(() => columnPageReader(page), [page]);
+```
+
+Import the hook from `@gonvex/react` and the reader from `@gonvex/client`.
+Treat hook pages as read-only: they remain stable across unchanged renders.
+For worker transfer, request a separate caller-owned snapshot through
+`client.localReplica.entityColumns(...)`. Transferring a hook page would detach
+the buffers React is still rendering. `completeProjection` is resident-field
+coverage, not proof of complete collection/filter coverage. See the client
+package's column-page contract for primitive, precision and byte-budget limits.
 
 ## Related Packages
 

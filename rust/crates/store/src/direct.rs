@@ -286,6 +286,16 @@ impl WriterStatements {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Called with exclusive ownership of the pooled writer, before schema
+    /// work retires it. Finalize raw statements while their handle is alive;
+    /// the replacement connection keeps the configured cache capacity.
+    pub(crate) fn retire(&self) {
+        let mut cache = self.lock();
+        cache.clear();
+        cache.db = 0;
+        cache.schema_version = None;
+    }
+
     /// Finalizes every statement and stops caching: the connection closes next.
     pub(crate) fn close(&self) {
         let mut cache = self.lock();
