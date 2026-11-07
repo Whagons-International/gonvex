@@ -13,6 +13,79 @@ struct Database {
 }
 
 #[tokio::test]
+async fn schema_retirement_finalizes_direct_statements_before_closing_the_writer() {
+    let database = Database::new("gonvex-schema-writer-retirement");
+    database.execute("CREATE TABLE parents(id TEXT PRIMARY KEY,value TEXT); INSERT INTO parents VALUES('p','before');").await;
+    database.install().await.unwrap();
+    let mut tx = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    tx.direct()
+        .await
+        .unwrap()
+        .run(|connection| connection.execute("UPDATE parents SET value='first' WHERE id='p'", &[]))
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        database
+            .pools
+            .writer_statement_stats(&database.url)
+            .await
+            .unwrap()
+            .cached
+            > 0
+    );
+    apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![SqlMigration::new(
+            "rebuild".into(),
+            MigrationScope::Tenant,
+            false,
+            "-- gonvex:foreign-key-rebuild\nALTER TABLE parents ADD COLUMN extra TEXT;".into(),
+        )],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        database
+            .pools
+            .writer_statement_stats(&database.url)
+            .await
+            .unwrap()
+            .cached,
+        0
+    );
+    let mut tx = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    tx.direct()
+        .await
+        .unwrap()
+        .run(|connection| connection.execute("UPDATE parents SET value='after' WHERE id='p'", &[]))
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        database
+            .pools
+            .writer_statement_stats(&database.url)
+            .await
+            .unwrap()
+            .cached
+            > 0
+    );
+    let value: String = sqlx::query_scalar("SELECT value FROM parents WHERE id='p'")
+        .fetch_one(&database.pools.reader(&database.url).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(value, "after");
+    database.pools.close().await;
+}
+
+#[tokio::test]
 async fn foreign_key_rebuild_preserves_cascading_children_and_restores_enforcement() {
     let database = Database::new("gonvex-fk-rebuild");
     database.execute("CREATE TABLE parents(id TEXT PRIMARY KEY); CREATE TABLE children(id TEXT PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE); INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c','p');").await;

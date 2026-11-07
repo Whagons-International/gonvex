@@ -840,6 +840,11 @@ impl ControlPlane {
             if migrations.iter().any(rebuilds_foreign_keys) {
                 // Cancellation must never return a FK-disabled connection to
                 // the ordinary writer pool. This schema connection is retired.
+                self.pools
+                    .database(&database_url)
+                    .await?
+                    .statements
+                    .retire();
                 connection.close_on_drop();
             }
             install_tenant_identity(&mut connection).await?;
@@ -929,6 +934,7 @@ pub(crate) fn apply_migrations<'a>(
         let _schema = pools.lock(database_url, SCHEMA_LOCK).await?;
         let mut connection = pool.acquire().await?;
         if migrations.iter().any(rebuilds_foreign_keys) {
+            pools.database(database_url).await?.statements.retire();
             connection.close_on_drop();
         }
         let (applied, notices) =
