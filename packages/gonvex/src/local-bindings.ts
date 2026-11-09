@@ -91,6 +91,32 @@ export function unrestrictedVisibility(manifest:Manifest, tables:Iterable<string
     return conditions;
 }
 
+/** Share immutable column descriptors instead of allocating one per field. */
+export function renderLocalSchema(schema: LocalSchema): string {
+  const shapes = new Map<string, { count: number; name: string }>();
+  for (const table of Object.values(schema)) for (const column of Object.values(table.columns)) {
+    const shape = JSON.stringify(column);
+    const entry = shapes.get(shape);
+    if (entry) entry.count++;
+    else shapes.set(shape, { count: 1, name: `column${shapes.size}` });
+  }
+  const declarations = [...shapes].filter(([, entry]) => entry.count > 1)
+    .map(([shape, entry]) => `const ${entry.name} = Object.freeze(${shape} as const);`).join("\n");
+  const tables = Object.entries(schema).map(([name, table]) => {
+    const properties = Object.entries(table).map(([key, value]) => {
+      if (key !== "columns") return `${JSON.stringify(key)}:${JSON.stringify(value)}`;
+      const columns = Object.entries(table.columns).map(([field, column]) => {
+        const shape = JSON.stringify(column);
+        const entry = shapes.get(shape)!;
+        return `${JSON.stringify(field)}:${entry.count > 1 ? entry.name : shape}`;
+      });
+      return `"columns":{${columns.join(",")}}`;
+    });
+    return `${JSON.stringify(name)}:{${properties.join(",")}}`;
+  });
+  return `${declarations}\nexport const localSchema = {${tables.join(",")}} as const;\n`;
+}
+
 export async function localBindings(root: string, manifest: Manifest): Promise<Record<string, string>> {
   const reducers = Object.entries(manifest.functions).filter(([, entry]) => entry.localExecution === 1);
   const schema = await projectLocalSchema(root);
@@ -160,7 +186,7 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
   return {
     ...native,
     "dataModel.ts":dataModel,
-    "local-schema.ts": `${header}export const localSchema = ${JSON.stringify(schema)} as const;\n`,
+    "local-schema.ts": header + renderLocalSchema(schema),
     ...Object.fromEntries(Object.entries(webChunks).map(([name, code]) => [name, header + code])),
     "local-reducers.d.ts": `${header}import type { ReducerDefinition } from "@gonvex/module-sdk";\nexport declare const localReducers: Readonly<Record<string, () => Promise<ReducerDefinition<any, any>>>>;\n`,
     "local-runtime.ts": `${header}export {localRuntime} from "./local-executor.js";\n`,

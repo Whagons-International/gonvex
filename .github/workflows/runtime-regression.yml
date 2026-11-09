@@ -161,6 +161,11 @@ jobs:
       - name: Test Rust runtime with SQLite
         working-directory: rust
         run: cargo test --locked --workspace --all-targets -- --test-threads=1
+      - name: Keep the WAL cap under background checkpoint I/O contention
+        working-directory: rust
+        run: |
+          cc -shared -fPIC -o "$RUNNER_TEMP/slow-checkpoint-sync.so" crates/store/tests/slow_checkpoint_sync.c -ldl -lpthread
+          LD_PRELOAD="$RUNNER_TEMP/slow-checkpoint-sync.so" cargo test --locked -p gonvex-store --test writer_durability checkpoints_run_off_the_writer_and_the_wal_stays_bounded -- --exact --test-threads=1
       - name: Require native root-admission deadlines, nested progress and exact permit capacity
         working-directory: rust
         shell: bash

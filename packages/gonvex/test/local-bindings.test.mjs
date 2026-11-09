@@ -7,7 +7,27 @@ import test from 'node:test';
 import { build } from 'rolldown';
 import { chromium } from '@playwright/test';
 import { buildModuleArtifact, moduleManifestFunctions } from '../dist/module-artifact.js';
-import { localBindings } from '../dist/local-bindings.js';
+import { localBindings, renderLocalSchema } from '../dist/local-bindings.js';
+
+test('generated schema shares immutable field descriptors without losing defaults or relationships', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gonvex-schema-descriptors-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const schema = {
+    parents: { key: 'id', columns: { id: { type: 'text', nullable: false }, name: { type: 'text', nullable: true } } },
+    children: { key: 'id', columns: {
+      id: { type: 'text', nullable: false }, parent: { type: 'text', nullable: true },
+      note: { type: 'text', nullable: true, default: "'initial'" },
+      count: { type: 'bigint', nullable: false, default: '0' },
+    }, foreignKeys: [{ columns: ['parent'], targetTable: 'parents', targetColumns: ['id'], onDelete: 'SET NULL', onUpdate: 'NO ACTION' }] },
+  };
+  const file = join(root, 'schema.ts');
+  await writeFile(file, renderLocalSchema(schema));
+  const { localSchema } = await import(pathToFileURL(file).href);
+  assert.deepEqual(localSchema, schema);
+  assert.equal(localSchema.parents.columns.name, localSchema.children.columns.parent);
+  assert.throws(() => { localSchema.children.columns.parent.nullable = false; }, TypeError);
+  assert.equal(localSchema.parents.columns.name.nullable, true);
+});
 
 test('codegen owns local execution and never replicates unexposed columns', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gonvex-local-bindings-'));
@@ -62,7 +82,7 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   const output = await build({input:join(root,'gonvex','local-executor.ts'),platform:'browser',write:false,output:{format:'iife',name:'SharedExecutor',codeSplitting:false}});
   const code = output.output.find(chunk=>chunk.type==='chunk').code;
   assert.doesNotMatch(code,/PGlite|new Worker|WebAssembly\.instantiate/);
-  const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
+  const browser = await chromium.launch({headless:true,args:['--no-sandbox','--disable-gpu']});
   t.after(()=>browser.close());
   const context = await browser.newContext({offline:true});
   const page = await context.newPage();

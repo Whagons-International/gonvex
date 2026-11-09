@@ -23,7 +23,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 use libsqlite3_sys as ffi;
@@ -34,7 +34,7 @@ use crate::DatabaseError;
 /// Checkpoints run by the background thread (observability and tests).
 pub static BACKGROUND_CHECKPOINTS: AtomicU64 = AtomicU64::new(0);
 /// Inline checkpoint attempts by the writer because the WAL reached its cap
-/// (an attempt that found a background checkpoint running is retried).
+/// (an attempt that found an external checkpoint running is retried).
 pub static INLINE_CHECKPOINTS: AtomicU64 = AtomicU64::new(0);
 /// Total and longest background checkpoint time in microseconds.
 pub static BACKGROUND_CHECKPOINT_US: AtomicU64 = AtomicU64::new(0);
@@ -80,6 +80,10 @@ fn wal_cap_pages() -> u64 {
 /// checkpoint thread.
 pub(crate) struct WalState {
     path: CString,
+    /// Serialize this process's background and cap checkpoints. SQLite does
+    /// not wait for a concurrent checkpointer: without this guard a fast
+    /// writer can repeatedly get SQLITE_BUSY and outrun the WAL cap.
+    checkpoint: Mutex<()>,
     every: u64,
     cap: u64,
     /// Frames in the WAL after the last commit.
@@ -98,6 +102,7 @@ impl WalState {
         let cap = wal_cap_pages();
         Arc::new(Self {
             path: CString::new(path.as_os_str().as_encoded_bytes()).unwrap_or_default(),
+            checkpoint: Mutex::new(()),
             every,
             cap,
             frames: AtomicU64::new(0),
@@ -116,8 +121,8 @@ impl WalState {
             self.next_request.store(self.every, Ordering::Relaxed);
             self.next_inline.store(self.cap, Ordering::Relaxed);
         }
-        // Past the cap the writer checkpoints itself; a concurrent background
-        // checkpoint would only make it fail with SQLITE_BUSY.
+        // Past the cap the writer checkpoints itself; no more background
+        // requests are needed until the WAL restarts.
         if frames < self.cap && frames >= self.next_request.load(Ordering::Relaxed) {
             self.next_request
                 .store(frames + self.every, Ordering::Relaxed);
@@ -212,6 +217,7 @@ fn run(receiver: mpsc::Receiver<Message>) {
                     connections.insert(state.path.clone(), (Arc::downgrade(&state), connection));
                 }
                 let (_, connection) = &connections[&state.path];
+                let _checkpoint = state.checkpoint.lock().unwrap();
                 let started = Instant::now();
                 let (mut log, mut copied) = (0, 0);
                 unsafe {
@@ -247,6 +253,9 @@ unsafe extern "C" fn wal_hook(
     let state = &*(context as *const Arc<WalState>);
     let frames = frames.max(0) as u64;
     if state.committed(frames) {
+        // PASSIVE never waits for the writer, so waiting for our background
+        // checkpoint here cannot deadlock with this committing connection.
+        let _checkpoint = state.checkpoint.lock().unwrap();
         INLINE_CHECKPOINTS.fetch_add(1, Ordering::Relaxed);
         let rc = ffi::sqlite3_wal_checkpoint_v2(
             db,
@@ -256,7 +265,7 @@ unsafe extern "C" fn wal_hook(
             std::ptr::null_mut(),
         );
         if rc == ffi::SQLITE_BUSY {
-            // A background checkpoint is still running: retry next commit.
+            // Another process owns the checkpoint lock: retry next commit.
             state.next_inline.store(frames + 1, Ordering::Relaxed);
         }
     }
