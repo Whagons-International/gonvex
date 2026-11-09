@@ -83,7 +83,7 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 let context, page, lastState;
 const errors = [];
 async function launch() {
-  context = await chromium.launchPersistentContext(join(output, 'profile'), { headless: true, args: ['--no-sandbox'] });
+  context = await chromium.launchPersistentContext(join(output, 'profile'), { headless: true, args: ['--no-sandbox', '--disable-gpu'] });
   page = context.pages()[0]; page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin); await page.addScriptTag({ url: origin + '/fixture.js' });
 }
@@ -123,7 +123,8 @@ try {
       if (!lastState.lostResult) return false;
       assertCounterBarrier(lastState, staged.entries[0]);
       const accepted = lastState.entries.find(entry => entry.id === staged.entries[0].id);
-      const heldData = lastState.heldFrames.some(frame => ['replica.transaction', 'replica.delta', 'replica.snapshotPage'].includes(frame.type)
+      const heldData = lastState.heldFrames.flatMap(frame => frame.type === 'replica.batch' ? frame.items : [frame])
+        .some(frame => ['replica.transaction', 'replica.delta', 'replica.snapshotPage'].includes(frame.type)
         && frame.cursor?.revision >= lastState.lostResult.committedRevision);
       return accepted?.state === 'committed' && accepted.awaitingReplica === true && heldData;
     }, 'independently durable acceptance with actual replica data withheld');

@@ -5,16 +5,15 @@
 //! races that PostgreSQL witnessed with advisory locks and `pg_blocking_pids`
 //! are orchestrated here with the mechanisms that now provide the guarantee:
 //! the runtime's keyed in-process locks, the single writer connection, query
-//! admission, and (for intra-transaction holds) a second SQLite connection
-//! that owns the file's write lock so the runtime writer waits in SQLite's busy
-//! handler inside its own transaction.
+//! admission, and native SQLite hooks that hold an actual uncommitted receipt
+//! claim and can interrupt it to exercise rollback and claimant takeover.
 use super::*;
 use base64::Engine as _;
 use gonvex_store::{MigrationScope, RuntimeManifestRecord, SqlMigration, TenantRoute};
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
-use sqlx::{Connection as _, Row as _};
-use std::path::{Path, PathBuf};
+use sqlx::sqlite::SqlitePool;
+use sqlx::Row as _;
+use std::path::PathBuf;
 
 const SCHEMA_LOCK: &str = "gonvex:reducer-receipt-schema";
 
@@ -32,28 +31,64 @@ struct Fixture {
     _data: Option<tempfile::TempDir>,
 }
 
-/// Opens a connection that is not owned by the runtime registry. Holding
-/// `BEGIN IMMEDIATE` on it owns the file's write lock, so the runtime's writer
-/// blocks inside its transaction at its first write (SQLite busy handler).
-async fn external_connection(path: &Path) -> sqlx::SqliteConnection {
-    sqlx::SqliteConnection::connect_with(
-        &SqliteConnectOptions::new()
-            .filename(path)
-            .busy_timeout(Duration::from_secs(5)),
-    )
-    .await
-    .unwrap()
-}
-
 /// The runtime writer is checked out by some transaction (its only connection).
 fn writer_owned(pool: &SqlitePool) -> bool {
     pool.size() == 1 && pool.num_idle() == 0
 }
 
 #[derive(Default)]
+struct ClaimGateState {
+    claims: usize,
+    released: usize,
+    interrupt: bool,
+    timed_out: bool,
+}
+
+#[derive(Default)]
+struct ReceiptClaimGate {
+    state: std::sync::Mutex<ClaimGateState>,
+    wake: std::sync::Condvar,
+}
+
+impl ReceiptClaimGate {
+    fn entered(&self, limit: usize) {
+        let mut state = self.state.lock().unwrap();
+        state.claims += 1;
+        let claim = state.claims;
+        if claim > limit {
+            return;
+        }
+        let (mut state, timeout) = self
+            .wake
+            .wait_timeout_while(state, Duration::from_secs(20), |state| {
+                state.released < claim
+            })
+            .unwrap();
+        state.timed_out |= timeout.timed_out();
+    }
+
+    fn release(&self, claims: usize, interrupt: bool) {
+        let mut state = self.state.lock().unwrap();
+        state.released = state.released.max(claims);
+        state.interrupt = interrupt;
+        self.wake.notify_all();
+    }
+
+    fn progress(&self) -> bool {
+        !std::mem::take(&mut self.state.lock().unwrap().interrupt)
+    }
+
+    fn claims(&self) -> usize {
+        let state = self.state.lock().unwrap();
+        assert!(!state.timed_out, "receipt claim gate timed out");
+        state.claims
+    }
+}
+
+#[derive(Default)]
 struct SDKConcurrencyGate {
     index: usize,
-    gate: Option<sqlx::SqliteConnection>,
+    gate: Option<Arc<ReceiptClaimGate>>,
     stable: usize,
     overlap: Option<serde_json::Value>,
     witnesses: Vec<serde_json::Value>,
@@ -61,12 +96,8 @@ struct SDKConcurrencyGate {
 
 impl SDKConcurrencyGate {
     async fn release(&mut self) {
-        if let Some(mut connection) = self.gate.take() {
-            sqlx::query("ROLLBACK")
-                .execute(&mut connection)
-                .await
-                .unwrap();
-            connection.close().await.unwrap();
+        if let Some(gate) = self.gate.take() {
+            gate.release(usize::MAX, false);
         }
     }
 
@@ -86,17 +117,26 @@ impl SDKConcurrencyGate {
             assert_eq!(request["mode"], mode);
             assert_eq!(request["rowId"], format!("sdk-concurrent-{mode}"));
             assert!(!request["key"].as_str().unwrap().is_empty());
-            // Own the tenant file's write lock. Both SDK reducers are admitted;
-            // the first takes the single runtime writer and waits inside its
-            // transaction at the receipt claim, the second waits for the writer.
-            let mut gate = external_connection(&gonvex_store::database_path(
-                &fixture.session.route.database_url,
-            ))
-            .await;
-            sqlx::query("BEGIN IMMEDIATE")
-                .execute(&mut gate)
-                .await
-                .unwrap();
+            // Hold the actual first receipt INSERT on the runtime's writer.
+            // An external write lock cannot establish this boundary: SQLite
+            // immediately refuses a deferred reader's write-lock upgrade.
+            // The update hook leaves the feed's preupdate capture hook intact.
+            let gate = Arc::new(ReceiptClaimGate::default());
+            let mut connection = fixture.pool.acquire().await.unwrap();
+            let mut handle = connection.lock_handle().await.unwrap();
+            let insert_gate = gate.clone();
+            let limit = if mode == "rollback" { 2 } else { 1 };
+            handle.set_update_hook(move |change| {
+                if change.table == "_gonvex_reducer_idempotency"
+                    && change.operation == sqlx::sqlite::SqliteOperation::Insert
+                {
+                    insert_gate.entered(limit);
+                }
+            });
+            let progress_gate = gate.clone();
+            handle.set_progress_handler(1, move || progress_gate.progress());
+            drop(handle);
+            drop(connection);
             self.gate = Some(gate);
             self.stable = 0;
             tokio::fs::write(directory.join("prepared.tmp"), b"{\"ready\":true}")
@@ -118,17 +158,18 @@ impl SDKConcurrencyGate {
             .await
             .admission_active;
         let owned = writer_owned(&fixture.pool);
+        let claims = self.gate.as_ref().unwrap().claims();
         if self.overlap.is_none() {
             // Require both reducer transactions to stay admitted together while
             // the writer is owned and cannot commit (sustained, not a sample).
-            if owned && admitted >= 2 {
+            if owned && admitted >= 2 && claims == 1 {
                 self.stable += 1;
             } else {
                 self.stable = 0;
                 tokio::fs::write(
                     directory.join("wait-graph.json"),
                     serde_json::to_vec_pretty(&serde_json::json!({
-                        "writerOwned": owned, "admissionActive": admitted}))
+                        "writerOwned": owned, "admissionActive": admitted,"claims":claims}))
                     .unwrap(),
                 )
                 .await
@@ -139,11 +180,12 @@ impl SDKConcurrencyGate {
             }
             self.stable = 0;
             self.overlap = Some(serde_json::json!({"overlap":true,"mode":mode,
-                "gate":"external-write-lock","writerOwned":true,"admittedReducers":admitted}));
+                "gate":"native-receipt-insert","writerOwned":true,"admittedReducers":admitted}));
             if mode == "rollback" {
-                // Keep the gate: the first transaction's receipt claim fails with
-                // SQLITE_BUSY at its busy timeout (the analog of a cancelled
-                // statement) and rolls back; the second then owns the writer.
+                // Interrupt the first claim through SQLite's real progress
+                // callback. Its transaction must roll back before the second
+                // claimant can reach its own uncommitted receipt INSERT.
+                self.gate.as_ref().unwrap().release(1, true);
                 return;
             }
         }
@@ -151,7 +193,7 @@ impl SDKConcurrencyGate {
         if mode == "rollback" {
             // The first reducer released its admission after rolling back while
             // the second now owns the writer and waits at its own claim.
-            if owned && admitted == 1 {
+            if owned && admitted == 1 && claims == 2 {
                 self.stable += 1;
             } else {
                 self.stable = 0;
@@ -213,7 +255,9 @@ impl Fixture {
         let url = gonvex_store::database_url(&root.join("tenant.db"));
         let mut cfg = config(true);
         cfg.module_host.binary = Some(binary.into());
-        cfg.module_host.isolate_pool_size = 1;
+        // SDK overlap schedules need both roots to reach their first database
+        // call; lazy writer admission happens after a root owns an isolate.
+        cfg.module_host.isolate_pool_size = if sdk { 2 } else { 1 };
         cfg.module_host.max_concurrent_calls = 2;
         cfg.module_host.start_timeout = Duration::from_secs(5);
         let runtime = Runtime::new(cfg);
@@ -629,7 +673,10 @@ async fn authenticated_sdk_module_upgrade_recovery() {
     );
 }
 
-#[tokio::test]
+// Direct SQLite calls can wait in the native busy handler. The coordinator
+// must keep observing admissions and release its gate while those calls wait,
+// as the production runtime's multi-thread executor does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires the authenticated SDK/storage coordinator and built packages"]
 async fn authenticated_sdk_receipt_replica_composition() {
     let script = std::env::var("GONVEX_SDK_RECEIPT_SCRIPT")

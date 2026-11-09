@@ -87,10 +87,10 @@ export async function runSDKConcurrency(url, output) {
         } }, {});
       });
       const witness = await jsonWhenReady(join(directory, 'witness.json'), 'blocked receipt claim');
-      // The backend owned the tenant file's write lock: the first reducer held
-      // the single runtime writer inside its transaction while the second was
-      // admitted and waiting for that writer (sustained, not sampled once).
-      assert(witness.overlap === true && witness.gate === 'external-write-lock' && witness.writerOwned === true
+      // A native SQLite hook holds the first actual receipt INSERT inside its
+      // transaction while the second reducer waits for the single writer.
+      // The coordinator witnesses sustained admission, not a timing guess.
+      assert(witness.overlap === true && witness.gate === 'native-receipt-insert' && witness.writerOwned === true
         && witness.admittedReducers >= 2, 'missing witnessed receipt overlap');
       if (mode === 'rollback') assert.equal(witness.takeover, true, 'losing claimant did not take over the rolled-back receipt');
       if (mode === 'rollback') {
@@ -129,5 +129,5 @@ export async function runSDKConcurrency(url, output) {
     }
   }
   await writeFile(join(output, 'receipt.json'), JSON.stringify({ cases,
-    boundary: 'Two real SDKs, independent SQLite journals/replicas and one immutable logical intent. An external SQLite write lock holds the first reducer inside its transaction on the single runtime writer while the second is admitted and waits; a busy-timeout statement failure tests owner rollback and claimant takeover. No arbitrary shared-store coordination claim.' }, null, 2) + '\n');
+    boundary: 'Two real SDKs, independent SQLite journals/replicas and one immutable logical intent. A native SQLite update hook holds the first receipt INSERT on the single runtime writer while the second reducer is admitted and waits. Native statement interruption tests actual rollback and claimant takeover. The change-feed preupdate hook remains installed. No arbitrary shared-store coordination claim.' }, null, 2) + '\n');
 }
