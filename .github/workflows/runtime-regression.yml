@@ -171,10 +171,12 @@ jobs:
       - name: Test Rust runtime with SQLite
         working-directory: rust
         run: |
+          set -euo pipefail
           cc -shared -fPIC -o "$RUNNER_TEMP/slow-checkpoint-sync.so" crates/store/tests/slow_checkpoint_sync.c -ldl -lpthread
           # Only writer_durability receives delayed syncs. Its batching proof
           # requires overlap; ordinary fast-disk timing does not guarantee it.
-          LD_PRELOAD="$RUNNER_TEMP/slow-checkpoint-sync.so" cargo test --locked --workspace --all-targets -- --test-threads=1
+          LD_PRELOAD="$RUNNER_TEMP/slow-checkpoint-sync.so" cargo test --locked --workspace --all-targets -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/native-runtime-tests.log"
+          grep -Eq 'gonvex-writer-io-fixture: wal_delays=[1-9][0-9]* ' "$RUNNER_TEMP/native-runtime-tests.log"
       - name: Keep the WAL cap under background checkpoint I/O contention
         working-directory: rust
         run: |
