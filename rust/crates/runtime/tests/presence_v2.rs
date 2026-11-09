@@ -33,7 +33,7 @@ fn test_config(
     let data_dir = gonvex_store::DataDir::parse(&database_url);
     Config {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        control_plane_database_url: Some(database_url.clone()),
+        control_plane_database_url: Some(database_url),
         default_database_url: Some(gonvex_store::database_url(data_dir.root())),
         tenant_database_urls: BTreeMap::new(),
         project_database_urls: BTreeMap::new(),
@@ -791,7 +791,7 @@ async fn presence_patches_ride_in_the_replica_batch() {
             break frame;
         }
     };
-    assert_eq!(batch["tenant"].is_string(), true);
+    assert!(batch["tenant"].is_string());
     let items = batch["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "{batch}");
     assert_eq!(changes(&items[0]), vec![(alice.clone(), "active".into())]);

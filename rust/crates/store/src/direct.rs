@@ -286,6 +286,16 @@ impl WriterStatements {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Called with exclusive ownership of the pooled writer, before schema
+    /// work retires it. Finalize raw statements while their handle is alive;
+    /// the replacement connection keeps the configured cache capacity.
+    pub(crate) fn retire(&self) {
+        let mut cache = self.lock();
+        cache.clear();
+        cache.db = 0;
+        cache.schema_version = None;
+    }
+
     /// Finalizes every statement and stops caching: the connection closes next.
     pub(crate) fn close(&self) {
         let mut cache = self.lock();
@@ -392,7 +402,7 @@ impl DirectSession {
                 cache.attach(db);
                 Some(work(&mut Conn {
                     db,
-                    cache: &mut *cache,
+                    cache: &mut cache,
                 }))
             }
             Statements::Local(cache) => {
@@ -439,7 +449,7 @@ impl Conn<'_> {
             Some(statement) => statement,
             None => {
                 self.cache.prepared += 1;
-                self.prepare_raw(sql, ffi::SQLITE_PREPARE_PERSISTENT as u32)?
+                self.prepare_raw(sql, ffi::SQLITE_PREPARE_PERSISTENT)?
             }
         };
         Ok(Stmt {

@@ -31,6 +31,16 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      - name: Fetch pinned V8 through the authenticated release API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c 'import tomllib; packages=tomllib.load(open("rust/Cargo.lock","rb"))["package"]; versions={p["version"] for p in packages if p["name"]=="v8"}; assert len(versions)==1; print(versions.pop())')
+          archive_dir="$RUNNER_TEMP/rusty-v8"
+          mkdir -p "$archive_dir"
+          gh release download "v$version" --repo denoland/rusty_v8 --pattern librusty_v8_release_x86_64-unknown-linux-gnu.a.gz --dir "$archive_dir"
+          gzip -t "$archive_dir/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz"
+          echo "RUSTY_V8_ARCHIVE=$archive_dir/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz" >> "$GITHUB_ENV"
       - name: Check isolated-load destination, privacy and qualification guards
         run: |
           node --test bench/whagons/safety.test.mjs
@@ -53,6 +63,8 @@ jobs:
         run: pnpm exec playwright install --with-deps --only-shell chromium
       - name: Reject retired Go sources
         run: test -z "$(find . -path ./node_modules -prune -o -path ./rust/target -prune -o \( -name '*.go' -o -name go.mod -o -name go.sum \) -print)"
+      - name: Check generated SQLite schema capabilities
+        run: node scripts/sync-sqlite-schema-options.mjs --check
       - name: Build JavaScript packages
         run: pnpm build:packages
       - name: Require historical SQLite transaction crash recovery and reject rearmed acceptance
@@ -158,7 +170,17 @@ jobs:
           PY
       - name: Test Rust runtime with SQLite
         working-directory: rust
-        run: cargo test --locked --workspace --all-targets -- --test-threads=1
+        run: |
+          set -euo pipefail
+          cc -shared -fPIC -o "$RUNNER_TEMP/slow-checkpoint-sync.so" crates/store/tests/slow_checkpoint_sync.c -ldl -lpthread
+          # Only writer_durability receives delayed syncs. Its batching proof
+          # requires overlap; ordinary fast-disk timing does not guarantee it.
+          LD_PRELOAD="$RUNNER_TEMP/slow-checkpoint-sync.so" cargo test --locked --workspace --all-targets -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/native-runtime-tests.log"
+          grep -Eq 'gonvex-writer-io-fixture: wal_delays=[1-9][0-9]* ' "$RUNNER_TEMP/native-runtime-tests.log"
+      - name: Keep the WAL cap under background checkpoint I/O contention
+        working-directory: rust
+        run: |
+          LD_PRELOAD="$RUNNER_TEMP/slow-checkpoint-sync.so" cargo test --locked -p gonvex-store --test writer_durability checkpoints_run_off_the_writer_and_the_wal_stays_bounded -- --exact --test-threads=1
       - name: Require native root-admission deadlines, nested progress and exact permit capacity
         working-directory: rust
         shell: bash

@@ -117,7 +117,7 @@ async fn old_writer(users: usize, beats: usize) -> (Measured, Measured) {
         .unwrap();
     let columns: Vec<gonvex_store::rows::ColumnInfo> = Vec::new();
     gonvex_store::execute_script(
-        &mut **setup.transaction(),
+        setup.transaction(),
         &format!(
             "CREATE TABLE \"userPresence\" (_id TEXT PRIMARY KEY, _creationTime INTEGER NOT NULL, \
              \"userId\" TEXT NOT NULL, \"lastSeenAt\" INTEGER NOT NULL, state TEXT NOT NULL);\n\

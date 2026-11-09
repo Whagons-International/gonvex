@@ -38,6 +38,7 @@ struct State {
 
 pub(crate) struct SyncBarrier {
     wal: PathBuf,
+    syncs: std::sync::atomic::AtomicU64,
     state: Mutex<State>,
     synced: watch::Sender<Synced>,
 }
@@ -48,9 +49,14 @@ impl SyncBarrier {
         wal.push("-wal");
         Arc::new(Self {
             wal: PathBuf::from(wal),
+            syncs: std::sync::atomic::AtomicU64::new(0),
             state: Mutex::default(),
             synced: watch::channel(Synced::default()).0,
         })
+    }
+
+    pub(crate) fn sync_count(&self) -> u64 {
+        self.syncs.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns once everything committed before this call is on disk.
@@ -88,6 +94,8 @@ impl SyncBarrier {
         loop {
             let target = self.state.lock().unwrap().issued;
             WAL_SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.syncs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let wal = self.wal.clone();
             let result = tokio::task::spawn_blocking(move || sync_file(&wal))
                 .await

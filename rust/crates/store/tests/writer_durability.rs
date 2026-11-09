@@ -73,7 +73,7 @@ async fn values(pools: &PoolRegistry, url: &str) -> Vec<(i64, String)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
     let (_dir, pools, url) = tenant(Durability::Full).await;
-    let syncs = gonvex_store::WAL_SYNCS.load(Ordering::Relaxed);
+    let syncs = pools.wal_sync_count(&url).await.unwrap();
     let mut tasks = Vec::new();
     for id in 0..60i64 {
         let (pools, url) = (pools.clone(), url.clone());
@@ -92,7 +92,7 @@ async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
     for task in tasks {
         revisions.push(task.await.unwrap());
     }
-    let syncs = gonvex_store::WAL_SYNCS.load(Ordering::Relaxed) - syncs;
+    let syncs = pools.wal_sync_count(&url).await.unwrap() - syncs;
     revisions.sort_unstable();
     revisions.dedup();
     assert_eq!(revisions.len(), 60, "one revision per transaction");
@@ -204,10 +204,10 @@ async fn checkpoints_run_off_the_writer_and_the_wal_stays_bounded() {
         "the background thread checkpointed"
     );
     // 600 commits of ~5 pages each would reach ~3,000 frames without
-    // checkpoints. The cap (200 frames) is approximate: an inline checkpoint
-    // that meets a running background one retries on the next commit, and
-    // the WAL restarts only when the writer's next transaction starts on a
-    // fully copied WAL, so allow a few multiples of it.
+    // checkpoints. The cap (200 frames) is approximate: a commit may cross
+    // it, and the WAL restarts only when the writer's next transaction starts
+    // on a fully copied WAL. The allocated file retains its high-water mark,
+    // so allow a few multiples of the cap.
     let wal = std::fs::metadata(dir.0.join("tenant.db-wal"))
         .unwrap()
         .len();

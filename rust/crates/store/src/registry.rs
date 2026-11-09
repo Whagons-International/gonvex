@@ -469,6 +469,13 @@ impl PoolRegistry {
         self.database(database_url).await?.sync.wait().await
     }
 
+    /// WAL sync attempts for this database, isolated from other tenants and
+    /// registries. Use this when measuring a tenant's group-commit behavior;
+    /// the process-wide WAL_SYNCS counter includes unrelated concurrent work.
+    pub async fn wal_sync_count(&self, database_url: &str) -> Result<u64, DatabaseError> {
+        Ok(self.database(database_url).await?.sync.sync_count())
+    }
+
     /// The writer pool (one connection). Every write must use it.
     pub async fn pool(&self, database_url: &str) -> Result<SqlitePool, DatabaseError> {
         Ok(self.database(database_url).await?.writer)

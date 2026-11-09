@@ -9,7 +9,7 @@ pub use connection::{
 use connection::{Outbound, Shared, Watched, Writer};
 use frame_limits::FrameLimits;
 use futures_util::{SinkExt, StreamExt};
-use shared::{deflate_segment, COMPRESSION_LEVEL};
+use shared::deflate_segment;
 pub use shared::{BatchFrame, OutboundBatch, Segment, SharedText};
 use std::{
     future::Future,
