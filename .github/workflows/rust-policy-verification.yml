@@ -94,11 +94,17 @@ jobs:
           distribution: temurin
           java-version: "21"
       - name: Check finite replica durability model and reject broken policies
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PYMODEL'
-          import json, os, pathlib, urllib.request
+          import json, os, pathlib, re, subprocess
           tool = json.loads(pathlib.Path('verification/tla/toolchain.json').read_text())
-          urllib.request.urlretrieve(tool['url'], os.environ['RUNNER_TEMP'] + '/tla2tools.jar')
+          release = re.fullmatch(r'https://github.com/([^/]+/[^/]+)/releases/download/(.+)/([^/]+)', tool['url'])
+          assert release, 'expected the pinned upstream GitHub release'
+          repository, tag, asset = release.groups()
+          subprocess.run(['gh', 'release', 'download', tag, '--repo', repository, '--pattern', asset,
+                          '--output', os.environ['RUNNER_TEMP'] + '/tla2tools.jar'], check=True)
           PYMODEL
           python3 verification/tla/check_replica_durability.py \
             --jar "$RUNNER_TEMP/tla2tools.jar" \

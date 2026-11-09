@@ -49,6 +49,19 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build:packages
           npm --prefix verification/native-sqlite ci --ignore-scripts --no-audit --no-fund
+      - name: Download pinned Expo Go through the upstream release API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          tool = json.loads(pathlib.Path('verification/native-sqlite/toolchain.json').read_text())['expoGo']
+          release = re.fullmatch(r'https://github.com/([^/]+/[^/]+)/releases/download/(.+)/([^/]+)', tool['url'])
+          assert release, 'expected the pinned upstream GitHub release'
+          repository, tag, asset = release.groups()
+          subprocess.run(['gh', 'release', 'download', tag, '--repo', repository, '--pattern', asset,
+                          '--output', os.environ['RUNNER_TEMP'] + '/expo-go.apk'], check=True)
+          PY
       - name: Enable KVM on the ephemeral CI runner
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -65,7 +78,7 @@ jobs:
           ram-size: 2048M
           disk-size: 6G
           emulator-options: -no-window -gpu swiftshader_indirect -feature -Vulkan -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
-          script: python3 verification/native-sqlite/run.py --serial emulator-5554 --output "$RUNNER_TEMP/native-sqlite"
+          script: python3 verification/native-sqlite/run.py --serial emulator-5554 --output "$RUNNER_TEMP/native-sqlite" --apk "$RUNNER_TEMP/expo-go.apk"
       - name: Retain native source, observations and process witnesses
         if: always()
         uses: actions/upload-artifact@v4
