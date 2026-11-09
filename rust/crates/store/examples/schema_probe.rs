@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sql = std::fs::read_to_string(script)?;
         let started = std::time::Instant::now();
         let mut transaction = control.begin_tenant_transaction(&route, false).await?;
-        gonvex_store::execute_script(&mut **transaction.transaction(), &sql).await?;
+        gonvex_store::execute_script(transaction.transaction(), &sql).await?;
         revisions.push(transaction.commit_with_revision().await?);
         transaction_ms.push(started.elapsed().as_millis());
     }

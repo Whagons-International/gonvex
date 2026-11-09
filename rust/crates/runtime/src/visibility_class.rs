@@ -1648,11 +1648,13 @@ pub struct ClassScope {
 
 static NEXT_CLASS: AtomicU64 = AtomicU64::new(1);
 
+type WeakClasses = Vec<(u64, Weak<VisibilityClass>)>;
+
 #[derive(Default)]
 struct ClassIndex {
     /// (class set slot, token) → classes holding the token in that set.
-    by_token: FxMap<(u16, u32), Vec<(u64, Weak<VisibilityClass>)>>,
-    ungated: Vec<(u64, Weak<VisibilityClass>)>,
+    by_token: FxMap<(u16, u32), WeakClasses>,
+    ungated: WeakClasses,
     /// (member set slot, token) → registered members holding it.
     members_by_token: FxMap<(u16, u32), Vec<Weak<MemberVisibility>>>,
     /// context value → registered members with that context value.

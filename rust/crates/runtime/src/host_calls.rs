@@ -222,6 +222,7 @@ impl DatabaseHostCalls {
     }
 
     /// Module SQL calls answered on the isolate thread so far.
+    #[cfg(test)]
     pub(crate) fn inline_calls(&self) -> u64 {
         self.sql().inline_calls
     }

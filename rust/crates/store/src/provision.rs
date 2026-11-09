@@ -1317,8 +1317,7 @@ pub(crate) fn install_change_feed_locked(
                 &column,
                 inbound,
                 integer,
-                Some(&namespace),
-                &watch,
+                Some((&namespace, &watch)),
             );
             let names = ["insert", "update", "delete"]
                 .map(|event| format!("gonvex_record_dependency_{namespace}_{event}"));

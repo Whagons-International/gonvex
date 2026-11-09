@@ -1023,7 +1023,7 @@ async fn create_tenant_shard(
         Ok(tenant) => (StatusCode::CREATED, Json(tenant)).into_response(),
         Err(error) => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error":error.to_string()})),
+            Json(serde_json::json!({"error":error})),
         )
             .into_response(),
     }

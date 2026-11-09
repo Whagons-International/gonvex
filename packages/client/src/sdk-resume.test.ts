@@ -290,3 +290,19 @@ it("verifies an aggregate ready after a resumed delta without rehashing the held
   expect(subscription).toMatchObject({ isUpToDate: true, forceFullIntegrity: false });
   committedRows.mockRestore();
 });
+
+it("releases retained collection opens once and honors cancellation", () => {
+  const value = new GonvexClient("ws://runtime.test/ws", {deferReplicaOpen: path => path.startsWith("held.")});
+  clients.push(value);
+  const start = vi.spyOn(value, "connect").mockImplementation(() => undefined);
+  const reference = (path: string): FunctionReference => ({kind: "query", path, delivery: "replica"});
+  const stop = value.subscribeReplica(reference("held.first"), {}, () => undefined);
+  const cancel = value.subscribeReplica(reference("held.cancelled"), {}, () => undefined);
+  cancel();
+  expect(start).not.toHaveBeenCalled();
+  value.releaseDeferredReplicaOpens();
+  expect(start).toHaveBeenCalledTimes(1);
+  value.releaseDeferredReplicaOpens();
+  expect(start).toHaveBeenCalledTimes(1);
+  stop();
+});

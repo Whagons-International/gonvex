@@ -406,7 +406,7 @@ async fn worker_loop(
         };
         let healthy = reply.healthy;
         served += 1;
-        if heap_stats_enabled() && (served == 1 || served % 200 == 0) {
+        if heap_stats_enabled() && (served == 1 || served.is_multiple_of(200)) {
             log_heap_statistics(
                 &mut isolate.runtime,
                 &source.specifier,

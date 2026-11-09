@@ -402,7 +402,7 @@ impl DirectSession {
                 cache.attach(db);
                 Some(work(&mut Conn {
                     db,
-                    cache: &mut *cache,
+                    cache: &mut cache,
                 }))
             }
             Statements::Local(cache) => {
@@ -449,7 +449,7 @@ impl Conn<'_> {
             Some(statement) => statement,
             None => {
                 self.cache.prepared += 1;
-                self.prepare_raw(sql, ffi::SQLITE_PREPARE_PERSISTENT as u32)?
+                self.prepare_raw(sql, ffi::SQLITE_PREPARE_PERSISTENT)?
             }
         };
         Ok(Stmt {

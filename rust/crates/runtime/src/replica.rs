@@ -35,6 +35,12 @@ use crate::sql_parameters::Parameters;
 use crate::visibility::{self, ResolvedVisibility, VisibilityPlan};
 use crate::Runtime;
 
+type ParentOverlay = Arc<Vec<(String, String, Option<Arc<Value>>)>>;
+type SharedDecision<'a> = (
+    &'a crate::feed_share::EventShare,
+    &'a (u64, usize, Arc<str>, Arc<str>),
+);
+
 #[derive(Debug, Error)]
 pub enum ReplicaError {
     #[error("{0}")]
@@ -303,7 +309,7 @@ impl Runtime {
         args: &Value,
     ) -> Result<Value, ReplicaError> {
         let mut read = self
-            .begin_collection_read(session, definition, visibility, args)
+            .begin_collection_read(session, definition, visibility)
             .await?;
         let mut rows = Vec::new();
         scan_window(
@@ -395,7 +401,7 @@ impl Runtime {
             subscription: None,
         };
         let mut read = self
-            .begin_collection_read(session, &definition, &visibility, &request.args)
+            .begin_collection_read(session, &definition, &visibility)
             .await?;
         let cursor = cursor_for(&read.clock, &definition, &directive.visibility_scope);
         let resumable = cursor_resumable(
@@ -650,7 +656,6 @@ impl Runtime {
         session: &TenantSession,
         definition: &ReplicaCollectionDefinition,
         plan: &VisibilityPlan,
-        args: &Value,
     ) -> Result<CollectionRead, ReplicaError> {
         // Each WebSocket queues up to REPLICA_OPEN_CONCURRENCY preparations,
         // so a sign-in burst could otherwise build hundreds of full snapshots
@@ -1210,7 +1215,7 @@ pub fn decide_row(
     plan: &VisibilityPlan,
     before: &ResolvedVisibility,
     after: &ResolvedVisibility,
-    overlay: &Option<Arc<Vec<(String, String, Option<Arc<Value>>)>>>,
+    overlay: &Option<ParentOverlay>,
     window: &ReplicaWindow,
     old: &Value,
     new: &Value,
@@ -1239,7 +1244,7 @@ pub(crate) fn decide_row_with(
     plan: &VisibilityPlan,
     before: &ResolvedVisibility,
     after: &ResolvedVisibility,
-    overlay: &Option<Arc<Vec<(String, String, Option<Arc<Value>>)>>>,
+    overlay: &Option<ParentOverlay>,
     window: &ReplicaWindow,
     old: &Value,
     new: &Value,
@@ -1327,10 +1332,7 @@ struct Compiled<'a> {
     handle: &'a crate::visibility_class::MemberHandle,
     /// The event share and this subscription's (class, definition, args,
     /// table) when its decisions may be shared per class.
-    share: Option<(
-        &'a crate::feed_share::EventShare,
-        &'a (u64, usize, Arc<str>, Arc<str>),
-    )>,
+    share: Option<SharedDecision<'a>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1404,7 +1406,7 @@ fn row_step(
                 &subscription.definition,
                 &subscription.args,
                 &subscription.visibility,
-                context.before.as_ref().unwrap_or(&subscription.resolved),
+                context.before.as_deref().unwrap_or(&subscription.resolved),
                 &subscription.resolved,
                 &context.overlay,
                 &subscription.window,
@@ -1703,12 +1705,11 @@ async fn declared_columns<'a>(
     definition: &ReplicaCollectionDefinition,
     columns: impl Iterator<Item = &'a String>,
 ) -> Result<Vec<(String, gonvex_store::rows::JsonKind)>, ReplicaError> {
-    let declared =
-        gonvex_store::rows::table_columns(&mut **transaction.transaction(), &definition.table)
-            .await?
-            .into_iter()
-            .map(|column| (column.name.clone(), column.kind()))
-            .collect::<BTreeMap<_, _>>();
+    let declared = gonvex_store::rows::table_columns(transaction.transaction(), &definition.table)
+        .await?
+        .into_iter()
+        .map(|column| (column.name.clone(), column.kind()))
+        .collect::<BTreeMap<_, _>>();
     columns
         .map(|column| {
             quote(column)?;
@@ -3261,7 +3262,11 @@ mod tests {
         // only the final membership is published.
         let mut definition = collection(serde_json::json!({"excludeWhenSet":["deletedAt"]}));
         definition.columns.push("deletedAt".into());
-        let mut subscription = holding(definition, serde_json::json!({}), &[row.clone()]);
+        let mut subscription = holding(
+            definition,
+            serde_json::json!({}),
+            std::slice::from_ref(&row),
+        );
         let mut client = BTreeMap::from([("1".to_owned(), row.clone())]);
         let mut edited = row.clone();
         edited["title"] = "edited".into();

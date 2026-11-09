@@ -656,7 +656,7 @@ mod tests {
         let ready = json!({"id":"one","cursor":{"epoch":"e","revision":9},"digest":"new"});
         assert_eq!(
             delivery.gate(&ServerMessage::ReplicaReadyMany {
-                ready: vec![ready.clone(), json!({"id":"other"})]
+                ready: vec![ready, json!({"id":"other"})]
             }),
             Some(ServerMessage::ReplicaReadyMany {
                 ready: vec![json!({"id":"other"})]

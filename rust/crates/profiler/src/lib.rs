@@ -305,20 +305,19 @@ struct Hist {
     max: AtomicU64,
 }
 
-#[allow(clippy::declare_interior_mutable_const)]
-const HIST: Hist = Hist {
-    buckets: [const { AtomicU64::new(0) }; BUCKETS],
-    sum: AtomicU64::new(0),
-    max: AtomicU64::new(0),
-};
-#[allow(clippy::declare_interior_mutable_const)]
-const HIST_SHARDS: [Hist; SHARDS] = [HIST; SHARDS];
-#[allow(clippy::declare_interior_mutable_const)]
-const HIST_LABELS: [[Hist; SHARDS]; LABEL_COUNT] = [HIST_SHARDS; LABEL_COUNT];
-
 /// `[stage][label][shard]`, zero-initialised in .bss: pages that are never
 /// recorded into are never touched.
-static HISTOGRAMS: [[[Hist; SHARDS]; LABEL_COUNT]; STAGE_COUNT] = [HIST_LABELS; STAGE_COUNT];
+static HISTOGRAMS: [[[Hist; SHARDS]; LABEL_COUNT]; STAGE_COUNT] = [const {
+    [const {
+        [const {
+            Hist {
+                buckets: [const { AtomicU64::new(0) }; BUCKETS],
+                sum: AtomicU64::new(0),
+                max: AtomicU64::new(0),
+            }
+        }; SHARDS]
+    }; LABEL_COUNT]
+}; STAGE_COUNT];
 
 /// Bucket index for a value in ns.
 #[inline(always)]

@@ -37,7 +37,7 @@ fn test_config(database_url: String) -> Config {
     let data_dir = gonvex_store::DataDir::parse(&database_url);
     Config {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        control_plane_database_url: Some(database_url.clone()),
+        control_plane_database_url: Some(database_url),
         default_database_url: Some(gonvex_store::database_url(data_dir.root())),
         tenant_database_urls: BTreeMap::new(),
         project_database_urls: BTreeMap::new(),

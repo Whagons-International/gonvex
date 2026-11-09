@@ -224,7 +224,6 @@ pub(crate) fn owned_capture_triggers_sql(
         inbound,
         integer_key,
         None,
-        &[],
     )
 }
 pub(crate) fn owned_capture_triggers_sql_named(
@@ -234,9 +233,10 @@ pub(crate) fn owned_capture_triggers_sql_named(
     column: &str,
     inbound: bool,
     integer_key: bool,
-    namespace: Option<&str>,
-    watch: &[String],
+    dependency: Option<(&str, &[String])>,
 ) -> String {
+    let (namespace, watch) =
+        dependency.map_or((None, &[][..]), |(name, watch)| (Some(name), watch));
     let names = match namespace {
         None => crate::feed::capture_trigger_names(source),
         Some(namespace) => ["insert", "update", "delete"]
