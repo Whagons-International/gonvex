@@ -73,7 +73,7 @@ async fn values(pools: &PoolRegistry, url: &str) -> Vec<(i64, String)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
     let (_dir, pools, url) = tenant(Durability::Full).await;
-    let syncs = gonvex_store::WAL_SYNCS.load(Ordering::Relaxed);
+    let syncs = pools.wal_sync_count(&url).await.unwrap();
     let mut tasks = Vec::new();
     for id in 0..60i64 {
         let (pools, url) = (pools.clone(), url.clone());
@@ -92,7 +92,7 @@ async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
     for task in tasks {
         revisions.push(task.await.unwrap());
     }
-    let syncs = gonvex_store::WAL_SYNCS.load(Ordering::Relaxed) - syncs;
+    let syncs = pools.wal_sync_count(&url).await.unwrap() - syncs;
     revisions.sort_unstable();
     revisions.dedup();
     assert_eq!(revisions.len(), 60, "one revision per transaction");

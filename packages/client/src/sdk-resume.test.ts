@@ -211,6 +211,7 @@ it.each(["replica.ready", "replica.delta"])("does not accept %s when reconnect i
 
 it("retries unsent subscription batches after a refresh preserves the existing subscriptions", () => {
   const state = client() as any;
+  state.isWebSocketConnected = true;
   state.socketGeneration = 1;
   state.hasAuthoritativeReplicaScope = true;
   state.serverCapabilities = { queryBatch: 1, replicaBatch: 1 };
@@ -232,6 +233,23 @@ it("retries unsent subscription batches after a refresh preserves the existing s
   state.flushQuerySubscribes();
   state.flushReplicaOpens();
   expect(state.send.mock.calls.map((call: any[]) => call[0].type)).toEqual(["query.subscribeMany", "replica.openMany"]);
+});
+
+it("does not queue a restored replica before its socket is connected", () => {
+  const state = client() as any;
+  state.hasAuthoritativeReplicaScope = true;
+  state.serverCapabilities = { replicaBatch: 1 };
+  state.send = vi.fn();
+  const replica = { id: "r", key: "r", path: "tasks.list", args: {}, listeners: new Set([() => {}]), opening: false };
+  state.replicaSubscriptions.set("r", replica);
+  state.sendReplicaOpen(replica);
+  state.flushReplicaOpens();
+  expect(state.send).not.toHaveBeenCalled();
+  expect(replica.opening).toBe(false);
+  state.isWebSocketConnected = true;
+  state.sendReplicaOpen(replica);
+  state.flushReplicaOpens();
+  expect(state.send.mock.calls.map((call: any[]) => call[0].type)).toEqual(["replica.openMany"]);
 });
 
 it("opts cold opens into aggregate verification only on a supporting runtime", () => {

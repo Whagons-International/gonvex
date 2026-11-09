@@ -867,6 +867,9 @@ async function writeBundle(
       format: "esm",
       codeSplitting: false,
       sourcemap: false,
+      // Region headers contain dependency paths and cannot enter signed artifacts.
+      minify: { compress: { dropDebugger: false, keepNames: { function: true, class: true }, joinVars: false, sequences: false }, mangle: false, codegen: { removeWhitespace: true, legalComments: "inline" } },
+      comments: { legal: true },
     });
     const chunks = result.output.filter((item): item is OutputChunk => item.type === "chunk");
     const assets = result.output.filter((item) => item.type === "asset");

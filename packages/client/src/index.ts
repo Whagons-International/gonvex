@@ -3920,13 +3920,15 @@ export class GonvexClient {
   }
 
   private sendReplicaOpen(subscription: ReplicaSubscription) {
+    // Auth/directive resume owns the first request for watches restored while
+    // disconnected. Do not queue an obsolete subscription for the next socket.
     // Replica rows are tenant-authorized state. A hook can mount while the
     // socket is connected but before session.ready/auth.result supplies the
     // authoritative visibility scope. Opening in that gap produces a correct
     // server rejection that is nevertheless transient and must not become a
     // fatal React snapshot error. The directive handlers resume every retained
     // subscription once the scope is active.
-    if (!this.ownsReplicaSubscription(subscription) || this.authInFlight || !this.hasAuthoritativeReplicaScope
+    if (!this.isWebSocketConnected || !this.ownsReplicaSubscription(subscription) || this.authInFlight || !this.hasAuthoritativeReplicaScope
       || subscription.listeners.size === 0 || subscription.opening) return;
     const requestScope = this.replicaScope;
     subscription.scope = requestScope;

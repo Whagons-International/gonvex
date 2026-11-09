@@ -115,7 +115,10 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
   let localCode: string;
   const webChunks: Record<string, string> = {};
   try {
-    const output = await bundle.generate({ format: "esm", codeSplitting: false });
+    const output = await bundle.generate({ format: "esm", codeSplitting: false,
+      // Suppress dependency-path region headers while preserving names and dead-code elimination.
+      minify: { compress: { dropDebugger: false, keepNames: { function: true, class: true }, joinVars: false, sequences: false }, mangle: false, codegen: { removeWhitespace: true, legalComments: "inline" } }, comments: { legal: true },
+    });
     if (output.output.length !== 1 || output.output[0]?.type !== "chunk") throw new Error("Local Reducers must compile into one self-contained module");
     localCode = output.output[0].code;
     // Browser controls preload their own Reducers. Unopened features keep
@@ -132,7 +135,9 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
       resolve: { conditionNames: ['browser', 'import', 'default'], mainFields: ['browser', 'module', 'main'] },
     });
     let web;
-    try { web = await lazyBundle.generate({ format: 'esm', entryFileNames: 'local-reducers.js', chunkFileNames: 'local-reducer-[name]-[hash].js' }); }
+    try { web = await lazyBundle.generate({ format: 'esm', entryFileNames: 'local-reducers.js', chunkFileNames: 'local-reducer-[name]-[hash].js',
+      minify: { compress: { dropDebugger: false, keepNames: { function: true, class: true }, joinVars: false, sequences: false }, mangle: false, codegen: { removeWhitespace: true, legalComments: 'inline' } }, comments: { legal: true },
+    }); }
     finally { await lazyBundle.close(); }
     for (const chunk of web.output) {
       if (chunk.type !== "chunk") throw new Error("Unexpected local Reducer asset");
