@@ -31,6 +31,16 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      - name: Fetch pinned V8 through the authenticated release API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c 'import tomllib; packages=tomllib.load(open("rust/Cargo.lock","rb"))["package"]; versions={p["version"] for p in packages if p["name"]=="v8"}; assert len(versions)==1; print(versions.pop())')
+          archive_dir="$RUNNER_TEMP/rusty-v8"
+          mkdir -p "$archive_dir"
+          gh release download "v$version" --repo denoland/rusty_v8 --pattern librusty_v8_release_x86_64-unknown-linux-gnu.a.gz --dir "$archive_dir"
+          gzip -t "$archive_dir/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz"
+          echo "RUSTY_V8_ARCHIVE=$archive_dir/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz" >> "$GITHUB_ENV"
       - name: Check isolated-load destination, privacy and qualification guards
         run: |
           node --test bench/whagons/safety.test.mjs

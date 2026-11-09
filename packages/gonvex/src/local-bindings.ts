@@ -179,6 +179,10 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
   const localDependencies = Object.fromEntries(reducers
     .map(([path, entry]) => [path, (entry.localDependencies ?? []).filter((table) => localTables.has(table))] as const)
     .filter(([, tables]) => tables.length > 0));
+  // Reuse the generated API's canonical collection references instead of
+  // retaining a second copy of every table's projection metadata at boot.
+  const collectionReferences = Object.keys(manifest.functions).filter(path => path.startsWith("__local."))
+    .map(path => "api" + path.split(".").map(part => `[${JSON.stringify(part)}]`).join(""));
   const native = await nativeLocalBindings(root, localCode, schema, {
     clientContract, artifactHash: manifest.module.hash, tables: Object.keys(schema),
     collections: Object.entries(manifest.functions).filter(([path]) => path.startsWith("__local.")).map(([path,entry]) => ({kind:"query",path,delivery:"replica",replica:entry.replica})),
@@ -191,6 +195,6 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
     "local-reducers.d.ts": `${header}import type { ReducerDefinition } from "@gonvex/module-sdk";\nexport declare const localReducers: Readonly<Record<string, () => Promise<ReducerDefinition<any, any>>>>;\n`,
     "local-runtime.ts": `${header}export {localRuntime} from "./local-executor.js";\n`,
     "local-visibility.ts": `${header}export const unrestrictedVisibility = ${JSON.stringify(unrestrictedVisibility(manifest, localTables))} as const;\n`,
-    "local-executor.ts": `${header}import { createPortableReducer } from "@gonvex/local-runtime/portable-client";\nimport { localSchema } from "./local-schema.js";\nimport { localReducers } from "./local-reducers.js";\nexport const localRuntime = { mode: "portable" as const, clientContract: ${JSON.stringify(clientContract)}, artifactHash: ${JSON.stringify(manifest.module.hash)}, tables: ${JSON.stringify(Object.keys(schema))}, collections: ${JSON.stringify(Object.entries(manifest.functions).filter(([path]) => path.startsWith("__local.")).map(([path, entry]) => ({kind:"query", path, delivery:"replica", replica:entry.replica})))} as const, localDependencies: ${JSON.stringify(localDependencies)} as const, unrestrictedVisibility: () => import("./local-visibility.js").then(module => module.unrestrictedVisibility), create: () => createPortableReducer({schema: localSchema, reducers: localReducers, artifactHash: ${JSON.stringify(manifest.module.hash)}}) };\n`,
+    "local-executor.ts": `${header}import { createPortableReducer } from "@gonvex/local-runtime/portable-client";\nimport { localSchema } from "./local-schema.js";\nimport { localReducers } from "./local-reducers.js";\nimport { api } from "./api.js";\nexport const localRuntime = { mode: "portable" as const, clientContract: ${JSON.stringify(clientContract)}, artifactHash: ${JSON.stringify(manifest.module.hash)}, tables: ${JSON.stringify(Object.keys(schema))}, collections: [${collectionReferences.join(",")}] as const, localDependencies: ${JSON.stringify(localDependencies)} as const, unrestrictedVisibility: () => import("./local-visibility.js").then(module => module.unrestrictedVisibility), create: () => createPortableReducer({schema: localSchema, reducers: localReducers, artifactHash: ${JSON.stringify(manifest.module.hash)}}) };\n`,
   };
 }

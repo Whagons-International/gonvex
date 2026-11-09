@@ -60,6 +60,10 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   assert.equal(functions['__local.tasks'].replica.maxBytes, 10000);
   assert.equal(functions.external.localExecution, undefined);
   const generated = await localBindings(root, {module,functions});
+  const collections = Object.fromEntries(Object.entries(functions).filter(([path]) => path.startsWith('__local.'))
+    .map(([path, entry]) => [path.slice('__local.'.length), {kind:'query',path,delivery:'replica',replica:entry.replica}]));
+  // localBindings is also exercised independently of the outer API writer.
+  await writeFile(join(root, 'gonvex', 'api.ts'), `export const api = {__local:${JSON.stringify(collections)}} as const;`);
   assert.match(generated['local-executor.ts'], /createPortableReducer/);
   assert.match(generated['local-runtime.native.tsx'], /installNativeRuntimeGlobals/);
   assert.equal(generated['local-worker.ts'], undefined);
@@ -79,7 +83,8 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   // worker, hidden WebView or WebAssembly engine in its dependency graph.
   await symlink(fileURLToPath(new URL('../../local-runtime', import.meta.url)), join(root, 'node_modules', '@gonvex', 'local-runtime'));
   for (const [name, source] of Object.entries(generated)) await writeFile(join(root, 'gonvex', name), source);
-  const output = await build({input:join(root,'gonvex','local-executor.ts'),platform:'browser',write:false,output:{format:'iife',name:'SharedExecutor',codeSplitting:false}});
+  await writeFile(join(root,'gonvex','browser-entry.ts'), 'export {localRuntime} from "./local-executor.js"; export {api} from "./api.js";');
+  const output = await build({input:join(root,'gonvex','browser-entry.ts'),platform:'browser',write:false,output:{format:'iife',name:'SharedExecutor',codeSplitting:false}});
   const code = output.output.find(chunk=>chunk.type==='chunk').code;
   assert.doesNotMatch(code,/PGlite|new Worker|WebAssembly\.instantiate/);
   const browser = await chromium.launch({headless:true,args:['--no-sandbox','--disable-gpu']});
@@ -89,6 +94,7 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   const requests = [];
   page.on('request', request=>requests.push(request.url()));
   await page.addScriptTag({content:code});
+  assert.equal(await page.evaluate(() => SharedExecutor.localRuntime.collections.find(ref => ref.path === '__local.tasks') === SharedExecutor.api.__local.tasks), true, 'the runtime and public API share one collection definition');
   const response=await page.evaluate(async hash=>SharedExecutor.localRuntime.create().execute('rename',{id:'t',title:'changed'},{scope:'scope',tables:{tasks:{complete:true,rows:[{_id:'t',title:'old'}]}}},{scope:'scope',commandId:'intent',now:1,artifactHash:hash,identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}}}),module.hash);
   assert.equal(response.patches[0].fields.title,'changed');
   const suite = JSON.parse(await readFile(new URL('../../module-sdk/runtime-contract/vectors.json', import.meta.url)));
