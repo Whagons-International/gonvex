@@ -118,6 +118,46 @@ All window updates are applied atomically before listeners are notified. Live
 Query windows and Replica Collections reference the same normalized entities,
 so every view of an entity converges together.
 
+### Experimental bounded column projections
+
+For a hot grid or worker, project an explicit ordered ID window from that same
+replica. Both budgets are required; no whole-table scan or disk hydration occurs
+inside this synchronous read:
+
+```ts
+import { columnPageReader, columnPageTransfers } from '@gonvex/client';
+
+const page = client.localReplica.entityColumns('items', orderedIds, {
+  title: { kind: 'string' },
+  dueAt: { kind: 'f64', nullable: true },
+  done: { kind: 'boolean' },
+}, { maxRows: 200, maxPayloadBytes: 64 * 1024 });
+const cells = columnPageReader(page);
+const firstTitle = cells.value('title', 0);
+// Alternatively give this caller-owned page to a worker. Do not read it again.
+worker.postMessage(page, columnPageTransfers(page));
+```
+
+Fields use typed numeric lanes, boolean bitmaps and per-page UTF-8 string
+dictionaries with narrow slots. Missing rows/fields and SQL NULL have distinct
+bitmaps. The lazy reader decodes only accessed strings. Other text/JSON fields
+are never cloned. Pending Reducer edits participate in the same atomic read.
+Transferred buffers belong to the page; authoritative replica data is untouched.
+
+`completeProjection` means all requested rows/fields were resident. It does not
+establish collection coverage, an exhaustive filter result or current server
+freshness. Check the collection/Live Query state separately. `replicaVersion`
+and `freshness` describe this snapshot; workers must reject superseded results.
+Public IDs remain strings. Slots are temporary local offsets, never command IDs.
+
+The byte budget counts owned typed buffers plus UTF-8 IDs/column names, excluding
+JS object/Map overhead and temporary encoding allocations. It is not a hard heap
+cap or a wire-size measurement. Supported lanes are `boolean`, `u32`, `i32`,
+`f64`, exact signed `i64` and `string`; invalid values/overflow throw. `i64`
+requires a BigInt or safe integer input and does not extend the current JSON
+transport to carry arbitrary 64-bit integers. This API adds no persisted cache,
+query engine, wire protocol, compression or transport subscription.
+
 ## Replica Collections
 
 Replica Collections materialize bounded, authorized entity sets in normalized

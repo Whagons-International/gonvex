@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/cli",
-  "version": "0.5.2-sqlite.0",
+  "version": "0.5.2-sqlite.1",
   "type": "module",
   "bin": {
     "gonvex": "./dist/index.js"

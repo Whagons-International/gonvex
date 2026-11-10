@@ -367,19 +367,7 @@ async fn validate(
         if definition.key != plan.key {
             return Ok(None);
         }
-        let primary =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pragma_table_info($1) WHERE pk>0")
-                .bind(&definition.table)
-                .fetch_one(&mut **read.transaction.transaction())
-                .await?;
-        let key_primary = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info($1) WHERE pk>0 AND name=$2",
-        )
-        .bind(&definition.table)
-        .bind(&definition.key)
-        .fetch_one(&mut **read.transaction.transaction())
-        .await?;
-        if primary != 1 || key_primary != 1 {
+        if !single_sql_key(&mut read.transaction, &definition.table, &definition.key).await? {
             return Ok(None);
         }
     }
@@ -414,6 +402,22 @@ async fn validate(
         return Ok(None);
     }
     Ok(Some((state.digest, state.window, upserts, deleted)))
+}
+
+/// `key` is `table`'s only primary-key column. Through the records-aware
+/// catalog: a logical record view (contract 3) is a SQL VIEW, whose columns
+/// `pragma_table_info` all reports with `pk=0`; its key is the record's public
+/// key, which maps one to one onto its storage table's SQL primary key
+/// (directly, or through the immutable `_gonvex_identity_keys`), and every
+/// record change is logged under that key.
+async fn single_sql_key(
+    transaction: &mut TenantTransaction,
+    table: &str,
+    key: &str,
+) -> Result<bool, ReplicaError> {
+    let columns = gonvex_store::rows::table_columns(transaction.transaction(), table).await?;
+    let mut primary = columns.iter().filter(|column| column.primary_key);
+    Ok(matches!((primary.next(), primary.next()), (Some(column), None) if column.name == key))
 }
 
 async fn history_complete(
@@ -592,5 +596,51 @@ mod tests {
         boundary.window.boundary = Some(Box::new((Value::Null, Value::Null)));
         cache.remember("boundary".into(), boundary);
         assert!(cache.candidate("boundary", &anchor(1).cursor).is_none());
+    }
+
+    /// Log-only resume needs the collection key to be the relation's single
+    /// SQL key; a registered logical record view qualifies through its
+    /// record schema, although SQLite reports no primary key for a view.
+    #[tokio::test]
+    async fn delta_key_check_reads_record_views_through_their_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = gonvex_store::database_url(&directory.path().join("keys.db"));
+        let pools = gonvex_store::PoolRegistry::new(gonvex_store::PoolLimits::default());
+        let mut connection = pools.pool(&url).await.unwrap().acquire().await.unwrap();
+        gonvex_store::execute_script(
+            &mut connection,
+            r#"CREATE TABLE plain(id TEXT PRIMARY KEY, title TEXT);
+               CREATE TABLE pair(a TEXT, b TEXT, PRIMARY KEY (a, b));
+               CREATE TABLE keyless(id TEXT, title TEXT);
+               CREATE TABLE taskStorage(_id INTEGER PRIMARY KEY, title TEXT);
+               CREATE VIEW tasks AS SELECT CAST(_id AS TEXT) _id, title FROM taskStorage;
+               CREATE VIEW unregistered AS SELECT id, title FROM plain;
+               CREATE TABLE _gonvex_record_views(name TEXT PRIMARY KEY,storage_table TEXT NOT NULL UNIQUE,key_column TEXT NOT NULL,schema TEXT NOT NULL);
+               INSERT INTO _gonvex_record_views VALUES('tasks','taskStorage','_id','{"key":"_id","columns":{"_id":{"type":"text"},"title":{"type":"text"}}}');"#,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        let mut read = gonvex_store::begin_transaction(&pools, &url, true)
+            .await
+            .unwrap();
+        for (table, key, single) in [
+            ("plain", "id", true),
+            ("plain", "title", false),
+            ("pair", "a", false),
+            ("keyless", "id", false),
+            ("unregistered", "id", false),
+            ("tasks", "_id", true),
+            ("tasks", "title", false),
+            ("missing", "id", false),
+        ] {
+            assert_eq!(
+                single_sql_key(&mut read, table, key).await.unwrap(),
+                single,
+                "{table}.{key}"
+            );
+        }
+        drop(read);
+        pools.close().await;
     }
 }
