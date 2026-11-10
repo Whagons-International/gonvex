@@ -606,7 +606,7 @@ it('sends only observed reducer tables and retries changed branches against the 
   });
   hosts.push(host);
   const seen: string[][] = [];
-  const client = new GonvexClient(url, { localRuntime: { artifactHash: 'artifact', tables: ['tasks', 'other', 'history'], create: () => ({
+  const client = new GonvexClient(url, { localRuntime: { artifactHash: 'artifact', tables: ['tasks', 'other', 'history'], unrestrictedVisibility: { tasks: {operator: 'public'}, other: {operator: 'public'}, history: {operator: 'public'} }, create: () => ({
     ready: host.initializeReady(), close: () => {}, replay: (...args) => host.replay(...args),
     execute: (...args) => { seen.push(Object.keys(args[2].tables)); return host.execute(...args); },
   }) } });

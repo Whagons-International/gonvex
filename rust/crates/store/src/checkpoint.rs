@@ -34,7 +34,7 @@ use crate::DatabaseError;
 /// Checkpoints run by the background thread (observability and tests).
 pub static BACKGROUND_CHECKPOINTS: AtomicU64 = AtomicU64::new(0);
 /// Inline checkpoint attempts by the writer because the WAL reached its cap
-/// (an attempt that found a background checkpoint running is retried).
+/// (an attempt that found an external checkpoint running is retried).
 pub static INLINE_CHECKPOINTS: AtomicU64 = AtomicU64::new(0);
 /// Total and longest background checkpoint time in microseconds.
 pub static BACKGROUND_CHECKPOINT_US: AtomicU64 = AtomicU64::new(0);
@@ -82,9 +82,10 @@ pub(crate) struct WalState {
     path: CString,
     every: u64,
     cap: u64,
-    /// Serialize our background checkpoint with the writer's cap fallback.
-    /// Otherwise a busy background checkpoint can make every cap attempt fail
-    /// while a fast writer keeps extending the WAL.
+    /// Serialize this process's background checkpoint with the writer's cap
+    /// fallback. SQLite does not wait for a concurrent checkpointer: without
+    /// this guard a busy background checkpoint can make every cap attempt fail
+    /// with SQLITE_BUSY while a fast writer keeps extending the WAL.
     checkpoint_lock: Mutex<()>,
     /// Frames in the WAL after the last commit.
     frames: AtomicU64,
@@ -121,8 +122,8 @@ impl WalState {
             self.next_request.store(self.every, Ordering::Relaxed);
             self.next_inline.store(self.cap, Ordering::Relaxed);
         }
-        // Past the cap the writer checkpoints itself; a concurrent background
-        // checkpoint would only make it fail with SQLITE_BUSY.
+        // Past the cap the writer checkpoints itself; no more background
+        // requests are needed until the WAL restarts.
         if frames < self.cap && frames >= self.next_request.load(Ordering::Relaxed) {
             self.next_request
                 .store(frames + self.every, Ordering::Relaxed);
@@ -276,6 +277,8 @@ unsafe extern "C" fn wal_hook(
         // The commit has released SQLite's writer lock before invoking the
         // WAL hook. Wait for our in-flight background copy, then finish the
         // uncopied tail before admitting the next writer transaction.
+        // PASSIVE never waits for the writer, so waiting for our background
+        // checkpoint here cannot deadlock with this committing connection.
         let _checkpoint = state
             .checkpoint_lock
             .lock()
@@ -288,7 +291,8 @@ unsafe extern "C" fn wal_hook(
             std::ptr::null_mut(),
         );
         if rc == ffi::SQLITE_BUSY {
-            // An external checkpoint can still hold SQLite's lock: retry next commit.
+            // An external checkpoint (another process) can still hold
+            // SQLite's checkpoint lock: retry next commit.
             state.next_inline.store(frames + 1, Ordering::Relaxed);
         }
     }

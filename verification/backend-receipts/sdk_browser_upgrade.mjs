@@ -68,7 +68,7 @@ export async function runSDKBrowserUpgrade(url, output) {
   let context, page, lastCompletedState;
   const browserErrors = [];
   const launch = async () => {
-    context = await chromium.launchPersistentContext(join(output, 'profile'), { headless: true, args: ['--no-sandbox'] });
+    context = await chromium.launchPersistentContext(join(output, 'profile'), { headless: true, args: ['--no-sandbox', '--disable-gpu'] });
     const opened = context.pages()[0];
     opened.on('pageerror', error => browserErrors.push(error.message));
     opened.on('console', message => { if (message.type() === 'error') browserErrors.push(message.text()); });

@@ -1976,13 +1976,9 @@ fn shared_parent_resolution(
     resolved: ResolvedVisibility,
 ) -> Arc<ResolvedVisibility> {
     type Key = (String, String, String, u64);
-    #[allow(clippy::type_complexity)]
-    static SHARED: std::sync::OnceLock<
-        std::sync::Mutex<(
-            BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>,
-            usize,
-        )>,
-    > = std::sync::OnceLock::new();
+    type ParentEntries = BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>;
+    type ParentCache = std::sync::Mutex<(ParentEntries, usize)>;
+    static SHARED: std::sync::OnceLock<ParentCache> = std::sync::OnceLock::new();
     fn same(left: &ResolvedVisibility, right: &ResolvedVisibility) -> bool {
         left.ephemeral_member == right.ephemeral_member
             && left.revision == right.revision

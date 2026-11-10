@@ -236,6 +236,23 @@ it("retries unsent subscription batches after a refresh preserves the existing s
   expect(state.send.mock.calls.map((call: any[]) => call[0].type)).toEqual(["query.subscribeMany", "replica.openMany"]);
 });
 
+it("does not queue a restored replica before its socket is connected", () => {
+  const state = client() as any;
+  state.hasAuthoritativeReplicaScope = true;
+  state.serverCapabilities = { replicaBatch: 1 };
+  state.send = vi.fn();
+  const replica = { id: "r", key: "r", path: "tasks.list", args: {}, listeners: new Set([() => {}]), opening: false };
+  state.replicaSubscriptions.set("r", replica);
+  state.sendReplicaOpen(replica);
+  state.flushReplicaOpens();
+  expect(state.send).not.toHaveBeenCalled();
+  expect(replica.opening).toBe(false);
+  state.isWebSocketConnected = true;
+  state.sendReplicaOpen(replica);
+  state.flushReplicaOpens();
+  expect(state.send.mock.calls.map((call: any[]) => call[0].type)).toEqual(["replica.openMany"]);
+});
+
 it("opts cold opens into aggregate verification only on a supporting runtime", () => {
   const state = client() as any;
   const subscription = { key: "empty", id: "r", path: "tasks.list", args: {} };
@@ -273,4 +290,20 @@ it("verifies an aggregate ready after a resumed delta without rehashing the held
   await state.handleReplicaMessage(subscription, { type: "replica.ready", id: "r", cursor, digest: replicaAggregateDigest(nextHashes) });
   expect(subscription).toMatchObject({ isUpToDate: true, forceFullIntegrity: false });
   committedRows.mockRestore();
+});
+
+it("releases retained collection opens once and honors cancellation", () => {
+  const value = new GonvexClient("ws://runtime.test/ws", {deferReplicaOpen: path => path.startsWith("held.")});
+  clients.push(value);
+  const start = vi.spyOn(value, "connect").mockImplementation(() => undefined);
+  const reference = (path: string): FunctionReference => ({kind: "query", path, delivery: "replica"});
+  const stop = value.subscribeReplica(reference("held.first"), {}, () => undefined);
+  const cancel = value.subscribeReplica(reference("held.cancelled"), {}, () => undefined);
+  cancel();
+  expect(start).not.toHaveBeenCalled();
+  value.releaseDeferredReplicaOpens();
+  expect(start).toHaveBeenCalledTimes(1);
+  value.releaseDeferredReplicaOpens();
+  expect(start).toHaveBeenCalledTimes(1);
+  stop();
 });

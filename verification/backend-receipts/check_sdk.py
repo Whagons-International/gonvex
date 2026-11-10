@@ -251,7 +251,11 @@ def main():
         require(code != 0 and "missing witnessed receipt overlap" in (output / "concurrency-witness-control.log").read_text(),
                 "SDK concurrency evidence control did not fail its intended assertion")
         concurrency = json.loads((output / "sdk/concurrency/receipt.json").read_text())
-        require([case["mode"] for case in concurrency["cases"]] == ["commit", "rollback"], "both concurrent ownership outcomes required")
+        # Runtime-writer gate (commit/rollback) and native receipt-INSERT gate
+        # (native-commit/native-rollback), in the coordinator's order
+        # (SDK_CONCURRENCY_MODES in receipt_guarantee_tests.rs).
+        require([case["mode"] for case in concurrency["cases"]] == ["commit", "rollback", "native-commit", "native-rollback"],
+                "every runtime-writer and native concurrent ownership outcome required")
         paths = ["verification/backend-receipts/check_sdk.py", "verification/backend-receipts/check_restart.py",
                  "verification/backend-receipts/build_sdk_mutant.mjs", ".github/workflows/runtime-regression.yml",
                  "verification/backend-receipts/sdk_composition.mjs", "rust/crates/runtime/src/tests/receipt_guarantee_tests.rs",

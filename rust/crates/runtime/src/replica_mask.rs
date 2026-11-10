@@ -40,10 +40,9 @@ pub(super) enum Resync {
 #[derive(Default)]
 pub(super) struct ApplyContext {
     /// The principal before this transaction's grants (None: unchanged).
-    pub before: Option<ResolvedVisibility>,
+    pub before: Option<Box<ResolvedVisibility>>,
     /// Parent rows as they were before this transaction.
-    #[allow(clippy::type_complexity)]
-    pub overlay: Option<Arc<Vec<(String, String, Option<Arc<Value>>)>>>,
+    pub overlay: Option<ParentOverlay>,
     /// Rows of the source table whose visibility may have moved without the
     /// row changing, as they are at the event's revision.
     pub affected: Vec<(String, Value)>,
@@ -377,7 +376,7 @@ impl Runtime {
         // (child column, values).
         let mut affected: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         if !granted.is_empty() || derived_touched {
-            context.before = Some(subscription.resolved.clone());
+            context.before = Some(Box::new(subscription.resolved.clone()));
         }
         for (scope, name, token) in &granted {
             if *scope == subscription.visibility.table {
@@ -453,7 +452,7 @@ impl Runtime {
         if !parent_changes.is_empty() {
             let mut overlay = Vec::new();
             let acl_columns = subscription_parent_acl_columns(subscription);
-            let before = context.before.as_ref().unwrap_or(&subscription.resolved);
+            let before = context.before.as_deref().unwrap_or(&subscription.resolved);
             for change in &parent_changes {
                 let image = collapsed
                     .get(&(change.table.as_str(), change.row_id.as_str()))
