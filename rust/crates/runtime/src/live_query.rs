@@ -1944,10 +1944,10 @@ mod tests {
         let resolved = ResolvedVisibility {
             ephemeral_member: false,
             revision: 1,
-            direct: BTreeMap::from([("member.id".into(), "alice".into())]),
+            direct: BTreeMap::from([("member.id".into(), "alice".into())]).into(),
             role: "member".into(),
-            permissions: serde_json::json!({}),
-            sets: BTreeMap::new(),
+            permissions: serde_json::json!({}).into(),
+            sets: BTreeMap::new().into(),
             fingerprint: "alice".into(),
             inherited: BTreeMap::new(),
             indexes: BTreeMap::new(),
@@ -2212,10 +2212,10 @@ mod tests {
             indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
-            direct: BTreeMap::from([("account.id".to_owned(), "account".to_owned())]),
+            direct: BTreeMap::from([("account.id".to_owned(), "account".to_owned())]).into(),
             role: "member".to_owned(),
-            permissions: Value::Null,
-            sets: BTreeMap::new(),
+            permissions: Value::Null.into(),
+            sets: BTreeMap::new().into(),
             fingerprint: "live-count-regression".to_owned(),
         };
         let float = Value::from(1.0_f64);
@@ -2396,10 +2396,10 @@ mod tests {
             indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
-            direct: BTreeMap::from([("member.id".to_owned(), "member-a".to_owned())]),
+            direct: BTreeMap::from([("member.id".to_owned(), "member-a".to_owned())]).into(),
             role: "member".to_owned(),
-            permissions: Value::Null,
-            sets: BTreeMap::new(),
+            permissions: Value::Null.into(),
+            sets: BTreeMap::new().into(),
             fingerprint: "scope-a".to_owned(),
         };
         let related = BTreeMap::from([("routing".to_owned(), (plan, resolved.clone()))]);
@@ -2722,10 +2722,10 @@ mod tests {
                     indexes: Default::default(),
                     ephemeral_member: false,
                     revision: 1,
-                    direct: context.clone(),
+                    direct: context.clone().into(),
                     role: "member".into(),
-                    permissions: Value::Null,
-                    sets: BTreeMap::new(),
+                    permissions: Value::Null.into(),
+                    sets: BTreeMap::new().into(),
                     fingerprint: "benchmark".into(),
                 };
                 (table, (guard, resolved))

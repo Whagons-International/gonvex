@@ -7528,3 +7528,6 @@ mod connection_future_sizes {
         );
     }
 }
+
+#[cfg(all(test, feature = "perf-fixture"))]
+mod queue_diagnostics;
