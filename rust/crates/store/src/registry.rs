@@ -386,7 +386,8 @@ pub struct PoolRegistrySnapshot {
     pub in_use: u32,
     pub idle: usize,
     /// Pools whose non-atomic SQLx idle sample was outside 0..=size.
-    /// Their idle contribution is unavailable (excluded), so in_use is an upper bound.
+    /// These pools contribute no idle connections and all sampled connections
+    /// to in_use. Pool metrics remain non-atomic observations.
     pub idle_samples_unavailable: usize,
     pub max_open_connections: u32,
     pub listener_connections: u32,

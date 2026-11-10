@@ -209,8 +209,9 @@ it.each(["replica.ready", "replica.delta"])("does not accept %s when reconnect i
   expect(state.replica.getWindow("tasks").source).toBe("cache");
 });
 
-it("retries unsent subscription batches after a refresh preserves the existing subscriptions", () => {
+it("retries unsent subscription batches after a refresh preserves the existing subscriptions", async () => {
   const state = client() as any;
+  await state.replicaReady;
   state.isWebSocketConnected = true;
   state.socketGeneration = 1;
   state.hasAuthoritativeReplicaScope = true;
@@ -235,7 +236,7 @@ it("retries unsent subscription batches after a refresh preserves the existing s
   expect(state.send.mock.calls.map((call: any[]) => call[0].type)).toEqual(["query.subscribeMany", "replica.openMany"]);
 });
 
-it("does not queue a restored replica before its socket is connected", () => {
+it("does not queue a restored replica before its socket is connected", async () => {
   const state = client() as any;
   state.hasAuthoritativeReplicaScope = true;
   state.serverCapabilities = { replicaBatch: 1 };
@@ -246,6 +247,8 @@ it("does not queue a restored replica before its socket is connected", () => {
   state.flushReplicaOpens();
   expect(state.send).not.toHaveBeenCalled();
   expect(replica.opening).toBe(false);
+  expect(state.replicaOpenHydrations.size).toBe(0);
+  await state.replicaReady;
   state.isWebSocketConnected = true;
   state.sendReplicaOpen(replica);
   state.flushReplicaOpens();
