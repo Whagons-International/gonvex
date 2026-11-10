@@ -2344,6 +2344,26 @@ pub(super) async fn query_rows(
     Ok((rows, window.truncated))
 }
 
+fn equal_filter_predicates(
+    filters: &BTreeMap<String, String>,
+    args: &serde_json::Map<String, Value>,
+    parameters: &mut Vec<Value>,
+) -> Result<Vec<String>, ReplicaError> {
+    filters
+        .iter()
+        .map(|(column, argument)| {
+            let value = args.get(argument).ok_or(ReplicaError::InvalidArguments)?;
+            let comparison = if value.is_null() { "IS" } else { "=" };
+            parameters.push(value.clone());
+            Ok(format!(
+                "r.{} {comparison} ${}",
+                quote(column)?,
+                parameters.len()
+            ))
+        })
+        .collect()
+}
+
 /// Streams the collection's visible rows (in order, within its budgets) to
 /// `visit` one at a time and returns the resulting window. Nothing but the
 /// visitor's own state outlives a row.
@@ -2371,14 +2391,11 @@ pub(crate) async fn scan_window(
     for column in &definition.exclude_when_set {
         predicates.push(format!("r.{} IS NULL", quote(column)?));
     }
-    for (column, argument) in &definition.equal_filters {
-        let value = args
-            .get(argument)
-            .ok_or(ReplicaError::InvalidArguments)?
-            .clone();
-        parameters.push(value);
-        predicates.push(format!("r.{} = ${}", quote(column)?, parameters.len()));
-    }
+    predicates.extend(equal_filter_predicates(
+        &definition.equal_filters,
+        args,
+        &mut parameters,
+    )?);
     let columns = declared_columns(transaction, definition, definition.columns.iter()).await?;
     let mut statement = format!(
         "SELECT {} FROM {} AS r WHERE {}",
@@ -3874,6 +3891,40 @@ mod tests {
             new_value: std::sync::Arc::new(new_value),
             provenance: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn nullable_equal_filter_reads_only_its_sql_snapshot_scope() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TABLE items(id TEXT, workspaceId TEXT); INSERT INTO items VALUES('global',NULL),('a','space-a'),('b','space-b');")
+            .execute(&pool).await.unwrap();
+        let filters = BTreeMap::from([("workspaceId".to_owned(), "workspace".to_owned())]);
+        for (value, expected) in [
+            (Value::Null, "global"),
+            (Value::String("space-a".into()), "a"),
+        ] {
+            let args = serde_json::json!({"workspace":value});
+            let mut parameters = vec![];
+            let predicates =
+                equal_filter_predicates(&filters, args.as_object().unwrap(), &mut parameters)
+                    .unwrap();
+            let sql = format!(
+                "SELECT id FROM items AS r WHERE {}",
+                predicates.join(" AND ")
+            );
+            let ids: Vec<String> = sqlx::query_scalar(&sql)
+                .bind(parameters[0].as_str())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(ids, vec![expected.to_owned()]);
+        }
+        assert!(equal_filter_predicates(&filters, &serde_json::Map::new(), &mut vec![]).is_err());
+        pool.close().await;
     }
 
     #[test]
