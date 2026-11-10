@@ -249,6 +249,8 @@ stages! {
     OffloadQueueWait => "offload.queue_wait", "background", "Offload pool: job submitted -> started on a pool thread";
     OffloadBusy => "offload.busy", "background", "Offload pool: time a job spent running (sum of its polls)";
     OffloadRun => "offload.run", "background", "Offload pool: job started -> finished (wall, includes awaits)";
+    ColdOpenLifetime => "replica.cold_open_lifetime", "snapshot", "Authoritative open after validated resume fallback, through completion or cancellation; excludes outbound send";
+    ColdOpenRefused => "replica.cold_open_refused", "snapshot", "Cold-open lifetime guard refusals (count, not ns)";
 }
 
 pub const STAGE_COUNT: usize = STAGES.len();
@@ -555,6 +557,7 @@ gauges! {
     IsolateWaiting => "module_host.isolate_waiting", "In-process invocations waiting for root admission or a V8 isolate";
     OffloadQueued => "offload.queued", "Offload pool jobs submitted but not started";
     OffloadRunning => "offload.running", "Offload pool jobs running";
+    ColdOpenActive => "replica.cold_open_active", "Guarded authoritative opens, including cache single-flight and build waits; excludes validated cheap resumes and outbound sends";
 }
 
 pub const GAUGE_COUNT: usize = GAUGES_INFO.len();
@@ -641,6 +644,20 @@ impl Gauge {
 
 /// Decrements its gauge on drop.
 pub struct GaugeGuard(Option<&'static Gauge>);
+
+/// Cold-open ownership captures profiling once. Unlike the existing generic
+/// `Gauge::guard` path, a concurrent disable cannot suppress the increment
+/// after the decision to own a decrement. Other gauge behavior is unchanged.
+#[inline]
+pub fn cold_open_guard() -> GaugeGuard {
+    if !enabled() {
+        return GaugeGuard(None);
+    }
+    let gauge = gauge(GaugeId::ColdOpenActive);
+    let value = gauge.current.fetch_add(1, Relaxed) + 1;
+    gauge.observe(value.max(0) as u64);
+    GaugeGuard(Some(gauge))
+}
 
 impl Drop for GaugeGuard {
     #[inline]
@@ -1396,5 +1413,28 @@ mod tests {
         assert_eq!(LABELS[Label::Cron as usize], "cron");
         assert_eq!(STAGES.len(), STAGE_COUNT);
         assert_eq!(STAGES[Stage::PollOther as usize].name, "poll.other");
+    }
+}
+
+#[cfg(test)]
+mod cold_open_tests {
+    use super::*;
+
+    #[test]
+    fn ownership_survives_both_toggle_directions() {
+        let was_enabled = enabled();
+        let gauge = gauge(GaugeId::ColdOpenActive);
+        assert_eq!(gauge.current(), 0);
+        set_enabled(true);
+        let counted = cold_open_guard();
+        assert_eq!(gauge.current(), 1);
+        set_enabled(false);
+        drop(counted);
+        assert_eq!(gauge.current(), 0);
+        let uncounted = cold_open_guard();
+        set_enabled(true);
+        drop(uncounted);
+        assert_eq!(gauge.current(), 0);
+        set_enabled(was_enabled);
     }
 }

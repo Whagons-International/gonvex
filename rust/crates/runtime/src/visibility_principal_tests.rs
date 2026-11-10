@@ -33,10 +33,10 @@ fn member() -> ResolvedVisibility {
     ResolvedVisibility {
         ephemeral_member: false,
         revision: 0,
-        direct: BTreeMap::from([("member.id".into(), "alice".into())]),
+        direct: BTreeMap::from([("member.id".into(), "alice".into())]).into(),
         role: "member".into(),
-        permissions: json!({}),
-        sets: BTreeMap::new(),
+        permissions: json!({}).into(),
+        sets: BTreeMap::new().into(),
         fingerprint: String::new(),
         inherited: BTreeMap::new(),
         indexes: BTreeMap::new(),
@@ -367,7 +367,7 @@ fn cached_inputs_are_shared_metadata_not_a_members_principal() {
     let columns = vec!["see_all_spots".into()];
     let alice = member();
     let mut bob = member();
-    bob.direct.insert("member.id".into(), "bob".into());
+    Arc::make_mut(&mut bob.direct).insert("member.id".into(), "bob".into());
     for _ in 0..2 {
         assert!(!p.principal_change_concerns(&alice, "members", "update", &columns, &old, &new));
         assert!(p.principal_change_concerns(&bob, "members", "update", &columns, &old, &new));

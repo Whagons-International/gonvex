@@ -356,10 +356,10 @@ async fn readiness_waits_for_the_applier_through_inherited_parents() {
     let mut inner = ResolvedVisibility {
         ephemeral_member: false,
         revision: 10,
-        direct: BTreeMap::new(),
+        direct: BTreeMap::new().into(),
         role: String::new(),
-        permissions: Value::Null,
-        sets: BTreeMap::new(),
+        permissions: Value::Null.into(),
+        sets: BTreeMap::new().into(),
         fingerprint: String::new(),
         inherited: BTreeMap::new(),
         indexes: BTreeMap::new(),
