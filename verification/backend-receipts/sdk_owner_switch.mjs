@@ -67,9 +67,11 @@ export async function runSDKOwnerSwitch(url, output, dimension = 'account') {
           auth.push({ owner, visibility, account: message.result.accountId, tenant: message.result.tenantId });
         }
         if (message.type === 'reducer.result' && owner === firstOwner) committedRevision = message.committedRevision;
-        if (message.type === 'replica.watermark') watermarks.push({ owner, revision: message.revision });
-        // Delivery v2 carries the tick's watermark on its replica.batch message.
-        if (message.type === 'replica.batch' && typeof message.watermark === 'number') watermarks.push({ owner, revision: message.watermark });
+        if (message.type === 'replica.watermark') watermarks.push({ owner, revision: message.revision, transport: 'standalone' });
+        // Delivery v2 carries the same ordered barrier after its batch items.
+        // Observe that negotiated wire format too; no standalone frame follows.
+        if (message.type === 'replica.batch' && typeof message.watermark === 'number')
+          watermarks.push({ owner, revision: message.watermark, transport: 'batch' });
         if (typeof listener === 'function') listener.call(this, event); else listener.handleEvent(event);
       }, options);
     }
@@ -94,6 +96,9 @@ export async function runSDKOwnerSwitch(url, output, dimension = 'account') {
     await client.replicaFrames;
     assert.equal(outcome, 'pending', 'acceptance promise was not held');
     assert.equal(client.localReplica.entity('receipt_records', firstRow)?.value, 7);
+    const firstOwnerSaved = await storage.load(visibility);
+    assert.equal(firstOwnerSaved.entities.receipt_records[firstRow]?.value, 7, 'first owner data barrier was not durable');
+    assert(firstOwnerSaved.cursor?.revision >= committedRevision, 'first owner durable cursor precedes its commit');
     const bobScope = ['identity', url, 'project', tenantSwitch ? secondOwner : 'tenant', 'receipt-fixture', tenantSwitch ? 'account' : secondOwner].join('\u0000');
     const bob = { ...original, id: original.id + 1, scope: bobScope, args: { id: secondRow, value: 7 },
       state: 'failed', awaitingReplica: undefined, attempts: 1, nextAttemptAt: 0, knownUnsent: true,
@@ -139,7 +144,7 @@ export async function runSDKOwnerSwitch(url, output, dimension = 'account') {
     assert.equal(calls.filter(call => call.owner === firstOwner).length, 1, 'original owner resent accepted work');
     assert.equal(calls.filter(call => call.owner === secondOwner).length, 1);
     assert(calls.every(call => call.idempotencyKey === original.idempotencyKey), 'owner switch changed original logical keys');
-    await writeFile(join(output, 'receipt.json'), JSON.stringify({ dimension, auth, calls, oldOutcome, original, bob, retained,
+    await writeFile(join(output, 'receipt.json'), JSON.stringify({ dimension, auth, calls, watermarks, firstOwnerSaved, oldOutcome, original, bob, retained,
       boundary: (tenantSwitch ? 'Actual authenticated tenant A->B->A across separately routed tenant SQLite files; account remains fixed. ' : '') + 'Actual authenticated owner A->B->A on one SDK/socket and real SQLite. Same logical key in distinct owner namespaces, delayed durable acceptance completion, parked prediction, explicit retry and original-owner reconciliation.' }, null, 2) + '\n');
   } catch (error) {
     await writeFile(join(output, 'failure.json'), JSON.stringify({ error: error.message, owner, visibility, auth, calls, watermarks, events,

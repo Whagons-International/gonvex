@@ -59,10 +59,43 @@ pub async fn table_columns(
     connection: &mut SqliteConnection,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, DatabaseError> {
+    let records: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='_gonvex_record_views' AND type='table')").fetch_one(&mut *connection).await?;
+    if records {
+        if let Some(schema) =
+            sqlx::query_scalar::<_, String>("SELECT schema FROM _gonvex_record_views WHERE name=$1")
+                .bind(table)
+                .fetch_optional(&mut *connection)
+                .await?
+        {
+            let schema: Value = serde_json::from_str(&schema)
+                .map_err(|error| DatabaseError::Decode(error.to_string()))?;
+            let key = schema["key"]
+                .as_str()
+                .ok_or_else(|| DatabaseError::Decode("record schema has no key".into()))?;
+            return schema["columns"]
+                .as_object()
+                .ok_or_else(|| DatabaseError::Decode("record schema has no columns".into()))?
+                .iter()
+                .map(|(name, column)| {
+                    Ok(ColumnInfo {
+                        name: name.clone(),
+                        declared: column["type"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                DatabaseError::Decode("record column has no type".into())
+                            })?
+                            .to_owned(),
+                        not_null: column["nullable"] == false,
+                        primary_key: name == key,
+                    })
+                })
+                .collect();
+        }
+    }
     let rows =
         sqlx::query("SELECT name, type, \"notnull\", pk FROM pragma_table_info($1) ORDER BY cid")
             .bind(table)
-            .fetch_all(connection)
+            .fetch_all(&mut *connection)
             .await?;
     Ok(rows
         .into_iter()

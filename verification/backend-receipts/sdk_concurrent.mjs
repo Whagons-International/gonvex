@@ -23,7 +23,13 @@ export async function runSDKConcurrency(url, output) {
     ? pathToFileURL(process.env.GONVEX_SDK_RECEIPT_CLIENT_MODULE).href
     : new URL('../../packages/client/dist/index.js', import.meta.url).href);
   const cases = [];
-  for (const mode of ['commit', 'rollback']) {
+  // `commit`/`rollback`: the backend holds the runtime's own single tenant
+  // writer in a real transaction while both reducers queue behind it.
+  // `native-commit`/`native-rollback`: a native SQLite hook holds a reducer's
+  // actual first receipt INSERT on that writer (and, for rollback, interrupts
+  // it). The backend coordinator runs the same modes in the same order.
+  for (const mode of ['commit', 'rollback', 'native-commit', 'native-rollback']) {
+    const native = mode.startsWith('native-'), rollback = mode.endsWith('rollback');
     const directory = join(output, mode); await mkdir(directory, { recursive: false });
     const rowId = 'sdk-concurrent-' + mode, clients = [], connections = [], states = [];
     const NativeSocket = globalThis.WebSocket;
@@ -86,15 +92,35 @@ export async function runSDKConcurrency(url, output) {
           table: 'receipt_records', key: 'id', columns: ['id', 'value'], maxRows: 100,
         } }, {});
       });
-      const witness = await jsonWhenReady(join(directory, 'witness.json'), 'queued claims behind the runtime writer');
-      // The backend held the runtime's single tenant writer in a real
-      // transaction while both SDK reducers were admitted and queued behind it
-      // (sustained, not sampled once); reads kept working and saw nothing of
-      // the intent. A second writer would have let a claimant commit.
-      assert(witness.overlap === true && witness.gate === 'runtime-writer' && witness.writerOwned === true
-        && witness.queuedWriters >= 2 && witness.readDuringWrite === true && witness.rowsWhileHeld === 0,
-        'missing witnessed receipt overlap');
-      if (mode === 'rollback') assert.equal(witness.ownerRolledBack, true, 'first owner did not roll back its claim');
+      const witness = await jsonWhenReady(join(directory, 'witness.json'),
+        native ? 'blocked receipt claim' : 'queued claims behind the runtime writer');
+      if (native) {
+        // A native SQLite hook holds the first actual receipt INSERT inside its
+        // transaction while the second reducer waits for the single writer.
+        // The coordinator witnesses sustained admission, not a timing guess.
+        assert(witness.overlap === true && witness.gate === 'native-receipt-insert' && witness.writerOwned === true
+          && witness.admittedReducers >= 2, 'missing witnessed receipt overlap');
+        if (rollback) assert.equal(witness.takeover, true, 'losing claimant did not take over the rolled-back receipt');
+        if (rollback) {
+          await until(async () => states.some(state => state.results.some(result => result.type === 'reducer.error'))
+            && (await Promise.all(states.map(state => state.store.load()))).some(entries => entries.length === 0), 'rollback and winning commit');
+          for (const [index, state] of states.entries()) {
+            const entries = await state.store.load();
+            if (entries.some(entry => ['failed', 'rejected'].includes(entry.state))) {
+              assert.equal(await clients[index].retryIntent(original.idempotencyKey), true);
+            }
+          }
+        }
+      } else {
+        // The backend held the runtime's single tenant writer in a real
+        // transaction while both SDK reducers were admitted and queued behind it
+        // (sustained, not sampled once); reads kept working and saw nothing of
+        // the intent. A second writer would have let a claimant commit.
+        assert(witness.overlap === true && witness.gate === 'runtime-writer' && witness.writerOwned === true
+          && witness.queuedWriters >= 2 && witness.readDuringWrite === true && witness.rowsWhileHeld === 0,
+          'missing witnessed receipt overlap');
+        if (rollback) assert.equal(witness.ownerRolledBack, true, 'first owner did not roll back its claim');
+      }
       await until(async () => watches.every(watch => watch.status().isUpToDate)
         && (await Promise.all(states.map(state => state.store.load()))).every(entries => entries.length === 0), 'both durable retirements');
       for (const state of states) {
@@ -106,12 +132,16 @@ export async function runSDKConcurrency(url, output) {
         assert(Object.values(saved.liveQueries).some(window => window.ids.includes(rowId)), 'concurrent retirement lost durable membership');
         assert.equal(state.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
       }
-      // Neither claimant was dropped: one executed, the other replayed its receipt
-      // (after a rolled-back owner, the executing claimant took over).
-      assert(states.every(state => state.results.some(result => result.type === 'reducer.result')), 'a queued claimant got no result');
-      assert(!states.some(state => state.results.some(result => result.type === 'reducer.error')), 'a queued claimant failed');
-      const revisions = new Set(states.map(state => state.results.find(result => result.type === 'reducer.result').committedRevision));
-      assert.equal(revisions.size, 1, 'competing claims committed the intent more than once');
+      if (!native) {
+        // Neither claimant was dropped: one executed, the other replayed its receipt
+        // (after a rolled-back owner, the executing claimant took over).
+        assert(states.every(state => state.results.some(result => result.type === 'reducer.result')), 'a queued claimant got no result');
+        assert(!states.some(state => state.results.some(result => result.type === 'reducer.error')), 'a queued claimant failed');
+        const revisions = new Set(states.map(state => state.results.find(result => result.type === 'reducer.result').committedRevision));
+        assert.equal(revisions.size, 1, 'competing claims committed the intent more than once');
+      } else if (!rollback) {
+        assert(states.every(state => state.results.some(result => result.type === 'reducer.result')));
+      }
       const result = { mode, original, witness, clients: states.map(state => ({ calls: state.calls, results: state.results })) };
       cases.push(result); await writeFile(join(directory, 'receipt.json'), JSON.stringify(result, null, 2) + '\n');
     } catch (error) {
@@ -126,5 +156,5 @@ export async function runSDKConcurrency(url, output) {
     }
   }
   await writeFile(join(output, 'receipt.json'), JSON.stringify({ cases,
-    boundary: 'Two real SDKs, independent SQLite journals/replicas and one immutable logical intent. The runtime\'s own single tenant writer is held in a real transaction while both reducers are admitted and queue behind it; reads continue and see nothing uncommitted. Commit: one claimant executes, the other replays. Rollback: a first owner that claimed the receipt and wrote the row rolls back, and a claimant takes over. No arbitrary shared-store coordination claim.' }, null, 2) + '\n');
+    boundary: 'Two real SDKs, independent SQLite journals/replicas and one immutable logical intent. Runtime-writer cases: the runtime\'s own single tenant writer is held in a real transaction while both reducers are admitted and queue behind it; reads continue and see nothing uncommitted. Commit: one claimant executes, the other replays. Rollback: a first owner that claimed the receipt and wrote the row rolls back, and a claimant takes over. Native cases: a native SQLite update hook holds the first receipt INSERT on the single runtime writer while the second reducer is admitted and waits; native statement interruption tests actual rollback and claimant takeover; the change-feed preupdate hook remains installed. No arbitrary shared-store coordination claim.' }, null, 2) + '\n');
 }

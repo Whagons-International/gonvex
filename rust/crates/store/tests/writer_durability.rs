@@ -63,8 +63,9 @@ async fn tenant(durability: Durability) -> (TestDir, PoolRegistry, String) {
     (dir, pools, url)
 }
 
-/// `WAL_SYNCS` is process-wide: the Full-durability tests take this lock so a
-/// parallel `cargo test` does not count another test's syncs.
+/// The sync count is per database (`PoolRegistry::wal_sync_count`); the lock
+/// only keeps the two Full-durability tests from overlapping, so neither one's
+/// commit timing is disturbed by the other's syncs.
 static FULL_SYNCS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn values(pools: &PoolRegistry, url: &str) -> Vec<(i64, String)> {
@@ -78,7 +79,7 @@ async fn values(pools: &PoolRegistry, url: &str) -> Vec<(i64, String)> {
 async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
     let _serial = FULL_SYNCS.lock().await;
     let (_dir, pools, url) = tenant(Durability::Full).await;
-    let syncs = gonvex_store::WAL_SYNCS.load(Ordering::Relaxed);
+    let syncs = pools.wal_sync_count(&url).await.unwrap();
     let mut tasks = Vec::new();
     for id in 0..60i64 {
         let (pools, url) = (pools.clone(), url.clone());
@@ -97,7 +98,7 @@ async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
     for task in tasks {
         revisions.push(task.await.unwrap());
     }
-    let syncs = gonvex_store::WAL_SYNCS.load(Ordering::Relaxed) - syncs;
+    let syncs = pools.wal_sync_count(&url).await.unwrap() - syncs;
     revisions.sort_unstable();
     revisions.dedup();
     assert_eq!(revisions.len(), 60, "one revision per transaction");
@@ -106,14 +107,25 @@ async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
         "Full durability syncs the WAL before acknowledging"
     );
     // Sharing itself depends on how long a sync takes relative to a commit
-    // (on a fast CI disk every commit can finish its own sync before the next
-    // one commits), so this end-to-end test only bounds it: never more than
-    // one sync per acknowledged commit. The deterministic sharing law lives in
-    // `sync_barrier::tests::waiters_queued_behind_a_running_sync_share_one_sync`.
-    assert!(
-        syncs <= 60,
-        "at most one WAL sync per commit ({syncs} for 60)"
-    );
+    // (on a fast disk every commit can finish its own sync before the next
+    // one commits). CI preloads `slow_checkpoint_sync.c`, which delays every
+    // WAL sync of this executable so commits always overlap: there, sharing
+    // is required. Without it this end-to-end test only bounds it: never more
+    // than one sync per acknowledged commit. The deterministic sharing law
+    // lives in `sync_barrier::tests::waiters_queued_behind_a_running_sync_share_one_sync`.
+    let overlap_forced =
+        std::env::var("LD_PRELOAD").is_ok_and(|preload| preload.contains("slow-checkpoint-sync"));
+    if overlap_forced {
+        assert!(
+            syncs < 60,
+            "concurrent commits shared WAL syncs ({syncs} for 60)"
+        );
+    } else {
+        assert!(
+            syncs <= 60,
+            "at most one WAL sync per commit ({syncs} for 60)"
+        );
+    }
     let reader = pools.reader(&url).await.unwrap();
     let per_revision: Vec<(i64, i64)> =
         sqlx::query_as("SELECT revision, count(*) FROM _gonvex_sync_changes GROUP BY revision")
@@ -215,10 +227,10 @@ async fn checkpoints_run_off_the_writer_and_the_wal_stays_bounded() {
         "the background thread checkpointed"
     );
     // 600 commits of ~5 pages each would reach ~3,000 frames without
-    // checkpoints. The cap (200 frames) is approximate: an inline checkpoint
-    // that meets a running background one retries on the next commit, and
-    // the WAL restarts only when the writer's next transaction starts on a
-    // fully copied WAL, so allow a few multiples of it.
+    // checkpoints. The cap (200 frames) is approximate: a commit may cross
+    // it, and the WAL restarts only when the writer's next transaction starts
+    // on a fully copied WAL. The allocated file retains its high-water mark,
+    // so allow a few multiples of the cap.
     let wal = std::fs::metadata(dir.0.join("tenant.db-wal"))
         .unwrap()
         .len();

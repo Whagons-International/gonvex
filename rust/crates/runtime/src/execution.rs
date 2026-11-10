@@ -1973,6 +1973,7 @@ mod tests {
         nested.observe(Some(9));
         nested.observe(None);
         nested.observe(Some(23));
+        assert_eq!(nested.maximum(), Some(23));
         assert_eq!(tracker.maximum(), Some(23));
     }
 
