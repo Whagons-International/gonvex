@@ -355,3 +355,11 @@ with `pragma_table_info`: a column whose declared type contains `JSON` takes
 `value -> '$.col'` (JSON text, JSON null as SQL NULL); others take
 `value ->> '$.col'`. `packages/local-runtime/test/sqlite-reference.ts` runs
 these statements on real SQLite against the portable engine.
+
+Pool snapshot `idle` statistics are approximate. SQLx 0.8.6 publishes a returned
+connection and its permit before incrementing its idle counter; a concurrent
+checkout on another runtime can briefly expose a wrapped counter. Snapshots
+exclude per-pool idle samples outside `0..=size` and report their number in
+`idleSamplesUnavailable`. When nonzero, `idle` is a lower bound and `inUse` an
+upper bound. Admission counters and permits are sampled independently and are
+not changed by this diagnostic validation.
