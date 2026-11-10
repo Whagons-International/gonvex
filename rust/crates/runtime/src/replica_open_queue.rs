@@ -8,7 +8,7 @@ use futures_util::{
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Which of a socket's preparations may hold a read clock (burst control,
 /// docs/performance/burst-control.md).
@@ -119,20 +119,61 @@ pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
 type Completion<T> = (String, u64, bool, T);
 /// Preparations run on the offload pool (`crate::offload`), not on the
 /// socket's runtime; dropping one cancels it.
-type Preparation<T> = crate::offload::Offloaded<(bool, Option<Completion<T>>, Reading)>;
-struct Entry {
+type Preparation<T> = crate::offload::Offloaded<(bool, Arc<CompletionSlot<T>>)>;
+// The socket's cancellation owner must be able to release an already finished
+// value without polling its JoinHandle (for example while processing a close).
+// The executor completion keeps only this small slot, not an inaccessible value.
+struct CompletionSlot<T>(Mutex<CompletionState<T>>);
+struct CompletionState<T> {
+    cancelled: bool,
+    value: Option<(Completion<T>, Reading)>,
+}
+impl<T> CompletionSlot<T> {
+    fn new() -> Self {
+        Self(Mutex::new(CompletionState {
+            cancelled: false,
+            value: None,
+        }))
+    }
+    fn finish(&self, result: Option<Completion<T>>, reading: Reading) {
+        let value = result.map(|result| (result, reading));
+        let mut state = self.0.lock().unwrap();
+        if !state.cancelled {
+            state.value = value;
+            return;
+        }
+        // Drop the rejected payload outside the lock. Cancellation and publish
+        // are serialized, so a racing completion cannot recreate a closed value.
+        drop(state);
+        drop(value);
+    }
+    fn cancel(&self) {
+        let value = {
+            let mut state = self.0.lock().unwrap();
+            state.cancelled = true;
+            state.value.take()
+        };
+        drop(value);
+    }
+    fn take(&self) -> Option<(Completion<T>, Reading)> {
+        self.0.lock().unwrap().value.take()
+    }
+}
+struct Entry<T> {
     ticket: u64,
     bytes: usize,
     abort: AbortHandle,
+    slot: Arc<CompletionSlot<T>>,
 }
 struct Waiting<T> {
     bulk: bool,
+    slot: Arc<CompletionSlot<T>>,
     future: BoxFuture<'static, Option<Completion<T>>>,
 }
 pub(crate) struct ReplicaOpenQueue<T> {
     active: FuturesUnordered<Preparation<T>>,
     waiting: VecDeque<(String, Waiting<T>)>,
-    entries: BTreeMap<String, Entry>,
+    entries: BTreeMap<String, Entry<T>>,
     bytes: usize,
     ticket: u64,
     bulk_active: usize,
@@ -166,6 +207,9 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
         Arc::clone(&self.progress)
     }
     pub fn clear(&mut self) {
+        for entry in self.entries.values() {
+            entry.slot.cancel();
+        }
         self.active.clear();
         self.waiting.clear();
         self.entries.clear();
@@ -176,6 +220,7 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
         if let Some(entry) = self.entries.remove(id) {
             self.bytes -= entry.bytes;
             entry.abort.abort();
+            entry.slot.cancel();
         }
         self.waiting.retain(|(key, _)| key != id);
     }
@@ -201,12 +246,14 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
         let ticket = self.ticket;
         let (abort, registration) = AbortHandle::new_pair();
         self.bytes += bytes;
+        let slot = Arc::new(CompletionSlot::new());
         self.entries.insert(
             id.clone(),
             Entry {
                 ticket,
                 bytes,
                 abort,
+                slot: Arc::clone(&slot),
             },
         );
         let key = id.clone();
@@ -216,7 +263,7 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
         )
         .map(Result::ok)
         .boxed();
-        self.waiting.push_back((id, Waiting { bulk, future }));
+        self.waiting.push_back((id, Waiting { bulk, future, slot }));
         Ok(())
     }
     fn start(&mut self) {
@@ -254,7 +301,8 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
                         // so it stays reading until the socket installs it.
                         let reading = Reading::new(Arc::clone(&state));
                         let result = OPEN.scope(state, job.future).await;
-                        (bulk, result, reading)
+                        job.slot.finish(result, reading);
+                        (bulk, job.slot)
                     },
                 )));
         }
@@ -265,11 +313,11 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
             // `_reading` drops when this returns: the caller installs the
             // value before its next await, so no feed event is applied
             // between this preparation's clock and its installation.
-            let (bulk, result, _reading) = self.active.next().await?;
+            let (bulk, slot) = self.active.next().await?;
             if bulk {
                 self.bulk_active -= 1;
             }
-            if let Some((id, ticket, _, value)) = result {
+            if let Some(((id, ticket, _, value), _reading)) = slot.take() {
                 if self
                     .entries
                     .get(&id)
@@ -286,6 +334,70 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn close_releases_completed_payload_and_read_fence_without_polling() {
+        struct Payload(Option<tokio::sync::oneshot::Sender<()>>, Vec<u8>);
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                assert_eq!(self.1.len(), 1 << 20);
+                if let Some(s) = self.0.take() {
+                    let _ = s.send(());
+                }
+            }
+        }
+        for replace in [false, true] {
+            let mut queue = ReplicaOpenQueue::default();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let (dropped, drop_ack) = tokio::sync::oneshot::channel();
+            queue
+                .push(
+                    "id".into(),
+                    1024,
+                    false,
+                    async move {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Payload(Some(dropped), vec![7; 1 << 20])
+                    }
+                    .boxed(),
+                )
+                .unwrap();
+            {
+                let next = queue.next();
+                tokio::pin!(next);
+                tokio::select! {_=&mut next=>panic!("gate closed"),r=started=>r.unwrap()}
+            }
+            release.send(()).unwrap();
+            // Wait until the offload job published into its connection-owned slot.
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while queue.entries["id"].slot.0.lock().unwrap().value.is_none() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(queue.reading());
+            if replace {
+                queue
+                    .push(
+                        "id".into(),
+                        1024,
+                        false,
+                        std::future::pending::<Payload>().boxed(),
+                    )
+                    .unwrap();
+            } else {
+                queue.remove("id");
+            }
+            tokio::time::timeout(std::time::Duration::from_millis(100), drop_ack)
+                .await
+                .expect("completed payload survived close/replacement without polling")
+                .unwrap();
+            assert!(!queue.reading(), "closed completion still defers feed");
+            queue.clear();
+        }
+    }
     #[tokio::test]
     async fn cancellation_drops_started_work_without_polling_completion() {
         struct Exit(Option<tokio::sync::oneshot::Sender<()>>);

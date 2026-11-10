@@ -44,13 +44,16 @@ pub struct Clock<'a> {
     pub retained: u64,
 }
 
-/// The SQL-resolved part of a version 2 resolution.
+/// The SQL-resolved part of a version 2 resolution. Payload Arcs are leases
+/// from this same validated core; cache keys and source/clock checks are unchanged.
+/// Subscriber-held leases may outlive eviction, and release when their last
+/// owner drops. Cache bytes still account each cached core once, not every lease.
 #[derive(Debug)]
 pub(crate) struct Core {
-    direct: BTreeMap<String, String>,
+    direct: Arc<BTreeMap<String, String>>,
     role: String,
-    permissions: Value,
-    sets: BTreeMap<String, BTreeSet<String>>,
+    permissions: Arc<Value>,
+    sets: Arc<BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// A shared resolution and the requesting plan's fingerprint of it.
@@ -622,6 +625,116 @@ pub(crate) fn input_tables(plan: &VisibilityPlan, role: &str) -> Vec<String> {
         }
     }
     tables.into_iter().collect()
+}
+
+#[cfg(test)]
+mod immutable_lease_tests {
+    use super::*;
+    fn resolution() -> ResolvedVisibility {
+        ResolvedVisibility {
+            ephemeral_member: false,
+            revision: 7,
+            direct: BTreeMap::from([
+                ("account.id".into(), "account-a".into()),
+                ("member.id".into(), "member-a".into()),
+                ("tenant.id".into(), "tenant-a".into()),
+            ])
+            .into(),
+            role: "member".into(),
+            permissions:
+                serde_json::json!({"canRead":true,"nested":{"values":["private-a","private-b"]}})
+                    .into(),
+            sets: BTreeMap::from([("teams".into(), BTreeSet::from(["team-a".into()]))]).into(),
+            fingerprint: "original-plan-fingerprint".into(),
+            inherited: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+        }
+    }
+    #[test]
+    fn scoped_core_leases_copy_on_write_without_mutating_cache_or_sibling() {
+        let original = resolution();
+        let shared = Shared {
+            core: Arc::new(Core::of(&original)),
+            fingerprint: original.fingerprint.as_str().into(),
+        };
+        let mut edited = shared.resolved(7);
+        let sibling = shared.resolved(8);
+        assert!(Arc::ptr_eq(&edited.permissions, &sibling.permissions));
+        assert!(Arc::ptr_eq(&edited.direct, &sibling.direct));
+        assert!(Arc::ptr_eq(&edited.sets, &sibling.sets));
+        Arc::make_mut(&mut edited.permissions)["nested"]["values"][0] = "edited-only".into();
+        Arc::make_mut(&mut edited.direct).insert("member.id".into(), "override-only".into());
+        Arc::make_mut(&mut edited.sets)
+            .get_mut("teams")
+            .unwrap()
+            .clear();
+        edited.revision = 9;
+        edited.fingerprint = "new-fingerprint".into();
+        assert_eq!(sibling.permissions["nested"]["values"][0], "private-a");
+        assert_eq!(sibling.direct["member.id"], "member-a");
+        assert!(sibling.sets["teams"].contains("team-a"));
+        assert_eq!(sibling.revision, 8);
+        assert_eq!(sibling.fingerprint, "original-plan-fingerprint");
+        let later = shared.resolved(10);
+        assert_eq!(*later.permissions, *original.permissions);
+        assert_eq!(*later.sets, *original.sets);
+        assert_eq!(*later.direct, *original.direct);
+        assert_ne!(edited.fingerprint, later.fingerprint);
+    }
+    #[test]
+    fn evicted_core_payload_lives_only_until_last_immutable_lease_drops() {
+        let original = resolution();
+        let shared = Shared {
+            core: Arc::new(Core::of(&original)),
+            fingerprint: original.fingerprint.as_str().into(),
+        };
+        let a = shared.resolved(7);
+        let b = shared.resolved(7);
+        let permissions = Arc::downgrade(&a.permissions);
+        let direct = Arc::downgrade(&a.direct);
+        let sets = Arc::downgrade(&a.sets);
+        let cache = PrincipalCache::with_config(Config {
+            enabled: true,
+            max_entries: 1,
+            ttl: Duration::ZERO,
+        });
+        let bytes = shared.core.heap_bytes();
+        let key = Key {
+            database: "synthetic-db".into(),
+            tenant: "tenant-a".into(),
+            account: "account-a".into(),
+            sets: [0; 32],
+        };
+        cache.bytes.store(bytes, Relaxed);
+        cache.entries.lock().unwrap().insert(
+            key,
+            Entry {
+                epoch: "epoch-a".into(),
+                low: 7,
+                revision: 7,
+                core: shared.core.clone(),
+                active: Arc::default(),
+                fingerprints: vec![],
+                tables: Arc::from([]),
+                bytes,
+                used: Instant::now(),
+            },
+        );
+        drop(original);
+        drop(shared);
+        cache.sweep(&mut cache.entries.lock().unwrap());
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.bytes, 0);
+        assert_eq!(stats.evictions, 1);
+        assert!(permissions.upgrade().is_some());
+        drop(a);
+        assert!(direct.upgrade().is_some());
+        drop(b);
+        assert!(permissions.upgrade().is_none());
+        assert!(direct.upgrade().is_none());
+        assert!(sets.upgrade().is_none());
+    }
 }
 
 #[cfg(test)]
