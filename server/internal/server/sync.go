@@ -343,15 +343,21 @@ func (c *wsConn) openSyncWithClock(
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 		return
 	}
-	rows, truncated, err := syncSnapshotRows(result, definition)
+	var analysis *syncSnapshotAnalysis
+	if c.server.syncResultIsShared(c.project, message.Path) {
+		analysis, err = analyzeSyncSnapshot(result, definition)
+	} else {
+		analysis, err = analyzeSyncSnapshotUncached(result, definition)
+	}
 	if err != nil {
 		protocolErr = err
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 		return
 	}
+	rows, truncated := analysis.rows, analysis.truncated
 	resultCount = len(rows)
-	subscription.visibleKeys = syncRowsKeySet(rows, definition.Key)
-	subscription.visibleHashes = syncRowsHashes(rows, definition.Key)
+	subscription.visibleKeys = cloneSyncKeys(analysis.byKey)
+	subscription.visibleHashes = cloneSyncHashes(analysis.hashes)
 	subscription.truncated = truncated
 	subscription.verified = true
 	if err := c.attachSync(ctx, subscription); err != nil {
@@ -542,19 +548,13 @@ func syncRowKey(row json.RawMessage, key string) string {
 }
 
 func currentSyncClock(ctx context.Context, databaseURL string) (syncClock, error) {
-	db, err := dbpool.Open(databaseURL)
+	db, err := syncReadDB(databaseURL)
 	if err != nil {
 		return syncClock{}, err
 	}
-	defer db.Close()
-	var clock syncClock
-	if err := db.QueryRowContext(
-		ctx,
-		`SELECT epoch, revision, retained_revision FROM _gonvex_sync_clock WHERE singleton = true`,
-	).Scan(&clock.DatabaseEpoch, &clock.Revision, &clock.RetainedRevision); err != nil {
-		return syncClock{}, fmt.Errorf("sync storage is not installed: %w", err)
-	}
-	return clock, nil
+	return batchedSyncClock(ctx, databaseURL, func(readCtx context.Context) (syncClock, error) {
+		return readSyncClockFromDB(readCtx, db)
+	})
 }
 
 // syncCursorForClock derives the cursor epoch from the database epoch, the
@@ -761,23 +761,20 @@ func (s *Server) deliverAuthoritativeSync(
 	if err != nil {
 		return false, err
 	}
-	rows, truncated, err := syncSnapshotRows(result, subscription.definition)
+	var analysis *syncSnapshotAnalysis
+	if s.syncResultIsShared(subscription.project, subscription.path) {
+		analysis, err = analyzeSyncSnapshot(result, subscription.definition)
+	} else {
+		analysis, err = analyzeSyncSnapshotUncached(result, subscription.definition)
+	}
 	if err != nil {
 		return false, err
 	}
-	subscription.truncated = truncated
-	currentRows := map[string]json.RawMessage{}
-	currentKeys := map[string]bool{}
-	for _, row := range rows {
-		key := syncRowKey(row, subscription.definition.Key)
-		if key == "" {
-			continue
-		}
-		currentRows[key] = row
-		currentKeys[key] = true
-	}
-	currentHashes := syncRowsHashes(rows, subscription.definition.Key)
-	currentDigest := syncHashesDigest(currentHashes)
+	subscription.truncated = analysis.truncated
+	currentRows := analysis.byKey
+	currentKeys := cloneSyncKeys(analysis.byKey)
+	currentHashes := cloneSyncHashes(analysis.hashes)
+	currentDigest := analysis.digest
 	if !subscription.verified && subscription.clientDigest != "" && !subscription.fullIntegrity {
 		if subscription.clientDigest != currentDigest {
 			s.pauseSyncForIntegrityWhileLocked(subscription)
@@ -978,11 +975,10 @@ func groupSyncChanges(changes []syncLogChange) []syncChangeBatch {
 }
 
 func readSyncChanges(ctx context.Context, databaseURL string, after, through uint64, tables ...string) ([]syncLogChange, error) {
-	db, err := dbpool.Open(databaseURL)
+	db, err := syncReadDB(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return nil, err
