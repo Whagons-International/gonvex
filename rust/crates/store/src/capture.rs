@@ -66,7 +66,7 @@ pub fn supported() -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Cell {
+pub(crate) enum Cell {
     Null,
     Integer(i64),
     Real(f64),
@@ -103,6 +103,7 @@ struct Context {
     /// Digest of the definitions `tables` was built from.
     digest: Mutex<[u8; 32]>,
     events: Mutex<Vec<Event>>,
+    records: RwLock<HashMap<String, Arc<crate::record_views::RecordDescriptor>>>,
 }
 
 /// Contexts of open writer connections, keyed by `sqlite3*`.
@@ -112,7 +113,7 @@ fn contexts() -> &'static Mutex<HashMap<usize, std::sync::Weak<Context>>> {
     CONTEXTS.get_or_init(Default::default)
 }
 
-unsafe fn value_cell(value: *mut ffi::sqlite3_value) -> Cell {
+pub(crate) unsafe fn value_cell(value: *mut ffi::sqlite3_value) -> Cell {
     if value.is_null() {
         return Cell::Null;
     }
@@ -231,7 +232,7 @@ unsafe extern "C" fn transaction_rollback(context: *mut c_void) {
         .clear();
 }
 
-fn cell_json(cell: &Cell, kind: JsonKind) -> Value {
+pub(crate) fn cell_json(cell: &Cell, kind: JsonKind) -> Value {
     match (cell, kind) {
         (Cell::Null, _) => Value::Null,
         (Cell::Integer(value), JsonKind::Boolean) => Value::Bool(*value != 0),
@@ -333,6 +334,41 @@ unsafe extern "C" fn capture_function(
     );
 }
 
+unsafe extern "C" fn record_value_function(
+    context: *mut ffi::sqlite3_context,
+    argc: c_int,
+    argv: *mut *mut ffi::sqlite3_value,
+) {
+    let fail = |message: &str| {
+        ffi::sqlite3_result_error(context, message.as_ptr().cast(), message.len() as c_int)
+    };
+    if argc != 2 {
+        return fail("gonvex_record_value requires a logical record and public key");
+    }
+    let args = std::slice::from_raw_parts(argv, 2);
+    let (Cell::Text(name), Cell::Text(key)) = (value_cell(args[0]), value_cell(args[1])) else {
+        return fail("record snapshots require public text identities");
+    };
+    let state = &*(ffi::sqlite3_user_data(context) as *const Arc<Context>);
+    let record = state.records.read().unwrap().get(&name).cloned();
+    let Some(record) = record else {
+        return fail("logical record view is not registered on this connection");
+    };
+    match crate::record_views::image(ffi::sqlite3_context_db_handle(context), &record, &key) {
+        Ok(Some(value)) => {
+            let text = value.to_string();
+            ffi::sqlite3_result_text(
+                context,
+                text.as_ptr().cast(),
+                text.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            );
+        }
+        Ok(None) => ffi::sqlite3_result_null(context),
+        Err(error) => fail(&error),
+    }
+}
+
 unsafe extern "C" fn destroy_context(data: *mut c_void) {
     drop(Box::from_raw(data as *mut Arc<Context>));
 }
@@ -347,6 +383,7 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
     }
     let digest = catalog_digest(connection).await?;
     let shapes = load_shapes(connection, digest).await?;
+    let records = record_descriptors(connection).await?;
     let mut handle = connection.lock_handle().await?;
     let db = handle.as_raw_handle().as_ptr();
     let key = db as usize;
@@ -375,9 +412,27 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
                     Some(destroy_context),
                 );
                 if rc != ffi::SQLITE_OK {
-                    drop(Box::from_raw(data));
                     return Err(DatabaseError::Decode(format!(
                         "register {CAPTURE_FUNCTION}: code {rc}"
+                    )));
+                }
+                let record_name =
+                    std::ffi::CString::new(crate::record_views::VALUE_FUNCTION).unwrap();
+                let record_data = Box::into_raw(Box::new(context.clone()));
+                let rc = ffi::sqlite3_create_function_v2(
+                    db,
+                    record_name.as_ptr(),
+                    2,
+                    ffi::SQLITE_UTF8,
+                    record_data.cast(),
+                    Some(record_value_function),
+                    None,
+                    None,
+                    Some(destroy_context),
+                );
+                if rc != ffi::SQLITE_OK {
+                    return Err(DatabaseError::Decode(format!(
+                        "register record snapshots: code {rc}"
                     )));
                 }
                 sqlite3_preupdate_hook(db, Some(preupdate), raw);
@@ -392,6 +447,7 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
     };
     *context.tables.write().unwrap() = shapes;
     *context.digest.lock().unwrap() = digest;
+    *context.records.write().unwrap() = records;
     Ok(())
 }
 
@@ -409,6 +465,11 @@ pub async fn refresh(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
         .get(&key)
         .and_then(std::sync::Weak::upgrade);
     if let Some(context) = context {
+        // Logical record views are rows of `_gonvex_record_views`, not
+        // schema: the catalog digest does not cover them, so reload them on
+        // every refresh (two small reads).
+        let records = record_descriptors(connection).await?;
+        *context.records.write().unwrap() = records;
         let digest = catalog_digest(connection).await?;
         if digest == *context.digest.lock().unwrap() {
             return Ok(());
@@ -418,6 +479,18 @@ pub async fn refresh(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
         *context.digest.lock().unwrap() = digest;
     }
     Ok(())
+}
+
+/// Logical record views registered on this database, by record name (for
+/// `gonvex_record_value`).
+async fn record_descriptors(
+    connection: &mut SqliteConnection,
+) -> Result<HashMap<String, Arc<crate::record_views::RecordDescriptor>>, DatabaseError> {
+    Ok(crate::record_views::descriptors(connection)
+        .await?
+        .into_values()
+        .map(|record| (record.name.clone(), Arc::new(record)))
+        .collect())
 }
 
 /// Digest of the `sqlite_schema` rows the capture catalog is a function of:

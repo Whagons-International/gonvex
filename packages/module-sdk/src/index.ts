@@ -215,6 +215,8 @@ export type ReadDB = {
 };
 
 export type WriteDB = ReadDB & {
+  /** Host adapter metadata for a logical SQL record. Public values keep their declared types across normalized storage. */
+  readonly recordColumns?: (table: string) => Promise<Record<string, {type:string}> | undefined>;
   /** Adapter hook for short deterministic non-database work, such as ID hashing. Never wrap database reads in this hook. */
   readonly keepAliveFor?: <T>(promise: Promise<T>) => Promise<T>;
   readonly lock?: (key: string) => Promise<void>;

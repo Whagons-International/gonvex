@@ -98,7 +98,7 @@ impl ProjectionCatalog {
                         AND t.sql LIKE '%' || $2 || '(%') = 3"#,
         )
         .bind(serde_json::Value::Array(candidates).to_string())
-        .bind(gonvex_store::capture::CAPTURE_FUNCTION)
+        .bind(gonvex_store::CAPTURE_FUNCTION)
         .fetch_all(&mut **transaction.transaction())
         .await?;
         let tracked = rows.into_iter().collect::<BTreeSet<_>>();

@@ -16,7 +16,9 @@
 //! read changed in between: one indexed probe of `_gonvex_sync_changes` in
 //! the open's own read transaction (the log is written in the committing
 //! transaction, and every row after `retained_revision` is kept). Tables
-//! without change capture are never cached. Parent ACL indexes and inherited
+//! without change capture are never cached; nor are logical record storage
+//! and owned tables, whose changes are logged under their record's name (the
+//! record view itself is cacheable). Parent ACL indexes and inherited
 //! parents are attached per open as before; only SQL results are shared.
 //!
 //! Env: `GONVEX_PRINCIPAL_CACHE=0` disables; `GONVEX_PRINCIPAL_CACHE_ENTRIES`
@@ -495,7 +497,8 @@ impl PrincipalCache {
         Ok(row.get::<i64, _>(0) != 0)
     }
 
-    /// Tables of `database` with change capture (all three triggers), at
+    /// Relations of `database` whose changes are logged under their own name
+    /// ([`captured_tables`]: captured tables and logical record views), at
     /// the transaction's schema version.
     async fn captured(
         &self,
@@ -510,31 +513,77 @@ impl PrincipalCache {
                 return Ok(tables.clone());
             }
         }
-        let names: Vec<String> = sqlx::query_scalar(
-            r#"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '\_gonvex\_sync\_%' ESCAPE '\'"#,
+        let triggers: Vec<(String, String)> = sqlx::query_as(
+            r#"SELECT name, coalesce(sql, '') FROM sqlite_master WHERE type = 'trigger' AND name LIKE '\_gonvex\_sync\_%' ESCAPE '\'"#,
         )
         .fetch_all(&mut **transaction.transaction())
         .await?;
-        let names = names.into_iter().collect::<BTreeSet<_>>();
-        let tables = names
-            .iter()
-            .filter_map(|name| {
-                name.strip_prefix("_gonvex_sync_")
-                    .and_then(|rest| rest.strip_suffix("_insert"))
-            })
-            .filter(|table| {
-                let [insert, update, delete] = gonvex_store::feed::capture_trigger_names(table);
-                names.contains(&insert) && names.contains(&update) && names.contains(&delete)
-            })
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
-        let tables = Arc::new(tables);
+        let has_records: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_gonvex_record_views')",
+        )
+        .fetch_one(&mut **transaction.transaction())
+        .await?;
+        let records: Vec<(String, String)> = if has_records {
+            sqlx::query_as("SELECT name, storage_table FROM _gonvex_record_views")
+                .fetch_all(&mut **transaction.transaction())
+                .await?
+        } else {
+            Vec::new()
+        };
+        let tables = Arc::new(captured_tables(&triggers, &records));
         self.captured
             .lock()
             .unwrap()
             .insert(database.into(), (version, tables.clone()));
         Ok(tables)
     }
+}
+
+/// The relations whose changes `_gonvex_sync_changes` logs under their own
+/// name, from the `_gonvex_sync_*` triggers (`(name, sql)`) and the logical
+/// records (`(name, storage_table)`).
+///
+/// An ordinary table counts when all three of its triggers are
+/// `gonvex_capture` triggers (`gonvex_store::feed::capture_triggers_sql`, the
+/// same test as `live_query_projection`). Logical record storage and owned
+/// tables carry triggers with the same names that stage the owning record in
+/// `_gonvex_record_pending` instead; their changes are logged under the
+/// record's name, never their own, so they never count. The record view
+/// counts instead, once its storage has all three record-staging triggers.
+fn captured_tables(
+    triggers: &[(String, String)],
+    records: &[(String, String)],
+) -> BTreeSet<String> {
+    let capture_call = format!("{}(", gonvex_store::CAPTURE_FUNCTION);
+    let sql = triggers
+        .iter()
+        .map(|(name, sql)| (name.as_str(), sql.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let triplet = |table: &str, body: &dyn Fn(&str) -> bool| {
+        gonvex_store::feed::capture_trigger_names(table)
+            .iter()
+            .all(|name| sql.get(name.as_str()).is_some_and(|sql| body(sql)))
+    };
+    let mut tables = sql
+        .keys()
+        .filter_map(|name| {
+            name.strip_prefix("_gonvex_sync_")
+                .and_then(|rest| rest.strip_suffix("_insert"))
+        })
+        .filter(|table| triplet(table, &|sql| sql.contains(&capture_call)))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    tables.extend(
+        records
+            .iter()
+            .filter(|(_, storage)| {
+                triplet(storage, &|sql| {
+                    sql.contains("_gonvex_record_pending") && !sql.contains(&capture_call)
+                })
+            })
+            .map(|(name, _)| name.clone()),
+    );
+    tables
 }
 
 fn plan_identity(plan: &VisibilityPlan) -> usize {
@@ -685,5 +734,154 @@ mod immutable_lease_tests {
         assert!(permissions.upgrade().is_none());
         assert!(direct.upgrade().is_none());
         assert!(sets.upgrade().is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gonvex_store::{
+        ControlPlane, MigrationScope, PoolLimits, PoolRegistry, SqlMigration, TenantRoute,
+    };
+
+    /// Contract 3 logical records: the storage and owned tables carry
+    /// `_gonvex_sync_<table>_*` triggers, but every change is logged under
+    /// the record's name. A resolution that read an owned table directly
+    /// must never be cached (its probe would never fire); one that read the
+    /// record view must be, and a write to an owned table invalidates it.
+    #[tokio::test]
+    async fn record_storage_and_owned_tables_are_captured_only_through_their_record() {
+        let directory = tempfile::tempdir().unwrap();
+        // One file holds the Control Plane and the tenant tables.
+        let url = gonvex_store::database_url(&directory.path().join("records.db"));
+        let pools = PoolRegistry::new(PoolLimits::default());
+        let control = ControlPlane::connect(&url, pools.clone(), BTreeMap::new())
+            .await
+            .unwrap();
+        let route = TenantRoute {
+            project_id: "records".into(),
+            tenant_id: "tenant".into(),
+            database_url: url.clone(),
+        };
+        let schema = r#"
+          INSERT INTO _gonvex_id_domains VALUES(1,'tasks');
+          INSERT INTO _gonvex_identity_keys VALUES(10,1,'a'),(11,1,'b');
+          CREATE TABLE teams(id TEXT PRIMARY KEY,name TEXT);
+          CREATE TABLE schedules(_id INTEGER PRIMARY KEY,value TEXT NOT NULL);
+          CREATE TABLE taskStorage(_id INTEGER PRIMARY KEY REFERENCES _gonvex_identity_keys(_id),scheduleId INTEGER REFERENCES schedules(_id));
+          CREATE TABLE details(_id INTEGER PRIMARY KEY,taskId INTEGER NOT NULL UNIQUE REFERENCES taskStorage(_id) ON DELETE CASCADE,value TEXT);
+          CREATE VIEW tasks AS SELECT i.value _id,s.value schedule,d.value detail FROM taskStorage t JOIN _gonvex_identity_keys i ON i._id=t._id LEFT JOIN schedules s ON s._id=t.scheduleId LEFT JOIN details d ON d.taskId=t._id;
+          INSERT INTO _gonvex_record_views VALUES('tasks','taskStorage','_id','{"key":"_id","columns":{"_id":{"type":"text"},"schedule":{"type":"text"},"detail":{"type":"text"}}}');
+          INSERT INTO _gonvex_table_options(name,capture,owner_table,owner_column,owner_direction) VALUES('schedules','owned','taskStorage','scheduleId','inbound'),('details','owned','taskStorage','taskId','outbound');
+          INSERT INTO schedules VALUES(1,'daily'); INSERT INTO taskStorage VALUES(10,1),(11,1); INSERT INTO details VALUES(1,10,'first');
+        "#;
+        control
+            .provision_tenant_database(
+                route,
+                vec![SqlMigration::new(
+                    "0001_records".into(),
+                    MigrationScope::Tenant,
+                    false,
+                    schema.into(),
+                )],
+            )
+            .await
+            .unwrap();
+        let cache = PrincipalCache::with_config(Config {
+            enabled: true,
+            max_entries: 16,
+            ttl: Duration::from_secs(60),
+        });
+        let mut read = gonvex_store::begin_transaction(&pools, &url, true)
+            .await
+            .unwrap();
+        let captured = cache.captured(&mut read, &url).await.unwrap();
+        drop(read);
+        for table in ["members", "teams", "tasks"] {
+            assert!(
+                captured.contains(table),
+                "{table} is cacheable: {captured:?}"
+            );
+        }
+        for table in ["taskStorage", "schedules", "details"] {
+            assert!(
+                !captured.contains(table),
+                "{table} logs under its record's name: {captured:?}"
+            );
+        }
+
+        let mut write = gonvex_store::begin_transaction(&pools, &url, false)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE details SET value='second' WHERE taskId=10")
+            .execute(&mut **write.transaction())
+            .await
+            .unwrap();
+        let revision = write.commit_with_revision().await.unwrap().unwrap();
+        let mut read = gonvex_store::begin_transaction(&pools, &url, true)
+            .await
+            .unwrap();
+        assert!(
+            cache
+                .changed(&mut read, &["tasks".to_owned()], revision - 1, revision)
+                .await
+                .unwrap(),
+            "an owned-table write invalidates a resolution that read the record"
+        );
+        assert!(
+            !cache
+                .changed(&mut read, &["details".to_owned()], 0, revision)
+                .await
+                .unwrap(),
+            "nothing is logged under the owned table's own name"
+        );
+        drop(read);
+        pools.close().await;
+    }
+
+    #[test]
+    fn record_views_need_record_triggers_on_their_storage() {
+        let plain = |table: &str| {
+            gonvex_store::feed::capture_trigger_names(table).map(|name| {
+                let sql = format!(
+                    "CREATE TRIGGER {name} AFTER INSERT ON {table} BEGIN INSERT INTO _gonvex_sync_changes VALUES ({}('{table}', NEW.rowid, 0)); END",
+                    gonvex_store::CAPTURE_FUNCTION
+                );
+                (name, sql)
+            })
+        };
+        let staged = |table: &str, record: &str| {
+            gonvex_store::feed::capture_trigger_names(table).map(|name| {
+                let sql = format!(
+                    "CREATE TRIGGER {name} BEFORE INSERT ON {table} BEGIN INSERT INTO _gonvex_record_pending(table_name,row_id,old_value) SELECT '{record}',NEW._id,gonvex_record_value('{record}',NEW._id); END"
+                );
+                (name, sql)
+            })
+        };
+        let records = vec![("tasks".to_owned(), "taskStorage".to_owned())];
+        // Registered, but its storage still has ordinary capture (before the
+        // change-feed install rewrites it): the storage logs under its own
+        // name, the record view not at all.
+        let triggers = plain("taskStorage").into_iter().collect::<Vec<_>>();
+        assert_eq!(
+            captured_tables(&triggers, &records),
+            BTreeSet::from(["taskStorage".to_owned()])
+        );
+        // Installed: only the record view.
+        let triggers = staged("taskStorage", "tasks")
+            .into_iter()
+            .chain(staged("details", "tasks"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captured_tables(&triggers, &records),
+            BTreeSet::from(["tasks".to_owned()])
+        );
+        // A missing trigger leaves either kind uncaptured.
+        let mut triggers = staged("taskStorage", "tasks")
+            .into_iter()
+            .chain(plain("teams"))
+            .collect::<Vec<_>>();
+        triggers.retain(|(name, _)| !name.ends_with("_delete"));
+        assert!(captured_tables(&triggers, &records).is_empty());
     }
 }

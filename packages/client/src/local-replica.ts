@@ -9,6 +9,7 @@ import type { LocalExecution } from "@gonvex/local-runtime";
 import type { LocalPatch } from '@gonvex/local-runtime';
 import type { ReducerReadView } from '@gonvex/local-runtime/portable';
 import { memoryReadView, overlayReadView, type ReadCoverage } from '@gonvex/local-runtime/read-view';
+import { packColumnPage, validateColumnRequest, type ColumnPage, type ColumnProjection, type ColumnPageLimits } from './column-page.js';
 
 export type LocalReplicaSession = {
   lastOnlineAtMs?: number;
@@ -190,6 +191,7 @@ type PendingCommand = {
 };
 
 export type ReplicaFreshness = "current" | "verifying" | "offline";
+export type ReplicaColumnPage = ColumnPage & { replicaVersion: number; freshness: ReplicaFreshness };
 
 export type LiveQueryResult<T extends ReplicaRow = ReplicaRow> = {
   rows: T[];
@@ -239,6 +241,8 @@ export interface LocalReplicaView {
   windowRows<T extends ReplicaRow = ReplicaRow>(signature: string): T[];
   entity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined;
   entityBatch<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined>;
+  /** Bounded field projection of explicit IDs, including predictions. No hydration. */
+  entityColumns(entity: string, ids: readonly string[], projection: ColumnProjection, limits: ColumnPageLimits): ReplicaColumnPage;
   entityRows<T extends ReplicaRow = ReplicaRow>(entity: string): T[];
   entityCompleteness(entity: string): "complete" | "partial";
   liveQuery<T extends ReplicaRow = ReplicaRow>(signature: string): LiveQueryResult<T>;
@@ -1552,6 +1556,31 @@ export class LocalReplica implements LocalReplicaView {
       const row = rows.get(id);
       return row === undefined ? undefined : immutable(row) as T;
     });
+  }
+
+  /** One atomic replica version, without cloning unrequested text/JSON. This is
+   * a caller-owned view of the existing replica, not another entity store. */
+  entityColumns(entity: string, ids: readonly string[], projection: ColumnProjection, limits: ColumnPageLimits): ReplicaColumnPage {
+    const base = this.scopeLoaded ? this.entities.get(entity) : undefined;
+    if (!this.scopeLoaded || this.pendingCommands.size === 0) {
+      return { ...packColumnPage(ids, projection, id => base?.get(id), limits), replicaVersion: this.version(), freshness: this.freshness() };
+    }
+    validateColumnRequest(ids, projection, limits);
+    const columns = Object.keys(projection);
+    const select = (row: ReplicaRow): ReplicaRow => {
+      const result: ReplicaRow = Object.create(null) as ReplicaRow;
+      for (const column of columns) if (Object.hasOwn(row, column)) result[column] = row[column]!;
+      return result;
+    };
+    const rows = new Map<string, ReplicaRow | undefined>();
+    for (const id of ids) if (!rows.has(id)) { const row = base?.get(id); rows.set(id, row ? select(row) : undefined); }
+    for (const command of this.pendingCommands.values()) for (const patch of command.patches) {
+      if ((patch.entity ?? patch.collection) !== entity || !rows.has(patch.rowId)) continue;
+      if (patch.op === 'delete') rows.set(patch.rowId, undefined);
+      else if (patch.op === 'insert' || patch.op === 'upsert') rows.set(patch.rowId, select(patch.fields as ReplicaRow));
+      else if (patch.op === 'patch') rows.set(patch.rowId, { ...(rows.get(patch.rowId) ?? {}), ...select(patch.fields as ReplicaRow) });
+    }
+    return { ...packColumnPage(ids, projection, id => rows.get(id), limits), replicaVersion: this.version(), freshness: this.freshness() };
   }
 
   /** All cached rows for one normalized entity, including optimistic overlays. */

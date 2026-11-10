@@ -13,6 +13,18 @@ const quote = (name: string) => {
   return `"${name}"`;
 };
 const allocations = new WeakMap<WriteDB, Map<string, number>>();
+const recordSchemas = new WeakMap<WriteDB, Map<string, Promise<Record<string, {type:string}> | undefined>>>();
+async function recordColumns(db: WriteDB, table: string) {
+  if (db.select) return undefined;
+  let cache = recordSchemas.get(db);
+  if (!cache) recordSchemas.set(db, cache = new Map());
+  let pending = cache.get(table);
+  if (!pending) {
+    pending = db.recordColumns ? db.recordColumns(table) : Promise.resolve(undefined);
+    cache.set(table,pending);
+  }
+  return pending;
+}
 /** `statement` ends in `RETURNING 1`; one tiny row per affected row. */
 async function affectedRows(
   db: WriteDB,
@@ -29,8 +41,9 @@ async function affectedRows(
  * type comes from pragma_table_info, the same source of truth the runtime
  * uses to decode rows, so callers never pass column types.
  */
-const jsonColumn = (table: string, column: string, source: string): string => {
+const jsonColumn = (table: string, column: string, source: string, definition?: {type:string}): string => {
   const path = `'$.${column}'`;
+  if (definition) return definition.type.toUpperCase().includes('JSON') ? `nullif(${source} -> ${path}, 'null')` : `${source} ->> ${path}`;
   return `CASE WHEN (SELECT upper(type) FROM pragma_table_info('${table}') WHERE name = '${column}') LIKE '%JSON%' THEN nullif(${source} -> ${path}, 'null') ELSE ${source} ->> ${path} END`;
 };
 /**
@@ -77,7 +90,7 @@ export async function insertDataRows(
       return { row, generatedId };
     }),
   );
-  if (ctx.db.select) {
+  if (ctx.db.select || await recordColumns(ctx.db, table)) {
     const result: JsonObject[] = [];
     for (const { row, generatedId } of prepared)
       result.push(await ctx.db.insert<JsonObject>(table, row, { generatedId }));
@@ -138,6 +151,7 @@ export async function updateDataRows(
     }
     return;
   }
+  const definitions = await recordColumns(db, table);
   for (const [signature, values] of groups(updates, (update) =>
     Object.keys(update.fields),
   )) {
@@ -158,7 +172,7 @@ export async function updateDataRows(
         ? `($1 -> CAST(${target} AS TEXT))`
         : `(SELECT source.value FROM json_each($1) AS source WHERE source.key = ${target})`;
       const assignments = columns
-        .map((name) => `${quote(name)} = ${jsonColumn(table, name, source)}`)
+        .map((name) => `${quote(name)} = ${jsonColumn(table, name, source, definitions?.[name])}`)
         .join(", ");
       await db.query(
         `UPDATE ${quote(table)} SET ${assignments} WHERE ${target} IN (SELECT key FROM json_each($1))`,
@@ -233,11 +247,12 @@ export async function updateDataWhere(
     );
     return rows.length;
   }
+  const definitions = await recordColumns(db, read.table);
   const sql = compileDataRead({ ...read, key, columns: [key] });
   const parameter = `$${sql.parameters.length + 1}`;
   return affectedRows(
     db,
-    `UPDATE ${quote(read.table)} SET ${names.map((name) => `${quote(name)} = ${jsonColumn(read.table, name, parameter)}`).join(", ")} WHERE ${quote(key)} IN (${sql.statement}) RETURNING 1`,
+    `UPDATE ${quote(read.table)} SET ${names.map((name) => `${quote(name)} = ${jsonColumn(read.table, name, parameter, definitions?.[name])}`).join(", ")} WHERE ${quote(key)} IN (${sql.statement}) RETURNING 1`,
     [...sql.parameters, JSON.stringify(fields)],
   );
 }
