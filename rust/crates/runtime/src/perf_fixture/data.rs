@@ -220,7 +220,7 @@ fn sentence(rng: &mut Rng, target: usize) -> String {
         if !text.is_empty() {
             text.push(' ');
         }
-        text.push_str(rng.pick(WORDS));
+        text.push_str(rng.pick::<&str>(WORDS));
     }
     text
 }

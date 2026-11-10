@@ -385,6 +385,10 @@ pub struct PoolRegistrySnapshot {
     pub open_connections: u32,
     pub in_use: u32,
     pub idle: usize,
+    /// Pools whose non-atomic SQLx idle sample was outside 0..=size.
+    /// These pools contribute no idle connections and all sampled connections
+    /// to in_use. Pool metrics remain non-atomic observations.
+    pub idle_samples_unavailable: usize,
     pub max_open_connections: u32,
     pub listener_connections: u32,
     pub admission_limit: usize,
@@ -393,6 +397,31 @@ pub struct PoolRegistrySnapshot {
     pub admission_count: u64,
     pub admission_wait_us: u64,
     pub admission_wait_max_us: u64,
+}
+
+#[derive(Default)]
+struct ConnectionCounts {
+    open: u32,
+    idle: usize,
+    unavailable_idle_samples: usize,
+}
+
+fn connection_counts(samples: impl IntoIterator<Item = (u32, usize)>) -> ConnectionCounts {
+    let mut counts = ConnectionCounts::default();
+    for (open, idle) in samples {
+        counts.open += open;
+        // SQLx 0.8.6 publishes a returned connection/permit before increasing
+        // num_idle. A concurrent checkout can briefly expose usize::MAX.
+        // Size and idle are also separate samples. Neither an underflow value
+        // nor idle > size is a physical idle count: expose it as unavailable,
+        // rather than adding it or reporting the pool as entirely idle.
+        if idle <= open as usize {
+            counts.idle += idle;
+        } else {
+            counts.unavailable_idle_samples += 1;
+        }
+    }
+    counts
 }
 
 /// Per-database single-writer queue statistics, updated with relaxed atomics
@@ -944,20 +973,21 @@ impl PoolRegistry {
 
     pub async fn snapshot(&self) -> PoolRegistrySnapshot {
         let databases = self.open_databases();
-        let open_connections = databases
-            .iter()
-            .map(|database| database.writer.size() + database.reader.size())
-            .sum::<u32>();
-        let idle = databases
-            .iter()
-            .map(|database| database.writer.num_idle() + database.reader.num_idle())
-            .sum::<usize>();
+        let connections = connection_counts(databases.iter().flat_map(|database| {
+            [
+                (database.writer.size(), database.writer.num_idle()),
+                (database.reader.size(), database.reader.num_idle()),
+            ]
+        }));
+        let open_connections = connections.open;
+        let idle = connections.idle;
         PoolRegistrySnapshot {
             listener_connections: 0,
             pools: databases.len(),
             open_connections,
             in_use: open_connections.saturating_sub(u32::try_from(idle).unwrap_or(u32::MAX)),
             idle,
+            idle_samples_unavailable: connections.unavailable_idle_samples,
             max_open_connections: u32::try_from(databases.len())
                 .unwrap_or(u32::MAX)
                 .saturating_mul(self.limits.max_connections_per_database + 1),
@@ -994,5 +1024,93 @@ impl PoolRegistry {
                 wal.close().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod idle_snapshot_regression {
+    use super::*;
+
+    #[test]
+    fn invalid_sqlx_idle_sample_is_unavailable_not_a_connection_count() {
+        let counts = connection_counts([(1, usize::MAX), (2, 1)]);
+        assert_eq!(counts.open, 3);
+        assert_eq!(counts.idle, 1);
+        assert_eq!(counts.unavailable_idle_samples, 1);
+        let inconsistent = connection_counts([(1, 2), (0, 0)]);
+        assert_eq!(inconsistent.idle, 0);
+        assert_eq!(inconsistent.unavailable_idle_samples, 1);
+    }
+
+    #[test]
+    fn valid_idle_samples_and_recovery_keep_their_exact_counts() {
+        let counts = connection_counts([(1, 0), (2, 2)]);
+        assert_eq!(counts.open, 3);
+        assert_eq!(counts.idle, 2);
+        assert_eq!(counts.unavailable_idle_samples, 0);
+        let empty = connection_counts([]);
+        assert_eq!(
+            (empty.open, empty.idle, empty.unavailable_idle_samples),
+            (0, 0, 0)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_survives_sqlx_connection_handoffs() {
+        let directory =
+            std::env::temp_dir().join(format!("gonvex-idle-handoff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let url = format!("sqlite://{}", directory.join("handoff.db").display());
+        let registry = Arc::new(PoolRegistry::new(PoolLimits {
+            max_connections_per_database: 1,
+            ..PoolLimits::default()
+        }));
+        let database = registry.database(&url).await.unwrap();
+        let held_reader = database.reader.acquire().await.unwrap();
+        let other_url = format!("sqlite://{}", directory.join("idle.db").display());
+        let other = registry.database(&other_url).await.unwrap();
+        drop(other.writer.acquire().await.unwrap());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while other.writer.num_idle() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let pool = database.writer.clone();
+            let start = start.clone();
+            workers.push(std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                start.wait();
+                runtime.block_on(async move {
+                    for _ in 0..20_000 {
+                        drop(pool.acquire().await.unwrap());
+                        tokio::task::yield_now().await;
+                    }
+                });
+            }));
+        }
+        start.wait();
+        for _ in 0..200_000 {
+            let snapshot = registry.snapshot().await;
+            assert!(snapshot.idle <= snapshot.open_connections as usize);
+            tokio::task::yield_now().await;
+        }
+        tokio::task::spawn_blocking(move || {
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        drop(held_reader);
+        registry.close().await;
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

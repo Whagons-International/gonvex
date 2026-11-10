@@ -12,10 +12,10 @@ fn membership_never_confuses_null_columns_with_the_string_null_token() {
     let principal = ResolvedVisibility {
         ephemeral_member: false,
         revision: 1,
-        direct: BTreeMap::new(),
+        direct: BTreeMap::new().into(),
         role: "member".into(),
-        permissions: Value::Null,
-        sets: BTreeMap::from([("tokens".into(), BTreeSet::from(["null".into()]))]),
+        permissions: Value::Null.into(),
+        sets: BTreeMap::from([("tokens".into(), BTreeSet::from(["null".into()]))]).into(),
         fingerprint: String::new(),
         inherited: BTreeMap::new(),
         indexes: BTreeMap::new(),
