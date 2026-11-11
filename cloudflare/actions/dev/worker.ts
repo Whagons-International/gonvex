@@ -1,9 +1,11 @@
 // Local-only Worker for long Action runs (see wrangler.jsonc and README.md).
-// It reuses the test tenant object and Workflow, with workerd's real fetch, so
-// an Action's requests leave the isolate as they would on the platform.
+// It reuses the test tenant object (K11's scheduler with K12's WorkflowHandoff)
+// and the Workflow, with workerd's real fetch, so an Action's requests leave
+// the isolate as they would on the platform. A queued Action goes the way every
+// outbox Action goes: K11 claims it on the alarm and hands it to the Workflow.
 import { configureActions, type ActionEnv } from "../src/worker.js";
-import { instanceId } from "../src/tenant.js";
-import { FakeScheduler, FakeStorage, registry, testControl } from "../test/worker.js";
+import { handoffInstanceId } from "../src/handoff.js";
+import { FakeStorage, registry, testControl } from "../test/worker.js";
 
 export { ActionWorkflow } from "../src/worker.js";
 export { TestTenant } from "../test/worker.js";
@@ -11,7 +13,6 @@ export { TestTenant } from "../test/worker.js";
 configureActions<ActionEnv>({
   registry,
   control: () => testControl,
-  scheduler: () => new FakeScheduler(),
   storage: () => new FakeStorage(),
 });
 
@@ -24,14 +25,14 @@ export default {
     const tenant = env.TENANT.getByName(tenantId);
     try {
       if (request.method === "POST" && url.pathname === "/enqueue") {
-        const body = (await request.json()) as { path: string; args: unknown; lease?: { leaseMs: number; renewMs: number } };
-        await tenant.configure(tenantId, body.lease ?? {});
+        const body = (await request.json()) as { path: string; args: unknown };
+        await tenant.configure(tenantId, {});
         const id = await tenant.enqueue(body.path, body.args);
-        return json({ id, instance: instanceId({ id, n: 1 }) });
+        return json({ id, instance: handoffInstanceId({ id, claim: { source: "outbox", id, attempt: 1, leaseMs: 300_000 } }) });
       }
       if (request.method === "GET" && url.pathname === "/run") {
         const id = url.searchParams.get("id")!;
-        return json({ row: await tenant.inspect(id), runs: await tenant.runRows(), outbox: await tenant.outboxRows(), stats: await tenant.outboxStats() });
+        return json({ id, outbox: await tenant.outboxRows(), dead: await tenant.deadRows(), events: await tenant.schedulerEvents() });
       }
       if (request.method === "GET" && url.pathname === "/workflow") {
         const instance = await env.ACTION_WORKFLOW.get(url.searchParams.get("instance")!);

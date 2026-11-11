@@ -2,7 +2,9 @@
 // Runs one agent Action locally in a Workflow step for a long time (K12
 // done_when: "a 30-minute agent Action completes locally"), the way S4's
 // scenario 1 runs it: event-stream turns of 20 s (100 events every 200 ms)
-// with 10 s pauses, renewals every 30 s on a 5-minute lease.
+// with 10 s pauses. K11's scheduler claims the queued Action on the tenant alarm
+// and hands it to K12's Workflow (WorkflowHandoff), which renews K11's 5-minute
+// claim every 100 s.
 //
 //   node actions/dev/run-agent.mjs [seconds=1800] [out.json]     (from cloudflare/)
 //
@@ -56,7 +58,7 @@ try {
     await sleep(30_000);
     status = await (await fetch(`${base}/workflow?instance=${enqueued.instance}`)).json();
     const run = await (await fetch(`${base}/run?tenant=${tenant}&id=${enqueued.id}`)).json();
-    console.log(`${Math.round((Date.now() - started) / 1000)} s: workflow ${status.status}; row ${JSON.stringify(run.row && { state: run.row.state, status: run.row.status, attempts: run.row.attempts, locked_at: run.row.locked_at })}`);
+    console.log(`${Math.round((Date.now() - started) / 1000)} s: workflow ${status.status}; outbox ${JSON.stringify(run.outbox)}; events ${JSON.stringify(run.events)}`);
     if (['complete', 'errored', 'terminated'].includes(status.status)) {
       const result = { seconds, wallSeconds: (Date.now() - started) / 1000, enqueued, workflow: status, tenant: run, measuredAt: new Date().toISOString() };
       await writeFile(out, JSON.stringify(result, null, 1));

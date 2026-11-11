@@ -35,7 +35,7 @@ export async function long_fail() {
   throw new Error("long.fail always fails");
 }
 
-/** A Reducer that queues an Action in its transaction (K04's actionEnqueue; K07 calls afterCommit). */
+/** A Reducer that queues an Action in its transaction (K04's actionEnqueue; K07 wakes K11's scheduler after the commit). */
 export async function queue_enqueue(ctx, args) {
   if (args.row) await ctx.db.query("INSERT INTO board (id, title, position, bumps) VALUES ($1, $2, 0, 0)", [args.row, "queued"]);
   const id = await ctx.actions.enqueue(args.path, args.args ?? null);

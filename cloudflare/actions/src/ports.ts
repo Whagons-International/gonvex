@@ -29,31 +29,35 @@ export type TenantCallReport =
   | { ok: true; value: string; committedRevision?: number | undefined }
   | { ok: false; error: string; transient: boolean };
 
-/** Lease protocol on the tenant's outbox (`outbox.ts`), plus the calls Actions make. */
+/**
+ * What the Action side calls on the tenant object. K11 owns
+ * `_gonvex_action_outbox` (0037): outbox and scheduled Actions reach the
+ * runtime only through K11's scheduler and `WorkflowHandoff` (handoff.ts). The
+ * `*Call` methods are the run protocol of direct agent `action.call`s
+ * (calls.ts, `_gonvex_st_action_runs`), the only table K12 claims.
+ */
 export interface TenantActionPort {
   call(request: TenantCallRequest): Promise<TenantCallReport>;
-  claim(request: ClaimRequest): Promise<Claim>;
-  renew(request: RenewRequest): Promise<Renewal>;
-  fail(request: FailRequest): Promise<{ v: 1; state: "retry" | "dead" | "stale" }>;
-  complete(request: CompleteRequest): Promise<Completion>;
+  claimCall(request: ClaimRequest): Promise<Claim>;
+  renewCall(request: RenewRequest): Promise<Renewal>;
+  completeCall(request: CompleteRequest): Promise<Completion>;
 }
 
 export interface ClaimRequest { v: 1; id: string; owner: string }
 export type Claim =
-  | { v: 1; ok: true; id: string; origin: "outbox" | "call"; attempt: number; path: string; args: unknown; actorAccountId: string; provenance: unknown; session: ActionSession | null; leaseMs: number; renewMs: number }
-  | { v: 1; ok: false; reason: "missing" | "done" | "dead" | "leased" | "notDue"; retryAfterMs?: number };
+  | { v: 1; ok: true; id: string; attempt: number; path: string; args: unknown; provenance: unknown; session: ActionSession; leaseMs: number; renewMs: number }
+  | { v: 1; ok: false; reason: "missing" | "done" | "dead" | "leased"; retryAfterMs?: number };
 
 export interface RenewRequest { v: 1; id: string; attempt: number }
 export interface Renewal { v: 1; ok: boolean; persisted: boolean }
-
-export interface FailRequest { v: 1; id: string; attempt: number; error: string; terminal?: boolean }
 
 export interface CompleteRequest {
   v: 1;
   id: string;
   attempt: number;
-  /** The result JSON (direct calls deliver it; outbox Actions discard it as Rust does). */
+  /** The result JSON, delivered once through `onFinished`. */
   value?: string | undefined;
+  /** The call's error text (a direct call is answered once, never retried). */
   error?: string | undefined;
 }
 export interface Completion { v: 1; applied: boolean; duplicate?: boolean; rejected?: boolean; appliedAttempt?: number }

@@ -1,13 +1,14 @@
 // The Action Worker (CONTRACT.md "Action Worker", 0016 G0-8):
 //
-// - `ActionWorkflow` runs every handed-off Action (outbox Actions, scheduled
-//   Actions handed over by K11, direct agent calls) as a Workflow step: no
-//   wall-clock limit, the engine's own retries for crashes, and one more step
-//   that applies the result through the tenant's fenced `complete`.
+// - `ActionWorkflow` runs every handed-off Action as a Workflow step: no
+//   wall-clock limit, and the engine's own retries for crashes. Two payloads:
+//   a run K11's scheduler claimed (outbox and scheduled Actions; K11 owns
+//   `_gonvex_action_outbox`, 0037), reported back with `completeRun`; and a
+//   direct agent call (`ActionCalls`), applied with the fenced `completeCall`.
 // - `ActionWorker.call` serves a direct `action.call` (K05/K07): a standard
 //   or public Action runs inline, bounded by its 15 min or 60 s deadline; an
-//   agent Action becomes a run of origin `call` in the tenant object and a
-//   Workflow instance, and its result reaches the socket through the tenant's
+//   agent Action becomes a run in `_gonvex_st_action_runs` and a Workflow
+//   instance, and its result reaches the socket through the tenant's
 //   `onFinished`.
 //
 // The module bundle ships in the Worker version (G0-2): the build that makes
@@ -16,17 +17,17 @@
 import { WorkflowEntrypoint, WorkerEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { ModuleRegistry } from "../../kernel/host/src/index.js";
 import type { Fetcher } from "./fetch.js";
-import type { ActionJob } from "./outbox.js";
+import type { CallJob } from "./calls.js";
 import { runHandoff, type HandoffJob, type HandoffTenantPort } from "./handoff.js";
-import type { Completion, ControlPort, SandboxPort, SchedulerPort, StoragePort, TenantActionPort } from "./ports.js";
+import type { Completion, ControlPort, SandboxPort, ScheduleRequest, SchedulerPort, StoragePort, TenantActionPort } from "./ports.js";
 import type { Provenance } from "./provenance.js";
 import { tenantRpc } from "./rpc.js";
-import { runClaimed, type RunOutcome } from "./runner.js";
+import { runCall, type RunOutcome } from "./runner.js";
 import { ActionRuntime, profileOf, type ActionReport } from "./runtime.js";
 import type { ActionSession } from "./session.js";
 
 export interface ActionEnv {
-  /** Tenant objects, `getByName(tenantId)`; they implement `TenantActionPort` and `beginCall`. */
+  /** Tenant objects, `getByName(tenantId)`; they expose `TenantActions`' methods by RPC (tenant.ts). */
   TENANT: DurableObjectNamespace;
   /** Workflow step timeout for a run (default "24 hours"; agent Actions have no other deadline). */
   ACTION_STEP_TIMEOUT?: string;
@@ -38,12 +39,12 @@ export interface ActionEnv {
 export interface ActionWorkerConfig<Env extends ActionEnv = ActionEnv> {
   registry(env: Env): ModuleRegistry;
   control?(env: Env): ControlPort | undefined;
+  /** `ctx.scheduler` from an Action. Default: the tenant's `schedule` RPC (K11's `Scheduler.enqueue`). */
   scheduler?(env: Env, tenantId: string): SchedulerPort | undefined;
   storage?(env: Env, tenantId: string): StoragePort | undefined;
   sandbox?(env: Env, tenantId: string): SandboxPort | undefined;
   fetcher?(env: Env): Fetcher | undefined;
-  /** Test hook passed to the runner. */
-  stopRenewing?: (attempt: number, elapsedMs: number) => boolean;
+  /** Renewal interval override (tests). */
   renewMs?: number;
 }
 
@@ -53,7 +54,10 @@ export function configureActions<Env extends ActionEnv>(value: ActionWorkerConfi
   config = value as unknown as ActionWorkerConfig<never>;
 }
 
-type TenantStub = TenantActionPort & HandoffTenantPort & { beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }): Promise<string> };
+type TenantStub = TenantActionPort & HandoffTenantPort & {
+  beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }): Promise<string>;
+  schedule(request: ScheduleRequest): Promise<string>;
+};
 
 function tenantStub(env: ActionEnv, tenantId: string): TenantStub {
   return (env.TENANT as unknown as { getByName(name: string): TenantStub }).getByName(tenantId);
@@ -68,7 +72,7 @@ function runtimeFor(env: ActionEnv, tenantId: string): { runtime: ActionRuntime;
     registry: c.registry(env),
     tenant,
     control,
-    scheduler: c.scheduler?.(env, tenantId),
+    scheduler: c.scheduler ? c.scheduler(env, tenantId) : { enqueue: (request) => tenantRpc("schedule", () => tenant.schedule(request)) },
     storage: c.storage?.(env, tenantId),
     sandbox: c.sandbox?.(env, tenantId),
     fetcher: c.fetcher?.(env),
@@ -81,29 +85,32 @@ export const STEP_RESULT_INLINE_BYTES = 512 * 1024;
 
 type StepOutcome =
   | (Omit<Extract<RunOutcome, { kind: "done" }>, "stats" | "renewals"> & { renewals: number; persisted: number; gapsMs: { min: number; max: number } | null; hostCalls: number; fetches: number; completion?: Completion })
-  | { kind: "failed"; attempt: number; error: string; state: string; renewals: number }
   | { kind: "skipped"; reason: string }
   | { kind: "lost"; attempt: number; renewals: number };
 
-export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, ActionJob | HandoffJob> {
-  override async run(event: Readonly<WorkflowEvent<ActionJob | HandoffJob>>, step: WorkflowStep) {
-    if ("kind" in event.payload && event.payload.kind === "handoff") return this.handoff(event.payload, step);
-    const job = event.payload as ActionJob;
+export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, CallJob | HandoffJob> {
+  override async run(event: Readonly<WorkflowEvent<CallJob | HandoffJob>>, step: WorkflowStep) {
+    const payload = event.payload;
+    if (payload.kind === "handoff") return this.handoff(payload, step);
+    return this.call(payload, event.instanceId, step);
+  }
+
+  /** A direct agent call: claim the run, run it, apply its answer once with `completeCall`. */
+  private async call(job: CallJob, instance: string, step: WorkflowStep) {
     // The engine retries a step within the same instance, so the same owner takes its own lease over at once.
-    const owner = `workflow:${event.instanceId}`;
+    const owner = `workflow:${instance}`;
     const timeout = (this.env.ACTION_STEP_TIMEOUT ?? "24 hours") as "24 hours";
     const delay = (this.env.ACTION_STEP_RETRY_DELAY ?? "5 seconds") as "5 seconds";
     const outcome = (await step.do("run action", { retries: { limit: 10, delay, backoff: "exponential" }, timeout }, async (): Promise<StepOutcome> => {
-      const { runtime, tenant, control } = runtimeFor(this.env, job.tenantId);
+      const { runtime, tenant } = runtimeFor(this.env, job.tenantId);
       const c = config as unknown as ActionWorkerConfig<ActionEnv>;
-      const outcome = await runClaimed({ runtime, tenant, control, renewMs: c.renewMs, stopRenewing: c.stopRenewing }, job, owner);
+      const outcome = await runCall({ runtime, tenant, renewMs: c.renewMs }, job, owner);
       switch (outcome.kind) {
         case "skipped":
           // Another owner holds the lease: let the engine retry later. Anything else is final for this hand-off.
-          if (outcome.reason === "leased") throw new Error(`Action ${job.id} is leased by another runner for ${outcome.retryAfterMs ?? 0} ms`);
+          if (outcome.reason === "leased") throw new Error(`Action call ${job.id} is leased by another runner for ${outcome.retryAfterMs ?? 0} ms`);
           return { kind: "skipped", reason: outcome.reason };
         case "lost": return { kind: "lost", attempt: outcome.attempt, renewals: outcome.renewals.renewed };
-        case "failed": return { kind: "failed", attempt: outcome.attempt, error: outcome.error.slice(0, 2_000), state: outcome.state, renewals: outcome.renewals.renewed };
         case "done": {
           const { stats, renewals, ...done } = outcome;
           // The first gap runs from the claim; the rest are renewal to renewal (S4's cadence measure).
@@ -113,22 +120,21 @@ export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, ActionJob | Ha
             gapsMs: gaps.length ? { min: Math.min(...gaps), max: Math.max(...gaps) } : null,
             hostCalls: stats.hostCalls, fetches: stats.fetches,
           };
-          // Outbox results are discarded, as in Rust; a large direct-call result is applied from here.
-          if (done.origin === "outbox") return { ...small, value: undefined };
           if (done.bytes <= STEP_RESULT_INLINE_BYTES) return small;
-          const completion = await tenantRpc("complete", () => tenant.complete({ v: 1, id: job.id, attempt: done.attempt, value: done.value, error: done.error }));
+          // A step result holds 1 MiB: a large answer is applied from inside the step.
+          const completion = await tenantRpc("completeCall", () => tenant.completeCall({ v: 1, id: job.id, attempt: done.attempt, value: done.value, error: done.error }));
           return { ...small, value: undefined, completion };
         }
       }
     })) as StepOutcome;
     if (outcome.kind !== "done" || outcome.completion) return outcome;
     const completion = await step.do("apply result", { retries: { limit: 20, delay: "2 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () =>
-      tenantRpc("complete", () => tenantStub(this.env, job.tenantId).complete({ v: 1, id: job.id, attempt: outcome.attempt, value: outcome.value, error: outcome.error })));
+      tenantRpc("completeCall", () => tenantStub(this.env, job.tenantId).completeCall({ v: 1, id: job.id, attempt: outcome.attempt, value: outcome.value, error: outcome.error })));
     return { ...outcome, value: undefined, completion };
   }
 
   /**
-   * A run K11's scheduler claimed and handed over (note 0034): run it with
+   * A run K11's scheduler claimed and handed over (0034, 0037): run it with
    * its claim renewed, then report the outcome once. K11 decides retry, dead
    * or done. A crash retries the step; K11's claim is still ours until its
    * lease runs out, after which a renewal is refused and the run stops.

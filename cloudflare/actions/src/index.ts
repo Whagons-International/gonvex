@@ -1,7 +1,7 @@
 // @gonvex kernel Action runtime (package K12). See ../README.md.
 export * from "./fetch.js";
 export * from "./handoff.js";
-export * from "./outbox.js";
+export * from "./calls.js";
 export * from "./ports.js";
 export * from "./provenance.js";
 export * from "./rpc.js";

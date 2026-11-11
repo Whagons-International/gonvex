@@ -1,19 +1,25 @@
-// Test Worker for the Action runtime (K12): a SQLite-backed tenant object that
-// hosts the outbox lease protocol and the module host (K04 on K01), and the
-// Action Workflow configured with the test artifact. Stand-ins, each named:
+// Test Worker for the Action runtime (K12): a SQLite-backed tenant object
+// composed as the kernel's tenant object will be (K19 wires K07's object):
 //
-// - the Reducer path (K07): `enqueue` runs a real Reducer through K04 that
-//   calls `ctx.actions.enqueue`, then calls `afterCommit` as K07 will;
-// - the alarm (K11): `alarm()` runs only the outbox sweep;
-// - control (K06): `tenantSessionForAccount` and `projectSecrets` from a table;
-// - scheduler (K11) and storage (K13): recording fakes behind their ports;
-// - the network: the conformance upstream answered in-process.
+// - K11's real `Scheduler` on a real `TenantAlarm` (the object's alarm), with
+//   K12's `WorkflowHandoff` as its `actions` port: outbox Actions are claimed by
+//   K11 and run in K12's Workflow;
+// - K12's `ActionCalls` for direct agent calls, its sweep registered on the same alarm;
+// - K04's module host on K01 for tools, `ctx.functions` and the queuing Reducer.
+//
+// Stand-ins, each named: the Reducer path (K07): `enqueue` runs a real Reducer
+// through K04 that calls `ctx.actions.enqueue`, then `scheduler.notify()` as K07
+// will; control (K06): sessions and secrets from a table; storage (K13): a
+// recording fake; the network: the conformance upstream answered in-process.
 import { DurableObject } from "cloudflare:workers";
 import { upstream, UPSTREAM_ORIGIN } from "@conformance-scenarios/actions-upstream.mjs";
 import { TenantStorage } from "../../kernel/storage/index";
 import { ModuleRegistry, TenantModuleHost } from "../../kernel/host/src/index.js";
-import { ActionOutbox, type ActionJob, type CallFinished, type Dispatcher } from "../src/outbox.js";
-import type { ClaimRequest, CompleteRequest, ControlPort, FailRequest, RenewRequest, SchedulerPort, StoragePort, TenantCallRequest } from "../src/ports.js";
+import { SYNC_INFRASTRUCTURE_SQL } from "../../kernel/capture/index.ts";
+import { Scheduler, storageAlarm, TenantAlarm, type ActionHandoff, type ActiveModule, type DurableRun as K11Run, type ReducerRunner, type SchedulerEvent } from "../../kernel/scheduler/index.ts";
+import { ActionCalls, type CallFinished, type CallJob, type Dispatcher } from "../src/calls.js";
+import { WorkflowHandoff, type HandoffJob } from "../src/handoff.js";
+import type { ClaimRequest, CompleteRequest, ControlPort, RenewRequest, ScheduleRequest, SchedulerPort, StoragePort, TenantCallRequest } from "../src/ports.js";
 import type { ActionSession } from "../src/session.js";
 import { TenantActions, WorkflowDispatcher } from "../src/tenant.js";
 import type { HandoffClaim, HandoffRunOutcome } from "../src/handoff.js";
@@ -86,28 +92,41 @@ export function registry(): ModuleRegistry {
 configureActions<ActionEnv>({
   registry,
   control: () => testControl,
-  scheduler: () => new FakeScheduler(),
   storage: () => new FakeStorage(),
   fetcher: () => testFetcher,
 });
 
-interface TestConfig { leaseMs: number; renewMs: number; maxAttempts: number; dispatch: "workflow" | "record" | "fail" }
-const DEFAULT_CONFIG: TestConfig = { leaseMs: 300_000, renewMs: 30_000, maxAttempts: 8, dispatch: "workflow" };
+interface TestConfig {
+  /** Direct calls (ActionCalls). */
+  leaseMs: number;
+  renewMs: number;
+  maxAttempts: number;
+  dispatch: "workflow" | "record" | "fail";
+  /** K11's outbox. */
+  outboxLeaseMs: number;
+  outboxMaxAttempts: number;
+  handoff: "workflow" | "record" | "fail";
+}
+const DEFAULT_CONFIG: TestConfig = { leaseMs: 300_000, renewMs: 30_000, maxAttempts: 8, dispatch: "workflow", outboxLeaseMs: 300_000, outboxMaxAttempts: 8, handoff: "workflow" };
 
 export class TestTenant extends DurableObject<Env> {
-  outbox!: ActionOutbox;
+  calls!: ActionCalls;
+  scheduler!: Scheduler;
+  alarmClock!: TenantAlarm;
   actions!: TenantActions;
   host!: TenantModuleHost;
-  readonly recorded: ActionJob[] = [];
+  /** Direct-call hand-offs (dispatch "record") and K11 hand-offs (handoff "record"). */
+  readonly recorded: CallJob[] = [];
+  readonly handedOff: K11Run[] = [];
   readonly finished: CallFinished[] = [];
-  /** K11 stand-in for handed-off runs: live claims, and the outcomes reported. */
-  readonly claims = new Map<string, boolean>();
-  readonly reported: Array<{ claim: HandoffClaim; outcome: HandoffRunOutcome }> = [];
+  readonly events: SchedulerEvent[] = [];
   readonly instance = crypto.randomUUID();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(BOARD_SQL);
+    // The runtime tables every tenant has (K03), `_gonvex_action_outbox` among them.
+    ctx.storage.transactionSync(() => { ctx.storage.sql.exec(SYNC_INFRASTRUCTURE_SQL); });
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS _k12_test (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
     this.setup();
   }
@@ -123,90 +142,103 @@ export class TestTenant extends DurableObject<Env> {
 
   private setup(): void {
     const config = this.config();
-    const workflow = new WorkflowDispatcher(this.env.ACTION_WORKFLOW);
+    const tenantId = this.tenantId();
+    const callWorkflow = new WorkflowDispatcher(this.env.ACTION_WORKFLOW as unknown as Workflow<CallJob>);
     const dispatcher: Dispatcher = {
       dispatch: async (job) => {
         if (config.dispatch === "fail") throw new Error("hand-off lost");
         if (config.dispatch === "record") { this.recorded.push(job); return; }
-        await workflow.dispatch(job);
+        await callWorkflow.dispatch(job);
       },
     };
-    this.outbox = new ActionOutbox({
-      storage: this.ctx.storage,
-      projectId: PROJECT,
-      tenantId: this.tenantId(),
-      dispatcher,
-      wake: async (at) => {
-        const current = await this.ctx.storage.getAlarm();
-        if (current === null || current > at) await this.ctx.storage.setAlarm(at);
+    const workflowHandoff = new WorkflowHandoff(this.env.ACTION_WORKFLOW as unknown as Workflow<HandoffJob>, PROJECT, tenantId);
+    const handoff: ActionHandoff = {
+      startAction: async (run) => {
+        if (config.handoff === "fail") throw new Error("hand-off lost");
+        if (config.handoff === "record") { this.handedOff.push(run); return { accepted: true }; }
+        return workflowHandoff.startAction(run as never);
       },
-      onFinished: (finished) => { this.finished.push(finished); },
-      leaseMs: config.leaseMs,
-      renewMs: config.renewMs,
-      maxAttempts: config.maxAttempts,
-    });
+    };
     this.host = new TenantModuleHost({ storage: new TenantStorage(this.ctx.storage), registry: registry() });
-    this.actions = new TenantActions(this.outbox, this.host);
+    const host = this.host;
+    const generation = () => registry().activeGeneration!;
+    const module: ActiveModule = {
+      kindOf: (path) => generation().engine.functions.get(path)?.kind,
+      crons: () => [],
+      artifactHash: () => generation().artifact.artifactHash,
+    };
+    const reducers: ReducerRunner = {
+      async runReducer(run) {
+        const report = await host.run({ function: run.function, kind: "reducer", args: run.args, identity: { tenant: { id: tenantId, projectId: PROJECT } }, invocation: run.provenance as unknown as Record<string, unknown>, lane: "scheduled" });
+        return report.ok ? { ok: true } : { ok: false, error: report.error?.message ?? "failed" };
+      },
+    };
+    this.alarmClock = new TenantAlarm(storageAlarm(this.ctx.storage), { onError: () => {} });
+    this.scheduler = new Scheduler({
+      storage: this.ctx.storage, project: PROJECT, tenant: tenantId, module, reducers, actions: handoff,
+      outboxLeaseMs: config.outboxLeaseMs, maxAttempts: config.outboxMaxAttempts, log: (event) => this.events.push(event),
+    });
+    this.scheduler.attach(this.alarmClock);
+    this.calls = new ActionCalls({
+      storage: this.ctx.storage, projectId: PROJECT, tenantId, dispatcher,
+      wake: async () => { await this.alarmClock.arm(); },
+      onFinished: (finished) => { this.finished.push(finished); },
+      leaseMs: config.leaseMs, renewMs: config.renewMs, maxAttempts: config.maxAttempts,
+    });
+    this.alarmClock.register(this.calls.alarmSource());
+    this.actions = new TenantActions(this.calls, this.host, this.scheduler);
   }
 
-  /** Names the tenant and sets lease timings for a test. */
+  /** Names the tenant and sets timings for a test. */
   configure(tenantId: string, config: Partial<TestConfig> = {}): void {
     this.ctx.storage.sql.exec("INSERT OR REPLACE INTO _k12_test (k, v) VALUES ('tenant', ?), ('config', ?)", tenantId, JSON.stringify(config));
     this.setup();
   }
 
-  // ---- TenantActionPort (the RPCs the Action side calls) ----
+  // ---- the RPCs the Action side calls (TenantActions) ----
   call(request: TenantCallRequest) { return this.actions.call(request); }
-  claim(request: ClaimRequest) { return this.actions.claim(request); }
-  renew(request: RenewRequest) { return this.actions.renew(request); }
-  fail(request: FailRequest) { return this.actions.fail(request); }
-  complete(request: CompleteRequest) { return this.actions.complete(request); }
+  claimCall(request: ClaimRequest) { return this.actions.claimCall(request); }
+  renewCall(request: RenewRequest) { return this.actions.renewCall(request); }
+  completeCall(request: CompleteRequest) { return this.actions.completeCall(request); }
   beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }) { return this.actions.beginCall(request); }
+  renewRun(request: Parameters<TenantActions["renewRun"]>[0]) { return this.actions.renewRun(request); }
+  completeRun(request: Parameters<TenantActions["completeRun"]>[0]) { return this.actions.completeRun(request); }
+  schedule(request: ScheduleRequest) { return this.actions.schedule(request); }
 
-  // ---- K11 stand-in: Scheduler.renew / Scheduler.complete for handed-off runs ----
-  private claimKey(claim: HandoffClaim) { return claim.source === "outbox" ? `${claim.id}#${claim.attempt}` : `${claim.id}#${claim.token}`; }
-  grantClaim(claim: HandoffClaim) { this.claims.set(this.claimKey(claim), true); }
-  revokeClaim(claim: HandoffClaim) { this.claims.set(this.claimKey(claim), false); }
-  async renewRun(request: { v: 1; claim: HandoffClaim }) { return this.claims.get(this.claimKey(request.claim)) === true; }
-  async completeRun(request: { v: 1; claim: HandoffClaim; outcome: HandoffRunOutcome }) {
-    if (this.claims.get(this.claimKey(request.claim)) !== true) return false;
-    this.claims.set(this.claimKey(request.claim), false);
-    this.reported.push({ claim: request.claim, outcome: request.outcome });
-    return true;
-  }
-  reportedRuns() { return this.reported; }
-
-  /** K07 stand-in: a Reducer queues the Action in its transaction; the hand-off follows the commit. */
-  async enqueue(path: string, args: unknown, options: { accountId?: string; row?: string; skipHandoff?: boolean } = {}): Promise<string> {
+  /** K07 stand-in: a Reducer queues the Action in its transaction; K11 is woken after the commit. */
+  async enqueue(path: string, args: unknown, options: { accountId?: string; row?: string; skipWake?: boolean } = {}): Promise<string> {
     const session = member(this.tenantId(), options.accountId ?? "acct-alice");
     const report = await this.host.run({
       function: "queue.enqueue", kind: "reducer", args: { path, args, row: options.row ?? null },
       identity: { account: { id: session.account.id, email: session.account.email ?? null }, member: { id: session.member.id }, tenant: { id: this.tenantId(), projectId: PROJECT } },
-      invocation: { channel: "ui", rootChannel: "ui", commandId: `enqueue-${crypto.randomUUID()}`, rootCommandId: "root-command" },
+      invocation: { channel: "ui", rootChannel: "ui", commandId: `enqueue-${crypto.randomUUID()}`, rootCommandId: "root-command", artifactHash: "a" },
     });
     if (!report.ok) throw new Error(report.error?.message ?? "enqueue failed");
-    if (!options.skipHandoff) await this.outbox.afterCommit();
+    if (!options.skipWake) await this.scheduler.notify();
     return (JSON.parse(report.value!) as { id: string }).id;
   }
 
-  sweep() { return this.outbox.sweep(); }
-  inspect(id: string) { return this.outbox.inspect(id); }
-  cancel(id: string) { return this.outbox.cancel(id); }
-  listDead() { return this.outbox.listDead(); }
-  requeue(id: string) { return this.outbox.requeue(id); }
-  recordedJobs() { return this.recorded; }
+  /** Fires the alarm now (what the platform does at the alarm time). */
+  async fire() { return this.alarmClock.fire(); }
+  inspectCall(id: string) { return this.calls.inspect(id); }
+  cancelCall(id: string) { return this.calls.cancel(id); }
+  listDead() { return this.scheduler.listDead(); }
+  requeueDead(id: string) { return this.scheduler.requeueDead(id); }
+  recordedCalls() { return this.recorded; }
+  handedOffRuns() { return this.handedOff; }
   finishedCalls() { return this.finished; }
-  outboxStats() { return { ...this.outbox.stats }; }
+  schedulerEvents() { return this.events.map((event) => ({ ...event })); }
+  callStats() { return { ...this.calls.stats }; }
   board() { return this.ctx.storage.sql.exec("SELECT id, title FROM board ORDER BY id").toArray(); }
-  outboxRows() { return this.ctx.storage.sql.exec("SELECT id, action_path, status, attempts, locked_at, last_error FROM _gonvex_action_outbox ORDER BY created_at").toArray(); }
-  runRows() { return this.ctx.storage.sql.exec("SELECT id, origin, state, attempts, dispatch_count, last_error FROM _gonvex_st_action_runs ORDER BY id").toArray(); }
-  /** Moves `locked_at` back, as if the last persisted renewal was `ms` ago (lease-expiry tests without waiting 5 min). */
-  ageLease(id: string, ms: number) { this.ctx.storage.sql.exec("UPDATE _gonvex_action_outbox SET locked_at = locked_at - ? WHERE id = ?", ms, id); this.outbox.forgetMemory(); }
+  outboxRows() { return this.ctx.storage.sql.exec("SELECT id, action_path, status, attempts, last_error FROM _gonvex_action_outbox ORDER BY created_at").toArray(); }
+  deadRows() { return this.ctx.storage.sql.exec("SELECT id, action_path, attempts, last_error FROM _gonvex_action_dead ORDER BY id").toArray(); }
+  jobRows() { return this.ctx.storage.sql.exec("SELECT id, function_path, status FROM gonvex_scheduled_jobs ORDER BY id").toArray(); }
+  runRows() { return this.ctx.storage.sql.exec("SELECT id, state, status, attempts, dispatch_count, last_error FROM _gonvex_st_action_runs ORDER BY id").toArray(); }
   instanceId() { return this.instance; }
   crash(): void { this.ctx.abort("k12 tenant crash test"); }
 
   override async alarm(): Promise<void> {
-    await this.outbox.sweep();
+    await this.alarmClock.fire();
   }
 }
 

@@ -68,13 +68,22 @@ export interface HandoffDeps {
   runtime: ActionRuntime;
   tenant: HandoffTenantPort;
   control?: ControlPort | undefined;
-  /** Renewal interval; K11 asks for at least every `leaseMs / 2`. Defaults to min(30 s, leaseMs / 3). */
+  /**
+   * Renewal interval. K11 asks for one at least every `leaseMs / 2` and writes
+   * `locked_at` on each, so K12 renews every third of the lease: 100 s on the
+   * 300 s outbox lease (36 row writes per running hour), 40 s on a 120 s job lease.
+   */
   renewMs?: number | undefined;
+  /** Test hook: stop renewing (a zombie) once this returns true. */
+  stopRenewing?: ((elapsedMs: number) => boolean) | undefined;
 }
 
+/** Renewals of K11's claim, and the gaps between them after the first (S4's cadence measure). */
+export interface HandoffRenewals { renewed: number; errors: number; gapsMs: { min: number; max: number } | null }
+
 export type HandoffResult =
-  | { kind: "done"; outcome: HandoffRunOutcome; renewals: number }
-  | { kind: "lost"; renewals: number };
+  | { kind: "done"; outcome: HandoffRunOutcome; renewals: HandoffRenewals; hostCalls: number; fetches: number }
+  | { kind: "lost"; renewals: HandoffRenewals };
 
 /**
  * Runs one handed-off Action with its claim renewed; the caller reports a
@@ -89,7 +98,7 @@ export async function runHandoff(deps: HandoffDeps, job: HandoffJob): Promise<Ha
       ? systemSession(job.projectId, job.tenantId)
       : await requireControl(deps).tenantSessionForAccount(job.projectId, job.tenantId, run.actor.accountId);
   } catch (error) {
-    return { kind: "done", outcome: { ok: false, error: String((error as Error)?.message ?? error) }, renewals: 0 };
+    return { kind: "done", outcome: { ok: false, error: String((error as Error)?.message ?? error) }, renewals: { renewed: 0, errors: 0, gapsMs: null }, hostCalls: 0, fetches: 0 };
   }
   const provenance = parseProvenance(run.provenance);
   if (provenance && run.direct) {
@@ -97,25 +106,36 @@ export async function runHandoff(deps: HandoffDeps, job: HandoffJob): Promise<Ha
     provenance.actorMemberId = session.member.id.trim() || null;
     if (session.delegation !== undefined && session.delegation !== null) provenance.delegation = session.delegation;
   }
-  let renewals = 0;
+  let renewed = 0;
+  let errors = 0;
+  const gaps: number[] = [];
+  const started = Date.now();
+  let last = started;
   let lostLease: () => void = () => undefined;
   const lost = new Promise<"lost">((resolve) => { lostLease = () => resolve("lost"); });
   let stopped = false;
   const timer = setInterval(() => {
-    if (stopped) return;
+    if (stopped || deps.stopRenewing?.(Date.now() - started)) return;
+    const sent = Date.now();
     deps.tenant.renewRun({ v: 1, claim: run.claim }).then((ok) => {
       if (stopped) return;
-      if (ok) renewals++;
-      else lostLease();
-    }, () => undefined);
-  }, deps.renewMs ?? Math.min(30_000, Math.floor(run.claim.leaseMs / 3)));
+      if (!ok) { lostLease(); return; }
+      if (renewed > 0) gaps.push(sent - last);
+      renewed++;
+      last = sent;
+    }, () => { errors++; });
+  }, deps.renewMs ?? Math.floor(run.claim.leaseMs / 3));
+  const renewals = (): HandoffRenewals => ({ renewed, errors, gapsMs: gaps.length ? { min: Math.min(...gaps), max: Math.max(...gaps) } : null });
   try {
     const report = await Promise.race([
       deps.runtime.execute({ session, path: run.function, args: run.args, provenance: provenance as RunnerProvenance | undefined }),
       lost,
     ]);
-    if (report === "lost") return { kind: "lost", renewals };
-    return { kind: "done", outcome: report.ok ? { ok: true } : { ok: false, error: report.error }, renewals };
+    if (report === "lost") return { kind: "lost", renewals: renewals() };
+    return {
+      kind: "done", outcome: report.ok ? { ok: true } : { ok: false, error: report.error }, renewals: renewals(),
+      hostCalls: report.stats.hostCalls, fetches: report.stats.fetches,
+    };
   } finally {
     stopped = true;
     clearInterval(timer);
