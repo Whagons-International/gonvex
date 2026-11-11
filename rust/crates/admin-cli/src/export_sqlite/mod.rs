@@ -1063,6 +1063,11 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
     let mut source = begin_snapshot(pool).await?;
     let schema = source_schema(&mut source).await?;
     let mut target = open_target(&job.target_url).await?;
+    // Rows are copied with the application's triggers running. Provisioning
+    // moved writer-only triggers out of the file (they run on the runtime's
+    // writer connection); put them back for this connection. The runtime's
+    // next provisioning moves them again.
+    gonvex_store::restore_writer_only_schema(&mut target).await?;
     if !job.is_control_plane && schema.contains_key("_gonvex_files") {
         gonvex_store::execute_script(&mut target, FILES_TABLE_DDL).await?;
     }
