@@ -50,7 +50,7 @@ pings. Queue consumers: 15 minutes. Workflow steps: no wall-clock limit.
 
 | # | Area | Rust today | Kernel behavior | Contract-change note |
 |---|---|---|---|---|
-| IB1 | Private files | Owner checked only for sandbox `importFile` (E.d.4) | Check the owner of a private file on **every** URL mint, signed download, metadata read and delete; `ownerId` on upload must be the caller (0012 R12, R13) | 0001, 0012 |
+| IB1 | Private files | Owner checked only for sandbox `importFile` (E.d.4) | Check the owner of a private file on **every** URL mint, signed download, metadata read and delete; `ownerId` on upload must be the caller (0001; metadata and proxy: 0012 R12, R13) | 0001, 0012 |
 | IB2 | Actions | `actions.enqueue` jobs retry forever (backoff from 1 s, capped at 15 min); scheduled jobs never retry (E.b) | Outbox Actions: at most 8 attempts, then `dead`. Scheduled jobs: still one attempt, a failure ends `dead` not `completed` (E.b.5) | 0001 |
 | IB3 | Reducer receipts | Receipt table never pruned (E.receipts) | Receipt results expire after the client's offline window; a tombstone refuses late duplicates | 0001, 0009 |
 | IB4 | Webhooks | No runtime route: external adapters verify and invoke an Action (D.1 Webhooks) | One Ingress Worker for every webhook | 0001, 0002 |
@@ -120,10 +120,10 @@ The frame is `{"type":"session.ready","capabilities":{...}}`. Server capabilitie
 | Capability | Value | Read by SDK? | Disposition |
 |---|---|---|---|
 | `replicaNoOldValues` | 1 | no (type only) | keep |
-| `replicaFieldPatches` | 1 | yes (`sdk:2221`, before decoding a `replica.rowPatch`) | defer: stop advertising until row patches are implemented. Unused by the SDK while `replicaBatchFrames` is on |
+| `replicaFieldPatches` | 1 | yes (`sdk:2221`, before decoding a `replica.rowPatch`) | replace (0012 R20): not advertised by the kernel. Unused by the SDK while `replicaBatchFrames` is on |
 | `replicaSnapshotPages` | 1 | — | keep |
 | `replicaSetDigest` | 1 (**Rust-only**) | no | replace: do not advertise. sum128 is not negotiated by the SDK |
-| `replicaNativeRows` | 1 (**Rust-only**) | no | defer: do not advertise until a client negotiates native rows |
+| `replicaNativeRows` | 1 (**Rust-only**) | no | replace (0012 R20): not advertised by the kernel |
 | `replicaResume` | 1 | yes (`sdk:4133`, decides whether `replica.open.digest` is sent) | keep |
 | `queryResume` | 1 | — | keep |
 | `preserveSubscriptions` | 1 | — | keep |
@@ -336,7 +336,7 @@ Public transport rate limits: 30 calls per connection and 120 per IP per 60 s wi
 
 ### A.5 Error codes and strings on the wire
 
-Disposition for every row: **keep** the exact strings and codes unless the row names a ruling.
+Disposition for every row: **keep** the exact strings and codes unless the row names a ruling. New in the kernel: `reducer.error{class:"rejected", retryable:false, error:"Reducer receipt expired"}` for a call that hits an expired receipt (0009).
 
 | Frame and field | Value | Emitted when | Source |
 |---|---|---|---|
@@ -369,6 +369,8 @@ Disposition: **keep** for the codes, `class` values, the unsolicited ids, the pa
 - **Replica admission overload:** `replica snapshot admission overloaded (admission deadline|too many waiting builds); retry` (`offload.rs:843, 1086, 1138`; `replica.rs:86`) as `replica.error`. Keep the text; the trigger is a tuning detail.
 
 ### A.6 Rust vs TS differences
+
+Disposition for every item: the kernel matches **Rust's** behavior (what Rust sends and accepts), not the TS union, unless an item names a ruling (0012 R18-R20).
 
 1. **Rust-only client message:** `replica.snapshotAck` (proto:450-457).
 2. **Rust-only server messages:** `replica.transactionEncoded`, `replica.snapshotStart`, `replica.snapshotEncodedPage` (binary), `replica.closed`, and the `canonicalUpserts` delta variant (proto:792-874; replica.rs:3225-3290).
@@ -467,7 +469,7 @@ The JS error envelope for every op is `{status:"ok",value}` / `{status:"denied",
 | `dbDelete` | `table`, `id`, `key?` | `{deleted:n}` | R | as update | as update | `BS:598-602`, `RT/host_calls.rs:1179-1188` | adapt: direct `sql.exec` | SDK type says `Promise<void>`, but the host returns `{deleted}` (`SDK/index.ts:227`) |
 | `dbDeleteMany` | `table`, `ids:(string\|number)[]`, `key?` | `{deleted:n}` | R | **≤10,000 ids/call**; one JSON param via `json_each($1)` | "deleteMany cannot delete more than 10000 rows per call"; "deleteMany ids must be an array" | `BS:603-607`, `RT/host_calls.rs:1190-1214` | adapt: direct `sql.exec` | 10k-id JSON text must stay below DO's 2 MB value cap |
 | `permissionsHas` | `permission:string` (non-empty), `scope?:string` (default `""` = tenant-wide) | `boolean` | R (Q refused by host) | Waits until the bits cover the tx's `_gonvex_sync_clock.revision`. | "ctx.permissions is available to Reducers with a tenant session"; "permission bits are rebuilding; retry" | `BS:613-619`, `RT/host_calls.rs:845-847,864-887` | adapt: in-memory permission index in the tenant DO | Answers from committed bits, not this Reducer's own uncommitted grant rows (`SDK/index.ts:274-276`) |
-| `actionEnqueue` | `function:string` (non-empty), `args?` (`undefined` -> `null`) | `string` action id | R | rejects `_gonvex.scheduler.enqueue`; opens the lazy writer | "actions.enqueue requires an Action path"; "actions.enqueue cannot invoke a Gonvex system operation"; aborted-tx | `BS:622-626`, `RT/host_calls.rs:782-815`, `ST/lib.rs:1659` | adapt: outbox row in the same DO tx. A DO alarm dispatches it to the Action Worker. **Intended:** max attempt count plus dead-letter state (today: exponential backoff 1 s to 15 min, forever, `ST/lib.rs:1343-1382`) | id = deterministic intent id (B.4) when commandId is present, else UUIDv4. Outbox hops are bounded by `MAX_DURABLE_HOPS=32` (`MR/lib.rs:25`, `RT/execution.rs:1200`). |
+| `actionEnqueue` | `function:string` (non-empty), `args?` (`undefined` -> `null`) | `string` action id | R | rejects `_gonvex.scheduler.enqueue`; opens the lazy writer | "actions.enqueue requires an Action path"; "actions.enqueue cannot invoke a Gonvex system operation"; aborted-tx | `BS:622-626`, `RT/host_calls.rs:782-815`, `ST/lib.rs:1659` | **replace** (IB2, 0001): outbox row in the same DO tx; a DO alarm dispatches it to the Action Worker; at most 8 attempts, then `dead` (today: exponential backoff 1 s to 15 min, forever, `ST/lib.rs:1343-1382`) | id = deterministic intent id (B.4) when commandId is present, else UUIDv4. Outbox hops are bounded by `MAX_DURABLE_HOPS=32` (`MR/lib.rs:25`, `RT/execution.rs:1200`). |
 | `toolInvoke` | `tool:string` (declared name), `args?` | the tool's Query/Reducer result | A | tool must be in `request.actionTools` (checked in isolate) and in the declared map. depth < 8. | "Action tool … is not declared for this invocation" (denied, sticky); "nested function invocation exceeded the maximum depth"; "Action tool … has unsupported kind …" | `BS:628-634`, `V8/isolate.rs:676-684`, `RT/action_calls.rs:306-371` | adapt: Action Worker -> tenant DO RPC (`query`/`reducer`). Each nested Reducer runs as its own DO transaction. | new commandId `agent-tool-<uuidv4>`, channel `agent`, `onBehalfOfMemberId` = session member |
 | `functionInvoke` | `path`, `args?`, `artifactHash` (all required strings) | function result | A (agent profile + `functions:true`) | target must be interactive and active. The artifact hash must match the active one. | "interactive function invocation is not declared for this Action"; `STALE_AGENT_CATALOG: expected artifact …` (`RT/execution.rs:55-56`) | `BS:635-647`, `RT/action_calls.rs:284-304,525-532`, `RT/execution.rs:995` | adapt: Workflow step / Action Worker -> DO RPC | JS sets `code="STALE_AGENT_CATALOG"` when the message contains it (`BS:442`) |
 | `scheduleAfter` | `delayMs:safe int ≥0`, `function`, `args?` | `"job_<id>"` | R, A | target must be a registered reducer/action of this module | "scheduled function … is not a registered Reducer or Action"; "scheduler delayMs is outside the supported range" | `BS:650-655`, `RT/host_calls.rs:816-828,889-927`, `RT/action_calls.rs:559-576` | adapt. R: outbox row `_gonvex.scheduler.enqueue` with payload `{jobId,function,args,runAtUnixMs,coalesce}` in the same tx. A: direct enqueue (`RT/scheduler.rs:792`). A DO alarm fires the earliest due job. | **runAt = host `Utc::now()` + delay at call time, not `ctx.now`** (`RT/host_calls.rs:824`). Local runtime uses `execution.now + delay` (`LR/portable.ts:481-482`). Divergence: keep the server behavior and flag it. |
@@ -476,12 +478,12 @@ The JS error envelope for every op is `{status:"ok",value}` / `{status:"denied",
 | `fetch` | `request:{url, method(upper, default GET), headers:{lower:str}, body:string\|null}`. JS: object body -> JSON + content-type. | `{status,statusText,url,headers,body:string}` or `{…,stream:u64}` for `text/event-stream` | A | absolute http(s) only. Origin must be in `networkOrigins` (checked in isolate **and** host). Redirects followed only to declared origins. **≤16 concurrent**. Response ≤8 MiB (content-length and body). connect 30 s. Total timeout = Action deadline remainder (none for agent). | "fetch origin is not declared for this Action" (denied, sticky); "fetch only supports absolute http and https URLs"; "fetch response exceeds the 8388608 byte limit"; "fetch … timed out within the … ms Action request budget"; "Action concurrent network request limit exceeded"; "fetch cannot start after the Action execution deadline" | `BS:671-689,523-543,513-521`, `V8/isolate.rs:654-675,685`, `V8/lib.rs:649-655`, `RT/action_calls.rs:22,159-184,373-490` | adapt: Action Worker global `fetch` with the same origin allowlist, `redirect:"manual"` loop and byte cap. Agent: Workflow step. | Body decoded with **`String::from_utf8_lossy`**, so binary responses are corrupted (`RT/action_calls.rs:488`). Keep that for parity (0012 R24). Denial texts: `fetch origin "<o>" is not declared for this Action` (`RT/action_calls.rs:401-404`), `redirect origin is not declared for this Action` (`:424`). Keep both. Mind Workers subrequest limits. |
 | `fetchRead` | `stream:u64` | `{chunk:string,done:false}` or `{done:true}` (unknown id -> done) | A | cumulative 8 MiB. UTF-8 split chars held back. | network-not-declared; size; timeout | `BS:498-511`, `RT/action_calls.rs:80-148,542-544` | adapt: ReadableStream reader on the Worker `fetch` body | serial in the isolate, concurrent in the host handler (`RT/action_calls.rs:507-509`) |
 | `fetchCancel` | `stream:u64` | `null` | A | — | — | `BS:509`, `RT/action_calls.rs:545-548` | adapt: `body.cancel()` | errors are swallowed in JS |
-| `storage` op `getMetadata` | `{fileId}` | `FileMetadata` (`id,tenantId,ownerId,bucket,objectKey,contentType,sizeBytes,checksum,visibility,status,createdAt,uploadedAt`) | R, A | **Finalizes pending uploads by HEAD on object storage, inside the Reducer's write tx** | "fileId is required"; "file not found"; "storage metadata is unavailable" | `BS:695`, `RT/host_calls.rs:766-781`, `RT/storage.rs:244-248,629-678` | adapt: `_gonvex_files` in the DO, R2 `head()` | network I/O inside a Reducer tx. No owner check today. **Intended: owner check.** |
-| `storage` op `generateUploadUrl` | `{contentType?,size?,visibility?(private\|tenant\|public),ownerId?,expiresMs?}` | `{fileId,url,method:"PUT"\|"POST",headers}` | A | size ≤128 MiB. Default expiry 15 min. Anonymous: visibility forced `tenant`, owner `""`, needs `GONVEX_PUBLIC_URL`. | "upload too large"; "public uploads require GONVEX_PUBLIC_URL…" | `BS:698`, `RT/storage.rs:26-28,151-218,926-943` | adapt: R2 presigned PUT or Worker proxy | caller may set any `ownerId` (`RT/storage.rs:934-943`). File id = `uuidv4.simple()`. |
-| `storage` op `getUrl` | `{fileId}` | `string` URL (public: object URL; else presigned 10 min or proxy) | A | — | file not found | `BS:699`, `RT/storage.rs:219-231` | adapt: R2. **Intended: owner check for private files.** | no owner check today |
-| `storage` op `generateDownloadUrl` | `{fileId, ttlMs (0 = default 10 min)}` | `string` URL | A | ttl ms -> s via `div_ceil`. **No max TTL.** | file not found | `BS:700`, `RT/storage.rs:232-243,945-953` | adapt: R2. **Intended: owner check.** | |
-| `storage` op `delete` | `{fileId}` | `null` | A | — | file not found | `BS:701`, `RT/storage.rs:249-270` | adapt: R2 delete plus a row delete in the DO. **Intended: owner check.** | |
-| `storage` op `store` | `{contentBase64 (non-empty), contentType?, visibility?, ownerId?}` | `FileMetadata` | A | decoded ≤128 MiB | "storage content is not valid base64"; "storage content exceeds the 134217728 byte limit" | `BS:703`, `RT/storage.rs:271-319` | adapt: R2 put | base64 in a JSON string conflicts with the 128 MB isolate on CF (a 128 MiB file is ~171 MiB of base64). Needs a lower cap: contract-change note. |
+| `storage` op `getMetadata` | `{fileId}` | `FileMetadata` (`id,tenantId,ownerId,bucket,objectKey,contentType,sizeBytes,checksum,visibility,status,createdAt,uploadedAt`) | R, A | **Finalizes pending uploads by HEAD on object storage, inside the Reducer's write tx** | "fileId is required"; "file not found"; "storage metadata is unavailable" | `BS:695`, `RT/host_calls.rs:766-781`, `RT/storage.rs:244-248,629-678` | **replace** (IB1, 0012 R12): `_gonvex_files` in the DO, R2 `head()`, owner check on private files | network I/O inside a Reducer tx. No owner check today. **Intended: owner check.** |
+| `storage` op `generateUploadUrl` | `{contentType?,size?,visibility?(private\|tenant\|public),ownerId?,expiresMs?}` | `{fileId,url,method:"PUT"\|"POST",headers}` | A | size ≤128 MiB. Default expiry 15 min. Anonymous: visibility forced `tenant`, owner `""`, needs `GONVEX_PUBLIC_URL`. | "upload too large"; "public uploads require GONVEX_PUBLIC_URL…" | `BS:698`, `RT/storage.rs:26-28,151-218,926-943` | **replace** (IB1): R2 presigned PUT or Worker proxy; `ownerId` must be the caller unless a system principal | caller may set any `ownerId` (`RT/storage.rs:934-943`). File id = `uuidv4.simple()`. |
+| `storage` op `getUrl` | `{fileId}` | `string` URL (public: object URL; else presigned 10 min or proxy) | A | — | file not found | `BS:699`, `RT/storage.rs:219-231` | **replace** (IB1): R2, owner check for private files. | no owner check today |
+| `storage` op `generateDownloadUrl` | `{fileId, ttlMs (0 = default 10 min)}` | `string` URL | A | ttl ms -> s via `div_ceil`. **No max TTL.** | file not found | `BS:700`, `RT/storage.rs:232-243,945-953` | **replace** (IB1): R2, owner check for private files. | |
+| `storage` op `delete` | `{fileId}` | `null` | A | — | file not found | `BS:701`, `RT/storage.rs:249-270` | **replace** (IB1): R2 delete plus a row delete in the DO, owner check for private files. | |
+| `storage` op `store` | `{contentBase64 (non-empty), contentType?, visibility?, ownerId?}` | `FileMetadata` | A | decoded ≤128 MiB | "storage content is not valid base64"; "storage content exceeds the 134217728 byte limit" | `BS:703`, `RT/storage.rs:271-319` | **replace** (IB1 for `ownerId`; 0012 R26 for size): R2 put | base64 in a JSON string conflicts with the 128 MB isolate on CF (a 128 MiB file is ~171 MiB of base64). Ruled in 0012 R26: the kernel caps `store` at 32 MiB decoded; larger files use `generateUploadUrl`. |
 | `storage` op `call(operation,payload)` | any of the above by name | as above | A | unknown -> "unknown storage operation …" | — | `BS:704`, `RT/storage.rs:320` | keep (alias) | |
 | `sandbox` op `create` | `{ttlMs?}` (exact fields) | `SandboxHandle {sandboxId,expiresAt,duckdb}` | A | ttl default 30 min, max 2 h. ≤128 total, ≤4 per account. Disabled by default. | "sandbox is disabled by runtime policy"; "sandbox ttl exceeds runtime policy"; "runtime sandbox limit reached" | `BS:711`, `RT/sandbox.rs:194-240`, `RT/config.rs:132-158` | adapt: Container (per sandbox id, scoped to project+tenant+account) | |
 | `sandbox` ops `destroy`/`run`/`cancel`/`status`/`readFile`/`readText`/`writeFile`/`writeText` | `destroy {sandboxId}`; `run {sandboxId,code,timeoutMs?}`; `cancel/status {sandboxId,executionId}`; `read* {sandboxId,path}`; `writeFile {sandboxId,path,contentBase64}`; `writeText {…,content}` | see `SDK/index.ts:340-358` | A | run timeout default 30 s, max 120 s. code ≤512 KiB. file ≤64 MiB. workspace ≤256 MiB. output ≤8 MiB. rows 500. heap 64 MiB. concurrency 2. ≤16 executions. Paths relative, no `..`. | "sandbox was not found"; "sandbox path must be relative…"; "sandbox payload contains unsupported field …" | `BS:712-719`, `RT/sandbox.rs:206-214,276,303,486,502,515,539,689-752` | adapt: Container | |
@@ -658,6 +660,8 @@ The Rust suite repeats them in a recycled isolate (`V8/runtime_contract_tests.rs
 Reference: Rust runtime at `0bf3ad13`. All Rust paths are `rust/crates/runtime/src/` unless they say otherwise. "control.rs:N" points to the handler body, and "def N" points to the `definition()` entry (control.rs:4323-4533). TS means `packages/client/src/control.ts`: the line of the `ref`, with the schema at lines 57-116.
 
 ### C.0 Dispatch rules that apply to every row
+
+Disposition for every rule: **keep**; dispatch runs in the Control DO.
 
 - **Wire.** A Control call is an ordinary `query.call` / `query.subscribe` / `reducer.call` / `action.call` frame with `scope:"control"` (lib.rs:3002, 3080, 3275, 3479, 5014). There is no HTTP route for Control functions.
 - **Lookup.** `definition(path)` decides the kind, the authorization and `live` (control.rs:4323). An unknown path returns `unknown Control Plane function "<p>"`. The wrong frame kind returns `Control Plane function "<p>" is not a Query|Reducer|Action` (control.rs:4535).
@@ -876,6 +880,8 @@ Source: native_auth.rs:39-50. CORS is `*`.
 
 #### C.3.6 Refresh and rotation
 
+Disposition: **keep** (lifetimes, rotation and reuse detection are client-visible); state in the Control DO.
+
 - Each refresh marks the old token used and issues a new pair in the same family.
 - Reuse within 5 s returns an error and keeps the family.
 - Reuse after 5 s revokes the whole family (sessions and refresh tokens; control.rs:3963-3972).
@@ -883,6 +889,8 @@ Source: native_auth.rs:39-50. CORS is `*`.
 - `exchangeExternalToken` with `previousRefreshToken` revokes the previous family.
 
 #### C.3.7 Revocation sources
+
+Disposition: **keep** every source; propagation to sockets is **adapt** per C.3.8 item 10 (≤30 s).
 
 All of these take effect on live sockets within 30 s (C.3.8):
 
@@ -897,6 +905,8 @@ All of these take effect on live sockets within 30 s (C.3.8):
 `accounts.updatePassword` does **not** revoke anything.
 
 #### C.3.8 Socket authentication and re-authentication in place
+
+Disposition for every item: **keep** (frames, codes, ordering and preservation rules), with the session held by the object that owns the socket (0004). Item 10 states its own adapt.
 
 `auth` frame: `{type:"auth",id,token?,project?,tenant?,controlOnly?,public?,clientContract?,device?,capabilities?}` (protocol index.ts:321). The handler is at lib.rs:4464. Branches:
 
@@ -935,6 +945,8 @@ Ruled in `contract-changes/0012-p00-lead-rulings.md` (R9, R10):
 - **No rate limit on Control auth Actions** on the member transport.
 
 ### C.4 Session semantics
+
+Disposition for every item: **keep**; the tenant scan in item 2 is **adapt** per 0012 R15.
 
 1. **Creating a session.**
    - Login (passwordLogin, exchangeExternalToken, refreshSession, or `/auth/token`) returns the Session object.
@@ -990,6 +1002,8 @@ All limiters are **process-local** (public-functions.md, "Abuse limits"). On Clo
 Reference: Rust runtime at `0bf3ad13`. All paths are relative to `rust/crates/runtime/src/` unless they start with `packages/`, `rust/crates/store/` or `docs/`. Where code and docs disagree, the code is what this section records, and the disagreement is flagged (**DOC≠CODE**).
 
 ### D.0 Router shape
+
+Disposition: routes and status codes **keep**; the router is the Router Worker (adapt). `dashboard::invalidate` is **adapt**: any successful non-GET `/dev/*` write notifies dashboard subscriptions in the Control DO. The 64 MiB JSON/form body limit is **keep** up to the Worker request-body limit of the plan; S-series spikes record that limit.
 
 - One axum router, `Runtime::router()` at `lib.rs:552-583`. The process serves nothing else (`main.rs:173-178`). It has no separate metrics or admin listener.
 - The router merges `native_auth::router()` (`native_auth.rs:39-50`), `operations::router()` (`operations.rs:46-126`) and `operator_data::router()` (`operator_data.rs:23-35`). There is no `.nest` and no `.fallback`, so an unmatched path gets axum's 404 and a wrong method gets 405.
@@ -1060,7 +1074,7 @@ There is no separate version route.
 
 | Method | Path | Handler | Auth | Request | Response | Rust | Disposition | Notes |
 |---|---|---|---|---|---|---|---|---|
-| GET | `/storage/{*key}` | `storage_download` | signed URL: `exp`,`sig`. HMAC-SHA256 keyed `"gonvex-storage:"+S3 secret` over `"{key}\n{exp}"`. `upload` must be absent | `?exp&sig`. `Range` header honoured | 200 or 206 streamed. Forwards `accept-ranges`, `content-length`, `content-range`, `content-type`, `etag`, `last-modified`. Inline allowlist (png/jpeg/gif/webp/avif, audio, mp4/webm/ogg, pdf), everything else `attachment` + `octet-stream`, `nosniff`, a CSP (sandbox when not inline), `cache-control: private, max-age=300`. 403, 404 or 502 | `lib.rs:560-566`, `653-778`; `storage.rs:365-380`, `883-905` | adapt: RW → R2 range GET (K13) | **The signature is the only check, and it is a bearer capability.** URLs are minted by WebSocket `storage.getUrl` and `generateDownloadUrl` (`storage.rs:220-246`), and neither checks the owner. The only owner check is `read_file` for sandbox imports (`storage.rs:341`). Intended behavior: check that the caller owns a private file before minting any download URL and before `delete` (`storage.rs:248-268`). Also `owner()` lets a caller store any `ownerId` (`storage.rs:934-943`). Download URLs last 10 minutes by default |
+| GET | `/storage/{*key}` | `storage_download` | signed URL: `exp`,`sig`. HMAC-SHA256 keyed `"gonvex-storage:"+S3 secret` over `"{key}\n{exp}"`. `upload` must be absent | `?exp&sig`. `Range` header honoured | 200 or 206 streamed. Forwards `accept-ranges`, `content-length`, `content-range`, `content-type`, `etag`, `last-modified`. Inline allowlist (png/jpeg/gif/webp/avif, audio, mp4/webm/ogg, pdf), everything else `attachment` + `octet-stream`, `nosniff`, a CSP (sandbox when not inline), `cache-control: private, max-age=300`. 403, 404 or 502 | `lib.rs:560-566`, `653-778`; `storage.rs:365-380`, `883-905` | **replace** (IB1, 0012 R13): RW → R2 range GET (K13) after a `_gonvex_files` lookup that refuses a deleted file or a private file whose URL was not minted for its owner | **The signature is the only check, and it is a bearer capability.** URLs are minted by WebSocket `storage.getUrl` and `generateDownloadUrl` (`storage.rs:220-246`), and neither checks the owner. The only owner check is `read_file` for sandbox imports (`storage.rs:341`). Intended behavior: check that the caller owns a private file before minting any download URL and before `delete` (`storage.rs:248-268`). Also `owner()` lets a caller store any `ownerId` (`storage.rs:934-943`). Download URLs last 10 minutes by default |
 | POST, PUT | `/storage/{*key}` | `storage_upload` | signed URL with `upload=1`, keyed `"gonvex-storage-upload:"+secret` | raw body, at most 128 MiB. `Content-Type` | `{storageId:<last key segment>}`. 409 `upload already consumed`. 413 `upload too large` (`lib.rs:813-816`). 403 or 502 | `lib.rs:780-841`; `storage.rs:382-492` | adapt: R2 put with `onlyIf` no-etag. The single-use claim moves from control-plane `gonvex_storage_uploads` to a TDO (0012 R6) | Single use: a ticket row is claimed before the PUT and released if the PUT fails. `If-None-Match:*` blocks overwrite. The tenant `_gonvex_files` row must still be `pending`. Upload URLs last 15 minutes. URLs are proxied only when `GONVEX_PUBLIC_URL` is set; otherwise the client gets a presigned S3 URL (`storage.rs:203-206`) |
 | OPTIONS | `/storage/{*key}` | `storage_options` | signed upload URL | same query | 204 or 403 | `lib.rs:843-861` | adapt: RW | A preflight without a valid signature returns 403 |
 | GET | `/dev/storage/files` | `storage_files` | pk\|op(`projects:read`,access) | `?project` or `x-gonvex-project-id` | `{configured,bucket,files:[{id,key,size,contentType,uploadedAt,url}]}`, at most 1000 | `operations.rs:65`, `1156-1184`; `storage.rs:494-572` | adapt: CDO fans out to TDO pages, or lists R2 by prefix | Loops over every tenant database in turn. Every row gets a signed download URL whatever its visibility. Keep paging |
@@ -1069,7 +1083,7 @@ There is no separate version route.
 
 | Method | Path | Handler | Auth | Request | Response | Rust | Disposition | Notes |
 |---|---|---|---|---|---|---|---|---|
-| any | (none) | — | — | — | — | absent. See `packages/module-sdk/README.md:260-263` | replace: new IW (K18) that verifies the provider signature on the raw body, resolves the tenant and invokes an Action through a TDO or service principal | Telnyx and GitHub are named in K18's `done_when` |
+| any | (none) | — | — | — | — | absent. See `packages/module-sdk/README.md:260-263` | replace: new IW (K18) that verifies the provider signature on the raw body, resolves the tenant and invokes an Action through a service principal (0002) | Telnyx and GitHub are named in K18's `done_when` |
 
 #### Deploy (developer / CLI)
 
@@ -1148,7 +1162,7 @@ There is no separate version route.
 | Method | Path | Handler | Auth | Request | Response | Rust | Disposition | Notes |
 |---|---|---|---|---|---|---|---|---|
 | GET | `/dev/actions/dead` | new | op(`projects:read`)+access | query `project`, `tenant`, `limit`, `cursor` | `{items:[{id,function,args,attempts,lastError,deadAt}],cursor}` | none (IB2 has no Rust counterpart) | replace (IB2, 0001) | Lists outbox Actions and scheduled jobs in state `dead` |
-| POST | `/dev/actions/dead/{id}/requeue` | new | op(`projects:write`)+manage | — | `{requeued:true}` | none | replace (IB2, 0001) | Resets attempts and makes the row pending again |
+| POST | `/dev/actions/dead/{id}/requeue` | new | op(`projects:update`)+manage | — | `{requeued:true}` | none | replace (IB2, 0001) | Resets attempts and makes the row pending again |
 
 #### Metrics, logs, errors and caches
 
@@ -1174,6 +1188,8 @@ There is no separate version route.
 
 #### D.2.1 Client side (`packages/gonvex/src/index.ts`)
 
+Disposition: **keep**. The CLI is unchanged; the kernel answers it as Rust does.
+
 1. **Starting the CLI.** `gonvex dev` (`runDev` at `631-683`) loads the runtime URL, project id and key (`GONVEX_PROJECT_KEY`) from flags or `.env` (`ensureProjectSettings` at `1893`). With `--once` there is no log stream and no watch loop, and a failed sync exits 1 (`676-681`). With `-- <cmd>` the CLI watches while running the child process. There is no separate `deploy` command: CI and Docker run `gonvex dev --once`.
 2. **Deciding when to build.** `watchProject` (`1187-1260`) fingerprints module sources, `migrations/**/*.sql` and `gonvex.json` by mtime and size.
    - It rebuilds when the fingerprint changes.
@@ -1193,6 +1209,8 @@ There is no separate version route.
    A non-2xx response throws. On success the returned `schemaDefinition` is written back into the generated bindings (`1229-1233`).
 
 #### D.2.2 Server side (`lib.rs:1358-1497`)
+
+Disposition: **adapt** per D.2.4 and 0012 R1-R5 (same validation, ordering, responses and status codes; Control DO, R2 and a Queue as mechanisms).
 
 1. **Body.** axum's `Json` extractor, limited to 64 MiB (`lib.rs:576`). Malformed JSON gets axum's 400 or 422 text, not `{error}`.
 2. **Project.** It comes from the body's `project`, or else from the header. When both are present they must match, otherwise 400 `manifest project does not match x-gonvex-project-id` (`1374-1395`). The result is written back into `manifest.project`.
@@ -1239,6 +1257,8 @@ There is no separate version route.
 
 #### D.2.3 Other paths into the same state
 
+Disposition: **adapt** as D.2.2.
+
 - **Startup** (`lib.rs:494-541`). For each stored manifest, ordered by `updated_at`, the runtime installs the module, re-applies the control migrations, then provisions every tenant 8 at a time (`STARTUP_TENANT_PROVISION_CONCURRENCY`, `lib.rs:164`). A failed tenant aborts startup.
 - **New tenants** (`provision_runtime_tenant` at `lib.rs:244-281`). The tenant is created, given the active module's migrations, then marked provisioned. This fails when no module is installed.
 - **Concurrency.** There is no project-level lock around `/dev/sync`. Two concurrent syncs serialize only per database on `SCHEMA_LOCK`, and on the activation gate.
@@ -1265,6 +1285,8 @@ Ruled: the first option (0012 R4).
 ### D.3 Operator authorization model
 
 #### Credential resolution
+
+Disposition: **keep** the order and every credential kind; verification runs in the Control DO with secrets as Worker secrets.
 
 `operations::authenticate` (`operations.rs:3122-3182`) tries these in order. It reads the token from `Authorization` with an optional `Bearer ` prefix (`operations.rs:3447-3461`).
 
@@ -1294,6 +1316,8 @@ Disposition for every row: **keep**; operator credentials are checked in the Con
 | Admin-key-only routes | `delete_row`, `replace_references`, `/dev/internal/e2e/members`. The `/healthz` diagnostics need an `admin`-role non-Local actor | — |
 
 #### Developer and tenant-admin roles on the WebSocket (`control.*`)
+
+Disposition: **keep**.
 
 These are separate from HTTP operators. `authorize_control` (`control.rs:2013-2080`), with the `Authorization` enum at `control.rs:45-51`, decides:
 - **Public**: anyone.
@@ -1357,7 +1381,7 @@ DO SQLite limits used below: 100 KB/statement, 100 bound params, 100 columns/tab
 | # | Rule | What Rust does | Source | DO compatibility | Disposition |
 |---|---|---|---|---|---|
 | m1 | Exactly one statement | SQLite-tokenizer-faithful scanner (strings, `"`/`` ` ``/`[]` identifiers, blobs, TCL vars, `--`/`/* */`); NUL and unterminated rejected; >1 statement rejected | `R:sql_admission.rs:1-14`, `R:sql_admission.rs:42-160`, `R:sql_admission.rs:194-213` | | **keep** (port lexer verbatim with its tests `R:sql_admission.rs:215-338`) Error texts (keep): `a database statement is required` (empty, `R:sql_admission.rs:194-197`), `a database statement may not contain NUL`, `…unterminated literal or comment`, `<HEAD> statements are not allowed in module SQL` (`R:sql_admission.rs:183-188, 198-203`). |
-| m2 | No transaction control | Refuses `COMMIT`, `END`, `ABORT`, `BEGIN`, `START`, bare `ROLLBACK [WORK\|TRANSACTION]`, `PREPARE TRANSACTION` | `R:sql_admission.rs:170-182` | Matches DO | **keep** |
+| m2 | No transaction control (exception: `PREPARE TRANSACTION AS` / `PREPARE TRANSACTION (` is not treated as transaction control, `R:sql_admission.rs:177`) | Refuses `COMMIT`, `END`, `ABORT`, `BEGIN`, `START`, bare `ROLLBACK [WORK\|TRANSACTION]`, `PREPARE TRANSACTION` | `R:sql_admission.rs:170-182` | Matches DO | **keep** |
 | m3 | No `ATTACH`/`DETACH`/`PRAGMA`/`VACUUM` | Head-word refusal; table-valued `pragma_table_info(...)` admitted | `R:sql_admission.rs:183-188`, `R:sql_admission.rs:267-280` | Matches DO for statements; **verify** DO allows `pragma_*` table-valued functions (SDK batched writes and provisioning rely on them, `D:sqlite-storage.md:352-356`, `S:provision.rs:295,1035,1126,1204,1305,1390,1470`) | **keep**; S1 verifies |
 | m4 | Savepoints | `SAVEPOINT x`, `RELEASE [SAVEPOINT] x`, `ROLLBACK [TRANSACTION|WORK] TO x` admitted (`sql_admission.rs:174-176`); SDK `applyDataWrites` wraps writes in `SAVEPOINT gonvex_data_writes` | `R:sql_admission.rs:246-265`; `P:module-sdk/src/data-write.ts:332`; `D:sqlite-storage.md:344-347` | `SAVEPOINT` forbidden in `exec`; only nested `transactionSync` (synchronous callback) | **adapt**: kernel intercepts the three heads and maps to nested savepoint scope; module code awaits between statements, so S2 decides feasibility |
 | m5 | Aborted until `ROLLBACK TO` | A failed statement marks the invocation aborted; only `ROLLBACK TO` clears it; never commits | `R:host_calls.rs:150-154`, `R:host_calls.rs:1011-1020`, `R:host_calls.rs:1067-1072` | | **keep** |
@@ -1387,7 +1411,7 @@ DO SQLite limits used below: 100 KB/statement, 100 bound params, 100 columns/tab
 
 #### E.a.5 Runtime-owned tables
 
-Disposition for every table: **keep** the name, columns and semantics inside the tenant DO (export/import and replay depend on them). Pruning rules change only where a note says so (0009 for receipts).
+Disposition for every table: **keep** the name, columns and semantics inside the tenant DO (export/import and replay depend on them). Pruning rules change only where a note says so (0009 for receipts). Exception: `_gonvex_action_outbox` gains `max_attempts` and a `dead` status, dead rows are kept, and the hop guard marks a row `dead` instead of deleting it (IB2).
 
 Tenant database (every tenant DO):
 
@@ -1411,6 +1435,10 @@ Tenant database (every tenant DO):
 | `members` | Tenant identity (runtime-provisioned) | `S:provision.rs:1563-1572` | App-owned |
 
 Control Plane tables this section touches (location ruled in 0012 R6, R7: scheduled jobs and storage uploads move to the tenant object; support sessions, commands and control idempotency stay in the control object): `gonvex_scheduled_jobs` (`S:control_schema.sql:261-301`), `gonvex_storage_uploads` (`S:control_schema.sql:350-358`), `gonvex_support_sessions`/`gonvex_support_commands` (`S:control_schema.sql:247-260`), `gonvex_control_idempotency` (`S:control_schema.sql:225-232`, never pruned).
+
+#### E.a.5b Moving existing data (`gonvex-admin export-sqlite`)
+
+`docs/sqlite-storage.md:181-330` describes the Postgres-to-SQLite export (`--keep-epoch` and the new-epoch reset, no DDL translation, integrity and sample checks, BLOB rejection). Disposition: **not contract** for the kernel. Tenant transfer from SQLite to a Durable Object and back is P03's tool (`cloudflare/tools/tenant-transfer/`), which must preserve the replica epoch per 0008 and reject BLOB values as this export does.
 
 #### E.a.6 Migrations
 
@@ -1438,7 +1466,7 @@ Control Plane tables this section touches (location ruled in 0012 R6, R7: schedu
 
 | Item | Rust | Source | Cloudflare | Disposition |
 |---|---|---|---|---|
-| Job table | Control Plane `gonvex_scheduled_jobs` (id, project, tenant, function_path, args, run_at, scheduled_for, cron_name, provenance, status `pending\|completed`, claim_sequence, claim_token, lease_until, wake_key, timestamps); indexes for due one-shot, due cron, completed, claim order; unique one pending run per (project,tenant,cron); unique one unclaimed wake per (project,tenant,wake_key) | `S:control_schema.sql:261-301` | | **adapt**: per-tenant table in the tenant DO (drop project/tenant columns); one DO alarm at min(next due) |
+| Job table | Control Plane `gonvex_scheduled_jobs` (id, project, tenant, function_path, args, run_at, scheduled_for, cron_name, provenance, status `pending\|completed`, claim_sequence, claim_token, lease_until, wake_key, timestamps); indexes for due one-shot, due cron, completed, claim order; unique one pending run per (project,tenant,cron); unique one unclaimed wake per (project,tenant,wake_key) | `S:control_schema.sql:261-301` | | **adapt**: per-tenant table in the tenant DO (drop project/tenant columns, 0012 R6); status gains `dead` (IB2); one DO alarm at min(next due) |
 | `ctx.scheduler.runAfter(delayMs, fn, args)` | Host call `scheduleAfter`; `run_at = now + delay` | `V8:gonvex_bootstrap.js:650-655` | | **keep** |
 | `runAt(atUnixMs, fn, args)` | Host call `scheduleAt` | `V8:gonvex_bootstrap.js:656-661` | | **keep** |
 | `wakeAt(atUnixMs, fn, args)` | `scheduleAt` with `coalesce:true` | `V8:gonvex_bootstrap.js:662-668` | | **keep** |
@@ -1537,11 +1565,11 @@ Today: outbox Actions retry forever with backoff capped at 15 min (E.c); schedul
 
 | Op | Rust | Source | Disposition |
 |---|---|---|---|
-| `generateUploadUrl` | Anonymous requires `GONVEX_PUBLIC_URL`; declared `size` ≤128 MiB (`MAX_DIRECT_STORE_BYTES`); inserts `pending` row; if public URL set: registers ticket in Control Plane `gonvex_storage_uploads` and returns proxy `POST` URL, else presigned `PUT`; TTL `expiresMs` (ceil to s) default 900 s; returns `{fileId,url,method,headers}` | `R:storage.rs:151-217`, `R:storage.rs:25-27` | **adapt**: R2 presigned PUT or Worker proxy (Worker body limit 100 MB on Free/Pro < 128 MiB: proxy path needs presigned/multipart); ticket moves into tenant DO |
-| `getUrl` | `metadata(finalize=true)`; proxy URL (10 min) if public URL set; else unsigned object URL when `public`; else presigned GET 10 min | `R:storage.rs:219-231` | **adapt** |
-| `generateDownloadUrl` | `metadata(finalize=false)`; TTL `ttlMs` default 600 s; proxy or presigned GET | `R:storage.rs:232-243` | **adapt** |
-| `getMetadata` | `metadata(finalize=true)` | `R:storage.rs:244-248` | **keep** |
-| `delete` | `metadata(false)`; DELETE object (404 ok); then DELETE row (not atomic with object) | `R:storage.rs:249-270`, `R:storage.rs:687-703` | **adapt** (R2 `delete`) |
+| `generateUploadUrl` | Anonymous requires `GONVEX_PUBLIC_URL`; declared `size` ≤128 MiB (`MAX_DIRECT_STORE_BYTES`); inserts `pending` row; if public URL set: registers ticket in Control Plane `gonvex_storage_uploads` and returns proxy `POST` URL, else presigned `PUT`; TTL `expiresMs` (ceil to s) default 900 s; returns `{fileId,url,method,headers}` | `R:storage.rs:151-217`, `R:storage.rs:25-27` | **replace** (IB1: owner = caller): R2 presigned PUT or Worker proxy (Worker body limit 100 MB on Free/Pro < 128 MiB: proxy path needs presigned/multipart); ticket moves into tenant DO |
+| `getUrl` | `metadata(finalize=true)`; proxy URL (10 min) if public URL set; else unsigned object URL when `public`; else presigned GET 10 min | `R:storage.rs:219-231` | **replace** (IB1: owner check for private files) |
+| `generateDownloadUrl` | `metadata(finalize=false)`; TTL `ttlMs` default 600 s; proxy or presigned GET | `R:storage.rs:232-243` | **replace** (IB1: owner check for private files) |
+| `getMetadata` | `metadata(finalize=true)` | `R:storage.rs:244-248` | **replace** (0012 R12: owner check for private files) |
+| `delete` | `metadata(false)`; DELETE object (404 ok); then DELETE row (not atomic with object) | `R:storage.rs:249-270`, `R:storage.rs:687-703` | **replace** (IB1: owner check; R2 `delete`) |
 | `store` | base64 ≤128 MiB decoded; PUT; insert `uploaded` row with sha256 checksum | `R:storage.rs:271-318` | **adapt**: 128 MiB base64 through V8 exceeds a 128 MB isolate; cap lower and route large blobs via upload URLs |
 | Finalize on read | `pending` + `finalize` → HEAD; if present, set `uploaded`, size, content type, ETag checksum. HEAD runs **inside an open tenant write transaction** | `R:storage.rs:604-680`, `R:storage.rs:642-683` | **adapt**: HEAD first (R2 `head`), then `transactionSync` (no I/O inside it) |
 | Tenant scoping | Every metadata read filters `id` and `tenant_id` | `R:storage.rs:645-650` | **keep** |
@@ -1559,7 +1587,7 @@ Today: outbox Actions retry forever with backoff capped at 15 min (E.c); schedul
 | Single-use upload (proxy mode) | Ticket `gonvex_storage_uploads(object_key PK, project, tenant, file_id, consumed_at)`; reject if consumed or row not `pending`; claim via upsert `consumed_at=now WHERE consumed_at IS NULL` committed before PUT; PUT with `If-None-Match: *` (412/409 → "upload already consumed" → HTTP 409); failed PUT releases claim; tickets never pruned | `S:control_schema.sql:350-358`, `R:storage.rs:382-470`, `R:storage.rs:472-490`, `R:lib.rs:829-841` | **adapt**: ticket in tenant DO; R2 conditional put (`onlyIf`) |
 | Single-use upload (presign mode) | None: presigned PUT reusable until expiry; no size condition | `R:storage.rs:203-207` | **replace**: always ticketed |
 | Upload route | `POST`/`PUT /storage/{*key}` requires `upload=1` and valid upload signature; body read ≤128 MiB (`body::to_bytes(…,128<<20)`) else 413; returns `{storageId}`; router also has `DefaultBodyLimit` 64 MiB (does not apply to a raw `Body`) | `R:lib.rs:560-576`, `R:lib.rs:780-841` | **adapt** (Worker route; body limit per plan) |
-| Download route | `GET /storage/{*key}`: rejects `upload` param or bad signature (403); forwards `Range`; passes 200/206; forwards `accept-ranges, content-length, content-range, content-type, etag, last-modified`; `Cache-Control: private, max-age=300`; 404 otherwise; streams body | `R:lib.rs:662-720` | **adapt** (R2 `get` with `range`) |
+| Download route | `GET /storage/{*key}`: rejects `upload` param or bad signature (403); forwards `Range`; passes 200/206; forwards `accept-ranges, content-length, content-range, content-type, etag, last-modified`; `Cache-Control: private, max-age=300`; 404 otherwise; streams body | `R:lib.rs:662-720` | **replace** (0012 R13: file-row lookup first; then R2 `get` with `range`) |
 | Inline allowlist | Inline only: `image/png, image/jpeg, image/gif, image/webp, image/avif, audio/mpeg, audio/ogg, audio/wav, audio/webm, audio/mp4, video/mp4, video/webm, video/ogg, application/pdf`; else `application/octet-stream` + `attachment`; always `nosniff`; CSP `default-src 'none'; base-uri 'none'` (inline) or `sandbox; default-src 'none'; base-uri 'none'` | `R:lib.rs:724-778` | **keep** |
 | CORS | `*`; `GET, POST, PUT, OPTIONS`; header `Content-Type`; OPTIONS requires valid upload signature | `R:lib.rs:843-885` | **keep** |
 | Size limits summary | Declared upload ≤128 MiB; proxy body ≤128 MiB; `store` ≤128 MiB; sandbox import ≤ `sandbox.max_file_bytes` | `R:storage.rs:26`, `R:storage.rs:158`, `R:storage.rs:274-280`, `R:lib.rs:815-818` | **adapt** to Worker/isolate limits |
@@ -1652,7 +1680,7 @@ Disposition: the 250 ms coalescing window and the `presence.*` frame shapes are 
 
 ### E.receipts Reducer receipts
 
-Disposition for every row: **keep** except pruning, which is **replace** per 0009.
+Disposition for every row: **keep** except pruning, which is **replace**: per 0009 for `_gonvex_reducer_idempotency`, per 0012 R9 (24 h expiry) for `gonvex_control_idempotency`.
 
 | Item | Rust | Source |
 |---|---|---|
@@ -1667,6 +1695,8 @@ Disposition for every row: **keep** except pruning, which is **replace** per 000
 Disposition: **replace** (intended, IB3). Rule in `contract-changes/0009-receipt-expiry.md`: results expire after `offlineMaxAgeMs + 24 h` and leave a tombstone; a call that hits a tombstone gets `reducer.error{class:"rejected"}` instead of running again; a `null` window keeps receipts as in Rust; tombstones are deleted after 365 days.
 
 ### E.timers One alarm per tenant DO
+
+Disposition: **adapt** (every Rust timer listed here multiplexes onto the tenant DO's single alarm; handlers stay idempotent).
 
 Every periodic task in this section multiplexes onto the single DO alarm, set to the minimum of: next scheduled job `run_at`; next outbox `available_at` or lease expiry; change-feed prune (hourly); completed-job prune (600 s); receipt prune; membership projection backoff (2–10 s); presence grace end (when hibernating); support last-seen flush (5 s close batch, 300 s refresh); targeted-wake flush (5 s). DO alarms are at-least-once, so every handler must be idempotent (the Rust handlers already are: claims, revision guards, conditional deletes).
 
@@ -1684,10 +1714,10 @@ new note and waits for the lead.
 | 0005 | Loading module bundles without `eval` | **open** (S2 numbers) | K04, K19 |
 | 0006 | Module SQL that opens savepoints | **open** (S2) | K01, K04, K07 |
 | 0007 | PBKDF2-SHA256 at 210,000 rounds | decided, K06 verifies | K06 |
-| 0008 | Replica epoch hashes the stored `database_url` | decided | P03, K10 |
+| 0008 | Replica epoch hashes the stored `database_url` | decided | P03, K10, M03 |
 | 0009 | Reducer receipt expiry with tombstones | decided | K07 |
 | 0010 | Change capture without custom functions or hooks | **open** (S1 numbers) | K02, K03 |
 | 0011 | `$N` placeholders, read-only Queries, 100-parameter limit | decided | K01, K04 |
-| 0012 | Lead rulings R1-R25 on items found during the freeze (R22, R25 open) | decided except R22 (S3), R25 (S2) | K05, K06, K11, K12, K13, K14, K19 |
+| 0012 | Lead rulings R1-R26 on items found during the freeze (R22, R25 open) | decided except R22 (S3), R25 (S2) | K05, K06, K11, K12, K13, K14, K19 |
 
 Stage 1 cannot start K01-K06 until 0004, 0005, 0006 and 0010 are decided at gate G0.
