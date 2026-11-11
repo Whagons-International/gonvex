@@ -76,10 +76,19 @@ of every file) has one process-wide soft limit,
 `GONVEX_SQLITE_CACHE_BUDGET_MB` (default 128; 0 disables): past it page
 caches recycle instead of growing. Idle readers close after
 `database_idle_timeout` (runtime default 15 s).
-While connection heap (schemas, statements) exceeds three quarters of that budget,
+While readers' connection heap (schemas, statements) exceeds three quarters of that budget,
 the reader sweep closes warm readers of quiet databases first, then busy databases' idle
 extra readers, the latter at most once per `GONVEX_DB_BUSY_BUDGET_CLOSE_MS` (default 60 s;
-0 = every sweep) per database, since a busy database reopens them at once.
+0 = every sweep) per database, since a busy database reopens them at once. Writers' parsed
+schemas (`sqliteWriterSchemaBytes` in the operations metrics) are not counted: every open
+database keeps its writer, so closing readers cannot free them. Size the budget for the warm
+readers to keep: one per busy tenant is one parsed schema each (57 MB for the Whagons tenant
+schema of 2026-11-10).
+
+Startup provisions tenants `GONVEX_STARTUP_PROVISION_CONCURRENCY` at a time (default 1:
+concurrent schema parses contend on SQLite's memory mutex and are slower than serial ones)
+and retries a failed tenant once alone. Pool waits give up after
+`GONVEX_DB_ACQUIRE_TIMEOUT_MS` (default 30,000).
 
 Read-only connections' worker threads run at nice 10 (`GONVEX_SQLITE_READER_NICE`, default 10,
 0 = unchanged), as do the offload/snapshot pool threads (`GONVEX_OFFLOAD_NICE`, default 10), so
