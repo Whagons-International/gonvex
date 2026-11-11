@@ -53,7 +53,7 @@ pings. Queue consumers: 15 minutes. Workflow steps: no wall-clock limit.
 | IB1 | Private files | Owner checked only for sandbox `importFile` (E.d.4) | Check the owner of a private file on **every** URL mint, signed download, metadata read and delete; `ownerId` on upload must be the caller (0001; metadata and proxy: 0012 R12, R13) | 0001, 0012 |
 | IB2 | Actions | `actions.enqueue` jobs retry forever (backoff from 1 s, capped at 15 min); scheduled jobs never retry (E.b) | Outbox Actions: at most 8 attempts, then `dead`. Scheduled jobs: still one attempt, a failure ends `dead` not `completed` (E.b.5) | 0001 |
 | IB3 | Reducer receipts | Receipt table never pruned (E.receipts) | Receipt results expire after the client's offline window; a tombstone refuses late duplicates | 0001, 0009 |
-| IB4 | Webhooks | No runtime route: external adapters verify and invoke an Action (D.1 Webhooks) | One Ingress Worker for every webhook | 0001, 0002 |
+| IB4 | Webhooks | No runtime route: external adapters verify and invoke an Action (D.1 Webhooks) | One Ingress Worker for every webhook, forwarding the raw body; signatures verified in the invoked Action or the Ingress Worker (0045) | 0001, 0002 |
 | IB5 | Visibility delivery | Rust never delivers a row that becomes visible when its parent is inserted later, though a fresh snapshot shows it (0031) | The kernel delivers it, converging on the snapshot state | 0032 |
 
 Out of scope by decision of the brief: the native-rows binary snapshot path (the shipped SDK never
@@ -1747,6 +1747,12 @@ new note and waits for the lead.
 | 0037 | Second wave-2 review: K08, K11, K19, K14, K12 rulings; numbering | decided | K02, K11, K12, K14, K19, G3b |
 | 0038 | K14 presence findings (dead-peer detection) | ruled in 0037 | K14, G3b |
 | 0039 | K12 Action runtime findings (renumbered by K12) | ruled in 0037 | K11, K12 |
+| 0040 | K21 bridge support findings | ruled in 0045 | K21, V02 |
+| 0041 | K15 telemetry findings | ruled in 0045 | K15 |
+| 0042 | K16 public functions findings | ruled in 0045 | K16, V01 |
+| 0043 | K18 ingress findings | ruled in 0045 (IB4 amended) | K17, K18, V01 |
+| 0044 | K17 service principals findings | ruled in 0045 | K17, V02 |
+| 0045 | Batch-C review rulings; numbering; assembly package proposal | decided | K15-K18, K21, V01, V02 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
