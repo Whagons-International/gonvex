@@ -1,0 +1,29 @@
+{
+  "noTx": {
+    "status": 200,
+    "ms": 110.6,
+    "value": {
+      "n": 1,
+      "kind": "noop",
+      "insideMs": 0,
+      "inTx": false,
+      "ms": 63,
+      "perCallMs": 63
+    }
+  },
+  "inTx": {
+    "status": 200,
+    "ms": 96,
+    "body": "{\"n\":1,\"kind\":\"noop\",\"insideMs\":0,\"inTx\":true,\"ms\":0,\"perCallMs\":0}"
+  },
+  "reducerInTx": {
+    "status": 200,
+    "ms": 58.7,
+    "body": "{\"mode\":\"rpc\",\"inst\":\"44dccc1d\",\"active\":\"dl\",\"results\":[{\"path\":\"s5.slow\",\"ms\":0,\"startedAt\":1794385775190,\"envelope\":{\"status\":\"ok\",\"value\":\"{\\\"generation\\\":\\\"dl\\\",\\\"isolate\\\":\\\"bb1e71a4\\\",\\\"n\\\":1}\"},\"committed\":true,\"stats\":{\"calls\":1,\"statements\":1,\"rowsRead\":0,\"rowsWritten\":0,\"catalogStatements\":0,\"catalogRowsRead\":0,\"savepoints\":0,\"byKind\":{\"dbQuery\":1},\"decltypeDependentColumns\":0}}]}"
+  },
+  "instances": [
+    "44dccc1d",
+    "44dccc1d",
+    "44dccc1d"
+  ]
+}

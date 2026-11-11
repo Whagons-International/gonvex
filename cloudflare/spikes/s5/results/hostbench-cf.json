@@ -1,0 +1,212 @@
+{
+  "reps": 5,
+  "n": 300,
+  "rows": [
+    {
+      "code": "tiny",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.20532104333333337,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.17251106666666677,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.2224172733333334,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.462616506666667,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.12098670000000009,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.18684499666666624,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.09045089333333332,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.15464484000000084,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.09856254000000035,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "tiny",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.1932136300000002,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.07764019000000037,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.3106855266666677,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.068745100000001,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.20453728333333251,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.09779691999999916,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.17880682333333273,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.11282292666666612,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.22364205000000006,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "noop",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.10295952999999979,
+      "doPerCallMs": 0
+    },
+    {
+      "code": "whagons",
+      "kind": "query",
+      "inTx": false,
+      "status": 200,
+      "clientPerCallMs": 0.14663669333333473,
+      "doPerCallMs": 0
+    }
+  ],
+  "summary": {
+    "tiny/noop/noTx": {
+      "clientPerCallMs": {
+        "n": 5,
+        "min": 0.1,
+        "p50": 0.1,
+        "p90": 0.2,
+        "max": 0.2,
+        "mean": 0.1
+      },
+      "errors": 0
+    },
+    "tiny/query/noTx": {
+      "clientPerCallMs": {
+        "n": 5,
+        "min": 0.2,
+        "p50": 0.2,
+        "p90": 0.5,
+        "max": 0.5,
+        "mean": 0.2
+      },
+      "errors": 0
+    },
+    "whagons/noop/noTx": {
+      "clientPerCallMs": {
+        "n": 5,
+        "min": 0.1,
+        "p50": 0.1,
+        "p90": 0.1,
+        "max": 0.1,
+        "mean": 0.1
+      },
+      "errors": 0
+    },
+    "whagons/query/noTx": {
+      "clientPerCallMs": {
+        "n": 5,
+        "min": 0.1,
+        "p50": 0.2,
+        "p90": 0.3,
+        "max": 0.3,
+        "mean": 0.2
+      },
+      "errors": 0
+    }
+  }
+}

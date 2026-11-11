@@ -1,0 +1,108 @@
+{
+  "facet-abort": {
+    "warm": "ok",
+    "inflight": {
+      "clientMs": 985,
+      "status": "ok",
+      "value": "{\"generation\":\"A\",\"isolate\":\"0086f875\",\"n\":40000}",
+      "committed": true
+    },
+    "activate": {
+      "error": ""
+    },
+    "next": {
+      "status": "ok",
+      "value": "{\"generation\":\"A\",\"isolate\":\"69373d3d\"}"
+    }
+  },
+  "facet-drain": {
+    "warm": "ok",
+    "inflight": {
+      "clientMs": 1954,
+      "status": "ok",
+      "value": "{\"generation\":\"A\",\"isolate\":\"a267bf85\",\"n\":40000}",
+      "committed": true
+    },
+    "activate": {
+      "previous": "A",
+      "active": "B",
+      "preloadMs": 112,
+      "draining": 0,
+      "drainMs": 0,
+      "sent": 0,
+      "at": 1794386530385,
+      "inst": "b4db6b6f"
+    },
+    "next": {
+      "status": "ok",
+      "value": "{\"generation\":\"B\",\"isolate\":\"4ab508ca\"}"
+    }
+  },
+  "facet-sleepy-abort": {
+    "inflight": {
+      "doneAtMs": 535,
+      "status": "error",
+      "message": "module generation changed",
+      "committed": false
+    },
+    "activate": {
+      "doneAtMs": 524,
+      "previous": "A",
+      "active": "B",
+      "preloadMs": 37,
+      "draining": 1,
+      "drainMs": 0,
+      "sent": 0,
+      "at": 1794386532758,
+      "inst": "643a4494"
+    },
+    "rowsAfter": {
+      "status": "ok",
+      "value": "[]"
+    }
+  },
+  "facet-sleepy-drain": {
+    "inflight": {
+      "doneAtMs": 1569,
+      "status": "ok",
+      "value": "{\"generation\":\"A\",\"isolate\":\"c3c73b45\"}",
+      "committed": true
+    },
+    "activate": {
+      "doneAtMs": 1567,
+      "previous": "A",
+      "active": "B",
+      "preloadMs": 40,
+      "draining": 1,
+      "drainMs": 1080,
+      "sent": 0,
+      "at": 1794386533709,
+      "inst": "83c509d7"
+    },
+    "rowsAfter": {
+      "status": "ok",
+      "value": "[\"drain-after\",\"drain-before\"]"
+    }
+  },
+  "runner": {
+    "inflight": {
+      "status": "ok",
+      "value": "{\"generation\":\"A\",\"isolate\":\"f4bd8d05\",\"n\":4000}"
+    },
+    "inflightMs": 0,
+    "activate": {
+      "previous": "A",
+      "active": "B",
+      "preloadMs": 139,
+      "draining": 0,
+      "drainMs": 0,
+      "sent": 0,
+      "at": 1794386535876,
+      "inst": "7448bd1c"
+    },
+    "next": {
+      "status": "ok",
+      "value": "{\"generation\":\"B\",\"isolate\":\"62dd7283\"}"
+    }
+  }
+}

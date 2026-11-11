@@ -1,0 +1,197 @@
+{
+  "tenant": "ws-mwbvh6i3",
+  "count": 1000,
+  "opened": 1000,
+  "code": "whagons",
+  "swaps": [
+    {
+      "k": 1,
+      "gen": "whagons:S1:mwbvh6i3",
+      "activateClientMs": 1111,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S0",
+        "active": "S1",
+        "preloadMs": 866,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 1001,
+        "at": 1794386653298,
+        "inst": "3d5ae328"
+      },
+      "reloadReceived": 1000,
+      "load": null,
+      "reloadAfterResponseMs": {
+        "n": 1000,
+        "min": -29,
+        "p50": -17,
+        "p90": -8,
+        "max": 3,
+        "mean": -17.1
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 2,
+      "gen": "whagons:S2:mwbvh6i3",
+      "activateClientMs": 872,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S1",
+        "active": "S2",
+        "preloadMs": 700,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 1001,
+        "at": 1794386657348,
+        "inst": "3d5ae328"
+      },
+      "reloadReceived": 1000,
+      "load": null,
+      "reloadAfterResponseMs": {
+        "n": 1000,
+        "min": -25,
+        "p50": -14,
+        "p90": -6,
+        "max": 0,
+        "mean": -13.5
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 3,
+      "gen": "whagons:S3:mwbvh6i3",
+      "activateClientMs": 973,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S2",
+        "active": "S3",
+        "preloadMs": 812,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 1001,
+        "at": 1794386661249,
+        "inst": "3d5ae328"
+      },
+      "reloadReceived": 1000,
+      "load": null,
+      "reloadAfterResponseMs": {
+        "n": 1000,
+        "min": -20,
+        "p50": -10,
+        "p90": -3,
+        "max": 141,
+        "mean": -10
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 4,
+      "gen": "whagons:S4:mwbvh6i3",
+      "activateClientMs": 1291,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S3",
+        "active": "S4",
+        "preloadMs": 1030,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 1001,
+        "at": 1794386665199,
+        "inst": "3d5ae328"
+      },
+      "reloadReceived": 1000,
+      "load": null,
+      "reloadAfterResponseMs": {
+        "n": 1000,
+        "min": -64,
+        "p50": -48,
+        "p90": -34,
+        "max": -2,
+        "mean": -46.6
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 5,
+      "gen": "whagons:S5:mwbvh6i3",
+      "activateClientMs": 891,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S4",
+        "active": "S5",
+        "preloadMs": 679,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 1001,
+        "at": 1794386669493,
+        "inst": "3d5ae328"
+      },
+      "reloadReceived": 1000,
+      "load": null,
+      "reloadAfterResponseMs": {
+        "n": 1000,
+        "min": -35,
+        "p50": -22,
+        "p90": -7,
+        "max": 21,
+        "mean": -20.2
+      },
+      "closesSoFar": 0
+    }
+  ],
+  "closesDuringSwaps": 0,
+  "framesDuringSwaps": 46000,
+  "statsAfterSwaps": {
+    "inst": "3d5ae328",
+    "isolate": "87297a89",
+    "build": "loader",
+    "constructedAt": 1794386642795,
+    "active": {
+      "id": "whagons:S5:mwbvh6i3",
+      "code": "whagons",
+      "label": "S5",
+      "nonce": "mwbvh6i3"
+    },
+    "sockets": 1001,
+    "loads": [
+      {
+        "id": "whagons:S0:mwbvh6i3",
+        "at": 1794386642920,
+        "fetchMs": 299,
+        "appBytes": 4157917
+      },
+      {
+        "id": "whagons:S1:mwbvh6i3",
+        "at": 1794386653298,
+        "fetchMs": 329,
+        "appBytes": 4157917
+      },
+      {
+        "id": "whagons:S2:mwbvh6i3",
+        "at": 1794386657348,
+        "fetchMs": 170,
+        "appBytes": 4157917
+      },
+      {
+        "id": "whagons:S3:mwbvh6i3",
+        "at": 1794386661249,
+        "fetchMs": 308,
+        "appBytes": 4157917
+      },
+      {
+        "id": "whagons:S4:mwbvh6i3",
+        "at": 1794386665199,
+        "fetchMs": 296,
+        "appBytes": 4157917
+      },
+      {
+        "id": "whagons:S5:mwbvh6i3",
+        "at": 1794386669493,
+        "fetchMs": 158,
+        "appBytes": 4157917
+      }
+    ],
+    "ballastMb": 0
+  }
+}

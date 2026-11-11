@@ -1,0 +1,9 @@
+0 activate 200 {"previous":"A","active":"B0","preloadMs":37,"draining":0,"drainMs":0,"sent":0,"at":1794386584712,"inst":"ecb4ff3e"} | inflight ok | next {"generation":"B0","isolate":"dee7e836"}
+1 activate 500 {"error":""} | inflight ok | next {"generation":"A","isolate":"58f6791f"}
+2 activate 200 {"previous":"A","active":"B2","preloadMs":58,"draining":0,"drainMs":0,"sent":0,"at":1794386587819,"inst":"d910d98c"} | inflight ok | next {"generation":"B2","isolate":"748e0b4e"}
+3 activate 200 {"previous":"A","active":"B3","preloadMs":74,"draining":0,"drainMs":0,"sent":0,"at":1794386589254,"inst":"8bcb20f5"} | inflight ok | next {"generation":"B3","isolate":"59dd449e"}
+4 activate 200 {"previous":"A","active":"B4","preloadMs":96,"draining":0,"drainMs":0,"sent":0,"at":1794386590325,"inst":"f8980776"} | inflight ok | next {"generation":"B4","isolate":"f8880e24"}
+5 activate 200 {"previous":"A","active":"B5","preloadMs":27,"draining":0,"drainMs":0,"sent":0,"at":1794386591802,"inst":"234c579a"} | inflight ok | next {"generation":"B5","isolate":"91050cab"}
+6 activate 200 {"previous":"A","active":"B6","preloadMs":28,"draining":0,"drainMs":0,"sent":0,"at":1794386592382,"inst":"d38260d9"} | inflight ok | next {"generation":"B6","isolate":"a0a147c9"}
+7 activate 200 {"previous":"A","active":"B7","preloadMs":48,"draining":0,"drainMs":0,"sent":0,"at":1794386593249,"inst":"503434e2"} | inflight ok | next {"generation":"B7","isolate":"0dfb119e"}
+activate failures 1 of 8
