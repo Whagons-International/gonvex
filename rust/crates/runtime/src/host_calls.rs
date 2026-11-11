@@ -1152,12 +1152,35 @@ impl SqlCalls {
         self.require_open()?;
         let key = self.resolve_table_key(table, key)?;
         require_row_id(&id)?;
-        let values: BTreeMap<String, Value> = object(patch, "patch")?.into_iter().collect();
+        let mut values: BTreeMap<String, Value> = object(patch, "patch")?.into_iter().collect();
         if values.is_empty() {
             return Err("an update requires at least one column".to_owned());
         }
+        // The key names the row. A patch may restate it (callers often pass
+        // a whole record), but never change it; restating it would also put
+        // the key in SET, which makes SQLite scan every child foreign key.
+        let key_column = key.trim_matches('"');
+        let restated = values
+            .keys()
+            .filter(|column| column.trim().eq_ignore_ascii_case(key_column))
+            .cloned()
+            .collect::<Vec<_>>();
+        for column in restated {
+            if values.remove(&column).as_ref() != Some(&id) {
+                return Err(format!(
+                    "db.update cannot change primary key {key_column:?} of {table:?}; delete the row and insert a new one"
+                ));
+            }
+        }
         let catalog = self.catalog_table(table)?;
         let quoted_table = quote_identifier(table)?;
+        if values.is_empty() {
+            // Only the unchanged key: nothing to write, return the row.
+            let statement = format!("SELECT * FROM {quoted_table} WHERE {key} = $1");
+            let parameters = [Parameter::scalar(&id)?];
+            return self
+                .run(|conn| returning_record_row(conn, table, &statement, &parameters, &catalog));
+        }
         let assignments = values
             .keys()
             .enumerate()

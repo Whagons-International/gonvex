@@ -1013,6 +1013,9 @@ fn apply_migrations_locked<'a>(
                 channel: Some("system".to_owned()),
                 ..Provenance::default()
             };
+            // Repair preludes may re-point keys; outside migrations the
+            // capture hook rejects any UPDATE that changes a primary key.
+            let _key_changes = crate::capture::allow_key_changes(&mut *connection).await?;
             if migration.no_transaction {
                 // `-- gonvex:no-transaction`: each statement commits on its own.
                 crate::execute_script(&mut *connection, &migration.sql).await?;

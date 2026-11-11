@@ -772,3 +772,60 @@ async fn logical_record_crud_preserves_defaults_json_scalars_and_final_values() 
     );
     calls.finish(true).await.unwrap();
 }
+
+#[tokio::test]
+async fn update_strips_a_restated_key_and_rejects_a_changed_one() {
+    let database = TestDatabase::new(
+        "CREATE TABLE calls (_id TEXT PRIMARY KEY, status TEXT NOT NULL);
+         INSERT INTO calls VALUES ('call-1','ringing'),('call-2','ringing');",
+    )
+    .await;
+    let mut calls = database.calls(DatabaseCapability::Reducer).await;
+    // Like Whagons' calling store: the whole record, key included, as patch.
+    let row = calls
+        .update(
+            "calls",
+            "_id",
+            serde_json::json!("call-1"),
+            serde_json::json!({"_id":"call-1","status":"answered"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(row, serde_json::json!({"_id":"call-1","status":"answered"}));
+    // A restated key alone writes nothing and returns the row.
+    let row = calls
+        .update(
+            "calls",
+            "_id",
+            serde_json::json!("call-2"),
+            serde_json::json!({"_ID":"call-2"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(row, serde_json::json!({"_id":"call-2","status":"ringing"}));
+    let error = calls
+        .update(
+            "calls",
+            "_id",
+            serde_json::json!("call-1"),
+            serde_json::json!({"_id":"call-3","status":"moved"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("cannot change primary key \"_id\""),
+        "{error}"
+    );
+    calls.finish(true).await.unwrap();
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT _id,status FROM calls ORDER BY _id")
+        .fetch_all(&database.pools.reader(&database.url).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("call-1".to_owned(), "answered".to_owned()),
+            ("call-2".to_owned(), "ringing".to_owned())
+        ]
+    );
+}
