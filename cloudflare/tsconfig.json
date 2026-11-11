@@ -22,5 +22,6 @@
   // SDK is written for the repo's base flags, not these, and like the
   // originals these files are run by the test runner, not type-checked here.
   // kernel/host (K04) has its own tsconfig, vitest config and test Worker.
-  "exclude": ["kernel/storage/test/sdk", "kernel/host"]
+  // kernel/files (K13) too, and checks router/storage with it.
+  "exclude": ["kernel/storage/test/sdk", "kernel/host", "kernel/files"]
 }

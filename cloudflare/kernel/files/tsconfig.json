@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"]
+  },
+  // The /storage routes (router/storage) are checked with the files they serve.
+  "include": [".", "../../router/storage"],
+  "exclude": ["node_modules"]
+}
