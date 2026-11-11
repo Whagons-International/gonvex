@@ -3,7 +3,7 @@
  *
  * Runs one scenario against one backend and returns its trace:
  *
- *   { backend, scenario, skipped?, failures: string[],
+ *   { backend, scenario, skipped?, failures: string[], digestsChecked,
  *     steps: [{ name, error?, observations, frames: { <session tag>: normalized frames } }],
  *     checksums: { <tenant>: { <table>: { count, sha256, rows } } } }
  *
@@ -12,19 +12,23 @@
  * `control.auth.passwordLogin` from the client that will use the session, as
  * an app does.
  *
- * A trace fails on its own (independently of any diff) when a step throws or
- * an `expect` is false. diffTraces (differ.mjs) then compares traces between
+ * A trace fails on its own (independently of any diff) when a step throws,
+ * an `expect` is false, or a digest the backend sent does not match the rows
+ * it delivered (digest-check.mjs). diffTraces (differ.mjs) then compares traces between
  * backends.
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import { Recorder, sdkClient, thinClient, RawSocket, control } from './sessions.mjs';
 import { normalizeSession, normalizeValue, Names } from './normalize.mjs';
 import { checksumRows } from './checksum.mjs';
+import { checkDigests } from './digest-check.mjs';
 
 export const PASSWORD = 'conformance-password-1';
 /** Client contract both SDKs announce (the fixture generates no local executor). */
 export const CLIENT_CONTRACT = { version: 1, offlineMaxAgeMs: null };
 const QUIET_MS = 300;
+/** Default `ctx.until` limit. The mutation self-test lowers it to fail fast. */
+const UNTIL_MS = Number(process.env.GONVEX_CONFORMANCE_UNTIL_MS) || 15_000;
 const QUIET_MAX_MS = 5_000;
 
 /** Replaces backend-assigned identifiers with stable aliases, deep. */
@@ -157,8 +161,8 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
     },
     observe(label, value) { current.observations[label] = value === undefined ? '<undefined>' : value; },
     expect(condition, message) { if (!condition) throw new ExpectationError(message); },
-    /** Polls until `check()` is truthy (default 15 s). */
-    async until(check, label, timeoutMs = 15_000) {
+    /** Polls until `check()` is truthy (default 15 s, or $GONVEX_CONFORMANCE_UNTIL_MS). */
+    async until(check, label, timeoutMs = UNTIL_MS) {
       const end = Date.now() + timeoutMs;
       for (;;) {
         try { if (await check()) return; } catch {}
@@ -191,6 +195,15 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
       try { trace.checksums[tenantName][table] = checksumRows(await backend.readTable(projectId, tenantId, table), { mask: aliases.mask }); }
       catch (error) { trace.failures.push(`reading ${tenantName}.${table}: ${error.message}`); }
     }
+  }
+
+  // ---- digest self-check (raw frames, before digests are masked) ----------------
+  trace.digestsChecked = 0;
+  for (const tag of new Set(recorder.records.map(r => r.tag))) {
+    const { checked, problems } = checkDigests(recorder.records.filter(r => r.tag === tag));
+    trace.digestsChecked += checked;
+    for (const p of [...new Set(problems)].slice(0, 5)) trace.failures.push(`digest self-check, session ${tag}: ${p}`);
+    if (new Set(problems).size > 5) trace.failures.push(`digest self-check, session ${tag}: ${new Set(problems).size - 5} more mismatches`);
   }
 
   // ---- normalize ----------------------------------------------------------------

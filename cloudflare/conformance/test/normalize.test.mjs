@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSession } from '../src/normalize.mjs';
+import { normalizeSession, normalizeValue } from '../src/normalize.mjs';
 import { diffFrames, diffTraces, diffValues, diffChecksums } from '../src/differ.mjs';
 
 const rec = (dir, frame, socket = 1, step = 's') => ({ dir, frame, socket, step });
@@ -122,4 +122,26 @@ test('a no-op integrity reconcile is dropped; one that moves rows is kept', () =
   ];
   assert.deepEqual(normalizeSession(episode([])), []);
   assert.equal(normalizeSession(episode([{ id: 'n1' }])).length, 4);
+});
+
+test('0012 R20: session.ready drops replicaNativeRows, replicaSetDigest and replicaFieldPatches', () => {
+  const ready = (capabilities) => normalizeSession([rec('in', { type: 'session.ready', capabilities })])[0].frame;
+  const rust = ready({ presence: 1, replicaBatchFrames: 1, replicaNativeRows: 1, replicaSetDigest: 1, replicaFieldPatches: 1 });
+  const kernel = ready({ presence: 1, replicaBatchFrames: 1 });
+  assert.deepEqual(rust, kernel);
+  assert.deepEqual(rust.capabilities, { presence: 1, replicaBatchFrames: 1 });
+  // Other capabilities are still compared.
+  assert.notDeepEqual(ready({ presence: 1 }), kernel);
+});
+
+test('ruling 0015: error messages stay exact, JavaScript stack lines are stripped', () => {
+  const error = (e) => normalizeSession([rec('in', { type: 'reducer.error', id: 'x', class: 'rejected', error: e })])[0].frame.error;
+  const rust = 'TypeScript module host returned execution_failed: module p function errors.reject: Error: fixture rejected the intent\n    at run (file:///gonvex/p/module.js:1:28805)\n    at eventLoopTick (ext:core/01_core.js:175:7)\n    at async gonvex:bootstrap.js:788:15';
+  const other = 'TypeScript module host returned execution_failed: module p function errors.reject: Error: fixture rejected the intent\n    at run (worker.js:9:1)';
+  assert.equal(error(rust), 'TypeScript module host returned execution_failed: module p function errors.reject: Error: fixture rejected the intent');
+  assert.equal(error(rust), error(other));
+  // The message itself, host wording included, is still compared exactly.
+  assert.notEqual(error(rust), error('host call failed: fixture rejected the intent'));
+  // Observations get the same rule.
+  assert.equal(normalizeValue({ error: rust }).error, error(rust));
 });

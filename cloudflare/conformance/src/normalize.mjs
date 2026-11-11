@@ -21,6 +21,8 @@
  *  - Digests and row hashes become `<digest>`.
  *  - A `replica.needHashes` episode that moves no row is dropped.
  *  - Object keys are sorted; batched opens are sorted by path and args.
+ *  - `session.ready` loses the three capabilities of 0012 R20.
+ *  - Error text loses JavaScript stack frame lines (ruling 0015).
  *
  * Every rule is listed in RULES below; README.md explains how to change them.
  */
@@ -80,8 +82,13 @@ class Names {
   }
 }
 
-/** Free text (error messages): measured durations, embedded UUIDs and tokens. */
+/**
+ * Free text (error messages). The message is contract (ruling 0015) and is
+ * compared exactly, except for: JavaScript stack frame lines (`\n    at …`),
+ * which are not contract; measured durations; embedded UUIDs and tokens.
+ */
 const text = (v, names) => v
+  .replace(/\n[ \t]*at [^\n]*/g, '')
   .replace(/\b\d+(?:\.\d+)? ?ms\b/g, '<n> ms')
   .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, (u) => names.name('uuid', u))
   .replace(/gvx_[a-z]+_[A-Za-z0-9._-]+/g, '<token>');
@@ -102,6 +109,19 @@ function canonicalOrder(frame) {
   if (frame?.type === 'replica.openMany' && Array.isArray(frame.opens)) return { ...frame, opens: [...frame.opens].sort((a, b) => by(a).localeCompare(by(b))) };
   if (frame?.type === 'query.subscribeMany' && Array.isArray(frame.subscribes)) return { ...frame, subscribes: [...frame.subscribes].sort((a, b) => by(a).localeCompare(by(b))) };
   return frame;
+}
+
+/**
+ * Capabilities a backend may advertise in `session.ready` without them being
+ * compared: Rust advertises them to every socket though the shipped SDK never
+ * uses them, and the kernel does not (contract-changes 0012 R20).
+ */
+export const UNCOMPARED_SERVER_CAPABILITIES = ['replicaNativeRows', 'replicaSetDigest', 'replicaFieldPatches'];
+function dropUncomparedCapabilities(frame) {
+  if (frame?.type !== 'session.ready' || !frame.capabilities) return frame;
+  const capabilities = { ...frame.capabilities };
+  for (const key of UNCOMPARED_SERVER_CAPABILITIES) delete capabilities[key];
+  return { ...frame, capabilities };
 }
 
 /** Expands container frames into the frames they stand for. `state.bindings` is per socket. */
@@ -128,7 +148,7 @@ export function normalizeSession(records) {
   const snapshots = new Map();
   for (const r of records) {
     const state = sockets.get(r.socket) ?? sockets.set(r.socket, { bindings: new Map() }).get(r.socket);
-    for (const frame of expand(canonicalOrder(r.frame), state)) {
+    for (const frame of expand(canonicalOrder(dropUncomparedCapabilities(r.frame)), state)) {
       // Merge snapshot pages into one logical snapshot, emitted at the last page.
       if (frame.type === 'replica.snapshotPage' || frame.type === 'replica.snapshotEncodedPage' || frame.type === 'replica.snapshotStart') {
         const key = r.socket + '\u0000' + frame.id + '\u0000' + frame.snapshotId;
@@ -240,6 +260,8 @@ export const FRAME_POLICY = {
   'replica.syncing': 'present',
   'telemetry.batch': 'ignore',
   'telemetry.event': 'ignore',
+  // error.* are contract (CONTRACT.md A.2, keep) but timer-driven in the SDK:
+  // K15 owns a dedicated scenario for them (README, "Normalization").
   'error.envelope': 'ignore',
   'error.ack': 'ignore',
   'error.heartbeat': 'ignore',

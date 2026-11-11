@@ -12,6 +12,7 @@ cloudflare/conformance/
   src/normalize.mjs    frame normalizer (every rule is listed in RULES)
   src/differ.mjs       compares traces, prints readable diffs
   src/checksum.mjs     per-table checksums
+  src/digest-check.mjs per-backend digest self-check (digests are masked in diffs)
   src/fixture.mjs      builds the fixture bundle with the repo's own `gonvex codegen`
   src/backend.mjs      backend adapter interface
   src/backends/        rust.mjs (reference), mutant.mjs (harness self-test), index.mjs (registry)
@@ -48,38 +49,13 @@ node --test test/mutation.check.mjs          # self-test: injected drift must be
 | `--serial` | Run the backends one after another. By default every scenario runs on all backends at once. |
 | `--verbose` | Print each step and its duration. |
 
-The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`.
+The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
 
 The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 11 scenarios on two debug-build backends takes about 2 minutes.
 
 ### CI
 
-`.github/workflows/cloudflare.yml` does not exist yet. P01 owns it. Until then, run the commands above. A job for P01 to add:
-
-```yaml
-  conformance:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with: { node-version: "24" }
-      # Same V8 archive step as runtime-regression.yml ("Fetch pinned V8 ...").
-      - uses: dtolnay/rust-toolchain@1.94.0
-      - uses: Swatinem/rust-cache@v2
-        with: { workspaces: rust }
-      - run: corepack enable && corepack prepare pnpm@11.1.2 --activate
-      - run: pnpm install --frozen-lockfile && pnpm build:packages
-      - run: cargo build --locked -p gonvex-runtime
-        working-directory: rust
-      - run: node --test test/*.test.mjs && node src/cli.mjs --json "$RUNNER_TEMP/conformance.json"
-        working-directory: cloudflare/conformance
-      - run: node --test test/mutation.check.mjs
-        working-directory: cloudflare/conformance
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with: { name: conformance, path: "${{ runner.temp }}/conformance.json", if-no-files-found: ignore }
-```
+The `Conformance unit tests` job in `.github/workflows/cloudflare.yml` runs `node --test test/*.test.mjs` on every PR to `cloudflare/integration`. Those tests need no backend. Rust against Rust (`node src/cli.mjs`) and the mutation self-test (`node --test test/mutation.check.mjs`) need the Rust binary and are run by hand for now. For G0, the verifier runs them.
 
 ## What is compared
 
@@ -88,6 +64,7 @@ Each scenario runs on every backend in a fresh project. Generation 1 of the fixt
 - **Steps.** Each step records the error it threw, if any. A step error or a failed `ctx.expect` fails that backend's run, even when the traces agree.
 - **Observations.** These are values the scenario chose to record: Reducer results, error classes, collection rows and presence maps.
 - **Frames.** Every frame each session sent and received, normalized and grouped by step. Within a step, frames are compared as a multiset per session. Ordering between sessions, and between frames that race, is not part of the contract.
+- **Digests (per backend).** The normalizer masks digests, because they cover values that differ between runs. So each backend's raw frames are checked on their own, before normalization. For every collection subscription, `src/digest-check.mjs` keeps the row hashes the client holds: from snapshots, from deltas, and from the `keys`/`hashes` a client claims when it resumes. It then recomputes every digest in `replica.ready` and `replica.delta` with the SDK's algorithm (`xor1` aggregate or the legacy pair hash, from `packages/client/src/replica-integrity.ts`). A mismatch fails that backend's run. The report prints how many digests were verified on each backend.
 - **Table checksums.** For every seeded tenant, the harness reads all rows of `board`, `notes` and `note_shares` through `readTable`. It masks them, sorts them, and hashes them with sha256 over canonical JSON lines. When a checksum differs, the diff shows the differing rows.
 
 ### Normalization
@@ -102,15 +79,17 @@ The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `te
 | Opaque scopes and epochs become `<scope#n>` and `<epoch#n>`. | They are hashes or random values. |
 | Revisions become ranks `r1, r2, …`. Live Query `sequence` values get their own ranks, `s1, …`. In observations they become `<revision>`. | Order is contract. Absolute numbers depend on provisioning. |
 | Clocks (`*At`, `*Ms`, `since`, `serverTime`) become `<time>`. `trace` and `device` are dropped. Durations inside error text (`1999 ms`) become `<n> ms`. | They vary from run to run. |
-| Digests and row hashes become `<digest>`. | They cover values that differ between runs. |
+| In error text, JavaScript stack frame lines (`\n    at …`) are stripped. | The message, which is the first line and includes the host wording such as `host call failed:`, is contract and compared exactly. Stack positions are not contract (ruling 0015). |
+| Digests and row hashes become `<digest>`. | They cover values that differ between runs. The digest self-check verifies each one on its own backend instead. |
+| `session.ready` loses `replicaNativeRows`, `replicaSetDigest` and `replicaFieldPatches`. | Rust advertises them to every socket, but the shipped SDK never uses them and the kernel does not advertise them (contract-changes 0012 R20). |
 | `replica.batch`, `replica.readyMany`, `query.batch`, `query.fanout` and `reducer.callMany` are expanded into the frames they stand for. | Batching is a transport choice. |
 | Snapshot pages are merged into one `replica.snapshot` with rows sorted by key. ACKs are dropped. | Page size and credits are tuning. |
 | The `opens` of a batch are sorted by path and args. | The SDK orders them by random subscription id. |
 | `replica.needHashes`, followed by the client's integrity reopen and a reply that moves no row, is dropped. Episodes that move rows are kept. | Rust asks for hashes depending on timing. |
 | `replica.watermark`, `control.watermark`, `query.progress` and `replica.syncing` are compared over the whole scenario per session, as sent or not sent, not per step. Watermarks are compared only for sessions that subscribed to something. | These are coalescible barriers. Rust also sends quiet-tenant watermarks on a timer. |
-| Telemetry and error-reporting frames are ignored. | They are not behaviour. |
+| Telemetry and error-reporting frames (`telemetry.*`, `error.register`, `error.envelope`, `error.heartbeat`, `error.ack`) are ignored. | The SDK sends them on timers, so their sequence is not comparable. `CONTRACT.md` A.2 marks the `error.*` frames **keep**, so they still need coverage: **K15 owns a dedicated scenario for them**, with its own client that sends each frame and asserts its `error.ack`. |
 
-Error **text** is compared exactly, apart from the masks above. This includes the Rust module host's wording and JavaScript stack positions in `rejected` errors. Whether the kernel must match that text is a contract question for the lead. See "Open questions" below.
+Error **text**: following ruling 0015, the message is compared exactly, host wording included. Only stack frame lines and the masks above are removed.
 
 ## Scenarios
 
@@ -172,7 +151,7 @@ Two receipt checks stay in `verification/backend-receipts/`, because they inject
 | `ctx.step(name, fn)` | Groups frames and observations. A throw is recorded, and the next step still runs. |
 | `ctx.observe(label, value)` | Records a value that every backend must reproduce. |
 | `ctx.expect(cond, msg)` | Asserts a fact that must hold on every backend. |
-| `ctx.until(check, label, ms)` | Polls until `check` returns true. The default limit is 15 s. |
+| `ctx.until(check, label, ms)` | Polls until `check` returns true. The default limit is 15 s, or `GONVEX_CONFORMANCE_UNTIL_MS`. |
 | `ctx.quiesce()` | Waits until no frame has arrived for 300 ms. |
 | `ctx.frames(tag, { dir, type })` | The raw frames of a session. |
 | `ctx.deploy(2)` | Deploys generation 2 of the fixture. |
@@ -208,14 +187,19 @@ To extend the fixture, edit `fixtures/app`, and `fixtures/app-v2` for the upgrad
 
 Seeding goes through the adapter, because the routes that create test projects and password Members are not part of the contract. The session token always comes from `control.auth.passwordLogin` over the socket, because that is contract. `src/backends/mutant.mjs` is a worked example: Rust behind a proxy that rewrites frames, used by `test/mutation.check.mjs` to prove the differ catches drift.
 
-## Notes for the lead
+## Reference behaviours and known differences
 
-These are open questions and observations from building the harness against Rust at `0bf3ad13`.
+The lead has accepted the following as Rust contract, as observed against Rust at `0bf3ad13`:
 
-1. **Error text strictness.** `rejected` errors carry the Rust host's wording and JavaScript stack positions, for example `TypeScript module host returned execution_failed: … at run (file:///gonvex/<project>/module.js:1:28805)`. The harness compares this text exactly today. If only `class`, `retryable` and the application's own message are contract, change `normalizeValue` and the `error` key rule in `normalizeSession`. That is a contract decision, not a harness one.
-2. **Same idempotency key, different arguments.** Rust returns the stored result of the first call without error (`receipt-lost-reply`, step 5). The harness records this as reference behaviour.
-3. **Stale `clientContract: 0`.** A Reducer call with a lower contract is accepted (`reducer-errors`, step 7). Only a stale `artifactHash` gives `update_required`.
-4. **Tenant ids are unique per runtime, not per project.** `gonvex_runtime_tenants.relationship_id` is the primary key, so the harness names tenants `<scenario>-<name>`.
-5. **Presence offline after a socket drop takes about 10 s on Rust.** The `presence` step "the last socket drops" waits for it. The kernel can be faster without failing the scenario.
-6. **Legacy visibility manifest.** The fixture's `visibility()` plans make Rust log a deprecation warning for v1 masks. Moving to v2 masks is a fixture change if the contract freezes on v2.
-7. **Node 22 WebSocket.** Node 22.23 fires `error` but no `close` on a refused connection and leaves `readyState` at CONNECTING. Node 26 and browsers follow the spec. Both SDKs reconnect from `close`, so `src/sessions.mjs` completes the spec's failure steps. Without this, any client retrying while a backend restarts stalls for 30 s.
+1. **Same idempotency key, different arguments.** Rust returns the stored result of the first call without error (`receipt-lost-reply`, step 5).
+2. **Stale `clientContract: 0`.** A Reducer call with a lower contract is accepted (`reducer-errors`, step 7). Only a stale `artifactHash` gives `update_required`.
+3. **Tenant ids are unique per runtime, not per project.** `gonvex_runtime_tenants.relationship_id` is the primary key, so the harness names tenants `<scenario>-<name>`.
+4. **Rust nondeterminism.** Quiet-tenant watermarks, no-op `needHashes` episodes and Live Query arrival order are absorbed by the normalization rules above.
+
+Other notes:
+
+- **Presence offline after a socket drop takes about 10 s on Rust.** The `presence` step "the last socket drops" waits for it. The kernel can be faster without failing the scenario.
+- **Legacy visibility manifest.** The fixture's `visibility()` plans make Rust log a deprecation warning for v1 masks. Moving to v2 masks is a fixture change if the contract freezes on v2.
+- **Node 22 WebSocket.** Node 22.23 fires `error` but no `close` on a refused connection and leaves `readyState` at CONNECTING. Node 26 and browsers follow the spec. Both SDKs reconnect from `close`, so `src/sessions.mjs` completes the spec's failure steps. Without this, any client retrying while a backend restarts stalls for 30 s.
+- **Stream bindings outlive a re-auth.** When one socket re-authenticates without `subscriptionsPreserved`, for example on a tenant switch, Rust drops every subscription. But the delivery v2 stream token can be the same in the new auth, and `expandReplicaBatch` (used by the SDK, the thin client and this harness) keeps a socket's bindings across auths. So Rust's next `replica.delta` and `replica.ready` for that stream also expand to the dropped subscription id (`receipt-owner-switch`, step "tenant switch A -> B"). The SDK ignores the unknown id, and the digest self-check skips subscriptions dropped by a re-auth. Those phantom frames are still in the normalized trace, so a kernel that unbinds or renames its streams at auth shows a diff there. It needs a ruling: either the client clears its bindings at `auth.result`, or the server must unbind.
+- **The SDK alone reacts to a wrong digest.** It reopens the collection again and again (about 80,000 frames in one scenario) and the run eventually fails on timeouts. The digest self-check fails it at the first mismatch and names it. It also covers the thin and raw clients, which never verify digests.

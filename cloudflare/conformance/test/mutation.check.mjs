@@ -16,7 +16,8 @@ const run = (mutation, scenario) => {
   const work = mkdtempSync(join(process.env.GONVEX_CONFORMANCE_TMP ?? tmpdir(), 'gonvex-conformance-mutant-'));
   try {
     return spawnSync(process.execPath, [CLI, '--work', work, '--backend', 'rust=rust', '--backend', `mutant=${fileURLToPath(new URL('../src/backends/mutant.mjs', import.meta.url))}`, '--scenario', scenario],
-      { encoding: 'utf8', env: { ...process.env, GONVEX_CONFORMANCE_MUTATION: mutation }, timeout: 300_000 });
+      // A mutated backend makes every wait time out; short waits keep this quick.
+      { encoding: 'utf8', env: { ...process.env, GONVEX_CONFORMANCE_MUTATION: mutation, GONVEX_CONFORMANCE_UNTIL_MS: '3000' }, timeout: 300_000, maxBuffer: 64 << 20 });
   } finally { rmSync(work, { recursive: true, force: true }); }
 };
 
@@ -24,6 +25,8 @@ const CASES = [
   ['reducer-error-class', 'reducer-errors', /class: "rejected" != "transient"/],
   ['row-value', 'reducer-second-client', /title: "first" != "first!"|"renamed" != "renamed!"/],
   ['drop-watermarks', 'reducer-second-client', /in replica.watermark: rust sent, mutant none/],
+  // Digests are masked in diffs; the per-backend self-check must catch this.
+  ['digest-drift', 'reducer-second-client', /\[mutant\] digest self-check, session [a-z-]+: digest mismatch on replica\.(ready|delta)/],
 ];
 
 for (const [mutation, scenario, expected] of CASES) {

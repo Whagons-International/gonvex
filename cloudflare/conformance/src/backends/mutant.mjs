@@ -10,6 +10,7 @@
  * Mutations:
  *   reducer-error-class  reducer.error class "rejected" becomes "transient"
  *   row-value            row titles in replica.transaction/delta get a "!" suffix
+ *   digest-drift         one hex digit of every replica.ready / replica.delta digest flips
  *   drop-watermarks      replica.watermark frames (and batch watermarks) vanish
  */
 import { WebSocketServer, WebSocket as WsClient } from 'ws';
@@ -22,6 +23,14 @@ const MUTATIONS = {
     if (m.type === 'replica.transaction') return { ...m, changes: m.changes.map(c => ({ ...c, newValue: bang(c.newValue) })) };
     if (m.type === 'replica.delta') return { ...m, upserts: m.upserts?.map(bang) };
     if (m.type === 'replica.batch') return { ...m, items: m.items.map(i => MUTATIONS['row-value'](i)) };
+    return m;
+  },
+  'digest-drift': (m) => {
+    // Flip one hex digit of the collection digest the backend reports.
+    const flip = (d) => (typeof d === 'string' && /[0-9a-f]$/.test(d) ? d.slice(0, -1) + (d.endsWith('0') ? '1' : '0') : d);
+    if ((m.type === 'replica.ready' || m.type === 'replica.delta') && m.digest) return { ...m, digest: flip(m.digest) };
+    if (m.type === 'replica.readyMany') return { ...m, ready: m.ready.map(r => (r.digest ? { ...r, digest: flip(r.digest) } : r)) };
+    if (m.type === 'replica.batch') return { ...m, items: m.items.map(i => MUTATIONS['digest-drift'](i)) };
     return m;
   },
   'drop-watermarks': (m) => {

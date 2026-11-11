@@ -46,6 +46,26 @@ jobs:
           echo "### Worker bundle" >> "$GITHUB_STEP_SUMMARY"
           echo "\`dist/index.js\`: $(wc -c < dist/index.js) bytes, $(gzip -c dist/index.js | wc -c) gzip" >> "$GITHUB_STEP_SUMMARY"
 
+  conformance-unit:
+    name: Conformance unit tests
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cloudflare/conformance
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      # Normalizer, differ and digest self-check; no backend or install needed.
+      # Rust against Rust (node src/cli.mjs) stays a manual run (see README).
+      - name: Unit tests
+        run: node --test test/*.test.mjs
+
   preview:
     name: Deploy preview Worker
     needs: check
