@@ -11,7 +11,8 @@ import { describe, expect, it } from "vitest";
 import * as host from "@conformance-fixture/host.ts";
 // @ts-expect-error vitest alias
 import * as board from "@conformance-fixture/board.ts";
-import { CatalogCache, DurableObjectInvocationStorage, ModuleRegistry, TenantModuleHost, type FunctionContract, type TenantCall } from "../src/index.js";
+import { TenantStorage } from "../../storage/index";
+import { ModuleRegistry, TenantModuleHost, type FunctionContract, type TenantCall } from "../src/index.js";
 import type { TestTenant } from "./worker.js";
 
 const any = { kind: "any" };
@@ -37,7 +38,7 @@ async function run(calls: [string, TenantCall["kind"], unknown, Partial<TenantCa
     state.storage.sql.exec(OUTBOX);
     const registry = new ModuleRegistry("conformance-fixture");
     registry.install({ moduleId: "conformance-fixture", generation: 1, artifactHash: "fixture", functions, exports: { ...host, ...board } as Record<string, unknown> });
-    const tenantHost = new TenantModuleHost({ storage: new DurableObjectInvocationStorage(state.storage), registry, cache: new CatalogCache(true) });
+    const tenantHost = new TenantModuleHost({ storage: new TenantStorage(state.storage), registry });
     const out = [];
     for (const [fn, kind, args, extra] of calls) {
       const report = await tenantHost.run({ function: fn, kind, args, identity, invocation: { channel: "ui", commandId: `cmd-${fn}` }, ...extra });

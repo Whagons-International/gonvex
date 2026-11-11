@@ -1,21 +1,18 @@
 // Runs Queries and Reducers in the tenant object: one generation lease, one
-// storage transaction (K01), one database host and the engine, with Rust's
-// commit rules (B.7):
-//
-// - commit only after the handler returned and its result passed the schema;
-// - a statement failure the module caught without ROLLBACK TO refuses the
-//   commit ("module database capability failed: current transaction is
-//   aborted…", rejected);
-// - the deferred-FK check runs before the platform's commit (G0-5);
-// - a Query never commits.
+// K01 storage invocation (`TenantStorage.invoke`), one database host and the
+// engine. K01 decides the commit with Rust's rules (B.7): only after the
+// handler returned, never with a statement failure outstanding (commit
+// refused with ABORTED), never past a deferred-FK violation (G0-5), never for
+// a Query. K04 discards the transaction when the engine fails the call
+// (handler error, budget, denial, invalid result) and maps every failure to
+// Rust's client text and class.
 import { databaseGrant } from "./capabilities.js";
-import { CatalogCache } from "./catalog.js";
 import type { Identity, InvocationInfo } from "./context.js";
-import { ABORTED, DatabaseHost, type DatabaseHostStats, type FileMetadataSource, type PermissionIndex } from "./database-host.js";
+import { StorageError, type InvocationStats, type TenantStorage } from "../../storage/index";
+import { DatabaseHost, type FileMetadataSource, type PermissionIndex } from "./database-host.js";
 import type { InvocationContext } from "./engine.js";
 import { ModuleError, classifyPlatformError, classifyWire, codes, type ErrorClass, type WireCode } from "./errors.js";
 import { isWireError, type ModuleRegistry } from "./generations.js";
-import type { TenantStorage } from "./storage.js";
 
 export interface TenantCall {
   function: string;
@@ -50,7 +47,24 @@ export interface CallReport {
   error?: CallError;
   committed: boolean;
   generation: number | undefined;
-  stats: DatabaseHostStats & { commitCheckRowsRead: number };
+  stats: CallStats;
+}
+
+/** Host calls (K04) and K01's row counters for one invocation. */
+export interface CallStats {
+  hostCalls: number;
+  byKind: Record<string, number>;
+  /** All statements, rows read and written, as K01 counts them (catalog and FK-model reads included). */
+  statements: number;
+  rowsRead: number;
+  rowsWritten: number;
+  /** Catalog lookups among the totals (pragma_table_info, record views). */
+  catalogStatements: number;
+  catalogRowsRead: number;
+  /** FK-model reads among the totals (once per schema generation). */
+  schemaRowsRead: number;
+  savepoints: number;
+  transientFault: boolean;
 }
 
 /** Commands whose earlier run overran the platform CPU limit (R25). */
@@ -89,9 +103,9 @@ export function deadlineOverrunError(moduleId: string, functionPath: string, tim
 }
 
 export interface TenantModuleHostOptions {
+  /** K01's storage layer for this tenant object; it owns the one catalog cache. */
   storage: TenantStorage;
   registry: ModuleRegistry;
-  cache?: CatalogCache;
   permissions?: PermissionIndex;
   files?: FileMetadataSource;
   /** Overrun commands refused without running (defaults to an in-memory set). */
@@ -100,7 +114,22 @@ export interface TenantModuleHostOptions {
   clock?: () => number;
 }
 
-const emptyStats = (): CallReport["stats"] => ({ calls: 0, byKind: {}, statements: 0, rowsRead: 0, rowsWritten: 0, catalogStatements: 0, catalogRowsRead: 0, catalogHits: 0, savepoints: 0, transientFault: false, commitCheckRowsRead: 0 });
+const emptyStats = (): CallStats => ({ hostCalls: 0, byKind: {}, statements: 0, rowsRead: 0, rowsWritten: 0, catalogStatements: 0, catalogRowsRead: 0, schemaRowsRead: 0, savepoints: 0, transientFault: false });
+
+function callStats(storage: InvocationStats | undefined, host: DatabaseHost | undefined): CallStats {
+  const stats = emptyStats();
+  if (host) { stats.hostCalls = host.stats.calls; stats.byKind = host.stats.byKind; stats.transientFault = host.stats.transientFault; }
+  if (storage) {
+    stats.statements = storage.statements;
+    stats.rowsRead = storage.rowsRead;
+    stats.rowsWritten = storage.rowsWritten;
+    stats.catalogStatements = storage.catalog.statements;
+    stats.catalogRowsRead = storage.catalog.rowsRead;
+    stats.schemaRowsRead = storage.schema.rowsRead;
+    stats.savepoints = storage.savepoints;
+  }
+  return stats;
+}
 
 function moduleHostError(code: WireCode, message: string, retryable = false): CallError {
   // ExecutionError::ModuleHost(Remote) Display.
@@ -115,20 +144,18 @@ function hostCallError(message: string, transient: boolean): CallError {
 
 /** One per tenant object. */
 export class TenantModuleHost {
-  readonly cache: CatalogCache;
   readonly quarantine: Quarantine;
   private readonly clock: () => number;
 
   constructor(private readonly options: TenantModuleHostOptions) {
-    this.cache = options.cache ?? new CatalogCache();
     this.clock = options.clock ?? (() => Date.now());
     this.quarantine = options.quarantine ?? new MemoryQuarantine();
-    // A new generation may come with new migrations: drop every catalog.
-    options.registry.onReload(() => this.cache.invalidate());
+    // A new generation may come with new migrations: drop K01's catalogs.
+    options.registry.onReload(() => options.storage.invalidateSchema());
   }
 
-  /** Migrations (K02) and any other kernel DDL call this after they commit. */
-  schemaChanged(): void { this.cache.invalidate(); }
+  /** Migrations (K02) and any other kernel DDL call this after they commit; K01 owns the cache. */
+  schemaChanged(): void { this.options.storage.invalidateSchema(); }
 
   async run(call: TenantCall): Promise<CallReport> {
     const registry = this.options.registry;
@@ -148,11 +175,10 @@ export class TenantModuleHost {
     const generation = lease.generation;
     let host: DatabaseHost | undefined;
     try {
-      const outcome = await this.options.storage.invocation(call.kind, async (tx) => {
+      const outcome = await this.options.storage.invoke(call.kind, async (session) => {
         host = new DatabaseHost({
           mode: call.kind,
-          tx,
-          cache: this.cache,
+          session,
           identity: call.identity,
           invocation: call.invocation,
           schedulable: (path) => generation.schedulable(path),
@@ -190,20 +216,24 @@ export class TenantModuleHost {
           });
           return { ok: true as const, value: result.value };
         } catch (error) {
+          // Rust's finish(false): the engine failed the call, nothing commits.
+          session.discard();
           if (error instanceof ModuleError) {
             const wire = error.wire(registry.moduleId, call.function);
             return { ok: false as const, error: moduleHostError(wire.code, wire.message, wire.retryable) };
           }
           throw error;
         }
-      }, (result) => result.ok && host?.aborted === undefined);
-      const stats = { ...(host?.stats ?? emptyStats()), commitCheckRowsRead: outcome.commitCheckRowsRead };
-      let { result } = outcome;
-      if (result.ok && call.kind === "reducer" && host?.aborted !== undefined) {
-        result = { ok: false, error: hostCallError(ABORTED, false) };
-      } else if (result.ok && outcome.commitError) {
-        result = { ok: false, error: hostCallError(outcome.commitError.message, stats.transientFault) };
+      });
+      const stats = callStats(outcome.stats, host);
+      if (!outcome.ok) {
+        // K01 refused the commit (a caught SQL failure, a deferred FK) or the body threw.
+        if (outcome.error instanceof StorageError) {
+          return { ok: false, error: hostCallError(outcome.error.message, stats.transientFault), committed: false, generation: generation.generation, stats };
+        }
+        throw outcome.error;
       }
+      const result = outcome.value;
       return result.ok
         ? { ok: true, value: result.value, committed: outcome.committed, generation: generation.generation, stats }
         : { ok: false, error: result.error, committed: false, generation: generation.generation, stats };
@@ -215,10 +245,9 @@ export class TenantModuleHost {
         error: { code: platform.code, message: platform.message, class: platform.class, retryable: platform.class === "transient" },
         committed: false,
         generation: generation.generation,
-        stats: { ...(host?.stats ?? emptyStats()), commitCheckRowsRead: 0 },
+        stats: callStats(undefined, host),
       };
     } finally {
-      host?.finish();
       lease.release();
     }
   }

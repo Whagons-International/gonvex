@@ -1,10 +1,8 @@
 // Test Worker: one SQLite-backed tenant object that hosts the fixture module.
 import { DurableObject } from "cloudflare:workers";
 import * as fixture from "./fixtures/host.module.js";
-import {
-  CatalogCache, DurableObjectInvocationStorage, ModuleRegistry, TenantModuleHost,
-  type EngineConfig, type FunctionContract, type ModuleArtifact, type PermissionIndex,
-} from "../src/index.js";
+import { TenantStorage } from "../../storage/index";
+import { ModuleRegistry, TenantModuleHost, type EngineConfig, type FunctionContract, type ModuleArtifact, type PermissionIndex } from "../src/index.js";
 
 const any = { kind: "any" };
 
@@ -57,7 +55,6 @@ export const SCHEMA = [
 
 export interface SetupOptions {
   engine?: Partial<EngineConfig>;
-  cache?: boolean;
   permissions?: Record<string, boolean | "rebuilding">;
   generation?: number;
 }
@@ -65,6 +62,7 @@ export interface SetupOptions {
 export class TestTenant extends DurableObject {
   registry!: ModuleRegistry;
   host!: TenantModuleHost;
+  storage!: TenantStorage;
   /** Constructor runs, to prove the object was not reset. */
   static constructed = 0;
   readonly instance: number;
@@ -82,10 +80,10 @@ export class TestTenant extends DurableObject {
     this.registry = new ModuleRegistry("fixture", options.engine ?? {});
     const bits = options.permissions;
     const permissions: PermissionIndex | undefined = bits === undefined ? undefined : { has: (_member, permission, scope) => bits[`${permission}@${scope}`] ?? false };
+    this.storage = new TenantStorage(this.ctx.storage);
     this.host = new TenantModuleHost({
-      storage: new DurableObjectInvocationStorage(this.ctx.storage),
+      storage: this.storage,
       registry: this.registry,
-      cache: new CatalogCache(options.cache ?? true),
       ...(permissions ? { permissions } : {}),
     });
     this.registry.install(fixtureArtifact(options.generation ?? 1));

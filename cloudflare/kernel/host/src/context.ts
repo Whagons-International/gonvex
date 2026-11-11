@@ -155,22 +155,19 @@ export function createContext(request: ContextRequest, op: HostOp): Readonly<Rec
   }
 
   const db: Record<string, unknown> = {};
-  const query = (statement: unknown, parameters?: unknown, catalog?: string) =>
-    op({ kind: "dbQuery", statement: text("statement", statement), parameters: parameterList(parameters), ...(catalog ? { catalog } : {}) });
-  if (granted.dbRead) db["query"] = (statement: unknown, parameters?: unknown) => query(statement, parameters);
+  const query = (statement: unknown, parameters?: unknown) => op({ kind: "dbQuery", statement: text("statement", statement), parameters: parameterList(parameters) });
+  if (granted.dbRead) db["query"] = query;
   if (granted.dbWrite) {
     const records = new Map<string, Promise<unknown>>();
     let hasRecords: Promise<unknown> | undefined;
-    // The two statements are the bootstrap's own (BS:575-585). They carry a
-    // `catalog` hint so the database host may answer them from its catalog
-    // cache; the result and the aborted-transaction rule are unchanged.
+    // The bootstrap's own two statements (BS:575-585), as module SQL.
     db["recordColumns"] = (table: unknown) => {
       const name = text("table", table);
       if (!records.has(name)) records.set(name, (async () => {
-        hasRecords ??= query("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='_gonvex_record_views' AND type='table') AS present", [], "recordViewsPresent");
+        hasRecords ??= query("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='_gonvex_record_views' AND type='table') AS present");
         const present = (await hasRecords) as { present?: unknown }[];
         if (!present[0]?.present) return undefined;
-        const [record] = (await query("SELECT schema FROM _gonvex_record_views WHERE name=$1", [name], "recordViewSchema")) as { schema: string }[];
+        const [record] = (await query("SELECT schema FROM _gonvex_record_views WHERE name=$1", [name])) as { schema: string }[];
         return record ? (JSON.parse(record.schema) as { columns: unknown }).columns : undefined;
       })());
       return records.get(name);

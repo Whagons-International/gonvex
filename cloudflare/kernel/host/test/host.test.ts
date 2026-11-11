@@ -235,7 +235,7 @@ describe("budgets and caps", () => {
     const report = await t.call("notes.manyCalls", "reducer", { calls: 10_000 });
     expect(report.error).toMatchObject({ code: "budget_exceeded", class: "transient", retryable: false });
     expect(report.error?.message).toBe("TypeScript module host returned budget_exceeded: module fixture function notes.manyCalls: module exceeded its 10000 ms execution deadline");
-    expect(report.stats.calls).toBe(50);
+    expect(report.stats.hostCalls).toBe(50);
   });
 
   it("refuses a quarantined command without running it (R25)", async () => {

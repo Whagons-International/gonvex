@@ -135,30 +135,3 @@ export const hostErrors = {
   /** In-process and socket transports wrap every host failure the same way (MH/session.rs:158-161, RT/in_process.rs:321-323). */
   wrapped: (capability: string, message: string) => `${capability} host call failed [${codes.HOST_CALL_FAILED}]: ${message}`,
 };
-
-/** Rust's sqlx text: "error returned from database: (code: N) <sqlite message>". */
-const sqliteCodes: Record<string, number> = {
-  SQLITE_ERROR: 1, SQLITE_INTERNAL: 2, SQLITE_PERM: 3, SQLITE_ABORT: 4, SQLITE_BUSY: 5, SQLITE_LOCKED: 6, SQLITE_NOMEM: 7,
-  SQLITE_READONLY: 8, SQLITE_INTERRUPT: 9, SQLITE_IOERR: 10, SQLITE_CORRUPT: 11, SQLITE_FULL: 13, SQLITE_CANTOPEN: 14,
-  SQLITE_PROTOCOL: 15, SQLITE_SCHEMA: 17, SQLITE_TOOBIG: 18, SQLITE_CONSTRAINT: 19, SQLITE_MISMATCH: 20, SQLITE_AUTH: 23,
-  SQLITE_RANGE: 25,
-  SQLITE_CONSTRAINT_CHECK: 275, SQLITE_CONSTRAINT_COMMITHOOK: 531, SQLITE_CONSTRAINT_FOREIGNKEY: 787,
-  SQLITE_CONSTRAINT_FUNCTION: 1043, SQLITE_CONSTRAINT_NOTNULL: 1299, SQLITE_CONSTRAINT_PRIMARYKEY: 1555,
-  SQLITE_CONSTRAINT_TRIGGER: 1811, SQLITE_CONSTRAINT_UNIQUE: 2067, SQLITE_CONSTRAINT_VTAB: 2323, SQLITE_CONSTRAINT_ROWID: 2579,
-};
-
-export interface SqlFailure {
-  /** The text a module sees. */
-  message: string;
-  /** Extended SQLite result code when known. */
-  code: number | undefined;
-}
-
-/** workerd: "<message>: SQLITE_X (extended: SQLITE_X_Y)" -> Rust's sqlx text. */
-export function rustSqlMessage(error: unknown): SqlFailure {
-  const text = String((error as { message?: unknown } | null)?.message ?? error);
-  const match = /^([\s\S]*): (SQLITE_[A-Z_]+)(?: \(extended: (SQLITE_[A-Z_]+)\))?$/.exec(text);
-  if (!match) return { message: text, code: undefined };
-  const code = (match[3] !== undefined ? sqliteCodes[match[3]] : undefined) ?? sqliteCodes[match[2] ?? ""];
-  return code === undefined ? { message: match[1] ?? text, code: undefined } : { message: `error returned from database: (code: ${code}) ${match[1]}`, code };
-}

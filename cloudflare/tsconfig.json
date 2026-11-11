@@ -20,5 +20,6 @@
   // ports of the SDK's SQL suites and SDK helpers on the storage layer. The
   // SDK is written for the repo's base flags, not these, and like the
   // originals these files are run by the test runner, not type-checked here.
-  "exclude": ["kernel/storage/test/sdk"]
+  // kernel/host (K04) has its own tsconfig, vitest config and test Worker.
+  "exclude": ["kernel/storage/test/sdk", "kernel/host"]
 }

@@ -1,46 +1,14 @@
-# 0020: K04 module host: the storage interface it needs from K01, three findings and the R25 proposal
+# 0021: K04 module host: storage interface, three findings and the R25 proposal
 
-Date: 2026-11-11. Status: **proposed by K04**, for the lead. Affects: K01, K04, K05, K19, the K04 entry in
+Date: 2026-11-11. Status: **decided in 0022** (§1 superseded by 0022 §1; §2–§4 and §5 a, c, d, e accepted; §5 b ruled as `limits.cpu_ms = 5000`, with K02 migration chunks ≤ 2 s CPU). Renumbered from 0020 (K05's 0020 merged first). Affects: K01, K04, K05, K19, the K04 entry in
 `work-packages.json`.
 
-## 1. Storage interface between K04 and K01 (proposed)
+## 1. Storage interface between K04 and K01 (superseded)
 
-K01 is being built in parallel. K04 codes against this interface (`cloudflare/kernel/host/src/storage.ts`)
-and ships a stand-in, `DurableObjectInvocationStorage`, built from S2's `engines.js`. K01 replaces the
-stand-in; K04's code does not change.
-
-```ts
-interface TenantStorage {
-  invocation<T>(mode: "query" | "reducer",
-                body: (tx: InvocationTransaction) => Promise<T>,
-                shouldCommit: (result: T) => boolean): Promise<InvocationOutcome<T>>;
-}
-interface InvocationTransaction {
-  exec(sql: string, binds: readonly SqlValue[]): ExecResult;   // throws SqlError (Rust text + code)
-  savepoint(name: string): Promise<void>;
-  release(name: string): Promise<void>;
-  rollbackTo(name: string): Promise<void>;
-}
-interface InvocationOutcome<T> { result: T; committed: boolean; commitError?: SqlError; commitCheckRowsRead: number }
-```
-
-| Duty | Owner | Rule |
-|---|---|---|
-| One storage transaction per invocation; a Query never commits | K01 | G0-3 |
-| `SAVEPOINT` / `RELEASE` / `ROLLBACK TO` as nested storage transactions; open savepoints settle at the end | K01 | 0006, G0-3 |
-| `$N` → `?N` in `exec` | K01 | 0011.1 |
-| A Query statement that writes fails with `error returned from database: (code: 8) attempt to write a readonly database` | K01 | 0011.2 |
-| Deferred-FK check before commit, reported as `commitError` with Rust's text | K01 | G0-5 |
-| Admission, typing, catalogs, the aborted-transaction rule, refusing the commit after a caught SQL error | K04 | B.2a, B.7 |
-| `SqlError.message` is sqlx's text: `error returned from database: (code: N) <sqlite message>` | K01 | B.5 |
-
-The stand-in takes two shortcuts that K01 must not: its FK check scans the whole
-`pragma_foreign_key_check` (S2: 55 ms per 1M child rows), and it leaves the 100-parameter error to the
-platform.
-
-Any kernel code that changes the schema outside the host (K02 migrations, the A01 transform) calls
-`TenantModuleHost.schemaChanged()` after it commits, so the catalog cache is dropped. A new generation
-drops it too.
+K04 first coded against a proposed `TenantStorage` interface with S2's stand-in behind it. **Superseded
+by 0022 §1:** K04 now calls K01 directly (`TenantStorage.invoke`, `StorageSession.query`, `runTyped`,
+`catalogOf`, `discard`). K01 owns every SQL semantic and the one catalog cache, and K04 owns the host-call
+surface. `TenantModuleHost.schemaChanged()` delegates to `TenantStorage.invalidateSchema()`.
 
 ## 2. Finding: no Whagons Query runs module JavaScript
 

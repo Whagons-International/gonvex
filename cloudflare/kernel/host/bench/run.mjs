@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { fixture, steps, callOf, T0 } from "../../../spikes/s2/test/scenarios.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const resultFile = process.env.BENCH_OUT ?? "whagons.json";
 const artifact = resolve(process.argv[2] ?? "");
 execFileSync("node", [join(here, "prepare.mjs"), artifact], { stdio: "inherit" });
 const functions = JSON.parse(readFileSync(join(artifact, "functions.json"), "utf8"));
@@ -61,8 +62,8 @@ async function workload(tenant, cache) {
     results.push({
       name, path, kind, ok: report.ok, committed: report.committed, error: report.error?.message?.split("\n")[0],
       rowsRead: report.stats?.rowsRead, catalogRowsRead: report.stats?.catalogRowsRead, catalogStatements: report.stats?.catalogStatements,
-      catalogHits: report.stats?.catalogHits, rowsWritten: report.stats?.rowsWritten, statements: report.stats?.statements,
-      commitCheckRowsRead: report.stats?.commitCheckRowsRead, serverMs: report.serverMs, clientMs: Math.round(performance.now() - t),
+      schemaRowsRead: report.stats?.schemaRowsRead, rowsWritten: report.stats?.rowsWritten, statements: report.stats?.statements,
+      serverMs: report.serverMs, clientMs: Math.round(performance.now() - t),
     });
   };
   for (const step of steps) {
@@ -86,14 +87,14 @@ try {
   child.kill("SIGINT");
 }
 mkdirSync(join(here, ".results"), { recursive: true });
-writeFileSync(join(here, ".results/whagons.json"), JSON.stringify(report, null, 2));
+writeFileSync(join(here, ".results", resultFile), JSON.stringify(report, null, 2));
 
 // Same database contents with and without the cache.
 const tablesOff = Object.keys(report.off.snapshot), tablesOn = Object.keys(report.on.snapshot);
 const differing = [...new Set([...tablesOff, ...tablesOn])].filter((table) => JSON.stringify(report.off.snapshot[table]) !== JSON.stringify(report.on.snapshot[table]));
 report.snapshotTables = tablesOn.length;
 report.snapshotDiffering = differing;
-writeFileSync(join(here, ".results/whagons.json"), JSON.stringify(report, null, 2));
+writeFileSync(join(here, ".results", resultFile), JSON.stringify(report, null, 2));
 
 // Summary table.
 const rows = report.off.results.map((a, i) => ({ a, b: report.on.results[i] }));
@@ -112,4 +113,8 @@ const offAll = sum(rows.map((r) => r.a), "rowsRead"), onAll = sum(rows.map((r) =
 console.log(`\noutcomes identical with and without cache: ${same}; tables compared: ${report.snapshotTables}, differing: ${JSON.stringify(differing)}`);
 console.log(`loaded ${report.on.meta.functions} functions (${report.on.meta.exports} exports, ${report.on.meta.unresolved} without a handler) in ${report.on.meta.loadMs} ms`);
 console.log(`passing calls: ${passing.length}; rows read ${offOk} -> ${onOk} (${Math.round((1 - onOk / offOk) * 100)} % fewer)`);
+const noModel = (list) => list.reduce((total, r) => total + (r.rowsRead ?? 0) - (r.schemaRowsRead ?? 0), 0);
+const offOkNoModel = noModel(passing.map((r) => r.a)), onOkNoModel = noModel(passing.map((r) => r.b));
+console.log(`passing calls without K01's FK-model reads: rows read ${offOkNoModel} -> ${onOkNoModel} (${Math.round((1 - onOkNoModel / offOkNoModel) * 100)} % fewer)`);
+console.log(`FK-model rows: off ${sum(passing.map((r) => r.a), "schemaRowsRead")}, on ${sum(passing.map((r) => r.b), "schemaRowsRead")}`);
 console.log(`all calls: rows read ${offAll} -> ${onAll} (${Math.round((1 - onAll / offAll) * 100)} % fewer)`);

@@ -5,5 +5,7 @@
     "allowJs": true,
     "checkJs": false
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // The root config excludes kernel/host (it is checked here) and K01's SDK ports.
+  "exclude": ["../storage/test/sdk"]
 }

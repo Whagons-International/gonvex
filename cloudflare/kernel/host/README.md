@@ -6,6 +6,11 @@ Runs a project's Queries and Reducers inside the tenant Durable Object with the 
 `rust/crates/module-runtime`, `module-runtime-v8` (`gonvex_bootstrap.js`, `isolate.rs`, `lib.rs`),
 `module-host` and `runtime/src/host_calls.rs` at `0bf3ad13`.
 
+It is built on the K01 storage layer (`cloudflare/kernel/storage`). Ruling 0022 §1: **K01 owns every SQL
+semantic** (admission, `$N`, read-only Queries, typing and decoding, catalogs and their cache, the
+aborted rule, savepoints, the deferred-FK check). **K04 owns** the `ctx` surface, capabilities,
+determinism, the host-call error wrapping, budgets and generations.
+
 ## Layout
 
 | File | What | Rust reference |
@@ -16,14 +21,11 @@ Runs a project's Queries and Reducers inside the tenant Durable Object with the 
 | `src/context.ts` | `ctx` for all three kinds, every host-call payload, `resolveHandler` | `BS:549-764` |
 | `src/engine.ts` | One generation's engine: lookup, args/result schema, budgets, sticky denials, serialized ops, result caps, the dispatcher's error envelope | `V8/lib.rs` `execute`, `V8/isolate.rs` `host_call`/`decode`, `BS:766-807` |
 | `src/schema.ts` | Portable schema validation with Rust's messages | `MR/lib.rs` `validate_at` |
-| `src/errors.ts` | `ModuleError`, wire codes, error classes, sqlx error text | `MR/lib.rs`, `MH/protocol.rs`, `MH/session.rs`, `RT/error_class.rs` |
-| `src/database-host.ts` | Query/Reducer host calls: `dbQuery/Insert/Update/Delete/DeleteMany`, `permissionsHas`, `actionEnqueue`, `scheduleAfter/At`, `storage.getMetadata`; admission, typing, the aborted-transaction rule, deterministic deferred ids | `RT/host_calls.rs` |
-| `src/catalog.ts` | Table catalogs and the object-wide catalog cache | `RT/host_calls.rs` `catalog_table` |
-| `src/sql.ts` | Admission, `$N` numbering, write targets, SELECT projection typing | `RT/sql_admission.rs`, `sql_projection.rs` (simplified) |
-| `src/storage.ts` | The storage interface K04 needs from K01, plus S2's stand-in (contract-change note 0020) | `ST/lib.rs` transaction rules |
+| `src/errors.ts` | `ModuleError`, wire codes, error classes, platform-error mapping | `MR/lib.rs`, `MH/protocol.rs`, `MH/session.rs`, `RT/error_class.rs` |
+| `src/database-host.ts` | Query/Reducer host calls on K01's `StorageSession`: `dbQuery` (K01's `query`), the statements `dbInsert/Update/Delete/DeleteMany`, the outbox and the scheduler build (K01's `runTyped`), `permissionsHas`, `storage.getMetadata`, deterministic deferred ids, Rust's error wrapping | `RT/host_calls.rs` |
 | `src/generations.ts` | Load, stage, activate, drain; pinned generations; the `system.reload` event | `MH/session.rs`, `server/src/lib.rs` registry |
-| `src/invoke.ts` | `TenantModuleHost.run`: lease, storage transaction, host, engine, commit rules, error mapping | `RT/execution.rs` reducer/query paths |
-| `test/` | workerd tests: the 34 vectors, host calls, transactions, budgets, the catalog cache, generations | |
+| `src/invoke.ts` | `TenantModuleHost.run`: lease, K01 invocation (`TenantStorage.invoke`), host, engine, discard on failure, error mapping; quarantine | `RT/execution.rs` reducer/query paths |
+| `test/` | workerd tests: the 34 vectors, host calls on K01, budgets, catalog invalidation, generations, parity with Rust's answers on the conformance fixture | |
 | `bench/` | The real Whagons bundle through the host (local workerd), rows read with the cache off and on | |
 | `probes/r25/` | The runaway-Reducer measurement on the platform (0012 R25, 0016 G0-11) | |
 
@@ -55,9 +57,10 @@ Runs a project's Queries and Reducers inside the tenant Durable Object with the 
   check. The Q/R wall budget is 10 s, the scheduled slice 3 s with Rust's message, the Action budget
   15 min, and an agent Action has none. Depth 8. The wall budget is enforced at host-call boundaries and
   by a timer race, plus a host-call counter. workerd cannot interrupt running JS: see R25 below.
-- **Transactions (B.7).** One storage transaction per invocation (through K01). After a caught SQL error,
-  later SQL fails with `current transaction is aborted…` until `ROLLBACK TO`, and the commit is refused.
-  The deferred-FK check runs before the commit (G0-5): the object is not reset. A Query never commits.
+- **Transactions (B.7).** K01's: one storage transaction per invocation, the aborted rule, the commit
+  refusal after a caught SQL error, the deferred-FK check (G0-5), Queries never commit. K04 discards
+  the transaction when the engine fails the call (Rust's `finish(false)`) and maps K01's refusals to
+  `module database capability failed: …`.
 - **Generations and reload (B.6, 0005 → G0-2).** In stage 1 the bundle ships in the Worker version.
   `ModuleRegistry` keeps Rust's semantics anyway:
   - generations are strictly newer (`generation_conflict` otherwise);
@@ -71,55 +74,57 @@ Runs a project's Queries and Reducers inside the tenant Durable Object with the 
 
 ## Catalog cache (G0-12, R04)
 
-Rust reads `pragma_table_info` and `_gonvex_record_views` once per invocation. In a Durable Object, S2
-found these reads are 95–99 % of a Reducer's rows. Two lookups cause most of it:
+There is one catalog cache, K01's (`kernel/storage/catalog.ts`). It is cached across invocations and
+invalidated by module DDL (K01), by `TenantModuleHost.schemaChanged()` (which K02 calls after
+migrations; it delegates to `TenantStorage.invalidateSchema()`) and by a new generation.
 
-- `EXISTS(… sqlite_schema …)` scans the whole schema;
-- `_gonvex_record_views … COLLATE NOCASE` cannot use the BINARY primary key, so it scans that table for
-  every table it looks up.
-
-The cache lives in object memory and is keyed by an epoch:
-
-- the first catalog need loads all record schemas in one scan;
-- tables are cached on first use;
-- a deploy (new generation) or `schemaChanged()` (migrations, K02) drops everything;
-- an invocation that runs DDL, or writes `_gonvex_record_views`, bypasses the cache from that statement
-  on and drops it when it ends, whether it commits or rolls back;
-- missing tables are never cached.
+This PR changes one thing in K01's catalog, as a separate commit for the K01 owner: **all record
+schemas load in one statement per schema generation**. `name COLLATE NOCASE` cannot use the BINARY
+primary key of `_gonvex_record_views`, so the per-table lookup scanned the whole table on each table's
+first use, about 400 rows each on Whagons. NOCASE is matched with ASCII folding and the first row wins,
+as the lookup would. K01's 101 tests pass.
 
 **Measured on real Whagons Reducers** (whagons5-client `2457bb65f` split bundle, S2's schema subset and
-35-step workload, local workerd, `node bench/run.mjs`). Each mode runs in a fresh tenant object, so the
-cache-on column includes the object's one-time catalog load:
+35-step workload, local workerd, `node bench/run.mjs`).
 
-| Reducer (S2 step) | Rows read, cache off (catalog) | Rows read, cache on (catalog) | Fewer |
-|---|---|---|---|
-| `teams.create` (01, first call in the object) | 2,140 (2,104) | 548 (512) | 74 % |
-| `spots.create` (08) | 2,179 (2,114) | 111 (46) | 95 % |
-| `cleaningStatuses.create` (19) | 2,117 (2,088) | 49 (20) | 98 % |
-| `cleaningStatuses.create` (22, warm) | 2,117 (2,088) | 29 (0) | 99 % |
-| `cleaningReports.create` (24) | 450 (438) | 52 (40) | 88 % |
-| `centers.askJev` (26) | 3,457 (3,342) | 154 (72) | 96 % |
-| `settings.togglePlugin` (27) | 475 (420) | 77 (22) | 84 % |
-| `boards.create` (28) | 851 (836) | 33 (18) | 96 % |
-| `boards.createMessage` (29) | 1,721 (1,668) | 89 (36) | 95 % |
-| `boards.createComment` (30) | 1,280 (1,250) | 44 (14) | 97 % |
-| **The 10 committed Reducers** | **16,787** | **1,186** | **93 %** |
-| All 37 calls (blocked and rollback steps included) | 54,545 | 2,124 | 96 % |
+- **Before** is Rust's cost: K01 without the patch, with catalogs invalidated before every invocation
+  (Rust reads them once per invocation).
+- **After** is K01's cache with the patch, in a fresh tenant object, so it includes the object's one-time
+  loads.
+- K01's deferred-FK model has no Rust counterpart. It is read once per object per schema generation
+  (5,256 rows, on the first Reducer after a wake) and is shown separately. Before excludes it.
 
+| Reducer (S2 step) | Before (catalog) | After (catalog) | of which FK model (once) | Fewer, excl. FK model |
+|---|---|---|---|---|
+| `teams.create` (01, first call in the object) | 2,016 (1,980) | 5,804 (512) | 5,256 | 73 % |
+| `spots.create` (08) | 2,055 (1,990) | 111 (46) | 0 | 95 % |
+| `cleaningStatuses.create` (19) | 1,993 (1,964) | 49 (20) | 0 | 98 % |
+| `cleaningStatuses.create` (22, warm) | 1,993 (1,964) | 29 (0) | 0 | 99 % |
+| `cleaningReports.create` (24) | 450 (438) | 52 (40) | 0 | 88 % |
+| `centers.askJev` (26) | 3,240 (3,125) | 195 (80) | 0 | 94 % |
+| `settings.togglePlugin` (27) | 475 (420) | 77 (22) | 0 | 84 % |
+| `boards.create` (28) | 820 (805) | 33 (18) | 0 | 96 % |
+| `boards.createMessage` (29) | 1,628 (1,575) | 89 (36) | 0 | 95 % |
+| `boards.createComment` (30) | 1,218 (1,188) | 44 (14) | 0 | 96 % |
+| **The 10 committed Reducers** | **15,888** | **6,483** | 5,256 | **92 %** (59 % with the one-time FK model) |
+| All 37 calls (blocked and rollback steps included) | 51,739 | 2,180 + FK model | | 96 % |
+
+- Without the record-schema patch, K01's cache gives **55 %** on the committed Reducers (15,888 →
+  7,099), excluding the FK model.
 - The catalog rows left with the cache on are `pragma_table_info` on a table's first use in the object.
   They go to 0 once the cache is warm (step 22).
 - Outcomes, rows written and the contents of all 29 application tables are identical with and without
   the cache.
-- Median server time for the committed Reducers: 11.5 ms off, 10.5 ms on (local; the machine was
+- Median server time for the committed Reducers: 23.0 ms before, 9.5 ms after (local; the machine was
   shared).
 - Same outcomes as S2: 10 of 25 distinct Reducers commit. The rest are blocked by schema objects DO
   SQLite refuses, until A01.
-- Upload with the Whagons split bundle: 5,747 KiB, **1,016.7 KiB gzip**. The host alone: 104.8 KiB,
-  27.0 KiB gzip (not minified).
+- Upload with the Whagons split bundle: 5,747 KiB, **1,016.7 KiB gzip** (measured before the move onto
+  K01).
 
 **Queries.** No Whagons Query has a JavaScript handler. All 859 are replica, live or one-shot plans that
 the runtime executes itself (K08/K10). Dispatching one through the module host gives Rust's
-`invalid_artifact` outcome. See contract-change note 0020. The Query dispatch path is covered by the 10
+`invalid_artifact` outcome. See contract-change note 0021. The Query dispatch path is covered by the 10
 Query vectors and `test/host.test.ts`.
 
 ## Runaway Reducer (0012 R25, 0016 G0-11)
@@ -156,15 +161,15 @@ Implemented here:
    the three platform texts. Measured with the probe: 1 reset instead of one per retry, and retries
    refused in 76–104 ms.
 
-Proposed for the lead (note 0020 §5):
+Accepted by the lead (0022), from note 0021 §5:
 
 3. The caller (K05 gateway, K07) records the command id on a fresh stub when it sees an overrun.
-4. Set `limits.cpu_ms` as the backstop, ideally under about 4 s so that an overrun ends before the 7 s shed
-   point. This conflicts with S1's 45 s-CPU migration transaction, so K02's chunk size must fit first.
+4. Ruled (0022 §5b): the tenant-object script sets `limits.cpu_ms = 5000`, and K02 chunks migrations
+   so that no chunk exceeds 2 s CPU. Revisit at V04.
 5. Keep sockets in gateways.
 6. The Worker Loader with `limits.cpuMs` is the only true per-call guard: no reset, about +1–2 ms p50.
-   But host calls back into a tenant that holds its transaction deadlocked (0 completed), so it is an
-   open question for S5.
+   But host calls back into a tenant that holds its transaction deadlocked (0 completed). Added to
+   S5's scope.
 
 ## Run
 
@@ -181,7 +186,7 @@ node kernel/host/bench/run.mjs <s2 .artifact dir>   # table above; raw data in b
 
 | Item | Owner |
 |---|---|
-| The real storage layer (FK check limited to the rows written, parameter limits, `$N` rewrite) | K01 |
+| Every SQL semantic, the catalog cache and the FK check | K01 |
 | Reducer receipts (claim at the first write, stored result, replay) | K07 |
 | The permission index behind `PermissionIndex` | K09 |
 | `_gonvex_files` and R2 behind `FileMetadataSource` | K13 |
