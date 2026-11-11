@@ -25,7 +25,7 @@ export default {
       ctx.observe('statements', await rawReducer(raw, 'storage.statements', {}));
     });
     await ctx.step('module savepoints', async () => {
-      ctx.observe('savepoints', await rawReducer(raw, 'storage.savepoints', {}));
+      ctx.observe('savepoints', await rawReducer(raw, 'storage.sqlSavepoints', {}));
     });
     await ctx.step('a caught SQL error without ROLLBACK TO does not commit', async () => {
       ctx.observe('caughtFailure', await rawReducer(raw, 'storage.caughtFailure', {}));
