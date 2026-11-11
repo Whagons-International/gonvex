@@ -1743,6 +1743,10 @@ new note and waits for the lead.
 | 0033 | K08 live-query findings | ruled in 0032 | K08, K10 |
 | 0034 | K11 scheduler findings | ruled in 0032 | K11, K12, R06 |
 | 0035 | K13 files findings | ruled in 0032 | K13, K19, V01 |
+| 0036 | K19 deploy and operator routes findings | ruled in 0037 | K02, K07, K10, K19 |
+| 0037 | Second wave-2 review: K08, K11, K19, K14, K12 rulings; numbering | decided | K02, K11, K12, K14, K19, G3b |
+| 0038 | K14 presence findings (dead-peer detection) | ruled in 0037 | K14, G3b |
+| 0039 | K12 Action runtime findings (renumbered by K12) | ruled in 0037 | K11, K12 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
