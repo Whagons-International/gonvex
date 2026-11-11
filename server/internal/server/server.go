@@ -994,7 +994,8 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
-	if alreadyLoaded && bundleChanged {
+	recycling := alreadyLoaded && bundleChanged
+	if recycling {
 		w.Header().Set("X-Gonvex-Recycle-Worker", "1")
 	}
 	s.registerProjectCrons(next.Project)
@@ -1008,7 +1009,15 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	// GET /dev/projects stayed empty even though the app was healthy.
 	s.ensureSyncedProjectListed(r.Context(), next.Project, syncKey(r))
 	s.cache.invalidateRows(r.Context(), next.Project, tenantIDFromRequest(next.Project, ""), "")
-	s.rerunProjectSubscriptions(next.Project)
+	if rerunSubscriptionsAfterSync(recycling) {
+		s.rerunProjectSubscriptions(next.Project)
+	} else {
+		// The supervisor replaces this worker as soon as the response is out and
+		// drains its WebSockets onto the replacement, which evaluates every
+		// subscription with the new bundle on reconnect. Re-running them here
+		// too only doubled the database burst of a deploy.
+		slog.Info("dev sync skipped subscription rerun; worker is being recycled", "project", next.Project)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
 		"project":         next.Project,
@@ -1019,6 +1028,14 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		"schemaSkipped":   schemaSkipped,
 		"runtimeReloaded": true,
 	})
+}
+
+// rerunSubscriptionsAfterSync reports whether /dev/sync should re-evaluate
+// this process's live subscriptions. A supervised worker (GONVEX_RUNTIME_WORKER=1)
+// whose sync replaced an already-loaded module is about to be recycled, so its
+// subscriptions move to the replacement worker; standalone runtimes always rerun.
+func rerunSubscriptionsAfterSync(recycling bool) bool {
+	return !recycling || strings.TrimSpace(os.Getenv("GONVEX_RUNTIME_WORKER")) != "1"
 }
 
 // projectSyncLock returns the mutex that serializes /dev/sync work for a project.
