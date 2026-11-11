@@ -129,6 +129,9 @@ function dropUncomparedCapabilities(frame) {
 
 /** Expands container frames into the frames they stand for. `state.bindings` is per socket. */
 export function expand(frame, state) {
+  // Malformed frames a scenario sends on purpose (decoder vectors) stay as they are.
+  const list = { 'replica.batch': 'items', 'replica.readyMany': 'ready', 'query.batch': 'messages', 'query.fanout': 'ids', 'reducer.callMany': 'calls' }[frame?.type];
+  if (list && !Array.isArray(frame[list])) return [frame];
   switch (frame?.type) {
     case 'replica.batch': return expandReplicaBatch(frame, state.bindings).flatMap(f => expand(f, state));
     case 'replica.readyMany': return frame.ready.map(r => ({ type: 'replica.ready', ...r }));

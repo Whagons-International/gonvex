@@ -96,6 +96,16 @@ test('a watermark the backend coalesced away does not renumber later revisions',
   assert.deepEqual(marks.slice(1).map(e => e.frame.revision), ['<barrier>', 'r1']);
 });
 
+test('malformed containers a scenario sends on purpose stay unexpanded', () => {
+  const records = [
+    { dir: 'out', socket: 1, step: 0, frame: { type: 'reducer.callMany', calls: {} } },
+    { dir: 'out', socket: 1, step: 0, frame: { type: 'replica.openMany' } },
+    { dir: 'in', socket: 1, step: 0, frame: { type: 'replica.batch', items: null } },
+  ];
+  const out = normalizeSession(records).map(r => r.frame.type);
+  assert.deepEqual(out, ['reducer.callMany', 'replica.openMany', 'replica.batch']);
+});
+
 test('diffFrames reports field-level differences and policies', () => {
   const a = normalizeSession([rec('in', { type: 'reducer.error', id: '1', error: 'x', class: 'rejected' }), rec('in', { type: 'replica.watermark', revision: 1 })]);
   const b = normalizeSession([rec('in', { type: 'reducer.error', id: '1', error: 'x', class: 'transient' })]);

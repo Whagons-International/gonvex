@@ -58,7 +58,15 @@ fn never_copied(table: &str) -> bool {
             | "_gonvex_sync_clock"
             | "gonvex_runtime_manifests"
     ) || table.starts_with("_gonvex_reference_")
+        || table.starts_with(KERNEL_TRANSFORM_PREFIX)
 }
+
+/// Every object the kernel schema transform adds starts with this prefix
+/// (`ADDED_PREFIX` in cloudflare/kernel/schema-transform, decision 0022 §5):
+/// scratch, queue and partition tables of an object provisioned by the kernel.
+/// A Rust file never has them, so an export drops them. (T3's generated
+/// columns are hidden columns, which `columns` already leaves out.)
+const KERNEL_TRANSFORM_PREFIX: &str = "_gonvex_st_";
 
 fn skip_reason(table: &str) -> &'static str {
     match table {
@@ -71,6 +79,9 @@ fn skip_reason(table: &str) -> &'static str {
         }
         "_gonvex_sync_bootstrap" => "installer receipts of this file's provisioning",
         "gonvex_runtime_manifests" => "module artifacts are redeployed, not copied",
+        _ if table.starts_with(KERNEL_TRANSFORM_PREFIX) => {
+            "kernel schema-transform object (A01); a Rust file never has it"
+        }
         _ => "reference ledger rebuilt from the catalog",
     }
 }
