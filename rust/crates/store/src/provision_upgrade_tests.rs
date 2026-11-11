@@ -893,6 +893,253 @@ async fn entity_definitions_capture_their_dependent_logical_records() {
 }
 
 #[tokio::test]
+async fn recorded_foreign_key_rebuilds_keep_the_writer_and_its_statements() {
+    let database = Database::new("gonvex-recorded-rebuild");
+    database
+        .execute("CREATE TABLE parents(id TEXT PRIMARY KEY,value TEXT); INSERT INTO parents VALUES('p','before');")
+        .await;
+    database.install().await.unwrap();
+    let migrations = vec![SqlMigration::new(
+        "rebuild".into(),
+        MigrationScope::Tenant,
+        false,
+        "-- gonvex:foreign-key-rebuild\nALTER TABLE parents ADD COLUMN extra TEXT;".into(),
+    )];
+    apply_migrations(
+        &database.pools,
+        &database.url,
+        migrations.clone(),
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    let mut tx = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    tx.direct()
+        .await
+        .unwrap()
+        .run(|connection| connection.execute("UPDATE parents SET value='warm' WHERE id='p'", &[]))
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    let cached = database
+        .pools
+        .writer_statement_stats(&database.url)
+        .await
+        .unwrap()
+        .cached;
+    assert!(cached > 0);
+    // Every boot passes the whole artifact. A rebuild already recorded must
+    // not retire the statement cache or the writer again.
+    let applied = apply_migrations(
+        &database.pools,
+        &database.url,
+        migrations,
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    assert!(applied.is_empty());
+    assert_eq!(
+        database
+            .pools
+            .writer_statement_stats(&database.url)
+            .await
+            .unwrap()
+            .cached,
+        cached
+    );
+    database.pools.close().await;
+}
+
+#[tokio::test]
+async fn rebuild_with_an_invalid_table_option_rolls_back_inside_the_migration() {
+    let database = Database::new("gonvex-rebuild-table-options");
+    database.install().await.unwrap();
+    let rebuild = |name: &str, owner: &str| {
+        SqlMigration::new(
+            name.into(),
+            MigrationScope::Tenant,
+            false,
+            format!(
+                "-- gonvex:foreign-key-rebuild
+                 CREATE TABLE parents(id TEXT PRIMARY KEY);
+                 CREATE TABLE edges(id TEXT PRIMARY KEY,owner TEXT{owner});
+                 INSERT INTO _gonvex_table_options(name,capture,owner_table,owner_column)
+                 VALUES('edges','derived','parents','owner');"
+            ),
+        )
+    };
+    // `edges` claims a derived owner it has no foreign key to. Committing
+    // that would fail every later boot's change-feed install.
+    let error = apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![rebuild("bad", "")],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("owner foreign key"), "{error}");
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM sqlite_schema WHERE name IN ('parents','edges')")
+            .await,
+        0
+    );
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM gonvex_migrations WHERE name='bad'")
+            .await,
+        0
+    );
+    database.install().await.unwrap();
+    // The corrected migration commits with capture already installed.
+    apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![rebuild("good", " REFERENCES parents(id)")],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_bootstrap WHERE name='table:parents'")
+            .await,
+        1
+    );
+    let version = database.schema_version().await;
+    database.install().await.unwrap();
+    assert_eq!(database.schema_version().await, version);
+    database.pools.close().await;
+}
+
+#[tokio::test]
+async fn members_rebuild_keeps_the_membership_outbox_triggers() {
+    let dir = TestDir::new("gonvex-members-rebuild");
+    let data = crate::DataDir::new(&dir.0);
+    let pools = PoolRegistry::new(PoolLimits::default());
+    let control = ControlPlane::connect(&data.control_url(), pools.clone(), Default::default())
+        .await
+        .unwrap();
+    let route = TenantRoute {
+        project_id: "project".to_owned(),
+        tenant_id: "tenant".to_owned(),
+        database_url: data.tenant_url("project", "tenant").unwrap(),
+    };
+    control
+        .clone()
+        .provision_tenant_database(route.clone(), Vec::new())
+        .await
+        .unwrap();
+    let writer = pools.pool(&route.database_url).await.unwrap();
+    sqlx::query("INSERT INTO members(id,account_id,status) VALUES('m1','a1','active')")
+        .execute(&writer)
+        .await
+        .unwrap();
+    let rebuild = members_rebuild();
+    control
+        .clone()
+        .provision_tenant_database(route.clone(), vec![rebuild])
+        .await
+        .unwrap();
+    let triggers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='members'
+         AND name LIKE 'gonvex_queue_control_plane_membership_%'",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    assert_eq!(triggers, 3);
+    // Without waiting for the next boot, membership changes still reach the
+    // Control Plane outbox.
+    let mut transaction = control
+        .begin_tenant_transaction(&route, false)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE members SET status='suspended',membership_revision=2 WHERE id='m1'")
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let outbox: (String, i64) = sqlx::query_as(
+        "SELECT status,membership_revision FROM _gonvex_control_plane_membership_outbox WHERE account_id='a1'",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    assert_eq!(outbox, ("suspended".to_owned(), 2));
+    pools.close().await;
+}
+
+fn members_rebuild() -> SqlMigration {
+    SqlMigration::new(
+        "0001_rebuild_members.sql".to_owned(),
+        MigrationScope::Tenant,
+        false,
+        "-- gonvex:foreign-key-rebuild
+     CREATE TABLE members_hold AS SELECT * FROM members;
+     DROP TABLE members;
+     CREATE TABLE members (
+       id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active',
+       display_name TEXT NOT NULL DEFAULT '', avatar_url TEXT NOT NULL DEFAULT '',
+       role TEXT NOT NULL DEFAULT 'member', permissions JSON NOT NULL DEFAULT '{}',
+       membership_revision INTEGER NOT NULL DEFAULT 1,
+       created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
+       nickname TEXT);
+     INSERT INTO members(id,account_id,status,display_name,avatar_url,role,permissions,
+       membership_revision,created_at,updated_at)
+     SELECT id,account_id,status,display_name,avatar_url,role,permissions,
+       membership_revision,created_at,updated_at FROM members_hold;
+     DROP TABLE members_hold;
+     CREATE INDEX members_by_role ON members(role);
+     CREATE INDEX members_by_status ON members(status,id);"
+            .to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn a_failing_batch_after_a_members_rebuild_still_restores_the_membership_triggers() {
+    let dir = TestDir::new("gonvex-members-rebuild-failed-batch");
+    let data = crate::DataDir::new(&dir.0);
+    let pools = PoolRegistry::new(PoolLimits::default());
+    let control = ControlPlane::connect(&data.control_url(), pools.clone(), Default::default())
+        .await
+        .unwrap();
+    let route = TenantRoute {
+        project_id: "project".to_owned(),
+        tenant_id: "tenant".to_owned(),
+        database_url: data.tenant_url("project", "tenant").unwrap(),
+    };
+    let failing = SqlMigration::new(
+        "0002_failing.sql".to_owned(),
+        MigrationScope::Tenant,
+        false,
+        "SELECT * FROM missing_table;".to_owned(),
+    );
+    // The rebuild commits, then the batch fails: the tenant keeps the
+    // rebuilt `members` and must keep its membership triggers too.
+    control
+        .clone()
+        .provision_tenant_database(route.clone(), vec![members_rebuild(), failing])
+        .await
+        .unwrap_err();
+    let writer = pools.pool(&route.database_url).await.unwrap();
+    let (rebuilt, triggers): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM gonvex_migrations WHERE name='0001_rebuild_members.sql'),
+                (SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='members'
+                   AND name LIKE 'gonvex_queue_control_plane_membership_%')",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    assert_eq!((rebuilt, triggers), (1, 3));
+    pools.close().await;
+}
+
+#[tokio::test]
 async fn migrations_may_change_primary_keys_that_ordinary_writes_cannot() {
     let database = Database::new("gonvex-migration-key-change");
     database

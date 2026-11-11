@@ -837,7 +837,7 @@ impl ControlPlane {
             let _admission = self.pools.admit(&database_url).await?;
             let _schema = self.pools.lock(&database_url, SCHEMA_LOCK).await?;
             let mut connection = pool.acquire().await?;
-            if migrations.iter().any(rebuilds_foreign_keys) {
+            if rebuild_pending(&mut connection, &migrations, MigrationScope::Tenant).await? {
                 // Cancellation must never return a FK-disabled connection to
                 // the ordinary writer pool. This schema connection is retired.
                 self.pools
@@ -848,13 +848,21 @@ impl ControlPlane {
                 connection.close_on_drop();
             }
             install_tenant_identity(&mut connection).await?;
-            let notices =
-                apply_migrations_locked(&mut connection, &migrations, MigrationScope::Tenant)
-                    .await?
-                    .1;
+            let migrated =
+                apply_migrations_locked(&mut connection, &migrations, MigrationScope::Tenant).await;
+            // A migration that rebuilds `members` drops the membership outbox
+            // triggers with the old table. Restore them after any batch that
+            // applied a migration, or failed after earlier ones committed.
+            let restored = match &migrated {
+                Ok((applied, _)) if applied.is_empty() => Ok(()),
+                _ => install_tenant_identity(&mut connection).await,
+            };
+            let notices = migrated?.1;
+            restored?;
             install_change_feed_locked(&mut connection).await?;
             drop(connection);
             publish(&self.pools, &database_url, notices).await?;
+            self.mark_tenant_available(&route);
             Ok(())
         })
     }
@@ -933,7 +941,7 @@ pub(crate) fn apply_migrations<'a>(
         let pool = pools.pool(database_url).await?;
         let _schema = pools.lock(database_url, SCHEMA_LOCK).await?;
         let mut connection = pool.acquire().await?;
-        if migrations.iter().any(rebuilds_foreign_keys) {
+        if rebuild_pending(&mut connection, &migrations, scope).await? {
             pools.database(database_url).await?.statements.retire();
             connection.close_on_drop();
         }
@@ -955,6 +963,35 @@ fn rebuilds_foreign_keys(migration: &SqlMigration) -> bool {
         .sql
         .lines()
         .any(|line| line.trim() == "-- gonvex:foreign-key-rebuild")
+}
+
+/// Whether a foreign-key rebuild of `scope` has not been applied yet. Only
+/// then must the schema connection be retired: an artifact keeps every
+/// recorded migration, so testing the artifact alone discarded the writer's
+/// statement cache and connection on every boot.
+async fn rebuild_pending(
+    connection: &mut SqliteConnection,
+    migrations: &[SqlMigration],
+    scope: MigrationScope,
+) -> Result<bool, DatabaseError> {
+    let rebuilds = migrations
+        .iter()
+        .filter(|migration| migration.scope == scope && rebuilds_foreign_keys(migration))
+        .map(|migration| migration.name.as_str())
+        .collect::<Vec<_>>();
+    if rebuilds.is_empty() {
+        return Ok(false);
+    }
+    if !table_exists(connection, "gonvex_migrations").await? {
+        return Ok(true);
+    }
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gonvex_migrations WHERE name IN (SELECT value FROM json_each($1))",
+    )
+    .bind(serde_json::to_string(&rebuilds).map_err(|error| protocol(error.to_string()))?)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(usize::try_from(recorded).unwrap_or(0) < rebuilds.len())
 }
 
 fn apply_migrations_locked<'a>(
@@ -1047,6 +1084,11 @@ fn apply_migrations_locked<'a>(
                             row.get::<i64, _>("fkid")
                         )));
                     }
+                    // Validate `_gonvex_table_options` and install capture
+                    // for the rebuilt schema in this transaction: a bad
+                    // declaration rolls the migration back instead of failing
+                    // every later boot. The boot install is then a warm no-op.
+                    install_change_feed_locked(&mut transaction).await?;
                 }
                 let notice = feed::finalize(&mut transaction, &provenance).await?;
                 sqlx::query(

@@ -237,6 +237,10 @@ struct SandboxHealth {
 struct RuntimeManifestHealth {
     ready: bool,
     failed_projects: usize,
+    /// Tenants out of service after failed startup provisioning, as
+    /// `project:tenant` with the reason. They do not make the runtime
+    /// unready: the other tenants keep serving.
+    unavailable_tenants: BTreeMap<String, String>,
 }
 
 #[cfg(feature = "perf-fixture")]
@@ -534,34 +538,7 @@ impl Runtime {
                     .clone()
                     .apply_control_migrations(module.migrations.clone())
                     .await?;
-                let routes = control.tenant_routes(&project).await?;
-                let provisioned = collect_bounded_ordered(
-                    routes.clone(),
-                    startup_tenant_provision_concurrency(),
-                    |route| {
-                        let control = control.clone();
-                        let migrations = module.migrations.clone();
-                        async move { control.provision_tenant_database(route, migrations).await }
-                    },
-                )
-                .await;
-                // A tenant that failed alongside the others (typically a pool
-                // timeout while the batch parsed its schemas) is retried alone
-                // before the start is abandoned: an abandoned start restarts
-                // the container and repeats the whole batch.
-                for (route, result) in routes.into_iter().zip(provisioned) {
-                    if let Err(error) = result {
-                        tracing::warn!(
-                            tenant = %route.tenant_id,
-                            %error,
-                            "tenant provisioning failed during startup; retrying alone"
-                        );
-                        control
-                            .clone()
-                            .provision_tenant_database(route, module.migrations.clone())
-                            .await?;
-                    }
-                }
+                provision_startup_tenants(&control, &project, &module.migrations).await?;
             }
             *self.inner.control_plane.write().await = Some(control);
             self.start_control_event_listener().await?;
@@ -1387,7 +1364,36 @@ async fn dev_sync(
 ) -> Response {
     match apply_dev_sync(&runtime, &headers, &mut manifest).await {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
-        Err((status, error)) => (status, Json(serde_json::json!({"error":error}))).into_response(),
+        Err(DevSyncError {
+            status,
+            error,
+            tenants,
+        }) => {
+            let mut body = serde_json::json!({"error":error});
+            if let Some(tenants) = tenants {
+                body["tenants"] = serde_json::Value::Array(tenants);
+            }
+            (status, Json(body)).into_response()
+        }
+    }
+}
+
+/// A rejected module push. `tenants` reports per-tenant provisioning when
+/// the push failed part way through its tenants.
+#[derive(Debug)]
+struct DevSyncError {
+    status: StatusCode,
+    error: String,
+    tenants: Option<Vec<serde_json::Value>>,
+}
+
+impl From<(StatusCode, String)> for DevSyncError {
+    fn from((status, error): (StatusCode, String)) -> Self {
+        Self {
+            status,
+            error,
+            tenants: None,
+        }
     }
 }
 
@@ -1395,7 +1401,7 @@ async fn apply_dev_sync(
     runtime: &Runtime,
     headers: &HeaderMap,
     manifest: &mut serde_json::Value,
-) -> Result<serde_json::Value, (StatusCode, String)> {
+) -> Result<serde_json::Value, DevSyncError> {
     let header_project = headers
         .get("x-gonvex-project-id")
         .and_then(|value| value.to_str().ok())
@@ -1415,7 +1421,8 @@ async fn apply_dev_sync(
         return Err((
             StatusCode::BAD_REQUEST,
             "manifest project does not match x-gonvex-project-id".to_owned(),
-        ));
+        )
+            .into());
     }
     manifest["project"] = serde_json::Value::String(project.clone());
     let key = headers
@@ -1449,7 +1456,8 @@ async fn apply_dev_sync(
         return Err((
             StatusCode::UNAUTHORIZED,
             "invalid Gonvex sync key".to_owned(),
-        ));
+        )
+            .into());
     }
     let module = manifest
         .get("module")
@@ -1478,17 +1486,13 @@ async fn apply_dev_sync(
         .apply_control_migrations(migrations.clone())
         .await
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+    // Every tenant, including one left unavailable at boot: a push is how
+    // an operator brings a repaired tenant back.
     let routes = control
-        .tenant_routes(&project)
+        .all_tenant_routes(&project)
         .await
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
-    for route in routes.iter().cloned() {
-        control
-            .clone()
-            .provision_tenant_database(route, migrations.clone())
-            .await
-            .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
-    }
+    let tenants = provision_pushed_tenants(&control, &project, &routes, &migrations).await?;
     let installed = runtime
         .inner
         .modules
@@ -1515,10 +1519,57 @@ async fn apply_dev_sync(
     Ok(serde_json::json!({
         "ok":true,
         "project":project,
+        "tenants":tenants,
         "functionCount":installed.functions.len(),
         "schemaDefinition":manifest.get("schema").cloned().unwrap_or_else(|| serde_json::json!({})),
         "runtimeReloaded":true,
     }))
+}
+
+/// Provisions a pushed module's migrations on every tenant and reports each
+/// tenant's outcome (docs/migrations.md). A failing tenant does not block
+/// the healthy ones, but it fails the push: the previous module stays
+/// installed and its manifest stays saved. Migrations cannot be rolled back,
+/// so the tenants that did migrate run the previous module on the new schema
+/// until the next push; pushes must stay expand/contract compatible. Repair
+/// the failed tenant and push again, which skips the migrations applied.
+async fn provision_pushed_tenants(
+    control: &ControlPlane,
+    project: &str,
+    routes: &[gonvex_store::TenantRoute],
+    migrations: &[gonvex_store::SqlMigration],
+) -> Result<Vec<serde_json::Value>, DevSyncError> {
+    let mut tenants = Vec::with_capacity(routes.len());
+    let mut failed = Vec::new();
+    for route in routes {
+        match control
+            .clone()
+            .provision_tenant_database(route.clone(), migrations.to_vec())
+            .await
+        {
+            Ok(()) => {
+                tenants.push(serde_json::json!({"tenant":route.tenant_id,"status":"provisioned"}))
+            }
+            Err(error) => {
+                tracing::error!(project, tenant = %route.tenant_id, %error, "module push failed provisioning a tenant");
+                tenants.push(serde_json::json!({"tenant":route.tenant_id,"status":"failed","error":error.to_string()}));
+                failed.push(format!("{:?}: {error}", route.tenant_id));
+            }
+        }
+    }
+    if failed.is_empty() {
+        return Ok(tenants);
+    }
+    Err(DevSyncError {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        error: format!(
+            "{} of {} tenants failed provisioning ({}). The previous module stays installed; the other tenants already have this push's migrations. Repair the failed tenants and push again.",
+            failed.len(),
+            routes.len(),
+            failed.join("; ")
+        ),
+        tenants: Some(tenants),
+    })
 }
 
 async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response {
@@ -1570,6 +1621,10 @@ async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response 
             runtime_manifests: RuntimeManifestHealth {
                 ready: failed_projects == 0,
                 failed_projects,
+                unavailable_tenants: match runtime.inner.control_plane.read().await.as_ref() {
+                    Some(control) => control.unavailable_tenants().into_iter().collect(),
+                    None => BTreeMap::new(),
+                },
             },
             module_host,
             s3_set: runtime.inner.storage.configured(),
@@ -5128,6 +5183,64 @@ fn ordered_control_completion(
 type PreparedReplicaOpen<S> = (Vec<ServerMessage>, Option<(String, S)>);
 type ReplicaOpenOutcome<S, E> = (ReplicaOpenRequest, Result<PreparedReplicaOpen<S>, E>);
 
+/// Provisions every tenant of `project` at startup. A tenant whose database
+/// fails is logged and marked unavailable (connections to it get a clear
+/// refusal), so one bad tenant cannot keep the runtime from serving the
+/// others. Startup still fails when every tenant fails: that is a systemic
+/// fault (a broken runtime build or migration) that a deploy's health check
+/// must refuse, as it did before.
+async fn provision_startup_tenants(
+    control: &ControlPlane,
+    project: &str,
+    migrations: &[gonvex_store::SqlMigration],
+) -> Result<(), gonvex_store::DatabaseError> {
+    let routes = control.all_tenant_routes(project).await?;
+    let provisioned = collect_bounded_ordered(
+        routes.clone(),
+        startup_tenant_provision_concurrency(),
+        |route| {
+            let control = control.clone();
+            let migrations = migrations.to_vec();
+            async move { control.provision_tenant_database(route, migrations).await }
+        },
+    )
+    .await;
+    let total = routes.len();
+    let mut failures = Vec::new();
+    for (route, result) in routes.into_iter().zip(provisioned) {
+        let Err(error) = result else { continue };
+        // A tenant that failed alongside the others (typically a pool
+        // timeout while the batch parsed its schemas) is retried alone
+        // before it is taken out of service.
+        tracing::warn!(
+            project,
+            tenant = %route.tenant_id,
+            %error,
+            "tenant provisioning failed during startup; retrying alone"
+        );
+        if let Err(error) = control
+            .clone()
+            .provision_tenant_database(route.clone(), migrations.to_vec())
+            .await
+        {
+            tracing::error!(
+                project,
+                tenant = %route.tenant_id,
+                %error,
+                "tenant provisioning failed; the tenant is unavailable until its database is repaired and the module is pushed again"
+            );
+            failures.push((route, error));
+        }
+    }
+    if total > 0 && failures.len() == total {
+        return Err(failures.swap_remove(0).1);
+    }
+    for (route, error) in failures {
+        control.mark_tenant_unavailable(&route, error.to_string());
+    }
+    Ok(())
+}
+
 async fn collect_bounded_ordered<T, U, F, Fut>(
     inputs: Vec<T>,
     concurrency: usize,
@@ -5432,6 +5545,7 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 mod tests {
     mod action_depth;
     mod receipt_guarantee_tests;
+    mod startup_provisioning;
     #[tokio::test]
     async fn native_snapshot_socket_backpressures_until_durable_ack() {
         use futures_util::{SinkExt, StreamExt};
