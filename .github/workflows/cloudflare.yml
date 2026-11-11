@@ -8,18 +8,23 @@ on:
   pull_request:
     branches: [cloudflare/integration]
     types: [opened, synchronize, reopened, ready_for_review, closed]
+  # A01 transform drift, nightly. GitHub runs schedules from the default
+  # branch only, so this takes effect once the file is on main.
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: cloudflare-${{ github.event.pull_request.number }}
+  group: cloudflare-${{ github.event.pull_request.number || github.event_name }}
   cancel-in-progress: ${{ github.event.action != 'closed' }}
 
 jobs:
   check:
     name: Typecheck and workerd tests
-    if: github.event.action != 'closed'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -48,7 +53,7 @@ jobs:
 
   conformance-unit:
     name: Conformance unit tests
-    if: github.event.action != 'closed'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -70,7 +75,7 @@ jobs:
     name: Deploy preview Worker
     needs: check
     # Same-repo PRs only: fork PRs never receive secrets.
-    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -119,7 +124,7 @@ jobs:
 
   cleanup:
     name: Delete preview Worker
-    if: github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -157,3 +162,64 @@ jobs:
       - name: Delete preview
         if: steps.secrets.outputs.ready == 'true'
         run: node scripts/deploy-preview.mjs delete --branch "$PREVIEW_BRANCH"
+
+  # A01 (contract-changes/0014, rule 5): run the kernel schema transform over
+  # the app's current staging migrations, so a construct it cannot handle
+  # shows up before cutover. Read-only: a sparse, shallow clone of
+  # whagons5-client `staging`, `migrations/` only, with a read-only deploy key.
+  transform-drift:
+    name: Schema transform over whagons5-client staging
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLIENT_DEPLOY_KEY: ${{ secrets.WHAGONS_CLIENT_DEPLOY_KEY }}
+    steps:
+      - name: Check read access to whagons5-client
+        id: access
+        run: |
+          if [ -n "$CLIENT_DEPLOY_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::WHAGONS_CLIENT_DEPLOY_KEY is not set: the app's staging migrations were NOT checked for transform drift."
+            echo "### Transform drift: not checked (WHAGONS_CLIENT_DEPLOY_KEY is not set)" >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.access.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+      - name: Fetch whagons5-client staging migrations (read-only)
+        if: steps.access.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/client-key"
+          printf '%s\n' "$CLIENT_DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone --quiet --depth 1 --branch staging --filter=blob:none --sparse \
+            git@github.com:Whagons-International/whagons5-client.git "$RUNNER_TEMP/client"
+          git -C "$RUNNER_TEMP/client" sparse-checkout set migrations
+          rm -f "$key"
+          echo "CLIENT_SHA=$(git -C "$RUNNER_TEMP/client" rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v7
+        if: steps.access.outputs.ready == 'true'
+        with:
+          node-version: "24"
+      # No install: the transform is dependency-free TypeScript that Node runs directly.
+      - name: Transform the staging migrations
+        if: steps.access.outputs.ready == 'true'
+        run: |
+          node cloudflare/kernel/schema-transform/verify/transform-migrations.mjs "$RUNNER_TEMP/client/migrations" \
+            --prelude cloudflare/spikes/s1/scripts/runtime-prelude.sql --json "$RUNNER_TEMP/drift.json"
+      - name: Summary
+        if: always() && steps.access.outputs.ready == 'true'
+        run: |
+          {
+            echo "### Transform drift: whagons5-client staging \`$CLIENT_SHA\`"
+            if [ -f "$RUNNER_TEMP/drift.json" ]; then
+              node -e 'const r=require(process.argv[1]);console.log(`transform ${r.version}: ${r.migrations.length} migrations, ${r.migrations.reduce((s,m)=>s+m.source,0)} statements in, ${r.migrations.reduce((s,m)=>s+m.output,0)} out, ${r.added.count} added objects, ${r.ms} ms`)' "$RUNNER_TEMP/drift.json"
+            else
+              echo "Failed: see the step log for the migration, object and limit."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

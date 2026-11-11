@@ -92,12 +92,18 @@ that key order. Running the names in ascending binary order and each name in `ro
 
 ## Verification
 
-- `test/*.test.ts` run inside workerd against real Durable Object SQLite (`pnpm test` in `cloudflare/`). For each
-  rewrite, the original construct is refused and the transformed DDL loads and returns the same results. For T6, a
-  12-branch reference layer gives identical bindings and guard errors to the untransformed layer.
-- `verify/transform-migrations.mjs <dir> [--prelude f]` transforms a migrations directory and prints a summary. It
-  exits 1 with the `TransformError` on an unhandled construct.
+Tests: `pnpm test` in `cloudflare/` runs `test/*.test.ts` inside workerd against real Durable Object SQLite. For each
+rewrite, the original construct is refused and the transformed DDL loads and returns the same results. For T6, a
+12-branch reference layer gives identical write outcomes, bindings and guard errors to the untransformed layer.
+Another test checks that no chunk ends inside a deferred-FK span or a T6 fill.
 
-The tenant-data checks (all 15 staging tenants: views `EXCEPT` both ways, index keys and a Unicode fuzz corpus, reference
-bindings and change rows against the Rust runtime on the same writes, platform load and strict-host compile) and the CI
-drift job land in the second A01 pull request.
+`verify/` holds the checks behind the A01 report. Tenant files are copied read-only, kept outside the repository and
+deleted afterwards.
+
+| Script | Checks |
+|---|---|
+| `transform-migrations.mjs <dir> [--prelude f]` | Transforms a migrations directory; exits 1 with the `TransformError`. The CI job `transform-drift` runs it on whagons5-client `staging`. |
+| `verify-tenant.mjs <tenant.db> --work d --rust-bin b` | Builds the transformed schema over a copy of the tenant's rows and compares it with the original. Every rewritten view must give the same rows (multiset, with storage classes), with every owner in scope, and T6's `expected` view must match after a fill. Rewritten index keys must match on every row and on a 10,000-string Unicode fuzz corpus. Writes generated from the file are replayed on both: on the original through the Rust runtime's own capture (`rust-replay/`, `gonvex-store` `capture::install` plus `feed::finalize`), on the transformed schema through T5's flush. The replay requires the same outcome and error for every write, including a duplicate live role name, the same change rows, and then the same content in every table. Values taken from the clock during the run are masked on both sides. |
+| `rust-replay/` | The Rust side of that replay. It is a standalone crate, like P03's stage tool, with the runtime's serde_json features (`preserve_order`, the vendored patch). |
+| `load-object.mjs migrations\|compile <base> <object> …` | Loads the transformed migrations into an object (one storage transaction per T7 chunk), then the runtime-generated objects. `compile` prepares every table's INSERT, UPDATE and DELETE and selects from every view. It uses the S1 spike Worker's routes. |
+| `strict-hosts.mjs <base> <n>` | On fresh objects, a 12-branch reference layer with T1 only and then with T6: same writes, same bindings. |
