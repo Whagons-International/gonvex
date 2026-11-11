@@ -90,14 +90,14 @@ watcher's offline. workerd serves the socket directly, so the server-side TCP st
 | Server `tcp_retries2` | Drop → offline | What happens |
 | --- | --- | --- |
 | 3 | 33.1 s (2 runs) | 20 s until K05's liveness watermark, ~3 s of retransmission, workerd reports close 1006 to the gateway, then the 10 s grace |
-| 8 | DP8 | |
-| 15 (Linux default) | DP15 | |
+| 8 | 136.5 s | 20 s, then about 105 s of exponential retransmission, close 1006, 10 s grace |
+| 15 (Linux default) | **not detected within 30 min** | still retransmitting when the run gave up |
 
 - **The 10 s grace after detection holds.** From workerd's close event to the watcher's offline it takes the grace
   plus one window, as in Rust.
 - **Detection itself is the gap.** Rust detects a silent peer in 60-80 s (server Pings). The kernel detects it only
-  when the server's TCP stack gives up retransmitting K05's 20 s watermark. With Linux defaults that takes
-  DP15TEXT. Without the watermark, an idle dead peer is never detected.
+  when the server's TCP stack gives up retransmitting K05's 20 s watermark. With Linux defaults that took more than
+  30 minutes locally. Without the watermark, an idle dead peer is never detected.
 - **The platform number is not measured.** Clients' TCP ends at Cloudflare's edge, whose retransmission policy we
   do not control, and the vault was down (no deploy). Follow-up: run `dead-peer.mjs` against a `gonvex-cf-dev-*`
   deploy, with the victim's port dropped by the client host's firewall.

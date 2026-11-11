@@ -78,8 +78,8 @@ Measured on arch3 (local workerd 1.20261023.1, loopback, 2026-11-11), victim idl
 | `tcp_retries2` | Drop → offline at the watcher | Breakdown |
 | --- | --- | --- |
 | 3 | 33.1 s, 33.1 s | 20 s until the liveness watermark, ~3 s of retransmissions, close 1006, 10 s grace |
-| 8 | see `results.md` | |
-| 15 (Linux default) | see `results.md` | |
+| 8 | 136.5 s | 20 s, then ~105 s of exponential retransmission, close 1006, 10 s grace |
+| 15 (Linux default) | **not detected within 30 min** | the kernel was still retransmitting (and probing) when the run gave up |
 
 Without the liveness watermark nothing is ever sent to an idle socket and the peer is never detected. On the
 platform the client's TCP connection ends at Cloudflare's edge, whose retransmission policy is not ours to set
