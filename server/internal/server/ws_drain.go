@@ -104,3 +104,9 @@ func (c *wsConn) closeForRestart() {
 	_ = c.conn.Close()
 	c.conn = nil
 }
+
+// WebSocketDrainWindow is the window a supervised worker spreads its restart
+// closes across (GONVEX_WS_DRAIN_WINDOW, default 12s).
+func WebSocketDrainWindow() time.Duration {
+	return wsDrainWindowFromEnv()
+}
