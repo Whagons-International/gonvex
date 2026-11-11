@@ -1,0 +1,499 @@
+{
+ "date": "2026-11-11",
+ "where": "local workerd (wrangler 4.155.0), arch3",
+ "app": "whagons5-client staging a6de676951 migrations 0000-0011",
+ "capture": "K03 kernel/capture (PR #348 branch)",
+ "reference": "fresh tenant from gonvex-store provision_tenant_database (rust @ this branch), 21,261 ms; re-provision 652 ms",
+ "runs": {
+  "local-2": {
+   "object": "local-2",
+   "steps": {
+    "plan": {
+     "id": "be38312345fd99b468d8d146059a1ec8",
+     "ms": 10023,
+     "heapMB": 99,
+     "migrations": 12,
+     "chunks": 163,
+     "statements": 30381,
+     "addedObjects": 1152,
+     "bytes": 18462420
+    },
+    "upload": {
+     "entries": 164,
+     "ms": 653
+    },
+    "provision": {
+     "state": "done",
+     "error": null,
+     "wallMs": 104798,
+     "activeMs": 100863,
+     "events": 68,
+     "objectRestarts": 0,
+     "transactionsSeen": 188,
+     "transactionMs": {
+      "p50": 238,
+      "p90": 1062,
+      "max": 1316
+     },
+     "slowest": [
+      "migration/0007_bounded_identity_projections.sql#4:200st:1316ms",
+      "migration/0007_bounded_identity_projections.sql#0:200st:1295ms",
+      "migration/0007_bounded_identity_projections.sql#7:200st:1218ms",
+      "migration/0007_bounded_identity_projections.sql#20:200st:1202ms",
+      "migration/0009_indexed_public_relationship_filters.sql#17:200st:1194ms"
+     ],
+     "databaseSize": 21946368
+    },
+    "ledger": {
+     "equal": true,
+     "rows": 12,
+     "durationMs": {
+      "0000_sqlite_baseline.sql": 88,
+      "0001_sqlite_projections.sql": 15,
+      "0002_agents_and_subtask_references.sql": 28,
+      "0003_sql_relationship_integrity.sql": 5052,
+      "0004_sql_document_relationships.sql": 2151,
+      "0005_compact_record_storage.sql": 13115,
+      "0006_scoped_form_and_poll_relationships.sql": 415,
+      "0007_bounded_identity_projections.sql": 27067,
+      "0008_scoped_json_key_types.sql": 22,
+      "0009_indexed_public_relationship_filters.sql": 19475,
+      "0010_remove_duplicate_indexes.sql": 57,
+      "0011_unique_workplan_generation_keys.sql": 6
+     }
+    },
+    "runtimeTables": {
+     "_gonvex_sync_bootstrap": {
+      "rows": 382,
+      "equal": false,
+      "differ": [
+       "table:__miniflare_do_name"
+      ]
+     },
+     "_gonvex_schema_capabilities": {
+      "rows": 3,
+      "equal": true
+     },
+     "_gonvex_table_options": {
+      "rows": 125,
+      "equal": true
+     },
+     "_gonvex_record_views": {
+      "rows": 367,
+      "equal": true
+     },
+     "_gonvex_record_dependencies": {
+      "rows": 10,
+      "equal": true
+     },
+     "_gonvex_id_domains": {
+      "rows": 365,
+      "equal": true
+     },
+     "_gonvex_reference_catalog": {
+      "rows": 0,
+      "equal": true
+     },
+     "members": {
+      "rows": 0,
+      "equal": true
+     },
+     "_gonvex_sync_clock": {
+      "rows": 1,
+      "equal": true
+     }
+    },
+    "schema": {
+     "kernel": {
+      "table": 645,
+      "index": 881,
+      "view": 1296,
+      "trigger": 7810
+     },
+     "rust": {
+      "table": 530,
+      "index": 881,
+      "view": 474,
+      "trigger": 7593
+     },
+     "added": 1150,
+     "missingFromKernel": 0,
+     "missingSample": [],
+     "extraNotAdded": 4,
+     "extraSample": [
+      "__miniflare_do_name",
+      "_gonvex_sync___miniflare_do_name_insert",
+      "_gonvex_sync___miniflare_do_name_update",
+      "_gonvex_sync___miniflare_do_name_delete"
+     ],
+     "identicalSql": 1852,
+     "differentSql": {
+      "trigger": 6424,
+      "table": 1,
+      "index": 1,
+      "view": 60,
+      "T5 capture": 1140
+     }
+    },
+    "state": {
+     "foreignKeys": 1,
+     "progress": {
+      "planId": "be38312345fd99b468d8d146059a1ec8",
+      "state": "done",
+      "phase": "done",
+      "unit": null,
+      "chunk": 12,
+      "gateClosed": false,
+      "applied": [
+       "0000_sqlite_baseline.sql",
+       "0001_sqlite_projections.sql",
+       "0002_agents_and_subtask_references.sql",
+       "0003_sql_relationship_integrity.sql",
+       "0004_sql_document_relationships.sql",
+       "0005_compact_record_storage.sql",
+       "0006_scoped_form_and_poll_relationships.sql",
+       "0007_bounded_identity_projections.sql",
+       "0008_scoped_json_key_types.sql",
+       "0009_indexed_public_relationship_filters.sql",
+       "0010_remove_duplicate_indexes.sql",
+       "0011_unique_workplan_generation_keys.sql"
+      ],
+      "revisions": [],
+      "events": 68,
+      "activeMs": 100863,
+      "error": null
+     }
+    }
+   },
+   "databaseSize": 21946368,
+   "failures": []
+  },
+  "local-kill": {
+   "object": "local-kill",
+   "steps": {
+    "plan": {
+     "id": "be38312345fd99b468d8d146059a1ec8",
+     "ms": 9564,
+     "heapMB": 51,
+     "migrations": 12,
+     "chunks": 163,
+     "statements": 30381,
+     "addedObjects": 1152,
+     "bytes": 18462420
+    },
+    "upload": {
+     "entries": 164,
+     "ms": 890
+    },
+    "kill": {
+     "atMs": 47580
+    },
+    "provision": {
+     "state": "done",
+     "error": null,
+     "wallMs": 125475,
+     "activeMs": 98906,
+     "events": 70,
+     "objectRestarts": 2,
+     "transactionsSeen": 170,
+     "transactionMs": {
+      "p50": 204,
+      "p90": 1000,
+      "max": 1361
+     },
+     "slowest": [
+      "migration/0007_bounded_identity_projections.sql#10:200st:1361ms",
+      "migration/0007_bounded_identity_projections.sql#12:200st:1135ms",
+      "migration/0007_bounded_identity_projections.sql#11:200st:1105ms",
+      "migration/0007_bounded_identity_projections.sql#19:200st:1103ms",
+      "migration/0009_indexed_public_relationship_filters.sql#3:200st:1075ms"
+     ],
+     "databaseSize": 21946368
+    },
+    "ledger": {
+     "equal": true,
+     "rows": 12,
+     "durationMs": {
+      "0000_sqlite_baseline.sql": 93,
+      "0001_sqlite_projections.sql": 16,
+      "0002_agents_and_subtask_references.sql": 29,
+      "0003_sql_relationship_integrity.sql": 5333,
+      "0004_sql_document_relationships.sql": 2234,
+      "0005_compact_record_storage.sql": 12078,
+      "0006_scoped_form_and_poll_relationships.sql": 394,
+      "0007_bounded_identity_projections.sql": 25635,
+      "0008_scoped_json_key_types.sql": 19,
+      "0009_indexed_public_relationship_filters.sql": 17832,
+      "0010_remove_duplicate_indexes.sql": 64,
+      "0011_unique_workplan_generation_keys.sql": 8
+     }
+    },
+    "runtimeTables": {
+     "_gonvex_sync_bootstrap": {
+      "rows": 381,
+      "equal": true
+     },
+     "_gonvex_schema_capabilities": {
+      "rows": 3,
+      "equal": true
+     },
+     "_gonvex_table_options": {
+      "rows": 125,
+      "equal": true
+     },
+     "_gonvex_record_views": {
+      "rows": 367,
+      "equal": true
+     },
+     "_gonvex_record_dependencies": {
+      "rows": 10,
+      "equal": true
+     },
+     "_gonvex_id_domains": {
+      "rows": 365,
+      "equal": true
+     },
+     "_gonvex_reference_catalog": {
+      "rows": 0,
+      "equal": true
+     },
+     "members": {
+      "rows": 0,
+      "equal": true
+     },
+     "_gonvex_sync_clock": {
+      "rows": 1,
+      "equal": true
+     }
+    },
+    "schema": {
+     "kernel": {
+      "table": 645,
+      "index": 881,
+      "view": 1296,
+      "trigger": 7807
+     },
+     "rust": {
+      "table": 530,
+      "index": 881,
+      "view": 474,
+      "trigger": 7593
+     },
+     "added": 1150,
+     "missingFromKernel": 0,
+     "missingSample": [],
+     "extraNotAdded": 1,
+     "extraSample": [
+      "__miniflare_do_name"
+     ],
+     "identicalSql": 1852,
+     "whitespaceOnly": 6131,
+     "rewritten": {
+      "table (T1-T4)": 1,
+      "index (T1-T4)": 1,
+      "view (T1-T4)": 3,
+      "view reading a reference view (T6)": 57,
+      "trigger reading a reference view (T6)": 293,
+      "T5 capture": 1140
+     },
+     "rewrittenSample": [
+      "recordstorage_roles",
+      "roles_live_name_key_unique",
+      "whtaskcustomfieldsearchdocuments",
+      "whtaskgridprojection",
+      "whtasktagsearchdocuments"
+     ]
+    },
+    "state": {
+     "foreignKeys": 1,
+     "progress": {
+      "planId": "be38312345fd99b468d8d146059a1ec8",
+      "state": "done",
+      "phase": "done",
+      "unit": null,
+      "chunk": 12,
+      "gateClosed": false,
+      "applied": [
+       "0000_sqlite_baseline.sql",
+       "0001_sqlite_projections.sql",
+       "0002_agents_and_subtask_references.sql",
+       "0003_sql_relationship_integrity.sql",
+       "0004_sql_document_relationships.sql",
+       "0005_compact_record_storage.sql",
+       "0006_scoped_form_and_poll_relationships.sql",
+       "0007_bounded_identity_projections.sql",
+       "0008_scoped_json_key_types.sql",
+       "0009_indexed_public_relationship_filters.sql",
+       "0010_remove_duplicate_indexes.sql",
+       "0011_unique_workplan_generation_keys.sql"
+      ],
+      "revisions": [],
+      "events": 70,
+      "activeMs": 98906,
+      "error": null
+     }
+    }
+   },
+   "databaseSize": 21946368,
+   "failures": []
+  },
+  "local-roll": {
+   "object": "local-roll",
+   "steps": {
+    "plan": {
+     "id": "be38312345fd99b468d8d146059a1ec8",
+     "ms": 9996,
+     "heapMB": 52,
+     "migrations": 12,
+     "chunks": 163,
+     "statements": 30381,
+     "addedObjects": 1152,
+     "bytes": 18462420
+    },
+    "upload": {
+     "entries": 164,
+     "ms": 616
+    },
+    "provision": {
+     "state": "done",
+     "error": null,
+     "wallMs": 3370,
+     "activeMs": 2033,
+     "events": 2,
+     "objectRestarts": 0,
+     "transactionsSeen": 5,
+     "transactionMs": {
+      "p50": 0,
+      "p90": 15,
+      "max": 15
+     },
+     "slowest": [
+      "prelude/tenant-identity#0:10st:15ms",
+      "migration/0011_unique_workplan_generation_keys.sql#0:1st:13ms",
+      "prelude/reference-ledger#0:18st:0ms",
+      "prelude/schema-options#0:15st:0ms",
+      "prelude/migration-ledger#0:1st:0ms"
+     ],
+     "databaseSize": 21950464
+    },
+    "ledger": {
+     "equal": true,
+     "rows": 12,
+     "durationMs": {
+      "0000_sqlite_baseline.sql": 89,
+      "0001_sqlite_projections.sql": 16,
+      "0002_agents_and_subtask_references.sql": 32,
+      "0003_sql_relationship_integrity.sql": 5008,
+      "0004_sql_document_relationships.sql": 2060,
+      "0005_compact_record_storage.sql": 11428,
+      "0006_scoped_form_and_poll_relationships.sql": 390,
+      "0007_bounded_identity_projections.sql": 23995,
+      "0008_scoped_json_key_types.sql": 20,
+      "0009_indexed_public_relationship_filters.sql": 17073,
+      "0010_remove_duplicate_indexes.sql": 55,
+      "0011_unique_workplan_generation_keys.sql": 10
+     }
+    },
+    "runtimeTables": {
+     "_gonvex_sync_bootstrap": {
+      "rows": 381,
+      "equal": true
+     },
+     "_gonvex_schema_capabilities": {
+      "rows": 3,
+      "equal": true
+     },
+     "_gonvex_table_options": {
+      "rows": 125,
+      "equal": true
+     },
+     "_gonvex_record_views": {
+      "rows": 367,
+      "equal": true
+     },
+     "_gonvex_record_dependencies": {
+      "rows": 10,
+      "equal": true
+     },
+     "_gonvex_id_domains": {
+      "rows": 365,
+      "equal": true
+     },
+     "_gonvex_reference_catalog": {
+      "rows": 0,
+      "equal": true
+     },
+     "members": {
+      "rows": 0,
+      "equal": true
+     },
+     "_gonvex_sync_clock": {
+      "rows": 1,
+      "equal": true
+     }
+    },
+    "schema": {
+     "kernel": {
+      "table": 645,
+      "index": 881,
+      "view": 1296,
+      "trigger": 7810
+     },
+     "rust": {
+      "table": 530,
+      "index": 881,
+      "view": 474,
+      "trigger": 7593
+     },
+     "added": 1150,
+     "missingFromKernel": 0,
+     "missingSample": [],
+     "extraNotAdded": 4,
+     "extraSample": [
+      "__miniflare_do_name",
+      "gonvex_queue_control_plane_membership_insert",
+      "gonvex_queue_control_plane_membership_update",
+      "gonvex_queue_control_plane_membership_delete"
+     ],
+     "identicalSql": 1852,
+     "whitespaceOnly": 6131,
+     "rewritten": {
+      "table (T1-T4)": 1,
+      "index (T1-T4)": 1,
+      "view (T1-T4)": 3,
+      "view reading a reference view (T6)": 57,
+      "trigger reading a reference view (T6)": 293,
+      "T5 capture": 1140
+     },
+     "rewrittenSample": [
+      "recordstorage_roles",
+      "roles_live_name_key_unique",
+      "whtaskcustomfieldsearchdocuments",
+      "whtaskgridprojection",
+      "whtasktagsearchdocuments"
+     ]
+    },
+    "state": {
+     "foreignKeys": 1,
+     "progress": {
+      "planId": "be38312345fd99b468d8d146059a1ec8",
+      "state": "done",
+      "phase": "done",
+      "unit": null,
+      "chunk": 0,
+      "gateClosed": false,
+      "applied": [
+       "0011_unique_workplan_generation_keys.sql"
+      ],
+      "revisions": [],
+      "events": 2,
+      "activeMs": 2033,
+      "error": null
+     }
+    }
+   },
+   "databaseSize": 21950464,
+   "failures": []
+  }
+ }
+}
