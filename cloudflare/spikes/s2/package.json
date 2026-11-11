@@ -1,0 +1,15 @@
+{
+  "name": "gonvex-cf-s2-execution-spike",
+  "private": true,
+  "type": "module",
+  "description": "S2: run real Whagons Reducers inside a Durable Object (local workerd only).",
+  "scripts": {
+    "artifact": "node scripts/build-artifact.mjs",
+    "serve": "workerd serve --experimental config.capnp",
+    "spike": "node test/run-spike.mjs"
+  },
+  "devDependencies": {
+    "workerd": "1.20261023.1",
+    "wrangler": "4.153.0"
+  }
+}

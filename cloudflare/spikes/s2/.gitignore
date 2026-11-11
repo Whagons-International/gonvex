@@ -1,0 +1,4 @@
+.artifact/
+.build/
+.storage/
+node_modules/

@@ -1,0 +1,6 @@
+# Standalone: this spike is not part of the Gonvex workspace.
+packages: []
+allowBuilds:
+  workerd: true
+  esbuild: true
+  sharp: false
