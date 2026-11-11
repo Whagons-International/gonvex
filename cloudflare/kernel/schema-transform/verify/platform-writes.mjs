@@ -45,11 +45,12 @@ for (const name of names) {
   };
   const touch = [];
   const reference = [];
-  for (let i = 0; i < n; i += 1) {
+  const other = keys[keys.length - 1];
+  for (let i = 0; i < keys.length - 1; i += 1) {
     const k = keys[i];
     touch.push(await run([`UPDATE ${q(table)} SET ${q(touchCol)} = ${q(touchCol)} WHERE ${q(key)} = ${k}`]));
     if (watched.length) {
-      const from = db.prepare(`SELECT ${watched.map((c) => `quote(${q(c)}) AS ${q(c)}`).join(", ")} FROM ${q(table)} WHERE ${q(key)} = ?`).get(keys[n]);
+      const from = db.prepare(`SELECT ${watched.map((c) => `quote(${q(c)}) AS ${q(c)}`).join(", ")} FROM ${q(table)} WHERE ${q(key)} = ?`).get(other);
       const back = db.prepare(`SELECT ${watched.map((c) => `quote(${q(c)}) AS ${q(c)}`).join(", ")} FROM ${q(table)} WHERE ${q(key)} = ?`).get(k);
       reference.push(await run([`UPDATE ${q(table)} SET ${watched.map((c) => `${q(c)} = ${from[c]}`).join(", ")} WHERE ${q(key)} = ${k}`]));
       reference.push(await run([`UPDATE ${q(table)} SET ${watched.map((c) => `${q(c)} = ${back[c]}`).join(", ")} WHERE ${q(key)} = ${k}`]));

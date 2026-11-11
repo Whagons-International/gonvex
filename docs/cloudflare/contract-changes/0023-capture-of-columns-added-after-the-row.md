@@ -1,6 +1,6 @@
-# 0022: Rust's hook capture reports a column added by ALTER TABLE as NULL on old rows
+# 0023: Rust's hook capture reports a column added by ALTER TABLE as NULL on old rows
 
-Date: 2026-11-11. Status: **open** (for the lead; numbered 0022 because open PRs #338 and #340 both use 0020). Reported by A01. Affects: K03, P02, M02.
+Date: 2026-11-11. Status: **open** (for the lead). Reported by A01. Affects: K03, P02, M02.
 
 ## Finding
 

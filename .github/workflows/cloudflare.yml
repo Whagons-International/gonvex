@@ -165,8 +165,11 @@ jobs:
 
   # A01 (contract-changes/0014, rule 5): run the kernel schema transform over
   # the app's current staging migrations, so a construct it cannot handle
-  # shows up before cutover. Read-only: a sparse, shallow clone of
-  # whagons5-client `staging`, `migrations/` only, with a read-only deploy key.
+  # shows up before cutover. Also (0022 §2a, §5): every REGEXP pattern in the
+  # app's module sources must compile with K01's translator, and no module
+  # source may name a storage table that carries T3's generated columns.
+  # Read-only: a sparse, shallow clone of whagons5-client `staging`
+  # (`migrations/` and `gonvex/`), with a read-only deploy key.
   transform-drift:
     name: Schema transform over whagons5-client staging
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
@@ -199,7 +202,7 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
           git clone --quiet --depth 1 --branch staging --filter=blob:none --sparse \
             git@github.com:Whagons-International/whagons5-client.git "$RUNNER_TEMP/client"
-          git -C "$RUNNER_TEMP/client" sparse-checkout set migrations
+          git -C "$RUNNER_TEMP/client" sparse-checkout set migrations gonvex
           rm -f "$key"
           echo "CLIENT_SHA=$(git -C "$RUNNER_TEMP/client" rev-parse HEAD)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v7
@@ -212,6 +215,11 @@ jobs:
         run: |
           node cloudflare/kernel/schema-transform/verify/transform-migrations.mjs "$RUNNER_TEMP/client/migrations" \
             --prelude cloudflare/spikes/s1/scripts/runtime-prelude.sql --json "$RUNNER_TEMP/drift.json"
+      - name: REGEXP patterns and generated-column tables in the app's module sources
+        if: steps.access.outputs.ready == 'true'
+        run: |
+          node --experimental-transform-types cloudflare/kernel/schema-transform/verify/app-source-checks.mjs \
+            "$RUNNER_TEMP/client" --json "$RUNNER_TEMP/app-checks.json"
       - name: Summary
         if: always() && steps.access.outputs.ready == 'true'
         run: |
@@ -221,5 +229,8 @@ jobs:
               node -e 'const r=require(process.argv[1]);console.log(`transform ${r.version}: ${r.migrations.length} migrations, ${r.migrations.reduce((s,m)=>s+m.source,0)} statements in, ${r.migrations.reduce((s,m)=>s+m.output,0)} out, ${r.added.count} added objects, ${r.ms} ms`)' "$RUNNER_TEMP/drift.json"
             else
               echo "Failed: see the step log for the migration, object and limit."
+            fi
+            if [ -f "$RUNNER_TEMP/app-checks.json" ]; then
+              node -e 'const r=require(process.argv[1]);console.log(`app sources: ${r.files} files; REGEXP patterns ${r.regexp.patterns.map(p=>"\`"+p.source+"\` "+(p.compiles?"compiles":"NOT compiled")).join(", ")||"none"} (compiler: ${r.regexp.compiler??"K01 not in tree"}); generated-column tables ${r.generatedColumnTables.join(", ")}: ${r.storageTableMentions.length} mentions; failures ${r.failures.length}`)' "$RUNNER_TEMP/app-checks.json"
             fi
           } >> "$GITHUB_STEP_SUMMARY"

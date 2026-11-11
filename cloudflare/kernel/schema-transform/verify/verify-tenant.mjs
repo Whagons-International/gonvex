@@ -24,7 +24,8 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { SchemaTransform, recordFlushSql, recordView, RECORD_PENDING_NAMES_SQL, RECORD_PENDING_CLEANUP_SQL, ADDED_PREFIX } from "../index.ts";
+import { recordFlushSql, RECORD_PENDING_NAMES_SQL, RECORD_PENDING_CLEANUP_SQL, ADDED_PREFIX } from "../index.ts";
+import { buildTransformed } from "./build-transformed.mjs";
 import { foldChainsInIndex } from "../fold.ts";
 
 const args = process.argv.slice(2);
@@ -75,53 +76,15 @@ const time = (fn) => {
 };
 
 // --- 1. transformed copy --------------------------------------------------------
-const orig = new DatabaseSync(origPath, { readOnly: true });
-const schema = orig.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY rowid").all();
-const hasRecords = orig.prepare("SELECT 1 FROM sqlite_schema WHERE name = '_gonvex_record_views'").get();
-const records = hasRecords ? orig.prepare("SELECT name, storage_table, key_column, schema FROM _gonvex_record_views ORDER BY name").all() : [];
-const recordsByName = new Map(records.map((r) => [r.name, recordView(r)]));
-// Tables whose capture triggers call gonvex_capture (feed::capture_triggers_sql): their shapes for T5.
-const capturedTables = [...new Set(schema.filter((o) => o.type === "trigger" && /gonvex_capture\s*\(/i.test(o.sql ?? "")).map((o) => o.tbl_name))].sort();
-const tables = capturedTables.map((name) => ({
-  name,
-  columns: orig.prepare("SELECT name, type AS declared, pk FROM pragma_table_info(?) ORDER BY cid").all(name).map((c) => ({ name: c.name, declared: c.declared, pk: c.pk })),
-}));
-// --no-t6 (measurement only): the same transform without T6, the layout S1 measured on lax hosts.
-const transform = args.includes("--no-t6") ? new SchemaTransform({ referenceMinBranches: Infinity, limits: { unionBranchesRead: Infinity } }) : new SchemaTransform();
-const [image, transformMs] = time(() => transform.image(report.tenant, schema, { records, tables }));
+const built = buildTransformed(xfPath, { name: report.tenant, noT6: args.includes("--no-t6") });
+const { transform, image, transformMs, applyMs } = built;
+const { schema, records, recordsByName, capturedTables, tables } = built.catalog;
 const rules = {};
 for (const r of image.rewrites) rules[r.rule] = (rules[r.rule] ?? 0) + 1;
-
+const orig = new DatabaseSync(origPath, { readOnly: true });
 const xf = new DatabaseSync(xfPath);
 const existing = new Map(schema.map((o) => [o.name.toLowerCase(), o]));
-const [, applyMs] = time(() => {
-  xf.exec("PRAGMA foreign_keys=OFF");
-  xf.exec("BEGIN");
-  for (const o of schema) if (o.type === "trigger") xf.exec(`DROP TRIGGER ${q(o.name)}`);
-  for (const o of schema) if (o.type === "view") xf.exec(`DROP VIEW ${q(o.name)}`);
-  const outByName = new Map();
-  for (const s of image.statements) {
-    const m = /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|[\w$]+)/i.exec(s);
-    if (m) outByName.set(m[1].replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase(), s);
-  }
-  for (const [name, sql] of outByName) {
-    const before = existing.get(name);
-    if (before && before.sql !== sql) xf.exec(`DROP INDEX ${q(before.name)}`);
-  }
-  for (const s of image.statements) {
-    const table = /^CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|[\w$]+)/i.exec(s);
-    if (table && existing.has(table[1].replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase())) continue;
-    const index = /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|[\w$]+)/i.exec(s);
-    if (index) {
-      const before = existing.get(index[1].replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase());
-      if (before && before.sql === s) continue;
-    }
-    xf.exec(s);
-  }
-  xf.exec("COMMIT");
-  xf.exec("PRAGMA foreign_keys=ON");
-});
-const xfSchema = xf.prepare("SELECT type, count(*) n, sum(length(sql)) bytes FROM sqlite_schema GROUP BY type ORDER BY type").all();
+const xfSchema = built.schemaStats;
 log("transform", {
   objects: schema.length, capturedTables: capturedTables.length, records: records.length, outputStatements: image.statements.length, rewrites: rules, added: transform.addedObjects().length,
   maxStatementBytes: Math.max(...image.statements.map((s) => Buffer.byteLength(s))), transformMs, applyMs,

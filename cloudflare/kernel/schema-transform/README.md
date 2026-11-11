@@ -107,9 +107,13 @@ deleted afterwards.
 | `rust-replay/` | The Rust side of that replay. It is a standalone crate, like P03's stage tool, with the runtime's serde_json features (`preserve_order`, the vendored patch). |
 | `load-object.mjs migrations\|compile <base> <object> …` | Loads the transformed migrations into an object (one storage transaction per T7 chunk), then the runtime-generated objects. `compile` prepares every table's INSERT, UPDATE and DELETE and selects from every view. It uses the S1 spike Worker's routes. |
 | `platform-writes.mjs <base> <object> <tenant.db>` | Write cost on an object: record writes with T5's flush, timed, with rows written. `verify-tenant.mjs --build-only --no-t6` builds the baseline without T6. |
+| `app-source-checks.mjs <client>` | Part of the drift job (0022 §2a, §5). Every REGEXP pattern in the app's module sources must compile with K01's translator (`kernel/storage/regexp.ts`). No module source may name a storage table that carries T3's generated columns. Run it with `node --experimental-transform-types`, because K01 uses parameter properties. |
+| `export-roundtrip.mjs <tenant.db> …` | P03 export from a kernel-provisioned object (0022 §5). Push the transformed file, `pull`, `stage` out, then require exactly Rust's schema, no added objects or hidden columns, no stage findings, and equal checksums. P03's `stage` skips `_gonvex_st_*` tables like its other never-copied tables. |
+| `build-transformed.mjs` | Shared: turns a copy of a tenant file into the kernel's schema in place. |
+| `strict-probe.mjs <base> <object>…` | Reads the 22 reference views S1 saw fail on strict hosts, to tell whether an object sits on one. |
 | `strict-hosts.mjs <base> <n>` | On fresh objects, a 12-branch reference layer with T1 only and then with T6: same writes, same bindings. |
 
 The P02 harness fixture goes through the same check: run `node src/cli.mjs --keep` in `cloudflare/conformance` with a
 `gonvex-runtime` build, then run `verify-tenant.mjs` on each `rust-a/data/projects/*/tenants/*.db`. Those tenants use
 `gonvex_capture` table capture, so the replay compares T5's row images with the pre-update hook's. See
-`docs/cloudflare/contract-changes/0022-*` for the one difference (columns added by `ALTER TABLE` on old rows).
+`docs/cloudflare/contract-changes/0023-*` for the one difference (columns added by `ALTER TABLE` on old rows).
