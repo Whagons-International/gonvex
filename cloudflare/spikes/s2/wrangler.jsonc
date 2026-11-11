@@ -1,0 +1,10 @@
+// Used only for `wrangler deploy --dry-run` size measurements (scripts/measure-startup.mjs).
+// Nothing is deployed; the name follows the gonvex-cf-dev- prefix rule.
+{
+  "name": "gonvex-cf-dev-s2-execution",
+  "main": ".build/worker.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": { "bindings": [{ "name": "TENANT", "class_name": "Tenant" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Tenant"] }]
+}
