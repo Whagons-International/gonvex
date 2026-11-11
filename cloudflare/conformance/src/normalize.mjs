@@ -24,6 +24,7 @@
  *  - The resume cursor revision of an integrity reopen that answers a
  *    `replica.needHashes` becomes `<persisted-watermark>` (contract-changes 0022 §6).
  *  - Object keys are sorted; batched opens are sorted by path and args.
+ *  - Presence Members are sorted by their (aliased) Member id.
  *  - `session.ready` loses the three capabilities of 0012 R20.
  *  - Error text loses JavaScript stack frame lines (ruling 0015).
  *
@@ -115,6 +116,10 @@ function canonicalOrder(frame) {
   const by = (x) => `${x.path}\u0000${JSON.stringify(canonical(x.args ?? {}))}`;
   if (frame?.type === 'replica.openMany' && Array.isArray(frame.opens)) return { ...frame, opens: [...frame.opens].sort((a, b) => by(a).localeCompare(by(b))) };
   if (frame?.type === 'query.subscribeMany' && Array.isArray(frame.subscribes)) return { ...frame, subscribes: [...frame.subscribes].sort((a, b) => by(a).localeCompare(by(b))) };
+  // Presence lists Members sorted by Member id, which each backend assigns at random: sort by the alias instead.
+  const byMember = (a, b) => String(a?.memberId).localeCompare(String(b?.memberId));
+  if (frame?.type === 'presence.snapshot' && Array.isArray(frame.members)) return { ...frame, members: [...frame.members].sort(byMember) };
+  if (frame?.type === 'presence.patch' && Array.isArray(frame.changes)) return { ...frame, changes: [...frame.changes].sort(byMember) };
   return frame;
 }
 

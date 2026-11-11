@@ -38,6 +38,7 @@ export function sessionPorts(env: SessionBindingsEnv): Ports {
     },
     tenants: {
       dispatch: (socket: SocketView, frame: ClientFrame) => tenant(socket).dispatch(socket, frame),
+      presenceLeave: (route, connectionId, host, previous) => rpc<TenantRpc>(env.TENANT_STUB, tenantObjectName(route)).presenceLeave(connectionId, host, previous ?? null),
     },
   };
 }

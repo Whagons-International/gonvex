@@ -16,6 +16,7 @@ import type { ReadyOptions } from "./capabilities";
 import { CLOSE } from "./protocol";
 import { ModuleCache, Session, type SessionHooks, type SessionRecord } from "./session";
 import type { ModuleInfo, Ports, TenantSession } from "./ports";
+import type { PresenceConfig } from "../presence/hub";
 
 /** Liveness and revalidation due within this window run in the same alarm (deadlines never run early). */
 const ALARM_SLACK_MS = 2_000;
@@ -28,6 +29,8 @@ export interface HostOptions {
   name: string;
   /** The placement's reaction to a socket entering or leaving a tenant. */
   tenantChanged?(socket: WebSocket, previous: TenantSession | null, next: TenantSession | null): void;
+  /** Presence v2 settings (K14); default: on when `ready.presence`. */
+  presence?: PresenceConfig;
 }
 
 interface Attachment { session: SessionRecord }
@@ -70,10 +73,16 @@ export class SocketHost {
     this.reschedule();
   }
 
-  closed(ws: WebSocket): void {
-    const session = this.sessions.get(ws);
+  async closed(ws: WebSocket): Promise<void> {
+    let session = this.sessions.get(ws);
+    if (!session) {
+      // A close that wakes a hibernated object: the closing socket is not among `getWebSockets()`
+      // when the constructor rebuilds the index (measured in workerd), but its attachment is readable.
+      const attachment = ws.deserializeAttachment() as Attachment | null;
+      if (attachment?.session) session = this.restore(ws, attachment.session);
+    }
     this.sessions.delete(ws);
-    session?.closedByPeer();
+    await session?.closedByPeer();
   }
 
   /** The alarm: deadlines, liveness and one batched revalidation round. */
@@ -131,6 +140,7 @@ export class SocketHost {
     const hooks: SessionHooks = {
       persist: () => this.persist(ws, this.sessions.get(ws)),
       tenantChanged: (previous, next) => this.options.tenantChanged?.(ws, previous, next),
+      waitUntil: (promise) => this.options.ctx.waitUntil(promise),
     };
     return {
       ports: this.options.ports,
@@ -138,6 +148,7 @@ export class SocketHost {
       host: this.options.name,
       modules: this.modules,
       hooks,
+      ...(this.options.presence ? { presence: this.options.presence } : {}),
       sink: {
         send: (text: string) => ws.send(text),
         close: (frame: { code: number; reason: string }) => {
