@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-s1",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  // One migration must commit in one event; allow the 5-minute maximum so the
+  // spike measures the real cost instead of the default 30 s cut-off.
+  "limits": { "cpu_ms": 300000 },
+  "durable_objects": {
+    "bindings": [{ "name": "TENANT", "class_name": "TenantSpike" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantSpike"] }]
+}

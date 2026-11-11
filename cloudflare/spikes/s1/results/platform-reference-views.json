@@ -1,0 +1,33 @@
+{
+ "object": "tenant-a937",
+ "views": 96,
+ "failing": {
+  "VIEWs and/or subqueries nested too deep": {
+   "count": 22,
+   "views": [
+    "referenceExpected_approvals",
+    "referenceExpected_audiencePresets",
+    "referenceExpected_gamificationPointTransactions",
+    "referenceExpected_goals",
+    "referenceExpected_kpiCards",
+    "referenceExpected_marketRecords",
+    "referenceExpected_nfcTags",
+    "referenceExpected_notifications",
+    "referenceExpected_reportDeliveries",
+    "referenceExpected_reportDocuments",
+    "referenceExpected_reports",
+    "referenceExpected_spotCustomFieldValues",
+    "referenceExpected_taskCustomFieldValues",
+    "referenceExpected_taskFindings",
+    "referenceExpected_taskRecurrences",
+    "referenceExpected_tasks",
+    "referenceExpected_templates",
+    "referenceExpected_workflowVersions",
+    "referenceExpected_workplanItems",
+    "referenceExpected_workspacePreferences",
+    "referenceExpected_workspaceViews",
+    "referenceExpected_workspaces"
+   ]
+  }
+ }
+}

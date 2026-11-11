@@ -1,0 +1,125 @@
+{
+ "object": "tenant-a937",
+ "rewrite": {
+  "records": 367,
+  "triggers": 1140,
+  "unresolvedCalls": 0,
+  "ok": true,
+  "ms": 6834,
+  "maxTriggerBytes": 7050,
+  "errors": []
+ },
+ "writePaths": {
+  "tables": 523,
+  "statements": 1569,
+  "failing": 24,
+  "byError": {
+   "out of memory": {
+    "count": 24,
+    "statements": [
+     "update recordStorage_customFields",
+     "insert recordStorage_taskRecurrences",
+     "update recordStorage_taskRecurrences",
+     "insert recordStorage_tasks",
+     "update recordStorage_tasks",
+     "insert recordStorage_templates",
+     "update recordStorage_templates",
+     "delete recordStorage_templates",
+     "insert recordStorage_workflowVersions",
+     "update recordStorage_workflowVersions",
+     "insert recordStorage_workplanItems",
+     "update recordStorage_workplanItems",
+     "delete recordStorage_workplanItems",
+     "update recordStorage_workspacePreferences",
+     "update recordStorage_workspaces",
+     "update referenceBindings_taskRecurrences",
+     "update referenceBindings_tasks",
+     "insert referenceBindings_templates",
+     "update referenceBindings_templates",
+     "delete referenceBindings_templates",
+     "update referenceBindings_workflowVersions",
+     "insert referenceBindings_workplanItems",
+     "update referenceBindings_workplanItems",
+     "delete referenceBindings_workplanItems"
+    ]
+   }
+  }
+ },
+ "writes": [
+  {
+   "record": "tasks",
+   "ok": true,
+   "ms": 108,
+   "rowsWritten": 24,
+   "changes": [
+    {
+     "table_name": "tasks",
+     "operation": "update",
+     "hasOld": 0,
+     "changed": "[\"updatedAt\"]",
+     "bytes": 2827
+    }
+   ]
+  },
+  {
+   "record": "statuses",
+   "ok": true,
+   "ms": 68,
+   "rowsWritten": 7,
+   "changes": [
+    {
+     "table_name": "statuses",
+     "operation": "update",
+     "hasOld": 0,
+     "changed": "[\"updatedAt\"]",
+     "bytes": 695
+    }
+   ]
+  },
+  {
+   "record": "members",
+   "ok": true,
+   "ms": 122,
+   "rowsWritten": 12,
+   "changes": [
+    {
+     "table_name": "members",
+     "operation": "update",
+     "hasOld": 0,
+     "changed": "[\"updated_at\"]",
+     "bytes": 6028
+    }
+   ]
+  },
+  {
+   "record": "notifications",
+   "ok": true,
+   "ms": 89,
+   "rowsWritten": 7,
+   "changes": [
+    {
+     "table_name": "notifications",
+     "operation": "update",
+     "hasOld": 0,
+     "changed": "[\"updatedAt\"]",
+     "bytes": 1115
+    }
+   ]
+  },
+  {
+   "record": "workplanItems",
+   "ok": true,
+   "ms": 110,
+   "rowsWritten": 7,
+   "changes": [
+    {
+     "table_name": "workplanItems",
+     "operation": "update",
+     "hasOld": 0,
+     "changed": "[\"updatedAt\"]",
+     "bytes": 2807
+    }
+   ]
+  }
+ ]
+}

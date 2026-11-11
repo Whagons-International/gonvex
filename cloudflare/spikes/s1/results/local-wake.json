@@ -1,0 +1,56 @@
+{
+ "object": "tenant-a937",
+ "rounds": 5,
+ "emptyObjectRoundTripMs": 36,
+ "coldMedianMs": 272,
+ "coldMaxMs": 295,
+ "warmMedianMs": 49,
+ "allFresh": true,
+ "results": [
+  {
+   "round": 0,
+   "coldMs": 247,
+   "fresh": true,
+   "rows": 50,
+   "warmMs": 45,
+   "rssBeforeMB": 2598.8,
+   "rssAfterColdMB": 2600.7
+  },
+  {
+   "round": 1,
+   "coldMs": 270,
+   "fresh": true,
+   "rows": 50,
+   "warmMs": 64,
+   "rssBeforeMB": 2601,
+   "rssAfterColdMB": 2601.2
+  },
+  {
+   "round": 2,
+   "coldMs": 295,
+   "fresh": true,
+   "rows": 50,
+   "warmMs": 49,
+   "rssBeforeMB": 2601.7,
+   "rssAfterColdMB": 2602.2
+  },
+  {
+   "round": 3,
+   "coldMs": 272,
+   "fresh": true,
+   "rows": 50,
+   "warmMs": 45,
+   "rssBeforeMB": 2602.4,
+   "rssAfterColdMB": 2602.6
+  },
+  {
+   "round": 4,
+   "coldMs": 287,
+   "fresh": true,
+   "rows": 50,
+   "warmMs": 86,
+   "rssBeforeMB": 2602.8,
+   "rssAfterColdMB": 2602.9
+  }
+ ]
+}
