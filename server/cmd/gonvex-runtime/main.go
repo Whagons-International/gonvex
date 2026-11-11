@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/server/internal/config"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 	gonvexruntime "github.com/gonvex/gonvex/server/internal/server"
 	"github.com/gonvex/gonvex/server/internal/supervisor"
 )
@@ -35,39 +36,95 @@ func reloadSupervisorEnabled() bool {
 	return (enabled == "1" || enabled == "true" || enabled == "yes" || enabled == "on") && worker != "1"
 }
 
+// terminationGrace is how long the gateway keeps its listener open after the
+// worker's WebSocket drain window, for slow closes and in-flight requests.
+// With the default 12s window the whole SIGTERM sequence stays well inside
+// the 30s `docker stop` timeout.
+const (
+	terminationGrace      = 3 * time.Second
+	maxTerminationDrain   = 20 * time.Second
+	gatewayShutdownBudget = 5 * time.Second
+)
+
 func runSupervisor(cfg config.Config) error {
-	runtimeSupervisor, err := supervisor.Start(context.Background(), supervisor.Config{})
+	runtimeSupervisor, err := supervisor.New(context.Background(), supervisor.Config{})
 	if err != nil {
 		return fmt.Errorf("start runtime supervisor: %w", err)
 	}
 	defer runtimeSupervisor.Close()
 
+	// Listen before the first worker is ready: /healthz (and everything else)
+	// answers 503 until a worker is active, instead of refusing connections.
 	server := gonvexruntime.NewHTTPServer(cfg.Addr, runtimeSupervisor.Handler())
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- server.ListenAndServe()
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
 	slog.Info("starting supervised gonvex runtime gateway", "addr", cfg.Addr)
-	select {
-	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownContext); err != nil {
-			slog.Warn("graceful gateway shutdown timed out", "error", err)
+	started := make(chan error, 1)
+	go func() {
+		started <- runtimeSupervisor.Start()
+	}()
+	for ready := false; ; {
+		select {
+		case err := <-started:
+			if err != nil {
+				shutdownGateway(server, gatewayShutdownBudget)
+				return fmt.Errorf("start runtime supervisor: %w", err)
+			}
+			ready = true
+			slog.Info("supervised gonvex runtime gateway ready", "addr", cfg.Addr)
+			continue
+		case received := <-signals:
+			if received == syscall.SIGTERM && ready {
+				terminateGateway(runtimeSupervisor, signals)
+			}
+			shutdownGateway(server, gatewayShutdownBudget)
+			return nil
+		case err := <-serverErrors:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("serve runtime gateway: %w", err)
+			}
+			return nil
 		}
-		return nil
-	case err := <-serverErrors:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("serve runtime gateway: %w", err)
+	}
+}
+
+// terminateGateway drains the active worker's WebSockets while the gateway
+// keeps accepting connections: the container stays routable until it exits,
+// so closing the listener first would turn every request in the drain window
+// into a refused connection (a 502 at the proxy). A second signal cuts the
+// drain short.
+func terminateGateway(runtimeSupervisor *supervisor.Supervisor, signals <-chan os.Signal) {
+	budget := min(gonvexruntime.WebSocketDrainWindow()+terminationGrace, maxTerminationDrain)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	go func() {
+		select {
+		case <-signals:
+			slog.Warn("second shutdown signal; ending WebSocket drain early")
+			cancel()
+		case <-ctx.Done():
 		}
-		return nil
+	}()
+	runtimeSupervisor.Terminate(ctx)
+}
+
+func shutdownGateway(server *http.Server, budget time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		slog.Warn("graceful gateway shutdown timed out", "error", err)
 	}
 }
 
 func runWorker(cfg config.Config) {
+	startProfilingListener()
 	runtime, err := gonvexruntime.NewRequired(cfg)
 	if err != nil {
 		slog.Error("gonvex runtime startup failed", "error", err)
@@ -111,6 +168,11 @@ func runWorker(cfg config.Config) {
 		select {
 		case <-drainSignals:
 			drainSignals = nil
+			// The replacement worker (or container) is already serving and has
+			// its own connection budget against the same PostgreSQL: give back
+			// idle connections and keep none before draining sockets.
+			released := dbpool.BeginDrain()
+			slog.Info("worker draining: released idle database connections", "idleClosed", released.IdleClosed, "inUse", released.InUse)
 			go runtime.DrainWebSockets(0)
 			continue
 		case <-ctx.Done():
