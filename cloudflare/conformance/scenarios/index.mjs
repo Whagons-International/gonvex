@@ -30,6 +30,7 @@ import scheduler from './scheduler.mjs';
 import liveQueryTaskGrid from './live-query-task-grid.mjs';
 import operatorRoutes from './operator-routes.mjs';
 import presenceEdges from './presence-edges.mjs';
+import actions from './actions.mjs';
 import servicePrincipals from './service-principals.mjs';
 
 export const SCENARIOS = [
@@ -61,6 +62,7 @@ export const SCENARIOS = [
   // K19: deploy and operator routes over HTTP (no seeded tenants).
   operatorRoutes,
   presenceEdges,
+  actions,
   // K17: restarts the backend once, with its principals configured.
   servicePrincipals,
   // Restarts the backend: keep last so a failure cannot disturb the others.

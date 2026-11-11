@@ -14,5 +14,6 @@ export default defineConfig({
   },
   // scripts/*.test.mjs are Node tests (node --test), not workerd tests.
   // kernel/host (K04) runs with its own config: `vitest run --root kernel/host`.
-  test: { include: ["test/**/*.test.ts", "kernel/**/*.test.ts"], exclude: ["kernel/host/**", "**/node_modules/**"] },
+  // kernel/files (K13) too: `vitest run --root kernel/files` (its test Worker has an R2 bucket).
+  test: { include: ["test/**/*.test.ts", "kernel/**/*.test.ts"], exclude: ["kernel/host/**", "**/node_modules/**", "kernel/files/**"] },
 });

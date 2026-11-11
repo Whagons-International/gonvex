@@ -1,4 +1,4 @@
-# 0040: K17 service principals: adaptations and three fixes outside the package
+# 0044: K17 service principals: adaptations and three fixes outside the package
 
 Date: 2026-11-11. Status: **proposed** (K17). Affects: K05, K06, K07, K04, A01, K19, K08 (fixture), M08, V01.
 

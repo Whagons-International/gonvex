@@ -22,6 +22,7 @@
   // SDK is written for the repo's base flags, not these, and like the
   // originals these files are run by the test runner, not type-checked here.
   // kernel/host (K04) has its own tsconfig, vitest config and test Worker.
+  // kernel/files (K13) too, and checks router/storage with it.
   // kernel/principals (K17): its harness imports K06 (Node types); kernel/principals/tsconfig.json checks it.
-  "exclude": ["kernel/storage/test/sdk", "kernel/host", "kernel/principals/harness", "kernel/principals/test"]
+  "exclude": ["kernel/storage/test/sdk", "kernel/host", "kernel/files", "kernel/principals/harness", "kernel/principals/test"]
 }

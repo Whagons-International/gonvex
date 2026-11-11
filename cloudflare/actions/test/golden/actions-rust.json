@@ -1,0 +1,347 @@
+{
+ "note": "Observations of conformance scenario `actions` on the Rust runtime at 0bf3ad13 (rust-a against rust-b, 3 runs, 6 identical traces). Normalized by the harness (<project>); the active artifact hash is replaced by <artifact>. Regenerate with actions/scripts/record-golden.mjs.",
+ "steps": {
+  "an Action with no capabilities": {
+   "surface": {
+    "result": {
+     "agentExecutionId": null,
+     "channel": "ui",
+     "clockNotPinned": true,
+     "commandIdShape": true,
+     "entropy": 8,
+     "function": "actions.surface",
+     "invocationKeys": [
+      "actorAccountId",
+      "actorMemberId",
+      "agentExecutionId",
+      "artifactHash",
+      "channel",
+      "commandId",
+      "delegation",
+      "onBehalfOfMemberId",
+      "parentCommandId",
+      "rootChannel",
+      "rootCommandId",
+      "threadId",
+      "toolCallId",
+      "turnId"
+     ],
+     "keys": [
+      "auth",
+      "function",
+      "invocation",
+      "kind",
+      "member",
+      "now",
+      "tenant"
+     ],
+     "kind": "action",
+     "parentCommandId": null,
+     "random": "number",
+     "rootChannel": "ui",
+     "rootIsCommand": true,
+     "typeofFetch": "undefined",
+     "uuid": true
+    }
+   }
+  },
+  "fetch within the declared origin": {
+   "fetch": {
+    "result": {
+     "badMethod": "GonvexHostError: host call failed: network host call failed [host_call_failed]: invalid fetch method: invalid HTTP method",
+     "bigChunked": "GonvexHostError: host call failed: network host call failed [host_call_failed]: fetch response exceeds the 8388608 byte limit",
+     "bigLength": "GonvexHostError: host call failed: network host call failed [host_call_failed]: fetch response exceeds the 8388608 byte limit",
+     "binary": "�A�",
+     "created": {
+      "body": "status 201",
+      "contentType": "text/plain",
+      "status": 201,
+      "statusText": "Created",
+      "url": "http://127.0.0.1:47812/status/201"
+     },
+     "echo": {
+      "body": "plain body",
+      "contentType": null,
+      "method": "POST",
+      "xk12": "yes"
+     },
+     "echoJson": {
+      "body": "{\"a\":1}",
+      "contentType": "application/json",
+      "method": "PUT",
+      "xk12": null
+     },
+     "json": {
+      "body": "{\"ok\":true,\"n\":1}",
+      "contentType": "application/json",
+      "status": 200,
+      "statusText": "OK",
+      "url": "http://127.0.0.1:47812/json"
+     },
+     "keys": [
+      "auth",
+      "fetch",
+      "function",
+      "invocation",
+      "kind",
+      "member",
+      "now",
+      "tenant"
+     ],
+     "missing": {
+      "body": "not found",
+      "contentType": "text/plain",
+      "status": 404,
+      "statusText": "Not Found",
+      "url": "http://127.0.0.1:47812/nowhere"
+     },
+     "noContent": {
+      "body": "",
+      "contentType": "text/plain",
+      "status": 204,
+      "statusText": "No Content",
+      "url": "http://127.0.0.1:47812/status/204"
+     },
+     "parsed": {
+      "n": 1,
+      "ok": true
+     },
+     "redirect": {
+      "body": "hello",
+      "contentType": "text/plain; charset=utf-8",
+      "status": 200,
+      "statusText": "OK",
+      "url": "http://127.0.0.1:47812/text"
+     },
+     "redirectChain": {
+      "body": "{\"ok\":true,\"n\":1}",
+      "contentType": "application/json",
+      "status": 200,
+      "statusText": "OK",
+      "url": "http://127.0.0.1:47812/json"
+     },
+     "redirectOut": "GonvexHostError: host call failed: network host call failed [host_call_failed]: fetch request failed: error following redirect",
+     "redirectsAfter": "no error",
+     "teapot": {
+      "body": "status 418",
+      "contentType": "text/plain",
+      "status": 418,
+      "statusText": "I'm a teapot",
+      "url": "http://127.0.0.1:47812/status/418"
+     }
+    }
+   }
+  },
+  "an event stream read as it arrives": {
+   "stream": {
+    "result": {
+     "afterStreams": "hello",
+     "big": "GonvexHostError: host call failed: network host call failed [host_call_failed]: fetch response exceeds the 8388608 byte limit",
+     "contentType": "text/event-stream",
+     "events": 5,
+     "everyChunkWhole": true,
+     "firstOfCancelled": true,
+     "status": 200,
+     "text": "data: {\"n\":1,\"text\":\"café\"}\n\ndata: {\"n\":2,\"text\":\"café\"}\n\ndata: {\"n\":3,\"text\":\"café\"}\n\ndata: {\"n\":4,\"text\":\"café\"}\n\ndata: {\"n\":5,\"text\":\"café\"}\n\n"
+    }
+   }
+  },
+  "an undeclared origin is a sticky denial": {
+   "relative": {
+    "error": "TypeScript module host returned execution_failed: module <project> function actions.fetchRelative: fetch origin is not declared for this Action"
+   },
+   "undeclared": {
+    "error": "TypeScript module host returned execution_failed: module <project> function actions.fetchUndeclared: fetch origin is not declared for this Action"
+   }
+  },
+  "an unconfigured secret": {
+   "secret": {
+    "error": "Action \"<project>\" requires a capability the Rust runtime has not configured: unconfigured project secret \"K12_NOT_CONFIGURED\""
+   }
+  },
+  "tools": {
+   "tools": {
+    "result": {
+     "added": {
+      "bumps": 0,
+      "id": "tool-row",
+      "position": 70,
+      "title": "from a tool"
+     },
+     "after": {
+      "value": [
+       {
+        "id": "tool-row",
+        "title": "from a tool"
+       },
+       {
+        "id": "tool-row-hidden",
+        "title": "internal"
+       }
+      ]
+     },
+     "badArgs": "GonvexHostError: host call failed: action_tools host call failed [host_call_failed]: function \"board.add\" arguments do not match its schema: $.id: expected string, received number",
+     "before": {
+      "value": []
+     },
+     "duplicate": "GonvexHostError: host call failed: action_tools host call failed [host_call_failed]: TypeScript module host returned execution_failed: module <project> function board.add: GonvexHostError: host call failed: db_write host call failed [host_call_failed]: error returned from database: (code: 1555) UNIQUE constraint failed: board.id",
+     "hidden": {
+      "bumps": 0,
+      "id": "tool-row-hidden",
+      "position": 90,
+      "title": "internal"
+     },
+     "keys": [
+      "auth",
+      "function",
+      "invocation",
+      "kind",
+      "member",
+      "now",
+      "tenant",
+      "tools"
+     ],
+     "tools": [
+      "add",
+      "hidden",
+      "rows"
+     ]
+    }
+   }
+  },
+  "functions.invoke": {
+   "functions": {
+    "result": {
+     "action": {
+      "agentExecutionShape": true,
+      "channel": "agent",
+      "commandIdShape": true,
+      "doubled": 4,
+      "hasParent": true,
+      "rootChannel": "ui"
+     },
+     "added": {
+      "bumps": 0,
+      "id": "function-row",
+      "position": 80,
+      "title": "from functions"
+     },
+     "badArgs": "GonvexHostError: host call failed: functions host call failed [host_call_failed]: function \"board.add\" arguments do not match its schema: $.id: expected string, received number",
+     "count": {
+      "n": 2
+     },
+     "internal": "GonvexHostError: host call failed: functions host call failed [host_call_failed]: function \"actions.internalAdd\" is not classified as interactive",
+     "keys": [
+      "auth",
+      "function",
+      "functions",
+      "invocation",
+      "kind",
+      "member",
+      "now",
+      "tenant"
+     ],
+     "missing": "GonvexHostError: host call failed: functions host call failed [host_call_failed]: function \"actions.nope\" is not registered",
+     "recursive": "GonvexHostError: host call failed: functions host call failed [host_call_failed]: recursive Action invocation detected for \"actions.functionsProbe\"",
+     "replica": {
+      "value": [
+       {
+        "bumps": 0,
+        "id": "tool-row",
+        "position": 70,
+        "title": "from a tool"
+       },
+       {
+        "bumps": 0,
+        "id": "function-row",
+        "position": 80,
+        "title": "from functions"
+       },
+       {
+        "bumps": 0,
+        "id": "tool-row-hidden",
+        "position": 90,
+        "title": "internal"
+       }
+      ]
+     },
+     "stale": "GonvexHostError: host call failed: functions host call failed [host_call_failed]: STALE_AGENT_CATALOG: expected artifact \"not-the-active-artifact\", active artifact is \"<artifact>\"",
+     "system": "GonvexHostError: host call failed: functions host call failed [host_call_failed]: function \"actions.surface\" is not classified as interactive"
+    }
+   }
+  },
+  "scheduler": {
+   "scheduler": {
+    "result": {
+     "after": true,
+     "at": true,
+     "coalesced": true,
+     "keys": [
+      "auth",
+      "function",
+      "invocation",
+      "kind",
+      "member",
+      "now",
+      "scheduler",
+      "tenant"
+     ],
+     "negative": "TypeError: scheduler delayMs must be a non-negative safe integer",
+     "query": "GonvexHostError: host call failed: scheduler host call failed [host_call_failed]: only Reducers and Actions can be scheduled",
+     "scheduler": [
+      "runAfter",
+      "runAt",
+      "wakeAt"
+     ],
+     "unregistered": "GonvexHostError: host call failed: scheduler host call failed [host_call_failed]: scheduled function \"actions.nope\" is not registered",
+     "wake": true
+    }
+   }
+  },
+  "storage": {
+   "storage": {
+    "result": {
+     "keys": [
+      "auth",
+      "function",
+      "invocation",
+      "kind",
+      "member",
+      "now",
+      "storage",
+      "tenant"
+     ],
+     "metadata": "GonvexHostError: host call failed: storage host call failed [host_call_failed]: storage is not configured",
+     "storage": [
+      "call",
+      "delete",
+      "generateDownloadUrl",
+      "generateUploadUrl",
+      "getMetadata",
+      "getUrl",
+      "store"
+     ],
+     "unknown": "GonvexHostError: host call failed: storage host call failed [host_call_failed]: storage is not configured",
+     "upload": "GonvexHostError: host call failed: storage host call failed [host_call_failed]: storage is not configured"
+    }
+   }
+  },
+  "errors": {
+   "badArgs": {
+    "error": "function \"actions.publicEcho\" arguments do not match its schema: $.text: expected string, received number"
+   },
+   "internal": {
+    "error": "internal function \"actions.internalAdd\" cannot be called by a client"
+   },
+   "throws": {
+    "error": "TypeScript module host returned execution_failed: module <project> function actions.fails: Error: k12 action failed on purpose"
+   },
+   "unknown": {
+    "error": "function \"actions.nope\" is not registered"
+   },
+   "wrongKind": {
+    "error": "function \"actions.boardCount\" is a query, not a action"
+   }
+  }
+ }
+}

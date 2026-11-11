@@ -1,0 +1,22 @@
+// Test-only Worker for K13 files: a tenant object with `_gonvex_files`, the
+// /storage router and a local R2 bucket (miniflare). Never deployed; the names
+// keep the gonvex-cf-dev- prefix anyway.
+{
+  "name": "gonvex-cf-dev-k13-files-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // The module host (K04) carries the active invocation in AsyncLocalStorage.
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": { "bindings": [{ "name": "TENANT", "class_name": "TestFilesTenant" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestFilesTenant"] }],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-files-test" }],
+  "vars": {
+    "GONVEX_PUBLIC_URL": "https://gonvex.test",
+    "GONVEX_STORAGE_SECRET": "k13-test-secret",
+    "GONVEX_STORAGE_BUCKET": "gonvex-cf-dev-files-test",
+    // Direct uploads: the AWS documentation's example credentials, never real ones.
+    "GONVEX_S3_ENDPOINT": "https://k13-test-account.r2.cloudflarestorage.com",
+    "GONVEX_S3_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+    "GONVEX_S3_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  }
+}
