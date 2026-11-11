@@ -1729,6 +1729,9 @@ new note and waits for the lead.
 | 0020 | K05 session-layer findings (proposed by K05) | ruled in 0022 §4 | K05, K10 |
 | 0021 | K04 module-host interfaces and R25 (proposed by K04) | ruled in 0022 §3 | K01, K04, K19, S5 |
 | 0022 | Wave-1 review rulings: K01/K04 ownership, K01 deviations, R25, K05 findings, A01 part 1, harness flake | decided | K01-K05, K08, S5 |
+| 0023 | Hook-capture quirk on columns added after the row (proposed by A01) | ruled in 0024 §1 | K03, M02 |
+| 0024 | Second wave-1 pass: A01 complete, watermark self-check for K10, K06 findings, numbering | decided | K03, K06, K10, K19, R03, R04, V03 |
+| 0025 | K06 control object findings (proposed by K06) | ruled in 0024 §3 | K06, V03 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
