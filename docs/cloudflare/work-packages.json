@@ -1,0 +1,1147 @@
+{
+ "plan": "Whagons on Cloudflare",
+ "doc": "https://claude.ai/artifact/DKcAWtgSJx4ZG5bP4oa3A6",
+ "reference_commit": {
+  "gonvex": "0bf3ad13419d25d9370607e1470ae58da4c43235 (gonvex staging head on 2026-11-10; identical to what staging runs)",
+  "whagons5-client": "origin/staging 2457bb65f"
+ },
+ "repo": "gonvex (paths relative to its root)",
+ "stages": {
+  "0": "prove",
+  "1": "kernel to contract parity",
+  "2": "migration",
+  "3": "toward whagons-lite"
+ },
+ "gates": [
+  {
+   "id": "G0",
+   "passes_if": "Each spike passes or has a written workaround; contract frozen; harness passes Rust against Rust"
+  },
+  {
+   "id": "G1",
+   "passes_if": "A real client sends a Reducer, it commits in an object, a second client receives it through a replica"
+  },
+  {
+   "id": "G2",
+   "passes_if": "Every contract item marked keep or adapt has a passing scenario"
+  },
+  {
+   "id": "G3",
+   "passes_if": "V01-V06 pass including 1,000 users on one tenant; staging on the kernel for 14 days"
+  },
+  {
+   "id": "G4",
+   "passes_if": "Per production tenant: 14 days of shadow with zero drift; cutover and rollback rehearsed on a copy"
+  },
+  {
+   "id": "G5",
+   "passes_if": "Per ring promotion: pass marks in the design doc hold"
+  },
+  {
+   "id": "G6",
+   "passes_if": "Every tenant on the kernel for 30 days; box out of the serving path"
+  }
+ ],
+ "packages": [
+  {
+   "id": "P00",
+   "stage": 0,
+   "wave": 0,
+   "title": "Contract freeze: CONTRACT.md with every wire message, host call, control function, HTTP route and SQL rule, each marked keep/adapt/replace/defer with intended-behavior notes",
+   "depends_on": [],
+   "owns": [
+    "docs/cloudflare/CONTRACT.md",
+    "docs/cloudflare/contract-changes/"
+   ],
+   "done_when": "A verifier agent checks it against source and finds nothing missing",
+   "reference": [
+    "packages/protocol/src/index.ts",
+    "rust/crates/protocol/src/lib.rs",
+    "rust/crates/module-runtime/src/lib.rs",
+    "rust/crates/module-runtime-v8/src/gonvex_bootstrap.js",
+    "rust/crates/runtime/src/lib.rs",
+    "rust/crates/runtime/src/control.rs",
+    "rust/crates/runtime/src/operations.rs",
+    "docs/sqlite-storage.md",
+    "packages/client/src/control.ts"
+   ]
+  },
+  {
+   "id": "P01",
+   "stage": 0,
+   "wave": 0,
+   "title": "Scaffold: cloudflare/ workspace, wrangler config, workerd test runner, CI job, preview deploy per PR, package AGENTS.md",
+   "depends_on": [],
+   "owns": [
+    "cloudflare/package.json",
+    "cloudflare/wrangler.jsonc",
+    "cloudflare/AGENTS.md",
+    ".github/workflows/cloudflare.yml"
+   ],
+   "done_when": "A hello-world Durable Object deploys from CI and its test runs in workerd",
+   "reference": []
+  },
+  {
+   "id": "S1",
+   "stage": 0,
+   "wave": 0,
+   "title": "Schema spike: real tenant schema and a copy of the largest staging tenant inside a Durable Object",
+   "depends_on": [],
+   "owns": [
+    "docs/cloudflare/spikes/S1-schema.md",
+    "cloudflare/spikes/s1/"
+   ],
+   "done_when": "Report states: does the schema load, cold wake ms, memory, migration apply time, and counts of statements >100 KB, tables >100 columns, rows >2 MB, queries >100 bound params, regexp uses, FTS5 trigram support",
+   "reference": [
+    "docs/sqlite-storage.md",
+    "rust/crates/store/src/"
+   ]
+  },
+  {
+   "id": "S2",
+   "stage": 0,
+   "wave": 0,
+   "title": "Execution spike: 20 real Reducers through packages/local-runtime in a Durable Object",
+   "depends_on": [],
+   "owns": [
+    "docs/cloudflare/spikes/S2-execution.md",
+    "cloudflare/spikes/s2/"
+   ],
+   "done_when": "Each runs in one transaction with working rollback and savepoints; the 34 runtime-contract vectors pass in workerd; bundle size and startup time of the full app bundle recorded",
+   "reference": [
+    "packages/local-runtime/",
+    "packages/module-sdk/runtime-contract/"
+   ]
+  },
+  {
+   "id": "S3",
+   "stage": 0,
+   "wave": 0,
+   "title": "Socket spike: 1,000 WebSockets on one Durable Object",
+   "depends_on": [],
+   "owns": [
+    "docs/cloudflare/spikes/S3-sockets.md",
+    "cloudflare/spikes/s3/"
+   ],
+   "done_when": "Numbers for memory, CPU per fan-out, permessage-deflate, the 32 MiB message cap, liveness without server pings, deploy behavior, hibernation with per-socket state",
+   "reference": [
+    "rust/crates/websocket/src/",
+    "rust/crates/runtime/src/presence.rs",
+    "docs/performance/presence-v2.md"
+   ]
+  },
+  {
+   "id": "S4",
+   "stage": 0,
+   "wave": 0,
+   "title": "Long Action spike: 30-minute agent Action in a Workflow step",
+   "depends_on": [],
+   "owns": [
+    "docs/cloudflare/spikes/S4-long-actions.md",
+    "cloudflare/spikes/s4/"
+   ],
+   "done_when": "Lease renews every 30 s, an SSE fetch streams, a 64 MB download completes, no platform limit hit",
+   "reference": [
+    "rust/crates/runtime/src/execution.rs",
+    "rust/crates/runtime/src/action_gate.rs"
+   ]
+  },
+  {
+   "id": "P02",
+   "stage": 0,
+   "wave": 0,
+   "title": "Conformance harness: scenario runner for two backend URLs using the real SDK and the thin client, frame normalizer, table checksums",
+   "depends_on": [],
+   "owns": [
+    "cloudflare/conformance/"
+   ],
+   "done_when": "Rust against Rust passes; scenarios cover thin-conformance and the receipt cases (lost reply, crash, upgrade, owner switch)",
+   "reference": [
+    "bench/whagons/thin-conformance.ts",
+    "bench/whagons/thin-client.mjs",
+    "verification/backend-receipts/",
+    "verification/tla/"
+   ]
+  },
+  {
+   "id": "P03",
+   "stage": 0,
+   "wave": 0,
+   "title": "Tenant export and import: SQLite file to Durable Object and back",
+   "depends_on": [],
+   "owns": [
+    "cloudflare/tools/tenant-transfer/"
+   ],
+   "done_when": "Row counts and per-table checksums match in both directions on every staging tenant",
+   "reference": [
+    "rust/crates/admin-cli/",
+    "docs/sqlite-storage.md"
+   ]
+  },
+  {
+   "id": "P04",
+   "stage": 0,
+   "wave": 0,
+   "title": "Reducer log feed: read-only export of committed Reducer calls in commit order with args, identity, time and entropy (named Rust exception)",
+   "depends_on": [],
+   "owns": [
+    "rust/crates/runtime/src/reducer_feed.rs",
+    "cloudflare/tools/reducer-feed/"
+   ],
+   "done_when": "Replaying one day of staging calls on a second Rust instance gives identical table checksums",
+   "reference": [
+    "rust/crates/runtime/src/execution.rs",
+    "rust/crates/store/src/control_schema.sql"
+   ]
+  },
+  {
+   "id": "P05",
+   "stage": 0,
+   "wave": 0,
+   "title": "Baseline metrics: client beacon and server counters on staging",
+   "depends_on": [],
+   "owns": [
+    "packages/client/src/beacon.ts",
+    "cloudflare/tools/beacon-worker/"
+   ],
+   "done_when": "Two weeks of per-tenant numbers exist: cold/warm boot, confirmation time, feed delay, reconnect, errors",
+   "reference": []
+  },
+  {
+   "id": "K01",
+   "stage": 1,
+   "wave": 1,
+   "title": "Storage layer: transaction and savepoint wrapper, single-statement admission, refusal of ATTACH/PRAGMA/VACUUM, decode by declared type, regexp replacement, parameter chunking",
+   "depends_on": [
+    "P00",
+    "P01",
+    "S1",
+    "S2",
+    "S3"
+   ],
+   "owns": [
+    "cloudflare/kernel/storage/"
+   ],
+   "done_when": "SDK SQL test suites pass on Durable Object SQLite",
+   "reference": [
+    "rust/crates/runtime/src/sql_admission.rs",
+    "rust/crates/store/src/",
+    "packages/module-sdk/test/data-write-sqlite.test.mjs"
+   ]
+  },
+  {
+   "id": "K02",
+   "stage": 1,
+   "wave": 1,
+   "title": "Migrations and provisioning: scope directives, checksum ledger, chunked apply, runtime-owned _gonvex_* tables, schema capabilities, foreign-key rebuild directive",
+   "depends_on": [
+    "P00",
+    "P01",
+    "S1",
+    "S2",
+    "S3"
+   ],
+   "owns": [
+    "cloudflare/kernel/migrate/"
+   ],
+   "done_when": "A fresh object provisions the full Whagons tenant schema; ledger matches the Rust runtime's",
+   "reference": [
+    "docs/migrations.md",
+    "rust/crates/store/src/provision.rs"
+   ]
+  },
+  {
+   "id": "K03",
+   "stage": 1,
+   "wave": 1,
+   "title": "Change capture: triggers into _gonvex_sync_changes, one revision per commit, transaction provenance, derived-table capture, 30-day pruning",
+   "depends_on": [
+    "P00",
+    "P01",
+    "S1",
+    "S2",
+    "S3"
+   ],
+   "owns": [
+    "cloudflare/kernel/capture/"
+   ],
+   "done_when": "Change rows equal the Rust runtime's for the same writes in the harness",
+   "reference": [
+    "rust/crates/store/src/capture.rs",
+    "rust/crates/store/src/feed.rs",
+    "docs/sqlite-storage.md"
+   ]
+  },
+  {
+   "id": "K04",
+   "stage": 1,
+   "wave": 1,
+   "title": "Module host: host-call interface on packages/local-runtime, capability sets per kind, pinned clock, seeded random, result caps, error classes, bundle generations, system.reload",
+   "depends_on": [
+    "P00",
+    "P01",
+    "S1",
+    "S2",
+    "S3"
+   ],
+   "owns": [
+    "cloudflare/kernel/host/"
+   ],
+   "done_when": "Runtime-contract vectors pass; a real Query and Reducer run from the app bundle",
+   "reference": [
+    "rust/crates/module-runtime/src/",
+    "rust/crates/module-runtime-v8/src/gonvex_bootstrap.js",
+    "rust/crates/runtime/src/host_calls.rs"
+   ]
+  },
+  {
+   "id": "K05",
+   "stage": 1,
+   "wave": 1,
+   "title": "Socket and session layer: /ws upgrade, session.ready, auth, capability negotiation, client.updateRequired, re-auth in place, close codes, size limits, compression, public sockets",
+   "depends_on": [
+    "P00",
+    "P01",
+    "S1",
+    "S2",
+    "S3"
+   ],
+   "owns": [
+    "cloudflare/kernel/session/"
+   ],
+   "done_when": "The real SDK connects and authenticates; handshake frames equal the Rust runtime's",
+   "reference": [
+    "rust/crates/runtime/src/lib.rs",
+    "rust/crates/websocket/src/"
+   ]
+  },
+  {
+   "id": "K06",
+   "stage": 1,
+   "wave": 1,
+   "title": "Control object: 36-table schema, sessions and refresh tokens, Firebase/OIDC exchange, native OAuth routes, passwords, impersonation, developer tokens, tenant routing, membership projector",
+   "depends_on": [
+    "P00",
+    "P01",
+    "S1",
+    "S2",
+    "S3"
+   ],
+   "owns": [
+    "cloudflare/control/"
+   ],
+   "done_when": "control.* scenarios pass for auth, tenants, invitations and support",
+   "reference": [
+    "rust/crates/runtime/src/control.rs",
+    "rust/crates/runtime/src/native_auth.rs",
+    "rust/crates/runtime/src/external_auth.rs",
+    "rust/crates/runtime/src/membership_projector.rs",
+    "rust/crates/store/src/control_schema.sql"
+   ]
+  },
+  {
+   "id": "K07",
+   "stage": 1,
+   "wave": 2,
+   "title": "Reducer path: reducer.call/callMany, idempotency and receipt query, row id derivation, committed revision, watermark, reference integrity, permission bits, outbox enqueue; receipts expire after the offline window",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/reducer/"
+   ],
+   "done_when": "Receipt scenarios pass, including lost reply and duplicate send",
+   "reference": [
+    "rust/crates/runtime/src/execution.rs",
+    "rust/crates/runtime/src/error_class.rs",
+    "rust/crates/runtime/src/permission_bits.rs",
+    "packages/module-sdk/src/reducer-execution.ts"
+   ]
+  },
+  {
+   "id": "K08",
+   "stage": 1,
+   "wave": 2,
+   "title": "Queries and Live Queries: query.call/subscribe/subscribeMany, the 10 structured plans compiled to SQL with visibility injected, page and object patches, progress and resume",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/query/"
+   ],
+   "done_when": "Live query frames equal the Rust runtime's on the task grid scenarios",
+   "reference": [
+    "rust/crates/runtime/src/live_query.rs",
+    "rust/crates/runtime/src/live_query_projection.rs",
+    "rust/crates/runtime/src/sql_projection.rs"
+   ]
+  },
+  {
+   "id": "K09",
+   "stage": 1,
+   "wave": 2,
+   "title": "Visibility: masks v2 as SQL, interpreter and class programs; permission grants; principal cache",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/visibility/"
+   ],
+   "done_when": "The Rust visibility corpus passes as a test set; all three forms agree",
+   "reference": [
+    "rust/crates/runtime/src/visibility.rs",
+    "rust/crates/runtime/src/visibility_mask.rs",
+    "rust/crates/runtime/src/visibility_class.rs",
+    "rust/crates/runtime/src/visibility_corpus.rs",
+    "docs/visibility-masks.md"
+   ]
+  },
+  {
+   "id": "K10",
+   "stage": 1,
+   "wave": 2,
+   "title": "Replica delivery: open/openMany/close, cursors, snapshot pages, digests, needHashes, reset reasons, deltas, batches, row patches, watermarks, eager and progressive, byte budgets, open admission. Written against a delivery interface with two placements",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06",
+    "K09"
+   ],
+   "owns": [
+    "cloudflare/kernel/delivery/"
+   ],
+   "done_when": "Replica scenarios pass, including resume, reset and reconnect wave",
+   "reference": [
+    "rust/crates/runtime/src/replica.rs",
+    "rust/crates/runtime/src/delivery.rs",
+    "rust/crates/runtime/src/snapshot_delivery.rs",
+    "rust/crates/runtime/src/replica_cursor.rs",
+    "rust/crates/runtime/src/replica_resume.rs",
+    "docs/replica-collections.md"
+   ]
+  },
+  {
+   "id": "K11",
+   "stage": 1,
+   "wave": 2,
+   "title": "Scheduler: crons with stagger and dueWhen, runAfter, runAt, coalescing wakeAt, outbox drain, leases, backoff, hop limits, on one alarm per tenant; max attempts and dead-letter state",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/scheduler/"
+   ],
+   "done_when": "All 14 Whagons crons fire on schedule in a 24-hour simulated clock run",
+   "reference": [
+    "rust/crates/runtime/src/scheduler.rs",
+    "rust/crates/runtime/src/scheduled_lane.rs"
+   ]
+  },
+  {
+   "id": "K12",
+   "stage": 1,
+   "wave": 2,
+   "title": "Action runtime: stateless Worker for Actions with fetch allowlist and streaming, secrets, tools, function invoke, storage, scheduler; agent Actions in a Workflow step",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06",
+    "S4"
+   ],
+   "owns": [
+    "cloudflare/actions/"
+   ],
+   "done_when": "Every Action capability has a passing scenario; a 30-minute agent Action completes",
+   "reference": [
+    "rust/crates/runtime/src/action_calls.rs",
+    "rust/crates/runtime/src/execution.rs"
+   ]
+  },
+  {
+   "id": "K13",
+   "stage": 1,
+   "wave": 2,
+   "title": "Files: R2 binding, _gonvex_files, signed proxy URLs with single-use uploads, range downloads, inline allowlist, visibility rules with owner checks on every path, direct presigned upload for large files",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/files/",
+    "cloudflare/router/storage/"
+   ],
+   "done_when": "Upload and download scenarios pass; a private file is refused to a non-owner on every route",
+   "reference": [
+    "rust/crates/runtime/src/storage.rs"
+   ]
+  },
+  {
+   "id": "K14",
+   "stage": 1,
+   "wave": 2,
+   "title": "Presence: transitions, subscribe, snapshot and patch frames, liveness without server pings, legacy beat paths answered in memory, support commands",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/presence/"
+   ],
+   "done_when": "Presence scenarios pass; a dropped client goes offline within the contract's grace time",
+   "reference": [
+    "rust/crates/runtime/src/presence.rs",
+    "docs/performance/presence-v2.md"
+   ]
+  },
+  {
+   "id": "K15",
+   "stage": 1,
+   "wave": 2,
+   "title": "Telemetry and errors: error envelopes with grouping, scrubbing and rate limits; performance events; Reducer logs",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/telemetry/"
+   ],
+   "done_when": "Error triage routes return the same groups as the Rust runtime for the same input",
+   "reference": [
+    "rust/crates/runtime/src/telemetry.rs",
+    "rust/crates/runtime/src/metrics.rs"
+   ]
+  },
+  {
+   "id": "K16",
+   "stage": 1,
+   "wave": 2,
+   "title": "Public functions: anonymous sockets, admission cache, per-connection and per-address limits, payload caps, public Action timeout",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/public/"
+   ],
+   "done_when": "The three public functions and token Actions pass; limits trip at the configured counts",
+   "reference": [
+    "rust/crates/runtime/src/public_functions.rs",
+    "docs/public-functions.md"
+   ]
+  },
+  {
+   "id": "K17",
+   "stage": 1,
+   "wave": 2,
+   "title": "Service principals: gvx_svc_ tokens bound to tenant and function allowlist, delegation",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/kernel/principals/"
+   ],
+   "done_when": "The existing API gateway connects unchanged and its consumer contracts pass",
+   "reference": [
+    "rust/crates/runtime/src/service_principal.rs",
+    "docs/service-principals.md"
+   ]
+  },
+  {
+   "id": "K18",
+   "stage": 1,
+   "wave": 2,
+   "title": "Ingress Worker: webhooks with tenant resolution and raw bodies, share pages",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/router/ingress/"
+   ],
+   "done_when": "Telnyx and GitHub signature checks pass on forwarded raw bodies",
+   "reference": []
+  },
+  {
+   "id": "K19",
+   "stage": 1,
+   "wave": 2,
+   "title": "Deploy and operator routes: /dev/sync with bundle storage, tenant migration rollout through a queue, activation; projects, tenants, env, manifest; dashboard data, metrics, logs, errors",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/control/operator/",
+    "cloudflare/router/dev/"
+   ],
+   "done_when": "gonvex dev --once deploys the Whagons app; the dashboard works against the kernel",
+   "reference": [
+    "rust/crates/runtime/src/operations.rs",
+    "rust/crates/runtime/src/operator_data.rs",
+    "rust/crates/runtime/src/dashboard.rs",
+    "packages/gonvex/src/"
+   ]
+  },
+  {
+   "id": "K20",
+   "stage": 1,
+   "wave": 2,
+   "title": "Sandbox: the existing sandbox worker in a Container behind ctx.sandbox, DuckDB included",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/sandbox/"
+   ],
+   "done_when": "Assistant data-analysis scenarios pass",
+   "reference": [
+    "rust/crates/runtime/src/sandbox.rs",
+    "rust/crates/sandbox-worker/"
+   ]
+  },
+  {
+   "id": "K21",
+   "stage": 1,
+   "wave": 2,
+   "title": "Bridge support: the Go bridge passes its compatibility suite against the kernel; its direct database access becomes a service-principal function (named app-repo exception)",
+   "depends_on": [
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "K05",
+    "K06"
+   ],
+   "owns": [
+    "cloudflare/bridge-support/"
+   ],
+   "done_when": "Whagons compatibility CI passes through the bridge",
+   "reference": []
+  },
+  {
+   "id": "V01",
+   "stage": 1,
+   "wave": 3,
+   "title": "Full conformance",
+   "depends_on": [
+    "K07",
+    "K08",
+    "K09",
+    "K10",
+    "K11",
+    "K12",
+    "K13",
+    "K14",
+    "K15",
+    "K16",
+    "K17",
+    "K18",
+    "K19",
+    "K20",
+    "K21"
+   ],
+   "owns": [
+    "cloudflare/conformance/"
+   ],
+   "done_when": "Every harness scenario passes against the kernel",
+   "reference": []
+  },
+  {
+   "id": "V02",
+   "stage": 1,
+   "wave": 3,
+   "title": "Whagons end to end",
+   "depends_on": [
+    "K07",
+    "K08",
+    "K09",
+    "K10",
+    "K11",
+    "K12",
+    "K13",
+    "K14",
+    "K15",
+    "K16",
+    "K17",
+    "K18",
+    "K19",
+    "K20",
+    "K21"
+   ],
+   "owns": [
+    "cloudflare/conformance/"
+   ],
+   "done_when": "The app's Playwright suite, module suites and compatibility CI pass against a preview deploy",
+   "reference": []
+  },
+  {
+   "id": "V03",
+   "stage": 1,
+   "wave": 3,
+   "title": "Load",
+   "depends_on": [
+    "K07",
+    "K08",
+    "K09",
+    "K10",
+    "K11",
+    "K12",
+    "K13",
+    "K14",
+    "K15",
+    "K16",
+    "K17",
+    "K18",
+    "K19",
+    "K20",
+    "K21"
+   ],
+   "owns": [
+    "cloudflare/conformance/"
+   ],
+   "done_when": "26-tenant mixed run passes; 1,000 users on one tenant pass: p95 <500 ms, p99 <1 s, errors <1%, all connected, including a reconnect wave",
+   "reference": []
+  },
+  {
+   "id": "V04",
+   "stage": 1,
+   "wave": 3,
+   "title": "Budgets",
+   "depends_on": [
+    "K07",
+    "K08",
+    "K09",
+    "K10",
+    "K11",
+    "K12",
+    "K13",
+    "K14",
+    "K15",
+    "K16",
+    "K17",
+    "K18",
+    "K19",
+    "K20",
+    "K21"
+   ],
+   "owns": [
+    "cloudflare/budgets/"
+   ],
+   "done_when": "SQL statements, rows read, rows written and CPU recorded per function; peak memory and wake time recorded",
+   "reference": []
+  },
+  {
+   "id": "V05",
+   "stage": 1,
+   "wave": 3,
+   "title": "Fault drills",
+   "depends_on": [
+    "K07",
+    "K08",
+    "K09",
+    "K10",
+    "K11",
+    "K12",
+    "K13",
+    "K14",
+    "K15",
+    "K16",
+    "K17",
+    "K18",
+    "K19",
+    "K20",
+    "K21"
+   ],
+   "owns": [
+    "cloudflare/conformance/"
+   ],
+   "done_when": "Deploy under load, eviction during a snapshot, failed alarm, R2 unavailable and control object unavailable each end with no lost or duplicated write",
+   "reference": []
+  },
+  {
+   "id": "V06",
+   "stage": 1,
+   "wave": 3,
+   "title": "Security review",
+   "depends_on": [
+    "K07",
+    "K08",
+    "K09",
+    "K10",
+    "K11",
+    "K12",
+    "K13",
+    "K14",
+    "K15",
+    "K16",
+    "K17",
+    "K18",
+    "K19",
+    "K20",
+    "K21"
+   ],
+   "owns": [
+    "docs/cloudflare/security-review.md"
+   ],
+   "done_when": "Visibility parity, file ownership, rate limits, secret handling and operator auth reviewed by a verifier with no open high findings",
+   "reference": []
+  },
+  {
+   "id": "X01",
+   "stage": 1,
+   "wave": 3,
+   "title": "Fan-out shards: gateway objects holding sockets, activated automatically by socket count or delivery CPU",
+   "depends_on": [
+    "K10"
+   ],
+   "owns": [
+    "cloudflare/kernel/gateway/"
+   ],
+   "done_when": "V03 passes at 1,000 users; tier changes without a deploy and steps down with a delay",
+   "reference": []
+  },
+  {
+   "id": "X02",
+   "stage": 1,
+   "wave": 3,
+   "title": "Snapshot offload: gateways serve snapshots from cached base pages plus the change-log tail",
+   "depends_on": [
+    "X01"
+   ],
+   "owns": [
+    "cloudflare/kernel/gateway/snapshot/"
+   ],
+   "done_when": "Cold-boot storm of 1,000 clients keeps writer confirmation p95 under 150 ms",
+   "reference": [
+    "rust/crates/runtime/src/snapshot_cache.rs"
+   ]
+  },
+  {
+   "id": "M01",
+   "stage": 2,
+   "wave": 4,
+   "title": "Router Worker in front of the box: socket proxy, per-tenant backend and ring, web build",
+   "depends_on": [
+    "P01"
+   ],
+   "owns": [
+    "cloudflare/router/"
+   ],
+   "done_when": "All staging traffic passes through the router with no baseline metric worse",
+   "reference": []
+  },
+  {
+   "id": "M02",
+   "stage": 2,
+   "wave": 4,
+   "title": "Shadow runner: feeds committed Reducer calls into a shadow object in order with original time and entropy; nightly checksum compare",
+   "depends_on": [
+    "P04",
+    "K07",
+    "P03"
+   ],
+   "owns": [
+    "cloudflare/tools/shadow/"
+   ],
+   "done_when": "14 consecutive days of zero drift on every staging tenant",
+   "reference": []
+  },
+  {
+   "id": "M03",
+   "stage": 2,
+   "wave": 4,
+   "title": "Cutover tool and runbook: pause, export, import, verify, flip, and reverse",
+   "depends_on": [
+    "P03",
+    "M01"
+   ],
+   "owns": [
+    "cloudflare/tools/cutover/",
+    "docs/cloudflare/runbooks/cutover.md"
+   ],
+   "done_when": "Rehearsed forward and back on every staging tenant",
+   "reference": []
+  },
+  {
+   "id": "M04",
+   "stage": 2,
+   "wave": 4,
+   "title": "Rings and releases: releases table, two bundles in one deploy, per-ring web builds, nightly pipeline, promotion and halt rules",
+   "depends_on": [
+    "M01",
+    "K19"
+   ],
+   "owns": [
+    "cloudflare/router/rings/",
+    ".github/workflows/nightly.yml"
+   ],
+   "done_when": "A nightly build reaches only the nightly ring; a forced halt reverts it",
+   "reference": []
+  },
+  {
+   "id": "M05",
+   "stage": 2,
+   "wave": 4,
+   "title": "Observability: structured logs, Analytics Engine datasets, alert Worker, health sweep, cost per tenant",
+   "depends_on": [
+    "P01"
+   ],
+   "owns": [
+    "cloudflare/observability/"
+   ],
+   "done_when": "Each of the five paging conditions fires in a drill",
+   "reference": []
+  },
+  {
+   "id": "M06",
+   "stage": 2,
+   "wave": 4,
+   "title": "Backups: nightly export of each tenant to R2 and weekly restore into the Rust runtime",
+   "depends_on": [
+    "P03"
+   ],
+   "owns": [
+    "cloudflare/tools/backup/"
+   ],
+   "done_when": "A restore drill passes checksum comparison",
+   "reference": []
+  },
+  {
+   "id": "M07",
+   "stage": 2,
+   "wave": 4,
+   "title": "Bridge re-point to the new /ws",
+   "depends_on": [
+    "K21",
+    "M01"
+   ],
+   "owns": [
+    "cloudflare/bridge-support/deploy/"
+   ],
+   "done_when": "Mobile compatibility suite passes on staging through the bridge",
+   "reference": []
+  },
+  {
+   "id": "M08",
+   "stage": 2,
+   "wave": 4,
+   "title": "API gateway re-point to the new /ws",
+   "depends_on": [
+    "K17",
+    "M01"
+   ],
+   "owns": [
+    "docs/cloudflare/runbooks/api-gateway.md"
+   ],
+   "done_when": "Consumer contracts in contracts/consumers/ pass on staging",
+   "reference": []
+  },
+  {
+   "id": "M09",
+   "stage": 2,
+   "wave": 4,
+   "title": "Media and images: ffmpeg worker in a Container, image transforms at the edge",
+   "depends_on": [
+    "P01"
+   ],
+   "owns": [
+    "cloudflare/media/"
+   ],
+   "done_when": "Video conversion scenarios pass; calls stay on LiveKit",
+   "reference": []
+  },
+  {
+   "id": "L01",
+   "stage": 3,
+   "wave": 5,
+   "title": "Budgets as gates",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "CI fails on any increase in statements, rows read or rows written per function",
+   "reference": []
+  },
+  {
+   "id": "L02",
+   "stage": 3,
+   "wave": 5,
+   "title": "Timers for polling crons",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "No cron runs more often than hourly; idle tenants are not woken",
+   "reference": []
+  },
+  {
+   "id": "L03",
+   "stage": 3,
+   "wave": 5,
+   "title": "Schema diet: move the trigger and view layer into the kernel write path",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Cold wake time and memory drop against the V04 record",
+   "reference": []
+  },
+  {
+   "id": "L04",
+   "stage": 3,
+   "wave": 5,
+   "title": "Change log without row images",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Fan-out reads each changed row once per batch; rows written per write drops",
+   "reference": []
+  },
+  {
+   "id": "L05",
+   "stage": 3,
+   "wave": 5,
+   "title": "Session parking and signed session tokens",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Objects hibernate with sockets open; the router verifies sessions without the control object",
+   "reference": []
+  },
+  {
+   "id": "L06",
+   "stage": 3,
+   "wave": 5,
+   "title": "Packed column pages as a new protocol version",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Server encodes rows straight into typed lanes behind a capability flag",
+   "reference": []
+  },
+  {
+   "id": "L07",
+   "stage": 3,
+   "wave": 5,
+   "title": "Columnar client replica from whagons-lite",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Web client uses the worker store and query engine with windows of at most 200 rows",
+   "reference": []
+  },
+  {
+   "id": "L08",
+   "stage": 3,
+   "wave": 5,
+   "title": "Agents as objects",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Assistant output streams over the agent's socket, not through row rewrites",
+   "reference": []
+  },
+  {
+   "id": "L09",
+   "stage": 3,
+   "wave": 5,
+   "title": "Sandbox replacement: Dynamic Worker JavaScript and scratch SQLite; remove DuckDB and the Container (after the bridge retires)",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Assistant analysis scenarios pass with no Container",
+   "reference": []
+  },
+  {
+   "id": "L10",
+   "stage": 3,
+   "wave": 5,
+   "title": "API gateway as a Worker; control plane to D1 if load requires",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Gateway VM removed",
+   "reference": []
+  },
+  {
+   "id": "L11",
+   "stage": 3,
+   "wave": 5,
+   "title": "Deletions: Rust serving path, bridge when policy allows, unused knobs",
+   "depends_on": [
+    "G6"
+   ],
+   "owns": [],
+   "done_when": "Listed components removed from deploys",
+   "reference": []
+  }
+ ],
+ "base_branch": "staging"
+}
