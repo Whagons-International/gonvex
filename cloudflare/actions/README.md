@@ -131,6 +131,7 @@ scheduler on the tenant alarm and handed to the Workflow, which renews K11's 5-m
 
 ## Numbers
 
+- **30 minutes through K11** (`dev/results/agent-1800s-k11-handoff-local.json`): 1,810 s on K11's attempt 1, 18 renewals of K11's claim at 100,001-100,004 ms, 60 stream turns, completed once by K11, no dead row.
 - **Bundle** (esbuild, minified):
   - the Action Worker's K12 code is 28.3 KB, 9.9 KB gzip;
   - with K04's engine it is 38.4 KB, 13.3 KB gzip, before the app bundle;
