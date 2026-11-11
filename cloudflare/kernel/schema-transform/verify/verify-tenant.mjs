@@ -86,7 +86,8 @@ const tables = capturedTables.map((name) => ({
   name,
   columns: orig.prepare("SELECT name, type AS declared, pk FROM pragma_table_info(?) ORDER BY cid").all(name).map((c) => ({ name: c.name, declared: c.declared, pk: c.pk })),
 }));
-const transform = new SchemaTransform();
+// --no-t6 (measurement only): the same transform without T6, the layout S1 measured on lax hosts.
+const transform = args.includes("--no-t6") ? new SchemaTransform({ referenceMinBranches: Infinity, limits: { unionBranchesRead: Infinity } }) : new SchemaTransform();
 const [image, transformMs] = time(() => transform.image(report.tenant, schema, { records, tables }));
 const rules = {};
 for (const r of image.rewrites) rules[r.rule] = (rules[r.rule] ?? 0) + 1;

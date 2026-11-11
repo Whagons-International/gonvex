@@ -29,7 +29,7 @@ import {
   utf8Bytes,
   type StatementKind,
 } from "./lexer.ts";
-import { checkStatement, effectiveDdlBytes, LIMITS, unionBranchesRead, type Limits } from "./limits.ts";
+import { checkStatement, effectiveDdlBytes, LIMITS, parseCteList, unionBranchesRead, type Limits } from "./limits.ts";
 import { finalOver, parseUnionView, pieceSql, resultColumns, type UnionView } from "./union-view.ts";
 
 /** Recorded in the tenant object's migration ledger metadata with every applied migration. */
@@ -743,17 +743,23 @@ export function mergeRanges(ranges: ReadonlyArray<readonly [number, number]>): A
 /** Table an INSERT / UPDATE / DELETE / REPLACE writes, lower-case, or null. */
 export function writeTarget(sql: string): string | null {
   const toks = significant(sql);
-  let i = 0;
-  if (toks[0]?.upper === "WITH") return null; // CTE-prefixed DML is not used by the app schema; treated as not writing a guarded table
-  const verb = toks[0]?.upper;
+  let start = 0;
+  if (toks[0]?.upper === "WITH") {
+    // `WITH ... INSERT/UPDATE/DELETE`: skip the CTE list.
+    const ctes = parseCteList(sql, toks, 0);
+    if (!ctes) return null;
+    start = ctes.next;
+  }
+  let i = start;
+  const verb = toks[start]?.upper;
   if (verb === "INSERT" || verb === "REPLACE") {
     while (toks[i] && toks[i]!.upper !== "INTO") i += 1;
     i += 1;
   } else if (verb === "UPDATE") {
-    i = 1;
+    i = start + 1;
     if (toks[i]?.upper === "OR") i += 2;
   } else if (verb === "DELETE") {
-    i = 2;
+    i = start + 2;
   } else return null;
   const t = toks[i];
   if (!isNameToken(t)) return null;
