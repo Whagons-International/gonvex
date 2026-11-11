@@ -1,0 +1,31 @@
+{
+  // Tenant object + the three runners compared by the S4 spike.
+  "name": "gonvex-cf-dev-s4-runner",
+  "main": "src/runner.ts",
+  "compatibility_date": "2026-10-01",
+  // Fetches to the upstream go over the public internet, like real Actions.
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "limits": { "cpu_ms": 300000 },
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "TENANT", "class_name": "TenantObject" },
+      { "name": "RUNNER", "class_name": "RunnerObject" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantObject", "RunnerObject"] }],
+  "queues": {
+    "producers": [{ "binding": "ACTIONS", "queue": "gonvex-cf-dev-s4-actions" }],
+    "consumers": [
+      { "queue": "gonvex-cf-dev-s4-actions", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 20, "max_concurrency": 20 }
+    ]
+  },
+  "workflows": [{ "name": "gonvex-cf-dev-s4-action", "binding": "ACTION_WF", "class_name": "ActionWorkflow" }],
+  "vars": {
+    "UPSTREAM_URL": "http://127.0.0.1:8788",
+    "LEASE_MS": "300000",
+    "RENEW_MS": "30000",
+    "MAX_ATTEMPTS": "8"
+  }
+}

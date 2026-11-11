@@ -1,0 +1,6153 @@
+{
+ "local-crash-alarm": {
+  "runner": "alarm",
+  "preset": "quick",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 87.2,
+  "enqueueToClaimMs": 2126,
+  "renewGapMs": {
+   "n": 1,
+   "min": 30001,
+   "max": 30001,
+   "mean": 30001
+  },
+  "renewals": 2,
+  "maxRenewRpcMs": 37,
+  "actionWallMs": 60393,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 4,
+    "events": 204,
+    "allContiguous": true,
+    "maxGapMs": 732,
+    "ms": 60393
+   }
+  ],
+  "replay": null,
+  "lastError": "injected throw failure (local)",
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.0,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1029
+    }
+   ],
+   [
+    2.1,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:a7fc1aab",
+     "takeover": false
+    }
+   ],
+   [
+    22.2,
+    "failed",
+    1,
+    {
+     "error": "injected throw failure (local)"
+    }
+   ],
+   [
+    24.2,
+    "claimed",
+    2,
+    {
+     "owner": "alarm:a7fc1aab",
+     "takeover": true
+    }
+   ],
+   [
+    84.6,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "local-crash-queue": {
+  "runner": "queue",
+  "preset": "quick",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 268.2,
+  "enqueueToClaimMs": 35871,
+  "renewGapMs": {
+   "n": 1,
+   "min": 30032,
+   "max": 30032,
+   "mean": 30032
+  },
+  "renewals": 2,
+  "maxRenewRpcMs": 79,
+  "actionWallMs": 60603,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 4,
+    "events": 204,
+    "allContiguous": true,
+    "maxGapMs": 330,
+    "ms": 60603
+   }
+  ],
+  "replay": null,
+  "lastError": "injected throw failure (local)",
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1262
+    }
+   ],
+   [
+    35.9,
+    "claimed",
+    1,
+    {
+     "owner": "queue:47f2d732",
+     "takeover": false
+    }
+   ],
+   [
+    55.9,
+    "failed",
+    1,
+    {
+     "error": "injected throw failure (local)"
+    }
+   ],
+   [
+    61.3,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 1794362950353
+    }
+   ],
+   [
+    61.4,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 77
+    }
+   ],
+   [
+    121.3,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 1794363010355
+    }
+   ],
+   [
+    121.4,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 3,
+     "handoffMs": 73
+    }
+   ],
+   [
+    202.3,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 1
+    }
+   ],
+   [
+    202.3,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 4,
+     "handoffMs": 7
+    }
+   ],
+   [
+    202.3,
+    "claimed",
+    2,
+    {
+     "owner": "queue:661f7552",
+     "takeover": true
+    }
+   ],
+   [
+    262.9,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "local-crash-workflow": {
+  "runner": "workflow",
+  "preset": "quick",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 91.7,
+  "enqueueToClaimMs": 1823,
+  "renewGapMs": {
+   "n": 1,
+   "min": 30001,
+   "max": 30001,
+   "mean": 30001
+  },
+  "renewals": 2,
+  "maxRenewRpcMs": 20,
+  "actionWallMs": 60439,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 4,
+    "events": 204,
+    "allContiguous": true,
+    "maxGapMs": 732,
+    "ms": 60439
+   }
+  ],
+  "replay": null,
+  "lastError": "injected throw failure (local)",
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.4,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1424
+    }
+   ],
+   [
+    1.8,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:cf04a-d1",
+     "takeover": false
+    }
+   ],
+   [
+    21.9,
+    "failed",
+    1,
+    {
+     "error": "injected throw failure (local)"
+    }
+   ],
+   [
+    26.9,
+    "claimed",
+    2,
+    {
+     "owner": "workflow:cf04a-d1",
+     "takeover": true
+    }
+   ],
+   [
+    87.4,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "local-dl512-workflow": {
+  "runner": "workflow",
+  "preset": "dl512",
+  "status": "dead",
+  "attempts": 8,
+  "effectsApplied": 0,
+  "totalS": 99.4,
+  "enqueueToClaimMs": 272,
+  "renewGapMs": null,
+  "renewals": null,
+  "maxRenewRpcMs": null,
+  "actionWallMs": null,
+  "steps": [],
+  "replay": null,
+  "lastError": "Attempt to write too many bytes through a FixedLengthStream.",
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.1,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 148
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:238b0-d1",
+     "takeover": false
+    }
+   ],
+   [
+    4.1,
+    "failed",
+    1,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    9.2,
+    "claimed",
+    2,
+    {
+     "owner": "workflow:238b0-d1",
+     "takeover": true
+    }
+   ],
+   [
+    9.3,
+    "failed",
+    2,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    19.4,
+    "claimed",
+    3,
+    {
+     "owner": "workflow:238b0-d1",
+     "takeover": true
+    }
+   ],
+   [
+    19.5,
+    "failed",
+    3,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    39.6,
+    "claimed",
+    4,
+    {
+     "owner": "workflow:238b0-d1",
+     "takeover": true
+    }
+   ],
+   [
+    39.6,
+    "failed",
+    4,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    60.2,
+    "sweep-redispatch",
+    4,
+    {
+     "status": "processing",
+     "overdueMs": 1794362947340
+    }
+   ],
+   [
+    60.5,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 326
+    }
+   ],
+   [
+    60.7,
+    "claimed",
+    5,
+    {
+     "owner": "workflow:238b0-d2",
+     "takeover": true
+    }
+   ],
+   [
+    61.0,
+    "failed",
+    5,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    66.2,
+    "claimed",
+    6,
+    {
+     "owner": "workflow:238b0-d2",
+     "takeover": true
+    }
+   ],
+   [
+    66.2,
+    "failed",
+    6,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    76.3,
+    "claimed",
+    7,
+    {
+     "owner": "workflow:238b0-d2",
+     "takeover": true
+    }
+   ],
+   [
+    76.3,
+    "failed",
+    7,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    79.7,
+    "claimed",
+    8,
+    {
+     "owner": "workflow:238b0-d1",
+     "takeover": true
+    }
+   ],
+   [
+    79.8,
+    "failed",
+    8,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    96.4,
+    "dead",
+    8,
+    {
+     "owner": "workflow:238b0-d2"
+    }
+   ]
+  ]
+ },
+ "local-dl64-alarm": {
+  "runner": "alarm",
+  "preset": "dl64",
+  "status": "dead",
+  "attempts": 8,
+  "effectsApplied": 0,
+  "totalS": 187.4,
+  "enqueueToClaimMs": 2204,
+  "renewGapMs": null,
+  "renewals": null,
+  "maxRenewRpcMs": null,
+  "actionWallMs": null,
+  "steps": [],
+  "replay": null,
+  "lastError": "Attempt to write too many bytes through a FixedLengthStream.",
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.1,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1106
+    }
+   ],
+   [
+    2.2,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:38eff430",
+     "takeover": false
+    }
+   ],
+   [
+    2.5,
+    "failed",
+    1,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    4.6,
+    "claimed",
+    2,
+    {
+     "owner": "alarm:38eff430",
+     "takeover": true
+    }
+   ],
+   [
+    4.7,
+    "failed",
+    2,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    8.8,
+    "claimed",
+    3,
+    {
+     "owner": "alarm:38eff430",
+     "takeover": true
+    }
+   ],
+   [
+    8.9,
+    "failed",
+    3,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    17.0,
+    "claimed",
+    4,
+    {
+     "owner": "alarm:38eff430",
+     "takeover": true
+    }
+   ],
+   [
+    17.1,
+    "failed",
+    4,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    33.2,
+    "claimed",
+    5,
+    {
+     "owner": "alarm:38eff430",
+     "takeover": true
+    }
+   ],
+   [
+    33.3,
+    "failed",
+    5,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    61.1,
+    "sweep-redispatch",
+    5,
+    {
+     "status": "processing",
+     "overdueMs": 1794362950026
+    }
+   ],
+   [
+    61.2,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 81
+    }
+   ],
+   [
+    61.3,
+    "claimed",
+    6,
+    {
+     "owner": "alarm:38eff430",
+     "takeover": true
+    }
+   ],
+   [
+    61.3,
+    "failed",
+    6,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    62.0,
+    "sweep-redispatch",
+    6,
+    {
+     "status": "processing",
+     "overdueMs": 1794362950866
+    }
+   ],
+   [
+    62.0,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 3,
+     "handoffMs": 20
+    }
+   ],
+   [
+    62.2,
+    "claimed",
+    7,
+    {
+     "owner": "alarm:38eff430",
+     "takeover": true
+    }
+   ],
+   [
+    62.2,
+    "failed",
+    7,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    122.4,
+    "sweep-redispatch",
+    7,
+    {
+     "status": "processing",
+     "overdueMs": 1794363011263
+    }
+   ],
+   [
+    122.7,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 4,
+     "handoffMs": 371
+    }
+   ],
+   [
+    123.2,
+    "claimed",
+    8,
+    {
+     "owner": "alarm:38eff430",
+     "takeover": true
+    }
+   ],
+   [
+    123.9,
+    "failed",
+    8,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    184.0,
+    "dead",
+    8,
+    {
+     "owner": "alarm:38eff430"
+    }
+   ]
+  ]
+ },
+ "local-dl64-queue": {
+  "runner": "queue",
+  "preset": "dl64",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 188,
+  "enqueueToClaimMs": 181908,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 2167,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "stream",
+    "contentLength": 67108864,
+    "bytes": 67108864,
+    "chunks": 16390,
+    "maxChunk": 4096,
+    "ms": 2167,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1197
+    }
+   ],
+   [
+    61.4,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 157
+    }
+   ],
+   [
+    61.4,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 8
+    }
+   ],
+   [
+    121.7,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 329
+    }
+   ],
+   [
+    121.9,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 3,
+     "handoffMs": 170
+    }
+   ],
+   [
+    181.9,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 2
+    }
+   ],
+   [
+    181.9,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 4,
+     "handoffMs": 14
+    }
+   ],
+   [
+    181.9,
+    "claimed",
+    1,
+    {
+     "owner": "queue:fed8058c",
+     "takeover": false
+    }
+   ],
+   [
+    184.1,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "local-dl64-workflow": {
+  "runner": "workflow",
+  "preset": "dl64",
+  "status": "dead",
+  "attempts": 8,
+  "effectsApplied": 0,
+  "totalS": 99.3,
+  "enqueueToClaimMs": 1888,
+  "renewGapMs": null,
+  "renewals": null,
+  "maxRenewRpcMs": null,
+  "actionWallMs": null,
+  "steps": [],
+  "replay": null,
+  "lastError": "Attempt to write too many bytes through a FixedLengthStream.",
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.5,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1488
+    }
+   ],
+   [
+    1.9,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:8d00a-d1",
+     "takeover": false
+    }
+   ],
+   [
+    2.4,
+    "failed",
+    1,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    7.5,
+    "claimed",
+    2,
+    {
+     "owner": "workflow:8d00a-d1",
+     "takeover": true
+    }
+   ],
+   [
+    7.6,
+    "failed",
+    2,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    17.8,
+    "claimed",
+    3,
+    {
+     "owner": "workflow:8d00a-d1",
+     "takeover": true
+    }
+   ],
+   [
+    18.0,
+    "failed",
+    3,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    38.1,
+    "claimed",
+    4,
+    {
+     "owner": "workflow:8d00a-d1",
+     "takeover": true
+    }
+   ],
+   [
+    38.2,
+    "failed",
+    4,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    61.6,
+    "sweep-redispatch",
+    4,
+    {
+     "status": "processing",
+     "overdueMs": 1794362950526
+    }
+   ],
+   [
+    61.7,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 102
+    }
+   ],
+   [
+    61.7,
+    "claimed",
+    5,
+    {
+     "owner": "workflow:8d00a-d2",
+     "takeover": true
+    }
+   ],
+   [
+    61.7,
+    "failed",
+    5,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    66.8,
+    "claimed",
+    6,
+    {
+     "owner": "workflow:8d00a-d2",
+     "takeover": true
+    }
+   ],
+   [
+    66.8,
+    "failed",
+    6,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    76.9,
+    "claimed",
+    7,
+    {
+     "owner": "workflow:8d00a-d2",
+     "takeover": true
+    }
+   ],
+   [
+    77.0,
+    "failed",
+    7,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    78.3,
+    "claimed",
+    8,
+    {
+     "owner": "workflow:8d00a-d1",
+     "takeover": true
+    }
+   ],
+   [
+    78.4,
+    "failed",
+    8,
+    {
+     "error": "Attempt to write too many bytes through a FixedLengthStream."
+    }
+   ],
+   [
+    97.1,
+    "dead",
+    8,
+    {
+     "owner": "workflow:8d00a-d2"
+    }
+   ]
+  ]
+ },
+ "local-dl64buf-alarm": {
+  "runner": "alarm",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 10.8,
+  "enqueueToClaimMs": 2062,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 3354,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 3353,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.0,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 965
+    }
+   ],
+   [
+    2.1,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:2e210c46",
+     "takeover": false
+    }
+   ],
+   [
+    5.5,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "local-dl64buf-queue": {
+  "runner": "queue",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 10.6,
+  "enqueueToClaimMs": 1979,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 3718,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 3718,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1327
+    }
+   ],
+   [
+    2.0,
+    "claimed",
+    1,
+    {
+     "owner": "queue:9d1d1861",
+     "takeover": false
+    }
+   ],
+   [
+    5.7,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "local-dl64buf-workflow": {
+  "runner": "workflow",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 10.9,
+  "enqueueToClaimMs": 1888,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 3585,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 3585,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.5,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1488
+    }
+   ],
+   [
+    1.9,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:05b3f-d1",
+     "takeover": false
+    }
+   ],
+   [
+    5.6,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "local-dup-handoff-queue": {
+  "runner": "queue",
+  "preset": "sse30s",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 99,
+  "enqueueToClaimMs": 5774,
+  "renewGapMs": null,
+  "renewals": 1,
+  "maxRenewRpcMs": 10,
+  "actionWallMs": 30070,
+  "steps": [
+   {
+    "kind": "sse",
+    "events": 150,
+    "contiguous": true,
+    "sawDone": true,
+    "maxGapMs": 315,
+    "firstByteMs": 16,
+    "ms": 30070
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1327
+    }
+   ],
+   [
+    5.3,
+    "dispatched",
+    null,
+    {
+     "cause": "manual",
+     "n": 2,
+     "handoffMs": 1
+    }
+   ],
+   [
+    5.8,
+    "claimed",
+    1,
+    {
+     "owner": "queue:e2c33abc",
+     "takeover": false
+    }
+   ],
+   [
+    35.9,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "local-handoff-lost-workflow": {
+  "runner": "workflow",
+  "preset": "quick",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 76.1,
+  "enqueueToClaimMs": 60600,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 11122,
+  "steps": [
+   {
+    "kind": "sse",
+    "events": 26,
+    "contiguous": true,
+    "sawDone": true,
+    "maxGapMs": 296,
+    "firstByteMs": 103,
+    "ms": 5072
+   },
+   {
+    "kind": "poll",
+    "polls": 4,
+    "ms": 6050
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.0,
+    "handoff-skipped",
+    null
+   ],
+   [
+    60.0,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 2
+    }
+   ],
+   [
+    60.3,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 1,
+     "handoffMs": 295
+    }
+   ],
+   [
+    60.6,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:896ae-d1",
+     "takeover": false
+    }
+   ],
+   [
+    71.8,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "local-stall-alarm": {
+  "runner": "alarm",
+  "preset": "stallShort",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 328,
+  "enqueueToClaimMs": 1762,
+  "renewGapMs": {
+   "n": 4,
+   "min": 29987,
+   "max": 30017,
+   "mean": 30005
+  },
+  "renewals": 5,
+  "maxRenewRpcMs": 38,
+  "actionWallMs": 150991,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 5,
+    "events": 505,
+    "allContiguous": true,
+    "maxGapMs": 465,
+    "ms": 150991
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.8,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 811
+    }
+   ],
+   [
+    1.8,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:e9245dd6",
+     "takeover": false
+    }
+   ],
+   [
+    61.8,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 49
+    }
+   ],
+   [
+    61.8,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 37
+    }
+   ],
+   [
+    122.4,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 1794363011784
+    }
+   ],
+   [
+    122.9,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 3,
+     "handoffMs": 474
+    }
+   ],
+   [
+    153.2,
+    "claimed",
+    2,
+    {
+     "owner": "alarm:e9245dd6",
+     "takeover": true
+    }
+   ],
+   [
+    304.2,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "local-stall-evict-queue": {
+  "runner": "queue",
+  "preset": "stallShort",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 173.3,
+  "enqueueToClaimMs": 223,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 151301,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 5,
+    "events": 505,
+    "allContiguous": true,
+    "maxGapMs": 522,
+    "ms": 151301
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.0,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 44
+    }
+   ],
+   [
+    0.2,
+    "claimed",
+    1,
+    {
+     "owner": "queue:fce2f4c2",
+     "takeover": false
+    }
+   ],
+   [
+    60.3,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 56
+    }
+   ],
+   [
+    60.3,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 40
+    }
+   ],
+   [
+    120.3,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": "released"
+    }
+   ],
+   [
+    120.3,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 3,
+     "handoffMs": 26
+    }
+   ],
+   [
+    151.6,
+    "complete-applied",
+    1
+   ],
+   [
+    151.8,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:09eacb6c",
+     "reason": "done"
+    }
+   ],
+   [
+    151.9,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:86dbe456",
+     "reason": "done"
+    }
+   ]
+  ]
+ },
+ "local-stall-evict-workflow": {
+  "runner": "workflow",
+  "preset": "stallShort",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 235.3,
+  "enqueueToClaimMs": 800,
+  "renewGapMs": {
+   "n": 4,
+   "min": 29987,
+   "max": 30024,
+   "mean": 30001
+  },
+  "renewals": 5,
+  "maxRenewRpcMs": 101,
+  "actionWallMs": 151391,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 5,
+    "events": 505,
+    "allContiguous": true,
+    "maxGapMs": 575,
+    "ms": 151391
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 306
+    }
+   ],
+   [
+    0.8,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:ce83b-d1",
+     "takeover": false
+    }
+   ],
+   [
+    60.8,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 2
+    }
+   ],
+   [
+    61.1,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 309
+    }
+   ],
+   [
+    61.4,
+    "claimed",
+    2,
+    {
+     "owner": "workflow:ce83b-d2",
+     "takeover": true
+    }
+   ],
+   [
+    152.7,
+    "complete-rejected",
+    1
+   ],
+   [
+    212.9,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "local-stall-queue": {
+  "runner": "queue",
+  "preset": "stallShort",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 438.5,
+  "enqueueToClaimMs": 55976,
+  "renewGapMs": {
+   "n": 4,
+   "min": 30002,
+   "max": 30159,
+   "mean": 30057
+  },
+  "renewals": 5,
+  "maxRenewRpcMs": 118,
+  "actionWallMs": 150694,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 5,
+    "events": 503,
+    "allContiguous": true,
+    "maxGapMs": 308,
+    "ms": 150694
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1262
+    }
+   ],
+   [
+    56.0,
+    "claimed",
+    1,
+    {
+     "owner": "queue:40650e0f",
+     "takeover": false
+    }
+   ],
+   [
+    116.0,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 2
+    }
+   ],
+   [
+    116.0,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 39
+    }
+   ],
+   [
+    202.3,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 2
+    }
+   ],
+   [
+    202.4,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 3,
+     "handoffMs": 7
+    }
+   ],
+   [
+    262.4,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 1794363151486
+    }
+   ],
+   [
+    262.5,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 4,
+     "handoffMs": 91
+    }
+   ],
+   [
+    263.2,
+    "claimed",
+    2,
+    {
+     "owner": "queue:957a1187",
+     "takeover": true
+    }
+   ],
+   [
+    413.9,
+    "complete-applied",
+    2
+   ],
+   [
+    414.0,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:3c3c002a",
+     "reason": "done"
+    }
+   ]
+  ]
+ },
+ "local-stall-workflow": {
+  "runner": "workflow",
+  "preset": "stallShort",
+  "status": "done",
+  "attempts": 3,
+  "effectsApplied": 1,
+  "totalS": 375.9,
+  "enqueueToClaimMs": 1745,
+  "renewGapMs": {
+   "n": 6,
+   "min": 30001,
+   "max": 110106,
+   "mean": 43385
+  },
+  "renewals": 5,
+  "maxRenewRpcMs": 100,
+  "actionWallMs": 151067,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 5,
+    "events": 504,
+    "allContiguous": true,
+    "maxGapMs": 459,
+    "ms": 151067
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1346
+    }
+   ],
+   [
+    1.7,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:bac84-d1",
+     "takeover": false
+    }
+   ],
+   [
+    61.8,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 3
+    }
+   ],
+   [
+    61.8,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 70
+    }
+   ],
+   [
+    61.9,
+    "claimed",
+    2,
+    {
+     "owner": "workflow:bac84-d2",
+     "takeover": true
+    }
+   ],
+   [
+    202.0,
+    "sweep-redispatch",
+    2,
+    {
+     "status": "processing",
+     "overdueMs": 2
+    }
+   ],
+   [
+    202.0,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 3,
+     "handoffMs": 70
+    }
+   ],
+   [
+    202.1,
+    "claimed",
+    3,
+    {
+     "owner": "workflow:bac84-d3",
+     "takeover": true
+    }
+   ],
+   [
+    353.2,
+    "complete-applied",
+    3
+   ]
+  ]
+ },
+ "p1-agent30-alarm-await": {
+  "runner": "alarm-await",
+  "preset": "agent30",
+  "status": "processing",
+  "attempts": 5,
+  "effectsApplied": 0,
+  "totalS": 3737.5,
+  "enqueueToClaimMs": 316,
+  "renewGapMs": {
+   "n": 118,
+   "min": 29942,
+   "max": 79595,
+   "mean": 31319
+  },
+  "renewals": null,
+  "maxRenewRpcMs": null,
+  "actionWallMs": null,
+  "steps": [],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:839dca9f",
+     "takeover": false
+    }
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 316
+    }
+   ],
+   [
+    902.7,
+    "claimed",
+    2,
+    {
+     "owner": "alarm:839dca9f",
+     "takeover": true
+    }
+   ],
+   [
+    1806.9,
+    "claimed",
+    3,
+    {
+     "owner": "alarm:839dca9f",
+     "takeover": true
+    }
+   ],
+   [
+    2716.4,
+    "claimed",
+    4,
+    {
+     "owner": "alarm:839dca9f",
+     "takeover": true
+    }
+   ],
+   [
+    3636.0,
+    "claimed",
+    5,
+    {
+     "owner": "alarm:839dca9f",
+     "takeover": true
+    }
+   ]
+  ]
+ },
+ "p1-agent30-alarm": {
+  "runner": "alarm",
+  "preset": "agent30",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 1807.1,
+  "enqueueToClaimMs": 251,
+  "renewGapMs": {
+   "n": 59,
+   "min": 29982,
+   "max": 30016,
+   "mean": 30000
+  },
+  "renewals": 60,
+  "maxRenewRpcMs": 79,
+  "actionWallMs": 1800615,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 60,
+    "events": 6060,
+    "allContiguous": true,
+    "maxGapMs": 213,
+    "ms": 1800615
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 240
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:e72a58c6",
+     "takeover": false
+    }
+   ],
+   [
+    1801.0,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-agent30-queue": {
+  "runner": "queue",
+  "preset": "agent30",
+  "status": "processing",
+  "attempts": 4,
+  "effectsApplied": 0,
+  "totalS": 3739.2,
+  "enqueueToClaimMs": 312427,
+  "renewGapMs": {
+   "n": 110,
+   "min": 29923,
+   "max": 60269,
+   "mean": 30823
+  },
+  "renewals": null,
+  "maxRenewRpcMs": null,
+  "actionWallMs": null,
+  "steps": [],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 209
+    }
+   ],
+   [
+    300.2,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 0
+    }
+   ],
+   [
+    300.4,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 202
+    }
+   ],
+   [
+    312.4,
+    "claimed",
+    1,
+    {
+     "owner": "queue:dbfdbabf",
+     "takeover": false
+    }
+   ],
+   [
+    403.1,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 299438
+    }
+   ],
+   [
+    704.2,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298283
+    }
+   ],
+   [
+    1004.4,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298055
+    }
+   ],
+   [
+    1212.5,
+    "claimed",
+    2,
+    {
+     "owner": "queue:dbfdbabf",
+     "takeover": true
+    }
+   ],
+   [
+    1304.8,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 297852
+    }
+   ],
+   [
+    1604.0,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298641
+    }
+   ],
+   [
+    1904.2,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298482
+    }
+   ],
+   [
+    2112.8,
+    "claimed",
+    3,
+    {
+     "owner": "queue:dbfdbabf",
+     "takeover": true
+    }
+   ],
+   [
+    2204.3,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298625
+    }
+   ],
+   [
+    2504.4,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298472
+    }
+   ],
+   [
+    2804.7,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298230
+    }
+   ],
+   [
+    3012.9,
+    "claimed",
+    4,
+    {
+     "owner": "queue:dbfdbabf",
+     "takeover": true
+    }
+   ],
+   [
+    3105.0,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 297982
+    }
+   ],
+   [
+    3404.2,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298736
+    }
+   ],
+   [
+    3704.4,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:df71efac",
+     "reason": "leased",
+     "retryAfterMs": 298556
+    }
+   ]
+  ]
+ },
+ "p1-agent30-workflow": {
+  "runner": "workflow",
+  "preset": "agent30",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 3736,
+  "enqueueToClaimMs": 1789,
+  "renewGapMs": {
+   "n": 59,
+   "min": 29987,
+   "max": 30021,
+   "mean": 30000
+  },
+  "renewals": 60,
+  "maxRenewRpcMs": 63,
+  "actionWallMs": 1801109,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 60,
+    "events": 6060,
+    "allContiguous": true,
+    "maxGapMs": 301,
+    "ms": 1801109
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.7,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 667
+    }
+   ],
+   [
+    1.8,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:81872-d1",
+     "takeover": false
+    }
+   ],
+   [
+    1803.0,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-dl512-alarm": {
+  "runner": "alarm",
+  "preset": "dl512",
+  "status": "dead",
+  "attempts": 8,
+  "effectsApplied": 0,
+  "totalS": 254.8,
+  "enqueueToClaimMs": 353,
+  "renewGapMs": null,
+  "renewals": null,
+  "maxRenewRpcMs": null,
+  "actionWallMs": null,
+  "steps": [],
+  "replay": null,
+  "lastError": "Network connection lost.",
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 309
+    }
+   ],
+   [
+    0.4,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:fc33de98",
+     "takeover": false
+    }
+   ],
+   [
+    0.8,
+    "failed",
+    1,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    2.7,
+    "claimed",
+    2,
+    {
+     "owner": "alarm:fc33de98",
+     "takeover": true
+    }
+   ],
+   [
+    3.1,
+    "failed",
+    2,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    7.0,
+    "claimed",
+    3,
+    {
+     "owner": "alarm:fc33de98",
+     "takeover": true
+    }
+   ],
+   [
+    7.5,
+    "failed",
+    3,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    15.3,
+    "claimed",
+    4,
+    {
+     "owner": "alarm:fc33de98",
+     "takeover": true
+    }
+   ],
+   [
+    16.1,
+    "failed",
+    4,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    31.8,
+    "claimed",
+    5,
+    {
+     "owner": "alarm:fc33de98",
+     "takeover": true
+    }
+   ],
+   [
+    32.2,
+    "failed",
+    5,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    64.1,
+    "claimed",
+    6,
+    {
+     "owner": "alarm:fc33de98",
+     "takeover": true
+    }
+   ],
+   [
+    65.0,
+    "failed",
+    6,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    124.7,
+    "claimed",
+    7,
+    {
+     "owner": "alarm:fc33de98",
+     "takeover": true
+    }
+   ],
+   [
+    125.6,
+    "failed",
+    7,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    185.3,
+    "claimed",
+    8,
+    {
+     "owner": "alarm:fc33de98",
+     "takeover": true
+    }
+   ],
+   [
+    185.7,
+    "failed",
+    8,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    245.6,
+    "dead",
+    8,
+    {
+     "owner": "alarm:fc33de98"
+    }
+   ]
+  ]
+ },
+ "p1-dl512-workflow": {
+  "runner": "workflow",
+  "preset": "dl512",
+  "status": "dead",
+  "attempts": 8,
+  "effectsApplied": 0,
+  "totalS": 1290.8,
+  "enqueueToClaimMs": 3831,
+  "renewGapMs": null,
+  "renewals": null,
+  "maxRenewRpcMs": null,
+  "actionWallMs": null,
+  "steps": [],
+  "replay": null,
+  "lastError": "Network connection lost.",
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.9,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 862
+    }
+   ],
+   [
+    3.8,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:05175-d1",
+     "takeover": false
+    }
+   ],
+   [
+    4.6,
+    "failed",
+    1,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    9.3,
+    "claimed",
+    2,
+    {
+     "owner": "workflow:05175-d1",
+     "takeover": true
+    }
+   ],
+   [
+    10.5,
+    "failed",
+    2,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    20.1,
+    "claimed",
+    3,
+    {
+     "owner": "workflow:05175-d1",
+     "takeover": true
+    }
+   ],
+   [
+    20.9,
+    "failed",
+    3,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    40.5,
+    "claimed",
+    4,
+    {
+     "owner": "workflow:05175-d1",
+     "takeover": true
+    }
+   ],
+   [
+    41.5,
+    "failed",
+    4,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    81.1,
+    "claimed",
+    5,
+    {
+     "owner": "workflow:05175-d1",
+     "takeover": true
+    }
+   ],
+   [
+    81.8,
+    "failed",
+    5,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    161.5,
+    "claimed",
+    6,
+    {
+     "owner": "workflow:05175-d1",
+     "takeover": true
+    }
+   ],
+   [
+    162.2,
+    "failed",
+    6,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    322.0,
+    "claimed",
+    7,
+    {
+     "owner": "workflow:05175-d1",
+     "takeover": true
+    }
+   ],
+   [
+    322.8,
+    "failed",
+    7,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    643.4,
+    "claimed",
+    8,
+    {
+     "owner": "workflow:05175-d1",
+     "takeover": true
+    }
+   ],
+   [
+    644.4,
+    "failed",
+    8,
+    {
+     "error": "Network connection lost."
+    }
+   ],
+   [
+    1285.2,
+    "dead",
+    8,
+    {
+     "owner": "workflow:05175-d1"
+    }
+   ]
+  ]
+ },
+ "p1-dl64-alarm": {
+  "runner": "alarm",
+  "preset": "dl64",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 21.8,
+  "enqueueToClaimMs": 297,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 14432,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "stream",
+    "contentLength": 67108864,
+    "bytes": 67108864,
+    "chunks": 16395,
+    "maxChunk": 4096,
+    "ms": 14432,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": {
+   "sameAttempt": {
+    "applied": false,
+    "duplicate": true,
+    "appliedAttempt": 1
+   },
+   "staleAttempt": {
+    "applied": false,
+    "duplicate": true,
+    "appliedAttempt": 1
+   }
+  },
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 278
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:10904f60",
+     "takeover": false
+    }
+   ],
+   [
+    14.8,
+    "complete-applied",
+    1
+   ],
+   [
+    21.0,
+    "complete-duplicate",
+    1
+   ],
+   [
+    21.2,
+    "complete-duplicate",
+    0
+   ]
+  ]
+ },
+ "p1-dl64-queue": {
+  "runner": "queue",
+  "preset": "dl64",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 407.7,
+  "enqueueToClaimMs": 392908,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 8650,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "stream",
+    "contentLength": 67108864,
+    "bytes": 67108864,
+    "chunks": 16391,
+    "maxChunk": 4096,
+    "ms": 8650,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": {
+   "sameAttempt": {
+    "applied": false,
+    "duplicate": true,
+    "appliedAttempt": 1
+   },
+   "staleAttempt": {
+    "applied": false,
+    "duplicate": true,
+    "appliedAttempt": 1
+   }
+  },
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 188
+    }
+   ],
+   [
+    300.2,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 1
+    }
+   ],
+   [
+    300.3,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 123
+    }
+   ],
+   [
+    392.9,
+    "claimed",
+    1,
+    {
+     "owner": "queue:908c1f53",
+     "takeover": false
+    }
+   ],
+   [
+    401.6,
+    "complete-applied",
+    1
+   ],
+   [
+    404.4,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:fd24f37f",
+     "reason": "done"
+    }
+   ],
+   [
+    406.8,
+    "complete-duplicate",
+    1
+   ],
+   [
+    406.9,
+    "complete-duplicate",
+    0
+   ]
+  ]
+ },
+ "p1-dl64-workflow": {
+  "runner": "workflow",
+  "preset": "dl64",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 11.7,
+  "enqueueToClaimMs": 3039,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 7612,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "stream",
+    "contentLength": 67108864,
+    "bytes": 67108864,
+    "chunks": 16384,
+    "maxChunk": 4096,
+    "ms": 7612,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": {
+   "sameAttempt": {
+    "applied": false,
+    "duplicate": true,
+    "appliedAttempt": 1
+   },
+   "staleAttempt": {
+    "applied": false,
+    "duplicate": true,
+    "appliedAttempt": 1
+   }
+  },
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.8,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 794
+    }
+   ],
+   [
+    3.0,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:689e2-d1",
+     "takeover": false
+    }
+   ],
+   [
+    10.8,
+    "complete-applied",
+    1
+   ],
+   [
+    11.1,
+    "complete-duplicate",
+    1
+   ],
+   [
+    11.1,
+    "complete-duplicate",
+    0
+   ]
+  ]
+ },
+ "p1-dup-handoff-queue": {
+  "runner": "queue",
+  "preset": "sse30s",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 518,
+  "enqueueToClaimMs": 392358,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 30007,
+  "steps": [
+   {
+    "kind": "sse",
+    "events": 151,
+    "contiguous": true,
+    "sawDone": true,
+    "maxGapMs": 219,
+    "firstByteMs": 25,
+    "ms": 30007
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 245
+    }
+   ],
+   [
+    10.7,
+    "dispatched",
+    null,
+    {
+     "cause": "manual",
+     "n": 2,
+     "handoffMs": 217
+    }
+   ],
+   [
+    310.7,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 3
+    }
+   ],
+   [
+    310.9,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 3,
+     "handoffMs": 249
+    }
+   ],
+   [
+    392.4,
+    "claimed",
+    1,
+    {
+     "owner": "queue:2ad8ae2c",
+     "takeover": false
+    }
+   ],
+   [
+    402.7,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:1360e03a",
+     "reason": "leased",
+     "retryAfterMs": 289657
+    }
+   ],
+   [
+    405.0,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:47adb2e9",
+     "reason": "leased",
+     "retryAfterMs": 287400
+    }
+   ],
+   [
+    422.4,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-dup-handoff-workflow": {
+  "runner": "workflow",
+  "preset": "sse30s",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 132.7,
+  "enqueueToClaimMs": 3533,
+  "renewGapMs": null,
+  "renewals": 1,
+  "maxRenewRpcMs": 64,
+  "actionWallMs": 30130,
+  "steps": [
+   {
+    "kind": "sse",
+    "events": 151,
+    "contiguous": true,
+    "sawDone": true,
+    "maxGapMs": 317,
+    "firstByteMs": 107,
+    "ms": 30130
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.5,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 464
+    }
+   ],
+   [
+    3.5,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:c63bc-d1",
+     "takeover": false
+    }
+   ],
+   [
+    11.3,
+    "dispatched",
+    null,
+    {
+     "cause": "manual",
+     "n": 2,
+     "handoffMs": 600
+    }
+   ],
+   [
+    11.8,
+    "claim-refused",
+    null,
+    {
+     "owner": "workflow:c63bc-d2",
+     "reason": "leased",
+     "retryAfterMs": 291726
+    }
+   ],
+   [
+    16.9,
+    "claim-refused",
+    null,
+    {
+     "owner": "workflow:c63bc-d2",
+     "reason": "leased",
+     "retryAfterMs": 286626
+    }
+   ],
+   [
+    27.1,
+    "claim-refused",
+    null,
+    {
+     "owner": "workflow:c63bc-d2",
+     "reason": "leased",
+     "retryAfterMs": 276480
+    }
+   ],
+   [
+    33.7,
+    "complete-applied",
+    1
+   ],
+   [
+    47.2,
+    "claim-refused",
+    null,
+    {
+     "owner": "workflow:c63bc-d2",
+     "reason": "done"
+    }
+   ]
+  ]
+ },
+ "p1-handoff-lost-workflow": {
+  "runner": "workflow",
+  "preset": "quick",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 315.8,
+  "enqueueToClaimMs": 301497,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 11063,
+  "steps": [
+   {
+    "kind": "sse",
+    "events": 26,
+    "contiguous": true,
+    "sawDone": true,
+    "maxGapMs": 203,
+    "firstByteMs": 28,
+    "ms": 5043
+   },
+   {
+    "kind": "poll",
+    "polls": 4,
+    "ms": 6020
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.0,
+    "handoff-skipped",
+    null
+   ],
+   [
+    300.0,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 1
+    }
+   ],
+   [
+    300.6,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 1,
+     "handoffMs": 598
+    }
+   ],
+   [
+    301.5,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:a09aa-d1",
+     "takeover": false
+    }
+   ],
+   [
+    312.7,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-kill-runner-alarm": {
+  "runner": "alarm",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 274.8,
+  "enqueueToClaimMs": 262,
+  "renewGapMs": {
+   "n": 7,
+   "min": 29983,
+   "max": 60078,
+   "mean": 34294
+  },
+  "renewals": 5,
+  "maxRenewRpcMs": 86,
+  "actionWallMs": 180031,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 203,
+    "ms": 180031
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 261
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:f2526695",
+     "takeover": false
+    }
+   ],
+   [
+    90.4,
+    "claimed",
+    2,
+    {
+     "owner": "alarm:f2526695",
+     "takeover": true
+    }
+   ],
+   [
+    270.4,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "p1-poll80-alarm": {
+  "runner": "alarm",
+  "preset": "poll80",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 82.2,
+  "enqueueToClaimMs": 404,
+  "renewGapMs": {
+   "n": 1,
+   "min": 29994,
+   "max": 29994,
+   "mean": 29994
+  },
+  "renewals": 2,
+  "maxRenewRpcMs": 46,
+  "actionWallMs": 80571,
+  "steps": [
+   {
+    "kind": "poll",
+    "polls": 41,
+    "ms": 80571
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.4,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 358
+    }
+   ],
+   [
+    0.4,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:895d0563",
+     "takeover": false
+    }
+   ],
+   [
+    81.0,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-poll80-queue": {
+  "runner": "queue",
+  "preset": "poll80",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 386.5,
+  "enqueueToClaimMs": 302913,
+  "renewGapMs": {
+   "n": 1,
+   "min": 30009,
+   "max": 30009,
+   "mean": 30009
+  },
+  "renewals": 2,
+  "maxRenewRpcMs": 63,
+  "actionWallMs": 80521,
+  "steps": [
+   {
+    "kind": "poll",
+    "polls": 41,
+    "ms": 80521
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 242
+    }
+   ],
+   [
+    300.2,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 1
+    }
+   ],
+   [
+    300.5,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 215
+    }
+   ],
+   [
+    302.9,
+    "claimed",
+    1,
+    {
+     "owner": "queue:63dcfa1b",
+     "takeover": false
+    }
+   ],
+   [
+    383.5,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-poll80-workflow": {
+  "runner": "workflow",
+  "preset": "poll80",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 92.9,
+  "enqueueToClaimMs": 2957,
+  "renewGapMs": {
+   "n": 1,
+   "min": 30003,
+   "max": 30003,
+   "mean": 30003
+  },
+  "renewals": 2,
+  "maxRenewRpcMs": 66,
+  "actionWallMs": 80336,
+  "steps": [
+   {
+    "kind": "poll",
+    "polls": 41,
+    "ms": 80336
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.7,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 652
+    }
+   ],
+   [
+    3.0,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:bd5d4-d1",
+     "takeover": false
+    }
+   ],
+   [
+    83.4,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-slow800-alarm": {
+  "runner": "alarm",
+  "preset": "slow800",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 801.8,
+  "enqueueToClaimMs": 364,
+  "renewGapMs": {
+   "n": 25,
+   "min": 29974,
+   "max": 30033,
+   "mean": 29999
+  },
+  "renewals": 26,
+  "maxRenewRpcMs": 64,
+  "actionWallMs": 800044,
+  "steps": [
+   {
+    "kind": "slow",
+    "status": 200,
+    "ms": 800044
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 262
+    }
+   ],
+   [
+    0.4,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:b1152b7e",
+     "takeover": false
+    }
+   ],
+   [
+    800.5,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-slow800-queue": {
+  "runner": "queue",
+  "preset": "slow800",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 1187.7,
+  "enqueueToClaimMs": 384424,
+  "renewGapMs": {
+   "n": 25,
+   "min": 29942,
+   "max": 30045,
+   "mean": 30001
+  },
+  "renewals": 26,
+  "maxRenewRpcMs": 106,
+  "actionWallMs": 800011,
+  "steps": [
+   {
+    "kind": "slow",
+    "status": 200,
+    "ms": 800011
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 216
+    }
+   ],
+   [
+    300.2,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 0
+    }
+   ],
+   [
+    300.3,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 130
+    }
+   ],
+   [
+    384.4,
+    "claimed",
+    1,
+    {
+     "owner": "queue:44fb2b3b",
+     "takeover": false
+    }
+   ],
+   [
+    403.4,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:ddcaa686",
+     "reason": "leased",
+     "retryAfterMs": 293253
+    }
+   ],
+   [
+    698.9,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:ddcaa686",
+     "reason": "leased",
+     "retryAfterMs": 285709
+    }
+   ],
+   [
+    986.3,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:ddcaa686",
+     "reason": "leased",
+     "retryAfterMs": 298309
+    }
+   ],
+   [
+    1184.7,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-slow800-workflow": {
+  "runner": "workflow",
+  "preset": "slow800",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 813.4,
+  "enqueueToClaimMs": 3655,
+  "renewGapMs": {
+   "n": 25,
+   "min": 29954,
+   "max": 30054,
+   "mean": 29999
+  },
+  "renewals": 26,
+  "maxRenewRpcMs": 103,
+  "actionWallMs": 800073,
+  "steps": [
+   {
+    "kind": "slow",
+    "status": 200,
+    "ms": 800073
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.1,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1074
+    }
+   ],
+   [
+    3.7,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:630ec-d1",
+     "takeover": false
+    }
+   ],
+   [
+    803.8,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-sse5-alarm": {
+  "runner": "alarm",
+  "preset": "sse5",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 305.4,
+  "enqueueToClaimMs": 316,
+  "renewGapMs": {
+   "n": 9,
+   "min": 29976,
+   "max": 30027,
+   "mean": 30000
+  },
+  "renewals": 10,
+  "maxRenewRpcMs": 83,
+  "actionWallMs": 300081,
+  "steps": [
+   {
+    "kind": "sse",
+    "events": 1501,
+    "contiguous": true,
+    "sawDone": true,
+    "maxGapMs": 224,
+    "firstByteMs": 79,
+    "ms": 300081
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 307
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:1acfaa5c",
+     "takeover": false
+    }
+   ],
+   [
+    300.5,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-sse5-queue": {
+  "runner": "queue",
+  "preset": "sse5",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 305.2,
+  "enqueueToClaimMs": 2582,
+  "renewGapMs": {
+   "n": 9,
+   "min": 29986,
+   "max": 30009,
+   "mean": 30000
+  },
+  "renewals": 9,
+  "maxRenewRpcMs": 91,
+  "actionWallMs": 300039,
+  "steps": [
+   {
+    "kind": "sse",
+    "events": 1501,
+    "contiguous": true,
+    "sawDone": true,
+    "maxGapMs": 234,
+    "firstByteMs": 34,
+    "ms": 300039
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 294
+    }
+   ],
+   [
+    2.6,
+    "claimed",
+    1,
+    {
+     "owner": "queue:4135a90d",
+     "takeover": false
+    }
+   ],
+   [
+    302.7,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-sse5-workflow": {
+  "runner": "workflow",
+  "preset": "sse5",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 305.6,
+  "enqueueToClaimMs": 1489,
+  "renewGapMs": {
+   "n": 9,
+   "min": 29946,
+   "max": 30050,
+   "mean": 30003
+  },
+  "renewals": 9,
+  "maxRenewRpcMs": 106,
+  "actionWallMs": 300078,
+  "steps": [
+   {
+    "kind": "sse",
+    "events": 1501,
+    "contiguous": true,
+    "sawDone": true,
+    "maxGapMs": 429,
+    "firstByteMs": 43,
+    "ms": 300078
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.8,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 812
+    }
+   ],
+   [
+    1.5,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:fb250-d1",
+     "takeover": false
+    }
+   ],
+   [
+    301.7,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-stall-alarm": {
+  "runner": "alarm",
+  "preset": "stall",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 640.4,
+  "enqueueToClaimMs": 289,
+  "renewGapMs": null,
+  "renewals": 1,
+  "maxRenewRpcMs": 58,
+  "actionWallMs": 600135,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 20,
+    "events": 2020,
+    "allContiguous": true,
+    "maxGapMs": 209,
+    "ms": 600135
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 287
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:b1bac8e5",
+     "takeover": false
+    }
+   ],
+   [
+    600.5,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-stall-queue": {
+  "runner": "queue",
+  "preset": "stall",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 3740.5,
+  "enqueueToClaimMs": 402205,
+  "renewGapMs": null,
+  "renewals": 1,
+  "maxRenewRpcMs": 69,
+  "actionWallMs": 600208,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 20,
+    "events": 2020,
+    "allContiguous": true,
+    "maxGapMs": 231,
+    "ms": 600208
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 229
+    }
+   ],
+   [
+    300.2,
+    "sweep-redispatch",
+    0,
+    {
+     "status": "pending",
+     "overdueMs": 1
+    }
+   ],
+   [
+    300.3,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 117
+    }
+   ],
+   [
+    402.2,
+    "claimed",
+    1,
+    {
+     "owner": "queue:991837c5",
+     "takeover": false
+    }
+   ],
+   [
+    404.6,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:2de17851",
+     "reason": "leased",
+     "retryAfterMs": 297640
+    }
+   ],
+   [
+    703.9,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:2de17851",
+     "reason": "leased",
+     "retryAfterMs": 296931
+    }
+   ],
+   [
+    1002.1,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:2de17851",
+     "reason": "leased",
+     "retryAfterMs": 292892
+    }
+   ],
+   [
+    1002.5,
+    "complete-applied",
+    1
+   ],
+   [
+    1296.4,
+    "claim-refused",
+    null,
+    {
+     "owner": "queue:2de17851",
+     "reason": "done"
+    }
+   ]
+  ]
+ },
+ "p1-stall-workflow": {
+  "runner": "workflow",
+  "preset": "stall",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 639.9,
+  "enqueueToClaimMs": 3806,
+  "renewGapMs": null,
+  "renewals": 1,
+  "maxRenewRpcMs": 50,
+  "actionWallMs": 604299,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 20,
+    "events": 2020,
+    "allContiguous": true,
+    "maxGapMs": 255,
+    "ms": 604299
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.8,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 766
+    }
+   ],
+   [
+    3.8,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:5e48b-d1",
+     "takeover": false
+    }
+   ],
+   [
+    608.2,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p1-tenant-crash-workflow": {
+  "runner": "workflow",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 185.3,
+  "enqueueToClaimMs": 2973,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29955,
+   "max": 30041,
+   "mean": 29995
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 98,
+  "actionWallMs": 180209,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 855,
+    "ms": 180209
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.9,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 868
+    }
+   ],
+   [
+    3.0,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:9d4a8-d1",
+     "takeover": false
+    }
+   ],
+   [
+    183.3,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-bystander1-alarm": {
+  "runner": "alarm",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 184,
+  "enqueueToClaimMs": 301,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29985,
+   "max": 30020,
+   "mean": 29994
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 105,
+  "actionWallMs": 180040,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 203,
+    "ms": 180040
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 299
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:c59689d4",
+     "takeover": false
+    }
+   ],
+   [
+    180.4,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-bystander1-queue": {
+  "runner": "queue",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 287.2,
+  "enqueueToClaimMs": 102132,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29984,
+   "max": 30014,
+   "mean": 30000
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 94,
+  "actionWallMs": 180073,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 215,
+    "ms": 180073
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.0,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 995
+    }
+   ],
+   [
+    102.1,
+    "claimed",
+    1,
+    {
+     "owner": "queue:1d13ea2a",
+     "takeover": false
+    }
+   ],
+   [
+    282.3,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-bystander1-workflow": {
+  "runner": "workflow",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 185.7,
+  "enqueueToClaimMs": 2830,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29995,
+   "max": 30005,
+   "mean": 30000
+  },
+  "renewals": 5,
+  "maxRenewRpcMs": 71,
+  "actionWallMs": 180068,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 204,
+    "ms": 180068
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.7,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 668
+    }
+   ],
+   [
+    2.8,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:2d1f0-d1",
+     "takeover": false
+    }
+   ],
+   [
+    183.0,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-bystander2-alarm": {
+  "runner": "alarm",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 184,
+  "enqueueToClaimMs": 268,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29916,
+   "max": 30089,
+   "mean": 29998
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 138,
+  "actionWallMs": 180080,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 216,
+    "ms": 180080
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 267
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:e295b15d",
+     "takeover": false
+    }
+   ],
+   [
+    180.4,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-bystander2-queue": {
+  "runner": "queue",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 466.1,
+  "enqueueToClaimMs": 282505,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29996,
+   "max": 30006,
+   "mean": 30002
+  },
+  "renewals": 5,
+  "maxRenewRpcMs": 68,
+  "actionWallMs": 180059,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 211,
+    "ms": 180059
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.9,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 886
+    }
+   ],
+   [
+    282.5,
+    "claimed",
+    1,
+    {
+     "owner": "queue:df5d3b90",
+     "takeover": false
+    }
+   ],
+   [
+    462.6,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-bystander2-workflow": {
+  "runner": "workflow",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 185.4,
+  "enqueueToClaimMs": 3024,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29992,
+   "max": 30009,
+   "mean": 29999
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 63,
+  "actionWallMs": 180342,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 219,
+    "ms": 180342
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.4,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 386
+    }
+   ],
+   [
+    3.0,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:6c111-d1",
+     "takeover": false
+    }
+   ],
+   [
+    183.5,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl1024hash-workflow": {
+  "runner": "workflow",
+  "preset": "dl1024hash",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 134.4,
+  "enqueueToClaimMs": 3864,
+  "renewGapMs": {
+   "n": 3,
+   "min": 28566,
+   "max": 31861,
+   "mean": 30082
+  },
+  "renewals": 4,
+  "maxRenewRpcMs": 2046,
+  "actionWallMs": 126084,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "hash",
+    "contentLength": 1073741824,
+    "bytes": 1073741824,
+    "chunks": 262180,
+    "maxChunk": 4096,
+    "ms": 126084,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.1,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1070
+    }
+   ],
+   [
+    3.9,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:d9213-d1",
+     "takeover": false
+    }
+   ],
+   [
+    133.1,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl32buf-workflow": {
+  "runner": "workflow",
+  "preset": "dl32buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 6.5,
+  "enqueueToClaimMs": 1763,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 3627,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 33554432,
+    "ms": 3627,
+    "sinkBytes": 33554432,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1214
+    }
+   ],
+   [
+    1.8,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:a1f72-d1",
+     "takeover": false
+    }
+   ],
+   [
+    5.6,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl512hash-alarm": {
+  "runner": "alarm",
+  "preset": "dl512hash",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 41.1,
+  "enqueueToClaimMs": 248,
+  "renewGapMs": null,
+  "renewals": 1,
+  "maxRenewRpcMs": 66,
+  "actionWallMs": 36361,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "hash",
+    "contentLength": 536870912,
+    "bytes": 536870912,
+    "chunks": 131097,
+    "maxChunk": 4096,
+    "ms": 36361,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 247
+    }
+   ],
+   [
+    0.2,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:6c041dec",
+     "takeover": false
+    }
+   ],
+   [
+    37.3,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl512hash-workflow": {
+  "runner": "workflow",
+  "preset": "dl512hash",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 31.2,
+  "enqueueToClaimMs": 3607,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 23626,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "hash",
+    "contentLength": 536870912,
+    "bytes": 536870912,
+    "chunks": 131084,
+    "maxChunk": 4096,
+    "ms": 23626,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.5,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 542
+    }
+   ],
+   [
+    3.6,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:228b2-d1",
+     "takeover": false
+    }
+   ],
+   [
+    28.2,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-alarm": {
+  "runner": "alarm",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 10.6,
+  "enqueueToClaimMs": 391,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 8755,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 8755,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 347
+    }
+   ],
+   [
+    0.4,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:fc606cc9",
+     "takeover": false
+    }
+   ],
+   [
+    9.2,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-concurrent1-queue": {
+  "runner": "queue",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 43.6,
+  "enqueueToClaimMs": 31190,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 12141,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 12141,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.5,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 527
+    }
+   ],
+   [
+    31.2,
+    "claimed",
+    1,
+    {
+     "owner": "queue:f5f152a6",
+     "takeover": false
+    }
+   ],
+   [
+    43.4,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-concurrent1-workflow": {
+  "runner": "workflow",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 7.2,
+  "enqueueToClaimMs": 1215,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 3055,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 3055,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.8,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 849
+    }
+   ],
+   [
+    1.2,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:dd7fe-d1",
+     "takeover": false
+    }
+   ],
+   [
+    4.4,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-concurrent2-queue": {
+  "runner": "queue",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 31.6,
+  "enqueueToClaimMs": 17087,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 11960,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 11960,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.6,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 576
+    }
+   ],
+   [
+    17.1,
+    "claimed",
+    1,
+    {
+     "owner": "queue:56415b38",
+     "takeover": false
+    }
+   ],
+   [
+    29.1,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-concurrent2-workflow": {
+  "runner": "workflow",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 16.3,
+  "enqueueToClaimMs": 1268,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 13896,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 13896,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.7,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 675
+    }
+   ],
+   [
+    1.3,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:0f19b-d1",
+     "takeover": false
+    }
+   ],
+   [
+    15.3,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-concurrent3-queue": {
+  "runner": "queue",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 19.1,
+  "enqueueToClaimMs": 1305,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 15463,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 15463,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.5,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 529
+    }
+   ],
+   [
+    1.3,
+    "claimed",
+    1,
+    {
+     "owner": "queue:cb5bd283",
+     "takeover": false
+    }
+   ],
+   [
+    16.8,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-concurrent3-workflow": {
+  "runner": "workflow",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 10.1,
+  "enqueueToClaimMs": 1825,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 8111,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 8111,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.7,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 714
+    }
+   ],
+   [
+    1.8,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:2e3e4-d1",
+     "takeover": false
+    }
+   ],
+   [
+    10.0,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-concurrent4-queue": {
+  "runner": "queue",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 43.5,
+  "enqueueToClaimMs": 29292,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 13368,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 13368,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.6,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 562
+    }
+   ],
+   [
+    29.3,
+    "claimed",
+    1,
+    {
+     "owner": "queue:d48da564",
+     "takeover": false
+    }
+   ],
+   [
+    42.7,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-concurrent4-workflow": {
+  "runner": "workflow",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 16.5,
+  "enqueueToClaimMs": 3902,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 10701,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 10701,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.1,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 1063
+    }
+   ],
+   [
+    3.9,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:03071-d1",
+     "takeover": false
+    }
+   ],
+   [
+    14.7,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-queue": {
+  "runner": "queue",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 15.7,
+  "enqueueToClaimMs": 5333,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 8390,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 8390,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 280
+    }
+   ],
+   [
+    5.3,
+    "claimed",
+    1,
+    {
+     "owner": "queue:52b13de7",
+     "takeover": false
+    }
+   ],
+   [
+    13.8,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-dl64buf-workflow": {
+  "runner": "workflow",
+  "preset": "dl64buf",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 11,
+  "enqueueToClaimMs": 868,
+  "renewGapMs": null,
+  "renewals": 0,
+  "maxRenewRpcMs": 0,
+  "actionWallMs": 7025,
+  "steps": [
+   {
+    "kind": "download",
+    "mode": "buffer",
+    "bytes": 67108864,
+    "ms": 7025,
+    "sinkBytes": 67108864,
+    "sinkSha256Matches": true,
+    "sha256MatchesSource": true
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.5,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 547
+    }
+   ],
+   [
+    0.9,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:f507e-d1",
+     "takeover": false
+    }
+   ],
+   [
+    8.2,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-oom-alarm": {
+  "runner": "alarm",
+  "preset": "crash",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 361.5,
+  "enqueueToClaimMs": 201,
+  "renewGapMs": {
+   "n": 9,
+   "min": 29992,
+   "max": 90008,
+   "mean": 36668
+  },
+  "renewals": 8,
+  "maxRenewRpcMs": 41,
+  "actionWallMs": 240126,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 8,
+    "events": 808,
+    "allContiguous": true,
+    "maxGapMs": 230,
+    "ms": 240126
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.2,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:b452fc3a",
+     "takeover": false
+    }
+   ],
+   [
+    0.2,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 203
+    }
+   ],
+   [
+    120.3,
+    "claimed",
+    2,
+    {
+     "owner": "alarm:b452fc3a",
+     "takeover": true
+    }
+   ],
+   [
+    360.5,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "p2-oom-queue": {
+  "runner": "queue",
+  "preset": "crash",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 337.8,
+  "enqueueToClaimMs": 2166,
+  "renewGapMs": {
+   "n": 9,
+   "min": 29974,
+   "max": 60426,
+   "mean": 33382
+  },
+  "renewals": 8,
+  "maxRenewRpcMs": 107,
+  "actionWallMs": 240123,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 8,
+    "events": 808,
+    "allContiguous": true,
+    "maxGapMs": 217,
+    "ms": 240123
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    1.0,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 954
+    }
+   ],
+   [
+    2.2,
+    "claimed",
+    1,
+    {
+     "owner": "queue:e3ef6711",
+     "takeover": false
+    }
+   ],
+   [
+    92.6,
+    "claimed",
+    2,
+    {
+     "owner": "queue:e3ef6711",
+     "takeover": true
+    }
+   ],
+   [
+    332.8,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "p2-oom-workflow": {
+  "runner": "workflow",
+  "preset": "crash",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 369.7,
+  "enqueueToClaimMs": 852,
+  "renewGapMs": {
+   "n": 9,
+   "min": 29975,
+   "max": 96985,
+   "mean": 37443
+  },
+  "renewals": 8,
+  "maxRenewRpcMs": 54,
+  "actionWallMs": 240181,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 8,
+    "events": 808,
+    "allContiguous": true,
+    "maxGapMs": 219,
+    "ms": 240181
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.5,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 467
+    }
+   ],
+   [
+    0.9,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:8e0e5-d1",
+     "takeover": false
+    }
+   ],
+   [
+    127.9,
+    "claimed",
+    2,
+    {
+     "owner": "workflow:8e0e5-d1",
+     "takeover": true
+    }
+   ],
+   [
+    368.1,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "p2-stall-alarm": {
+  "runner": "alarm",
+  "preset": "stall",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 665.3,
+  "enqueueToClaimMs": 321,
+  "renewGapMs": null,
+  "renewals": 1,
+  "maxRenewRpcMs": 44,
+  "actionWallMs": 600402,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 20,
+    "events": 2020,
+    "allContiguous": true,
+    "maxGapMs": 245,
+    "ms": 600402
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 320
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:d4ec1e30",
+     "takeover": false
+    }
+   ],
+   [
+    330.4,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 2
+    }
+   ],
+   [
+    330.5,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 119
+    }
+   ],
+   [
+    600.8,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p2-stall-queue": {
+  "runner": "queue",
+  "preset": "stall",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 993.2,
+  "enqueueToClaimMs": 471,
+  "renewGapMs": {
+   "n": 20,
+   "min": 29989,
+   "max": 330411,
+   "mean": 45020
+  },
+  "renewals": 20,
+  "maxRenewRpcMs": 72,
+  "actionWallMs": 600224,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 20,
+    "events": 2020,
+    "allContiguous": true,
+    "maxGapMs": 214,
+    "ms": 600224
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 290
+    }
+   ],
+   [
+    0.5,
+    "claimed",
+    1,
+    {
+     "owner": "queue:2ac3ddc7",
+     "takeover": false
+    }
+   ],
+   [
+    330.6,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 0
+    }
+   ],
+   [
+    330.8,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 248
+    }
+   ],
+   [
+    330.9,
+    "claimed",
+    2,
+    {
+     "owner": "queue:e6e8b15f",
+     "takeover": true
+    }
+   ],
+   [
+    600.8,
+    "complete-rejected",
+    1
+   ],
+   [
+    931.2,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "p2-stall-workflow": {
+  "runner": "workflow",
+  "preset": "stall",
+  "status": "done",
+  "attempts": 2,
+  "effectsApplied": 1,
+  "totalS": 996.3,
+  "enqueueToClaimMs": 3021,
+  "renewGapMs": {
+   "n": 20,
+   "min": 29968,
+   "max": 331312,
+   "mean": 45066
+  },
+  "renewals": 20,
+  "maxRenewRpcMs": 74,
+  "actionWallMs": 600514,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 20,
+    "events": 2020,
+    "allContiguous": true,
+    "maxGapMs": 453,
+    "ms": 600514
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.9,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 880
+    }
+   ],
+   [
+    3.0,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:03ce3-d1",
+     "takeover": false
+    }
+   ],
+   [
+    333.0,
+    "sweep-redispatch",
+    1,
+    {
+     "status": "processing",
+     "overdueMs": 0
+    }
+   ],
+   [
+    333.9,
+    "dispatched",
+    null,
+    {
+     "cause": "sweep",
+     "n": 2,
+     "handoffMs": 850
+    }
+   ],
+   [
+    334.4,
+    "claimed",
+    2,
+    {
+     "owner": "workflow:03ce3-d2",
+     "takeover": true
+    }
+   ],
+   [
+    603.4,
+    "complete-rejected",
+    1
+   ],
+   [
+    935.0,
+    "complete-applied",
+    2
+   ]
+  ]
+ },
+ "p3-redeploy-alarm-await": {
+  "runner": "alarm-await",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 184.3,
+  "enqueueToClaimMs": 345,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29996,
+   "max": 30005,
+   "mean": 29999
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 75,
+  "actionWallMs": 180174,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 223,
+    "ms": 180174
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 344
+    }
+   ],
+   [
+    0.3,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:b578ff48",
+     "takeover": false
+    }
+   ],
+   [
+    180.6,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p3-redeploy-alarm": {
+  "runner": "alarm",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 184.3,
+  "enqueueToClaimMs": 379,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29990,
+   "max": 30008,
+   "mean": 30001
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 92,
+  "actionWallMs": 180171,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 214,
+    "ms": 180171
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 325
+    }
+   ],
+   [
+    0.4,
+    "claimed",
+    1,
+    {
+     "owner": "alarm:0b97ebd1",
+     "takeover": false
+    }
+   ],
+   [
+    180.6,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p3-redeploy-queue": {
+  "runner": "queue",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 189.7,
+  "enqueueToClaimMs": 4818,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29957,
+   "max": 30025,
+   "mean": 29997
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 106,
+  "actionWallMs": 180078,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 221,
+    "ms": 180078
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.3,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 311
+    }
+   ],
+   [
+    4.8,
+    "claimed",
+    1,
+    {
+     "owner": "queue:06873ce3",
+     "takeover": false
+    }
+   ],
+   [
+    185.0,
+    "complete-applied",
+    1
+   ]
+  ]
+ },
+ "p3-redeploy-workflow": {
+  "runner": "workflow",
+  "preset": "agent3",
+  "status": "done",
+  "attempts": 1,
+  "effectsApplied": 1,
+  "totalS": 184.1,
+  "enqueueToClaimMs": 1198,
+  "renewGapMs": {
+   "n": 5,
+   "min": 29994,
+   "max": 30008,
+   "mean": 29999
+  },
+  "renewals": 6,
+  "maxRenewRpcMs": 67,
+  "actionWallMs": 180130,
+  "steps": [
+   {
+    "kind": "agent",
+    "turns": 6,
+    "events": 606,
+    "allContiguous": true,
+    "maxGapMs": 307,
+    "ms": 180130
+   }
+  ],
+  "replay": null,
+  "lastError": null,
+  "timeline": [
+   [
+    0.0,
+    "enqueued",
+    null
+   ],
+   [
+    0.6,
+    "dispatched",
+    null,
+    {
+     "cause": "commit",
+     "n": 1,
+     "handoffMs": 605
+    }
+   ],
+   [
+    1.2,
+    "claimed",
+    1,
+    {
+     "owner": "workflow:15c86-d1",
+     "takeover": false
+    }
+   ],
+   [
+    181.5,
+    "complete-applied",
+    1
+   ]
+  ]
+ }
+}

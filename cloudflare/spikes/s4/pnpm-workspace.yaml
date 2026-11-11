@@ -1,0 +1,5 @@
+# Standalone spike: its own pnpm root, outside the Gonvex workspace.
+packages: []
+allowBuilds:
+  esbuild: true
+  workerd: true

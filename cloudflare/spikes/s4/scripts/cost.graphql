@@ -1,0 +1,22 @@
+# Per-run cost inputs from the GraphQL Analytics API (variables: acct, start, end).
+query($acct: string!, $start: Time!, $end: Time!) {
+  viewer { accounts(filter: {accountTag: $acct}) {
+    workflows: workflowsAdaptiveGroups(limit: 1000, filter: {datetime_geq: $start, datetime_leq: $end, workflowName: "gonvex-cf-dev-s4-action"}) {
+      dimensions { instanceId }
+      sum { cpuTime wallTime stepCount allStepCount retryCount executionDuration }
+    }
+    objects: durableObjectsPeriodicGroups(limit: 1000, filter: {datetime_geq: $start, datetime_leq: $end}) {
+      dimensions { namespaceId objectId actorMemoryMb }
+      sum { activeTime cpuTime duration rowsRead rowsWritten subrequests exceededMemoryErrors exceededCpuErrors }
+    }
+    invocations: workersInvocationsAdaptive(limit: 100, filter: {datetime_geq: $start, datetime_leq: $end, scriptName_in: ["gonvex-cf-dev-s4-runner", "gonvex-cf-dev-s4-upstream"]}) {
+      dimensions { scriptName eventType status }
+      sum { requests subrequests cpuTimeUs wallTime }
+      quantiles { cpuTimeP50 cpuTimeP99 wallTimeP99 }
+    }
+    queue: queueConsumerMetricsAdaptiveGroups(limit: 100, filter: {datetime_geq: $start, datetime_leq: $end}) {
+      dimensions { queueId }
+      avg { concurrency }
+    }
+  } }
+}
