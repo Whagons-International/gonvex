@@ -1,0 +1,536 @@
+{
+  "tenant": "ws-mwbvi00o",
+  "count": 500,
+  "opened": 500,
+  "code": "tiny",
+  "swaps": [
+    {
+      "k": 1,
+      "gen": "tiny:S1:mwbvi00o",
+      "activateClientMs": 1222,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S0",
+        "active": "S1",
+        "preloadMs": 20,
+        "draining": 1,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386687295,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -34,
+        "p50": -26,
+        "p90": -15,
+        "max": -1,
+        "mean": -23.9
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 2,
+      "gen": "tiny:S2:mwbvi00o",
+      "activateClientMs": 443,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S1",
+        "active": "S2",
+        "preloadMs": 18,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386691786,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -30,
+        "p50": -23,
+        "p90": -11,
+        "max": 113,
+        "mean": -21.8
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 3,
+      "gen": "tiny:S3:mwbvi00o",
+      "activateClientMs": 69,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S2",
+        "active": "S3",
+        "preloadMs": 19,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386695528,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -10,
+        "p50": -5,
+        "p90": -2,
+        "max": 9,
+        "mean": -5.2
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 4,
+      "gen": "tiny:S4:mwbvi00o",
+      "activateClientMs": 73,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S3",
+        "active": "S4",
+        "preloadMs": 18,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386698909,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -9,
+        "p50": -5,
+        "p90": -2,
+        "max": 41,
+        "mean": -4.8
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 5,
+      "gen": "tiny:S5:mwbvi00o",
+      "activateClientMs": 122,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S4",
+        "active": "S5",
+        "preloadMs": 69,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386702277,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -9,
+        "p50": -5,
+        "p90": -2,
+        "max": 10,
+        "mean": -4.8
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 6,
+      "gen": "tiny:S6:mwbvi00o",
+      "activateClientMs": 76,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S5",
+        "active": "S6",
+        "preloadMs": 24,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386705698,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -9,
+        "p50": -4,
+        "p90": -1,
+        "max": 4,
+        "mean": -4.2
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 7,
+      "gen": "tiny:S7:mwbvi00o",
+      "activateClientMs": 181,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S6",
+        "active": "S7",
+        "preloadMs": 127,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386709071,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -9,
+        "p50": -4,
+        "p90": -1,
+        "max": 77,
+        "mean": -3.8
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 8,
+      "gen": "tiny:S8:mwbvi00o",
+      "activateClientMs": 100,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S7",
+        "active": "S8",
+        "preloadMs": 46,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386712553,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -9,
+        "p50": -5,
+        "p90": -1,
+        "max": 99,
+        "mean": -4.3
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 9,
+      "gen": "tiny:S9:mwbvi00o",
+      "activateClientMs": 80,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S8",
+        "active": "S9",
+        "preloadMs": 21,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386715964,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -13,
+        "p50": -9,
+        "p90": -6,
+        "max": 11,
+        "mean": -8.6
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 10,
+      "gen": "tiny:S10:mwbvi00o",
+      "activateClientMs": 67,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S9",
+        "active": "S10",
+        "preloadMs": 18,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386719342,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -9,
+        "p50": -4,
+        "p90": -1,
+        "max": 34,
+        "mean": -4.1
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 11,
+      "gen": "tiny:S11:mwbvi00o",
+      "activateClientMs": 75,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S10",
+        "active": "S11",
+        "preloadMs": 25,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386722708,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -8,
+        "p50": -4,
+        "p90": -1,
+        "max": 24,
+        "mean": -3.7
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 12,
+      "gen": "tiny:S12:mwbvi00o",
+      "activateClientMs": 77,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S11",
+        "active": "S12",
+        "preloadMs": 22,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794386726083,
+        "inst": "6d3094f2"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "error"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -8,
+        "p50": -4,
+        "p90": -2,
+        "max": 282,
+        "mean": -3.8
+      },
+      "closesSoFar": 0
+    }
+  ],
+  "closesDuringSwaps": 0,
+  "framesDuringSwaps": 45000,
+  "statsAfterSwaps": {
+    "inst": "6d3094f2",
+    "isolate": "9cf3a2d5",
+    "build": "loader",
+    "constructedAt": 1794386680996,
+    "active": {
+      "id": "tiny:S12:mwbvi00o",
+      "code": "tiny",
+      "label": "S12",
+      "nonce": "mwbvi00o"
+    },
+    "sockets": 501,
+    "loads": [
+      {
+        "id": "tiny:S0:mwbvi00o",
+        "at": 1794386681078,
+        "fetchMs": 13,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S0:mwbvi00o",
+        "at": 1794386686989,
+        "fetchMs": 10,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S1:mwbvi00o",
+        "at": 1794386687295,
+        "fetchMs": 8,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S1:mwbvi00o",
+        "at": 1794386691500,
+        "fetchMs": 10,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S2:mwbvi00o",
+        "at": 1794386691786,
+        "fetchMs": 8,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S2:mwbvi00o",
+        "at": 1794386695234,
+        "fetchMs": 12,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S3:mwbvi00o",
+        "at": 1794386695528,
+        "fetchMs": 8,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S3:mwbvi00o",
+        "at": 1794386698600,
+        "fetchMs": 17,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S4:mwbvi00o",
+        "at": 1794386698909,
+        "fetchMs": 8,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S4:mwbvi00o",
+        "at": 1794386701988,
+        "fetchMs": 13,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S5:mwbvi00o",
+        "at": 1794386702277,
+        "fetchMs": 11,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S5:mwbvi00o",
+        "at": 1794386705406,
+        "fetchMs": 16,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S6:mwbvi00o",
+        "at": 1794386705698,
+        "fetchMs": 12,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S6:mwbvi00o",
+        "at": 1794386708776,
+        "fetchMs": 12,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S7:mwbvi00o",
+        "at": 1794386709071,
+        "fetchMs": 114,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S7:mwbvi00o",
+        "at": 1794386712281,
+        "fetchMs": 24,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S8:mwbvi00o",
+        "at": 1794386712553,
+        "fetchMs": 32,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S8:mwbvi00o",
+        "at": 1794386715660,
+        "fetchMs": 17,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S9:mwbvi00o",
+        "at": 1794386715964,
+        "fetchMs": 10,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S9:mwbvi00o",
+        "at": 1794386719041,
+        "fetchMs": 9,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S10:mwbvi00o",
+        "at": 1794386719342,
+        "fetchMs": 8,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S10:mwbvi00o",
+        "at": 1794386722411,
+        "fetchMs": 9,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S11:mwbvi00o",
+        "at": 1794386722708,
+        "fetchMs": 12,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S11:mwbvi00o",
+        "at": 1794386725794,
+        "fetchMs": 13,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S12:mwbvi00o",
+        "at": 1794386726083,
+        "fetchMs": 9,
+        "appBytes": 11
+      }
+    ],
+    "ballastMb": 0
+  }
+}

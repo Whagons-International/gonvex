@@ -1,0 +1,51 @@
+{
+  "code": "whagons",
+  "rows": [
+    {
+      "step": "object, no generation",
+      "rssMb": 136.8
+    },
+    {
+      "step": "Runner generation 1 loaded",
+      "rssMb": 222.6
+    },
+    {
+      "step": "Runner generation 2 loaded",
+      "rssMb": 263.7
+    },
+    {
+      "step": "Runner generation 3 loaded",
+      "rssMb": 305.2
+    },
+    {
+      "step": "Runner generation 4 loaded",
+      "rssMb": 342.9
+    },
+    {
+      "step": "facet on generation F1",
+      "rssMb": 375.4
+    },
+    {
+      "step": "facet on generation F2",
+      "rssMb": 407.6
+    },
+    {
+      "step": "facet on generation F3",
+      "rssMb": 436.6
+    },
+    {
+      "step": "facet on generation F4",
+      "rssMb": 475.9
+    }
+  ],
+  "deltas": [
+    85.8,
+    41.1,
+    41.5,
+    37.7,
+    32.5,
+    32.2,
+    29,
+    39.3
+  ]
+}

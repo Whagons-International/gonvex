@@ -1,0 +1,79 @@
+{
+  "tenant": "as-yielding-mwbvl9n9",
+  "inflightKind": "yielding",
+  "drain": false,
+  "rows": [
+    {
+      "k": 1,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S1",
+      "objectReset": false
+    },
+    {
+      "k": 2,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S2",
+      "objectReset": false
+    },
+    {
+      "k": 3,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S3",
+      "objectReset": false
+    },
+    {
+      "k": 4,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S4",
+      "objectReset": false
+    },
+    {
+      "k": 5,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S5",
+      "objectReset": false
+    },
+    {
+      "k": 6,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S6",
+      "objectReset": false
+    },
+    {
+      "k": 7,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S7",
+      "objectReset": false
+    },
+    {
+      "k": 8,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S8",
+      "objectReset": false
+    },
+    {
+      "k": 9,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S9",
+      "objectReset": false
+    },
+    {
+      "k": 10,
+      "activate": "ok",
+      "inflight": "module generation changed",
+      "next": "S10",
+      "objectReset": false
+    }
+  ],
+  "firstBroken": null,
+  "broken": 0
+}

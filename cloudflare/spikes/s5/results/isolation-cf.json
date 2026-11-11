@@ -1,0 +1,40 @@
+{
+  "envKeys": [],
+  "checks": [
+    {
+      "label": "fetch https://example.com",
+      "ok": false,
+      "error": "Error: This worker is not permitted to access the internet via global functions like fetch(). It must use capabilities (such as bindings in 'env') to talk to the outsi"
+    },
+    {
+      "label": "fetch https://api.cloudflare.com",
+      "ok": false,
+      "error": "Error: This worker is not permitted to access the internet via global functions like fetch(). It must use capabilities (such as bindings in 'env') to talk to the outsi"
+    },
+    {
+      "label": "connect example.com:80",
+      "ok": false,
+      "error": "Error: This worker is not permitted to access the internet via global functions like fetch(). It must use capabilities (such as bindings in 'env') to talk to the outsi"
+    },
+    {
+      "label": "caches.default.match",
+      "ok": false,
+      "error": "Error: Cache API is not yet supported for dynamically-loaded workers."
+    },
+    {
+      "label": "eval",
+      "ok": false,
+      "error": "EvalError: Code generation from strings disallowed for this context"
+    },
+    {
+      "label": "new Function",
+      "ok": false,
+      "error": "EvalError: Code generation from strings disallowed for this context"
+    },
+    {
+      "label": "crypto.randomUUID outside an invocation",
+      "ok": true,
+      "value": "36"
+    }
+  ]
+}

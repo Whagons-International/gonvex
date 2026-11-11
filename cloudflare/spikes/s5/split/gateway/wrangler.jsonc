@@ -1,0 +1,13 @@
+{
+  // Split-deploy probe: gateway objects hold sockets; TENANT points at the other script. Deleted after the run.
+  "name": "gonvex-cf-dev-s5-gw",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "durable_objects": { "bindings": [
+    { "name": "GATEWAY", "class_name": "Gateway" },
+    { "name": "TENANT", "class_name": "Tenant", "script_name": "gonvex-cf-dev-s5-tn" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Gateway"] }]
+}

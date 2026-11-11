@@ -1,0 +1,2794 @@
+{
+  "run": "mwbv946r",
+  "startedAt": "2026-11-11T08:37:46.243Z",
+  "modes": {
+    "facet": {
+      "tenants": [
+        {
+          "tenant": "wl-facet-mwbv946r-0",
+          "rttMs": 60.6,
+          "firstLoad": {
+            "ms": 714,
+            "callbackRan": true,
+            "fetchMs": 175,
+            "info": {
+              "generation": "A",
+              "code": "whagons",
+              "nonce": "mwbv946r",
+              "isolate": "4572a716",
+              "evaluatedAt": 0,
+              "appExports": 1519
+            },
+            "inst": "6137f2f2"
+          },
+          "provisionMs": 2302.8,
+          "provision": {
+            "executed": 2060,
+            "inserted": 933,
+            "failures": 13,
+            "refused": 13,
+            "databaseSize": 4034560,
+            "target": "facet"
+          },
+          "counts": {
+            "_gonvex_action_outbox": 2,
+            "_gonvex_id_domains": 365,
+            "_gonvex_identity_keys": 45,
+            "_gonvex_record_dependencies": 10,
+            "_gonvex_record_views": 367,
+            "_gonvex_reference_sequence": 1,
+            "_gonvex_schema_capabilities": 3,
+            "_gonvex_sync_clock": 1,
+            "_gonvex_table_options": 125,
+            "gonvex_migrations": 12,
+            "members": 2,
+            "peopleDirectory": 2,
+            "recordIdentity_members": 2,
+            "recordPublicReference_spots": 1,
+            "recordPublicReference_teams": 1,
+            "recordStorage_boardComments": 1,
+            "recordStorage_boardMessages": 1,
+            "recordStorage_boards": 1,
+            "recordStorage_cleaningReportSchedules": 1,
+            "recordStorage_cleaningStatuses": 2,
+            "recordStorage_globalSettings": 7,
+            "recordStorage_permissions": 7,
+            "recordStorage_plugins": 2,
+            "recordStorage_spots": 1,
+            "recordStorage_teams": 1,
+            "s2SavepointRows": 3,
+            "taskGridRows_fts_config": 1,
+            "taskGridRows_fts_data": 2,
+            "taskRelatedSearchDocuments_fts_config": 1,
+            "taskRelatedSearchDocuments_fts_data": 2
+          }
+        },
+        {
+          "tenant": "wl-facet-mwbv946r-1",
+          "rttMs": 26.1,
+          "firstLoad": {
+            "ms": 422,
+            "callbackRan": true,
+            "fetchMs": 106,
+            "info": {
+              "generation": "A",
+              "code": "whagons",
+              "nonce": "mwbv946r",
+              "isolate": "c3eb7436",
+              "evaluatedAt": 0,
+              "appExports": 1519
+            },
+            "inst": "bcae9ed1"
+          },
+          "provisionMs": 2719.3,
+          "provision": {
+            "executed": 2060,
+            "inserted": 933,
+            "failures": 13,
+            "refused": 13,
+            "databaseSize": 4034560,
+            "target": "facet"
+          },
+          "counts": {
+            "_gonvex_action_outbox": 2,
+            "_gonvex_id_domains": 365,
+            "_gonvex_identity_keys": 45,
+            "_gonvex_record_dependencies": 10,
+            "_gonvex_record_views": 367,
+            "_gonvex_reference_sequence": 1,
+            "_gonvex_schema_capabilities": 3,
+            "_gonvex_sync_clock": 1,
+            "_gonvex_table_options": 125,
+            "gonvex_migrations": 12,
+            "members": 2,
+            "peopleDirectory": 2,
+            "recordIdentity_members": 2,
+            "recordPublicReference_spots": 1,
+            "recordPublicReference_teams": 1,
+            "recordStorage_boardComments": 1,
+            "recordStorage_boardMessages": 1,
+            "recordStorage_boards": 1,
+            "recordStorage_cleaningReportSchedules": 1,
+            "recordStorage_cleaningStatuses": 2,
+            "recordStorage_globalSettings": 7,
+            "recordStorage_permissions": 7,
+            "recordStorage_plugins": 2,
+            "recordStorage_spots": 1,
+            "recordStorage_teams": 1,
+            "s2SavepointRows": 3,
+            "taskGridRows_fts_config": 1,
+            "taskGridRows_fts_data": 2,
+            "taskRelatedSearchDocuments_fts_config": 1,
+            "taskRelatedSearchDocuments_fts_data": 2
+          }
+        },
+        {
+          "tenant": "wl-facet-mwbv946r-2",
+          "rttMs": 39,
+          "firstLoad": {
+            "ms": 1040,
+            "callbackRan": true,
+            "fetchMs": 191,
+            "info": {
+              "generation": "A",
+              "code": "whagons",
+              "nonce": "mwbv946r",
+              "isolate": "260039bd",
+              "evaluatedAt": 0,
+              "appExports": 1519
+            },
+            "inst": "e8d992ff"
+          },
+          "provisionMs": 2610.3,
+          "provision": {
+            "executed": 2060,
+            "inserted": 933,
+            "failures": 13,
+            "refused": 13,
+            "databaseSize": 4034560,
+            "target": "facet"
+          },
+          "counts": {
+            "_gonvex_action_outbox": 2,
+            "_gonvex_id_domains": 365,
+            "_gonvex_identity_keys": 45,
+            "_gonvex_record_dependencies": 10,
+            "_gonvex_record_views": 367,
+            "_gonvex_reference_sequence": 1,
+            "_gonvex_schema_capabilities": 3,
+            "_gonvex_sync_clock": 1,
+            "_gonvex_table_options": 125,
+            "gonvex_migrations": 12,
+            "members": 2,
+            "peopleDirectory": 2,
+            "recordIdentity_members": 2,
+            "recordPublicReference_spots": 1,
+            "recordPublicReference_teams": 1,
+            "recordStorage_boardComments": 1,
+            "recordStorage_boardMessages": 1,
+            "recordStorage_boards": 1,
+            "recordStorage_cleaningReportSchedules": 1,
+            "recordStorage_cleaningStatuses": 2,
+            "recordStorage_globalSettings": 7,
+            "recordStorage_permissions": 7,
+            "recordStorage_plugins": 2,
+            "recordStorage_spots": 1,
+            "recordStorage_teams": 1,
+            "s2SavepointRows": 3,
+            "taskGridRows_fts_config": 1,
+            "taskGridRows_fts_data": 2,
+            "taskRelatedSearchDocuments_fts_config": 1,
+            "taskRelatedSearchDocuments_fts_data": 2
+          }
+        }
+      ],
+      "steps": {
+        "01 teams.create": {
+          "path": "teams.create",
+          "outcomes": [
+            "committed ok:\"team-ops\"",
+            "committed ok:\"team-ops\"",
+            "committed ok:\"team-ops\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 30.2,
+            "p50": 42.1,
+            "p90": 44,
+            "max": 44,
+            "mean": 38.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 28,
+            "p50": 29,
+            "p90": 32,
+            "max": 32,
+            "mean": 29.7
+          },
+          "hostCalls": 6,
+          "statements": 22,
+          "consistent": true
+        },
+        "02 workspaces.create": {
+          "path": "workspaces.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_workspaces",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_workspaces",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_workspaces"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -6.3,
+            "p50": 18.3,
+            "p90": 19.6,
+            "max": 19.6,
+            "mean": 10.6
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 6,
+          "statements": 24,
+          "consistent": true
+        },
+        "03 categories.create": {
+          "path": "categories.create",
+          "outcomes": [
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_categories -> recordStorage_workspaces)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_categories -> recordStorage_workspaces)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_categories -> recordStorage_workspaces)"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 20.9,
+            "p50": 31.3,
+            "p90": 48,
+            "max": 48,
+            "mean": 33.4
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 6,
+          "statements": 25,
+          "consistent": true
+        },
+        "04 statuses.create": {
+          "path": "statuses.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -1,
+            "p50": 11.5,
+            "p90": 13.3,
+            "max": 13.3,
+            "mean": 7.9
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "05 statuses.create": {
+          "path": "statuses.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -16.9,
+            "p50": 13.5,
+            "p90": 17.8,
+            "max": 17.8,
+            "mean": 4.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "06 priorities.create": {
+          "path": "priorities.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -16.4,
+            "p50": 8.1,
+            "p90": 12.7,
+            "max": 12.7,
+            "mean": 1.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "07 priorities.create": {
+          "path": "priorities.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 6.3,
+            "p50": 7.8,
+            "p90": 12.4,
+            "max": 12.4,
+            "mean": 8.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "08 spots.create": {
+          "path": "spots.create",
+          "outcomes": [
+            "committed ok:\"spot-101\"",
+            "committed ok:\"spot-101\"",
+            "committed ok:\"spot-101\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 2.2,
+            "p50": 31.4,
+            "p90": 32.6,
+            "max": 32.6,
+            "mean": 22.1
+          },
+          "doMs": {
+            "n": 3,
+            "min": 24,
+            "p50": 24,
+            "p90": 30,
+            "max": 30,
+            "mean": 26
+          },
+          "hostCalls": 5,
+          "statements": 21,
+          "consistent": true
+        },
+        "09 tags.create": {
+          "path": "tags.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskTagSearchDocuments",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskTagSearchDocuments",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskTagSearchDocuments"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -11.3,
+            "p50": 18.4,
+            "p90": 22.3,
+            "max": 22.3,
+            "mean": 9.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "10 approvals.create": {
+          "path": "approvals.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 2.8,
+            "p50": 10,
+            "p90": 18.6,
+            "max": 18.6,
+            "mean": 10.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "11 approvals.createApprover": {
+          "path": "approvals.createApprover",
+          "outcomes": [
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_approvalApprovers -> recordStorage_approvals)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_approvalApprovers -> recordStorage_approvals)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_approvalApprovers -> recordStorage_approvals)"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -2.1,
+            "p50": 21.5,
+            "p90": 170.3,
+            "max": 170.3,
+            "mean": 63.2
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 6,
+          "statements": 22,
+          "consistent": true
+        },
+        "12 tasks.create": {
+          "path": "tasks.create",
+          "outcomes": [
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -21.2,
+            "p50": 5.6,
+            "p90": 7.3,
+            "max": 7.3,
+            "mean": -2.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 1,
+          "statements": 4,
+          "consistent": true
+        },
+        "13 tasks.create": {
+          "path": "tasks.create",
+          "outcomes": [
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -20.5,
+            "p50": 1.5,
+            "p90": 6.2,
+            "max": 6.2,
+            "mean": -4.3
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 1,
+          "statements": 4,
+          "consistent": true
+        },
+        "14 tasks.update": {
+          "path": "tasks.update",
+          "outcomes": [
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -15.2,
+            "p50": 15,
+            "p90": 18.7,
+            "max": 18.7,
+            "mean": 6.2
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "15 tasks.assign": {
+          "path": "tasks.assign",
+          "outcomes": [
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -18.8,
+            "p50": 6.4,
+            "p90": 8.2,
+            "max": 8.2,
+            "mean": -1.4
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "16 tasks.setFlag": {
+          "path": "tasks.setFlag",
+          "outcomes": [
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -19.8,
+            "p50": 6.5,
+            "p90": 15.2,
+            "max": 15.2,
+            "mean": 0.6
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "17 taskResources.createNote": {
+          "path": "taskResources.createNote",
+          "outcomes": [
+            "rolled back handler:Error: Task not found",
+            "rolled back handler:Error: Task not found",
+            "rolled back handler:Error: Task not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -18.6,
+            "p50": 7.2,
+            "p90": 7.6,
+            "max": 7.6,
+            "mean": -1.3
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "18 tasks.decideApproval": {
+          "path": "tasks.decideApproval",
+          "outcomes": [
+            "rolled back handler:Error: Approval request not found",
+            "rolled back handler:Error: Approval request not found",
+            "rolled back handler:Error: Approval request not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -18.8,
+            "p50": 7.8,
+            "p90": 10.2,
+            "max": 10.2,
+            "mean": -0.3
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 1,
+          "statements": 4,
+          "consistent": true
+        },
+        "19 cleaningStatuses.create": {
+          "path": "cleaningStatuses.create",
+          "outcomes": [
+            "committed ok:\"cs-dirty\"",
+            "committed ok:\"cs-dirty\"",
+            "committed ok:\"cs-dirty\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 15.3,
+            "p50": 17.8,
+            "p90": 26.3,
+            "max": 26.3,
+            "mean": 19.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 20,
+            "p50": 22,
+            "p90": 23,
+            "max": 23,
+            "mean": 21.7
+          },
+          "hostCalls": 5,
+          "statements": 21,
+          "consistent": true
+        },
+        "20 cleaningAutomation.create": {
+          "path": "cleaningAutomation.create",
+          "outcomes": [
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -1.1,
+            "p50": 17.1,
+            "p90": 17.8,
+            "max": 17.8,
+            "mean": 11.2
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 4,
+          "statements": 11,
+          "consistent": true
+        },
+        "21 statuses.create": {
+          "path": "statuses.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -10.7,
+            "p50": 8.8,
+            "p90": 19.2,
+            "max": 19.2,
+            "mean": 5.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "22 cleaningStatuses.create": {
+          "path": "cleaningStatuses.create",
+          "outcomes": [
+            "committed ok:\"cs-clean\"",
+            "committed ok:\"cs-clean\"",
+            "committed ok:\"cs-clean\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -8.7,
+            "p50": 25.4,
+            "p90": 73.2,
+            "max": 73.2,
+            "mean": 30
+          },
+          "doMs": {
+            "n": 3,
+            "min": 20,
+            "p50": 22,
+            "p90": 22,
+            "max": 22,
+            "mean": 21.3
+          },
+          "hostCalls": 5,
+          "statements": 21,
+          "consistent": true
+        },
+        "23 cleaningAutomation.create": {
+          "path": "cleaningAutomation.create",
+          "outcomes": [
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -8.5,
+            "p50": 5.2,
+            "p90": 8.4,
+            "max": 8.4,
+            "mean": 1.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 4,
+          "statements": 11,
+          "consistent": true
+        },
+        "24 cleaningReports.create": {
+          "path": "cleaningReports.create",
+          "outcomes": [
+            "committed ok:\"crs-1\"",
+            "committed ok:\"crs-1\"",
+            "committed ok:\"crs-1\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 1.4,
+            "p50": 19.6,
+            "p90": 27.5,
+            "max": 27.5,
+            "mean": 16.1
+          },
+          "doMs": {
+            "n": 3,
+            "min": 21,
+            "p50": 23,
+            "p90": 28,
+            "max": 28,
+            "mean": 24
+          },
+          "hostCalls": 3,
+          "statements": 7,
+          "consistent": true
+        },
+        "25 priorities.remove": {
+          "path": "priorities.remove",
+          "outcomes": [
+            "rolled back handler:Error: Priority not found",
+            "rolled back handler:Error: Priority not found",
+            "rolled back handler:Error: Priority not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -19.1,
+            "p50": 6.6,
+            "p90": 19.8,
+            "max": 19.8,
+            "mean": 2.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "26 centers.askJev": {
+          "path": "centers.askJev",
+          "outcomes": [
+            "committed ok:null",
+            "committed ok:null",
+            "committed ok:null"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 9,
+            "p50": 29.3,
+            "p90": 31.5,
+            "max": 31.5,
+            "mean": 23.3
+          },
+          "doMs": {
+            "n": 3,
+            "min": 18,
+            "p50": 20,
+            "p90": 24,
+            "max": 24,
+            "mean": 20.7
+          },
+          "hostCalls": 14,
+          "statements": 37,
+          "consistent": true
+        },
+        "27 settings.togglePlugin": {
+          "path": "settings.togglePlugin",
+          "outcomes": [
+            "committed ok:\"2fadef32-de05-8dc3-80b9-265dc2f39f5e\"",
+            "committed ok:\"2fadef32-de05-8dc3-80b9-265dc2f39f5e\"",
+            "committed ok:\"2fadef32-de05-8dc3-80b9-265dc2f39f5e\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 12,
+            "p50": 30.7,
+            "p90": 60.7,
+            "max": 60.7,
+            "mean": 34.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 19,
+            "p50": 20,
+            "p90": 25,
+            "max": 25,
+            "mean": 21.3
+          },
+          "hostCalls": 2,
+          "statements": 6,
+          "consistent": true
+        },
+        "28 boards.create": {
+          "path": "boards.create",
+          "outcomes": [
+            "committed ok:\"board-1\"",
+            "committed ok:\"board-1\"",
+            "committed ok:\"board-1\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -4.8,
+            "p50": 17.9,
+            "p90": 24.1,
+            "max": 24.1,
+            "mean": 12.4
+          },
+          "doMs": {
+            "n": 3,
+            "min": 16,
+            "p50": 20,
+            "p90": 21,
+            "max": 21,
+            "mean": 19
+          },
+          "hostCalls": 3,
+          "statements": 10,
+          "consistent": true
+        },
+        "29 boards.createMessage": {
+          "path": "boards.createMessage",
+          "outcomes": [
+            "committed ok:\"msg-1\"",
+            "committed ok:\"msg-1\"",
+            "committed ok:\"msg-1\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 23,
+            "p50": 30.9,
+            "p90": 60.2,
+            "max": 60.2,
+            "mean": 38.1
+          },
+          "doMs": {
+            "n": 3,
+            "min": 17,
+            "p50": 21,
+            "p90": 25,
+            "max": 25,
+            "mean": 21
+          },
+          "hostCalls": 4,
+          "statements": 17,
+          "consistent": true
+        },
+        "30 boards.createComment": {
+          "path": "boards.createComment",
+          "outcomes": [
+            "committed ok:\"cmt-1\"",
+            "committed ok:\"cmt-1\"",
+            "committed ok:\"cmt-1\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 6.4,
+            "p50": 19.8,
+            "p90": 21.3,
+            "max": 21.3,
+            "mean": 15.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 18,
+            "p50": 19,
+            "p90": 24,
+            "max": 24,
+            "mean": 20.3
+          },
+          "hostCalls": 4,
+          "statements": 14,
+          "consistent": true
+        },
+        "31 tasks.create": {
+          "path": "tasks.create",
+          "outcomes": [
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -22.5,
+            "p50": 4.3,
+            "p90": 13.7,
+            "max": 13.7,
+            "mean": -1.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 1,
+          "statements": 4,
+          "consistent": true
+        },
+        "32 approvals.create": {
+          "path": "approvals.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -14.7,
+            "p50": 6.7,
+            "p90": 10.6,
+            "max": 10.6,
+            "mean": 0.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "33 approvals.create": {
+          "path": "approvals.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 3.8,
+            "p50": 12.7,
+            "p90": 12.7,
+            "max": 12.7,
+            "mean": 9.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "34 tasks.assign": {
+          "path": "tasks.assign",
+          "outcomes": [
+            "rolled back handler:Error: Task not found: task-2. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-2. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-2. Use its exact _id or task number from a fresh task query."
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -14.9,
+            "p50": 0.9,
+            "p90": 6.5,
+            "max": 6.5,
+            "mean": -2.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "35 tasks.archive": {
+          "path": "tasks.archive",
+          "outcomes": [
+            "rolled back handler:Error: Task not found",
+            "rolled back handler:Error: Task not found",
+            "rolled back handler:Error: Task not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -19.4,
+            "p50": 3.2,
+            "p90": 8.4,
+            "max": 8.4,
+            "mean": -2.6
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "S1 caught mid-batch failure": {
+          "path": "s2.caughtBatchFailure",
+          "outcomes": [
+            "committed ok:{\"caught\":\"error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id\"}",
+            "committed ok:{\"caught\":\"error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id\"}",
+            "committed ok:{\"caught\":\"error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id\"}"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 2.7,
+            "p50": 18.3,
+            "p90": 19.8,
+            "max": 19.8,
+            "mean": 13.6
+          },
+          "doMs": {
+            "n": 3,
+            "min": 15,
+            "p50": 19,
+            "p90": 21,
+            "max": 21,
+            "mean": 18.3
+          },
+          "hostCalls": 9,
+          "statements": 12,
+          "consistent": true
+        },
+        "S2 uncaught mid-batch failure": {
+          "path": "s2.uncaughtBatchFailure",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -15.5,
+            "p50": 2.4,
+            "p90": 2.8,
+            "max": 2.8,
+            "mean": -3.4
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 8,
+          "statements": 11,
+          "consistent": true
+        },
+        "S3 nested savepoints, ROLLBACK TO, continue": {
+          "path": "s2.nestedSavepoints",
+          "outcomes": [
+            "committed ok:{\"rows\":[\"s3-kept\"],\"clockPinned\":true,\"random\":[0.11764705833047628,0.7655943611171097]}",
+            "committed ok:{\"rows\":[\"s3-kept\"],\"clockPinned\":true,\"random\":[0.11764705833047628,0.7655943611171097]}",
+            "committed ok:{\"rows\":[\"s3-kept\"],\"clockPinned\":true,\"random\":[0.11764705833047628,0.7655943611171097]}"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -4.4,
+            "p50": 17.1,
+            "p90": 27.2,
+            "max": 27.2,
+            "mean": 13.3
+          },
+          "doMs": {
+            "n": 3,
+            "min": 14,
+            "p50": 19,
+            "p90": 20,
+            "max": 20,
+            "mean": 17.7
+          },
+          "hostCalls": 11,
+          "statements": 12,
+          "consistent": true
+        },
+        "S4 caught SQL error without ROLLBACK TO": {
+          "path": "s2.caughtSqlErrorWithoutRecovery",
+          "outcomes": [
+            "rolled back commit:transaction failed and was not committed: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+            "rolled back commit:transaction failed and was not committed: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+            "rolled back commit:transaction failed and was not committed: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -18.9,
+            "p50": 2.5,
+            "p90": 5.2,
+            "max": 5.2,
+            "mean": -3.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 5,
+          "consistent": true
+        }
+      },
+      "repeated": {
+        "spots.create": {
+          "ok": 75,
+          "failed": [],
+          "doMs": {
+            "n": 75,
+            "min": 15,
+            "p50": 20,
+            "p90": 26,
+            "max": 50,
+            "mean": 21
+          }
+        },
+        "boards.createMessage": {
+          "ok": 75,
+          "failed": [],
+          "doMs": {
+            "n": 75,
+            "min": 15,
+            "p50": 19,
+            "p90": 22,
+            "max": 29,
+            "mean": 19.2
+          }
+        },
+        "s5.noop": {
+          "ok": 75,
+          "failed": [],
+          "doMs": {
+            "n": 75,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          }
+        },
+        "s5.slow": {
+          "ok": 75,
+          "failed": [],
+          "doMs": {
+            "n": 75,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          }
+        },
+        "_batch": {
+          "clientMsPerCall": {
+            "n": 15,
+            "min": 10.8,
+            "p50": 12.3,
+            "p90": 14.9,
+            "max": 15,
+            "mean": 12.6
+          }
+        }
+      }
+    },
+    "inline": {
+      "tenants": [
+        {
+          "tenant": "wl-inline-mwbv946r-0",
+          "rttMs": 51.2,
+          "provisionMs": 1169,
+          "provision": {
+            "executed": 2060,
+            "inserted": 933,
+            "failures": 13,
+            "refused": 13,
+            "databaseSize": 4034560,
+            "target": "self"
+          },
+          "counts": {
+            "_gonvex_action_outbox": 2,
+            "_gonvex_id_domains": 365,
+            "_gonvex_identity_keys": 45,
+            "_gonvex_record_dependencies": 10,
+            "_gonvex_record_views": 367,
+            "_gonvex_reference_sequence": 1,
+            "_gonvex_schema_capabilities": 3,
+            "_gonvex_sync_clock": 1,
+            "_gonvex_table_options": 125,
+            "gonvex_migrations": 12,
+            "members": 2,
+            "peopleDirectory": 2,
+            "recordIdentity_members": 2,
+            "recordPublicReference_spots": 1,
+            "recordPublicReference_teams": 1,
+            "recordStorage_boardComments": 1,
+            "recordStorage_boardMessages": 1,
+            "recordStorage_boards": 1,
+            "recordStorage_cleaningReportSchedules": 1,
+            "recordStorage_cleaningStatuses": 2,
+            "recordStorage_globalSettings": 7,
+            "recordStorage_permissions": 7,
+            "recordStorage_plugins": 2,
+            "recordStorage_spots": 1,
+            "recordStorage_teams": 1,
+            "s2SavepointRows": 3,
+            "taskGridRows_fts_config": 1,
+            "taskGridRows_fts_data": 2,
+            "taskRelatedSearchDocuments_fts_config": 1,
+            "taskRelatedSearchDocuments_fts_data": 2
+          }
+        },
+        {
+          "tenant": "wl-inline-mwbv946r-1",
+          "rttMs": 28,
+          "provisionMs": 2177.7,
+          "provision": {
+            "executed": 2060,
+            "inserted": 933,
+            "failures": 13,
+            "refused": 13,
+            "databaseSize": 4034560,
+            "target": "self"
+          },
+          "counts": {
+            "_gonvex_action_outbox": 2,
+            "_gonvex_id_domains": 365,
+            "_gonvex_identity_keys": 45,
+            "_gonvex_record_dependencies": 10,
+            "_gonvex_record_views": 367,
+            "_gonvex_reference_sequence": 1,
+            "_gonvex_schema_capabilities": 3,
+            "_gonvex_sync_clock": 1,
+            "_gonvex_table_options": 125,
+            "gonvex_migrations": 12,
+            "members": 2,
+            "peopleDirectory": 2,
+            "recordIdentity_members": 2,
+            "recordPublicReference_spots": 1,
+            "recordPublicReference_teams": 1,
+            "recordStorage_boardComments": 1,
+            "recordStorage_boardMessages": 1,
+            "recordStorage_boards": 1,
+            "recordStorage_cleaningReportSchedules": 1,
+            "recordStorage_cleaningStatuses": 2,
+            "recordStorage_globalSettings": 7,
+            "recordStorage_permissions": 7,
+            "recordStorage_plugins": 2,
+            "recordStorage_spots": 1,
+            "recordStorage_teams": 1,
+            "s2SavepointRows": 3,
+            "taskGridRows_fts_config": 1,
+            "taskGridRows_fts_data": 2,
+            "taskRelatedSearchDocuments_fts_config": 1,
+            "taskRelatedSearchDocuments_fts_data": 2
+          }
+        },
+        {
+          "tenant": "wl-inline-mwbv946r-2",
+          "rttMs": 28.1,
+          "provisionMs": 1401.2,
+          "provision": {
+            "executed": 2060,
+            "inserted": 933,
+            "failures": 13,
+            "refused": 13,
+            "databaseSize": 4034560,
+            "target": "self"
+          },
+          "counts": {
+            "_gonvex_action_outbox": 2,
+            "_gonvex_id_domains": 365,
+            "_gonvex_identity_keys": 45,
+            "_gonvex_record_dependencies": 10,
+            "_gonvex_record_views": 367,
+            "_gonvex_reference_sequence": 1,
+            "_gonvex_schema_capabilities": 3,
+            "_gonvex_sync_clock": 1,
+            "_gonvex_table_options": 125,
+            "gonvex_migrations": 12,
+            "members": 2,
+            "peopleDirectory": 2,
+            "recordIdentity_members": 2,
+            "recordPublicReference_spots": 1,
+            "recordPublicReference_teams": 1,
+            "recordStorage_boardComments": 1,
+            "recordStorage_boardMessages": 1,
+            "recordStorage_boards": 1,
+            "recordStorage_cleaningReportSchedules": 1,
+            "recordStorage_cleaningStatuses": 2,
+            "recordStorage_globalSettings": 7,
+            "recordStorage_permissions": 7,
+            "recordStorage_plugins": 2,
+            "recordStorage_spots": 1,
+            "recordStorage_teams": 1,
+            "s2SavepointRows": 3,
+            "taskGridRows_fts_config": 1,
+            "taskGridRows_fts_data": 2,
+            "taskRelatedSearchDocuments_fts_config": 1,
+            "taskRelatedSearchDocuments_fts_data": 2
+          }
+        }
+      ],
+      "steps": {
+        "01 teams.create": {
+          "path": "teams.create",
+          "outcomes": [
+            "committed ok:\"team-ops\"",
+            "committed ok:\"team-ops\"",
+            "committed ok:\"team-ops\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 32.8,
+            "p50": 34.4,
+            "p90": 83.4,
+            "max": 83.4,
+            "mean": 50.2
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 6,
+          "statements": 22,
+          "consistent": true
+        },
+        "02 workspaces.create": {
+          "path": "workspaces.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_workspaces",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_workspaces",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_workspaces"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 1.5,
+            "p50": 22.7,
+            "p90": 31.2,
+            "max": 31.2,
+            "mean": 18.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 6,
+          "statements": 24,
+          "consistent": true
+        },
+        "03 categories.create": {
+          "path": "categories.create",
+          "outcomes": [
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_categories -> recordStorage_workspaces)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_categories -> recordStorage_workspaces)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_categories -> recordStorage_workspaces)"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 20,
+            "p50": 31.7,
+            "p90": 40.2,
+            "max": 40.2,
+            "mean": 30.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 6,
+          "statements": 25,
+          "consistent": true
+        },
+        "04 statuses.create": {
+          "path": "statuses.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -10.8,
+            "p50": 7.1,
+            "p90": 20.1,
+            "max": 20.1,
+            "mean": 5.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "05 statuses.create": {
+          "path": "statuses.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -9.9,
+            "p50": 10,
+            "p90": 10.4,
+            "max": 10.4,
+            "mean": 3.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "06 priorities.create": {
+          "path": "priorities.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -10,
+            "p50": 1.4,
+            "p90": 17.4,
+            "max": 17.4,
+            "mean": 3
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "07 priorities.create": {
+          "path": "priorities.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -17.1,
+            "p50": -0.6,
+            "p90": 8.5,
+            "max": 8.5,
+            "mean": -3.1
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "08 spots.create": {
+          "path": "spots.create",
+          "outcomes": [
+            "committed ok:\"spot-101\"",
+            "committed ok:\"spot-101\"",
+            "committed ok:\"spot-101\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 6.5,
+            "p50": 30.8,
+            "p90": 103.2,
+            "max": 103.2,
+            "mean": 46.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 21,
+          "consistent": true
+        },
+        "09 tags.create": {
+          "path": "tags.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskTagSearchDocuments",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskTagSearchDocuments",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskTagSearchDocuments"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 0.8,
+            "p50": 6.1,
+            "p90": 22.2,
+            "max": 22.2,
+            "mean": 9.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "10 approvals.create": {
+          "path": "approvals.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -16.3,
+            "p50": 4.1,
+            "p90": 10,
+            "max": 10,
+            "mean": -0.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "11 approvals.createApprover": {
+          "path": "approvals.createApprover",
+          "outcomes": [
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_approvalApprovers -> recordStorage_approvals)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_approvalApprovers -> recordStorage_approvals)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_approvalApprovers -> recordStorage_approvals)"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 1.8,
+            "p50": 3,
+            "p90": 19.9,
+            "max": 19.9,
+            "mean": 8.3
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 6,
+          "statements": 22,
+          "consistent": true
+        },
+        "12 tasks.create": {
+          "path": "tasks.create",
+          "outcomes": [
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -25.7,
+            "p50": 1.4,
+            "p90": 4.2,
+            "max": 4.2,
+            "mean": -6.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 1,
+          "statements": 4,
+          "consistent": true
+        },
+        "13 tasks.create": {
+          "path": "tasks.create",
+          "outcomes": [
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -18.9,
+            "p50": -4.7,
+            "p90": 2.3,
+            "max": 2.3,
+            "mean": -7.1
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 1,
+          "statements": 4,
+          "consistent": true
+        },
+        "14 tasks.update": {
+          "path": "tasks.update",
+          "outcomes": [
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -2.4,
+            "p50": 13.3,
+            "p90": 13.3,
+            "max": 13.3,
+            "mean": 8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "15 tasks.assign": {
+          "path": "tasks.assign",
+          "outcomes": [
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -17.7,
+            "p50": 0.6,
+            "p90": 5.9,
+            "max": 5.9,
+            "mean": -3.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "16 tasks.setFlag": {
+          "path": "tasks.setFlag",
+          "outcomes": [
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -23.3,
+            "p50": -2.9,
+            "p90": 9.6,
+            "max": 9.6,
+            "mean": -5.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "17 taskResources.createNote": {
+          "path": "taskResources.createNote",
+          "outcomes": [
+            "rolled back handler:Error: Task not found",
+            "rolled back handler:Error: Task not found",
+            "rolled back handler:Error: Task not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -16.7,
+            "p50": -0.6,
+            "p90": 8.6,
+            "max": 8.6,
+            "mean": -2.9
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "18 tasks.decideApproval": {
+          "path": "tasks.decideApproval",
+          "outcomes": [
+            "rolled back handler:Error: Approval request not found",
+            "rolled back handler:Error: Approval request not found",
+            "rolled back handler:Error: Approval request not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -15.9,
+            "p50": 4.3,
+            "p90": 21.7,
+            "max": 21.7,
+            "mean": 3.4
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 1,
+          "statements": 4,
+          "consistent": true
+        },
+        "19 cleaningStatuses.create": {
+          "path": "cleaningStatuses.create",
+          "outcomes": [
+            "committed ok:\"cs-dirty\"",
+            "committed ok:\"cs-dirty\"",
+            "committed ok:\"cs-dirty\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -2.3,
+            "p50": 29.9,
+            "p90": 42.7,
+            "max": 42.7,
+            "mean": 23.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 21,
+          "consistent": true
+        },
+        "20 cleaningAutomation.create": {
+          "path": "cleaningAutomation.create",
+          "outcomes": [
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -7.6,
+            "p50": 7,
+            "p90": 36.7,
+            "max": 36.7,
+            "mean": 12
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 4,
+          "statements": 11,
+          "consistent": true
+        },
+        "21 statuses.create": {
+          "path": "statuses.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -17,
+            "p50": 1.6,
+            "p90": 10.4,
+            "max": 10.4,
+            "mean": -1.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "22 cleaningStatuses.create": {
+          "path": "cleaningStatuses.create",
+          "outcomes": [
+            "committed ok:\"cs-clean\"",
+            "committed ok:\"cs-clean\"",
+            "committed ok:\"cs-clean\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -2.8,
+            "p50": 36.4,
+            "p90": 40,
+            "max": 40,
+            "mean": 24.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 21,
+          "consistent": true
+        },
+        "23 cleaningAutomation.create": {
+          "path": "cleaningAutomation.create",
+          "outcomes": [
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+            "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 0.5,
+            "p50": 6.4,
+            "p90": 17.5,
+            "max": 17.5,
+            "mean": 8.1
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 4,
+          "statements": 11,
+          "consistent": true
+        },
+        "24 cleaningReports.create": {
+          "path": "cleaningReports.create",
+          "outcomes": [
+            "committed ok:\"crs-1\"",
+            "committed ok:\"crs-1\"",
+            "committed ok:\"crs-1\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -5.9,
+            "p50": 48.9,
+            "p90": 61.7,
+            "max": 61.7,
+            "mean": 34.9
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 3,
+          "statements": 7,
+          "consistent": true
+        },
+        "25 priorities.remove": {
+          "path": "priorities.remove",
+          "outcomes": [
+            "rolled back handler:Error: Priority not found",
+            "rolled back handler:Error: Priority not found",
+            "rolled back handler:Error: Priority not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -1.5,
+            "p50": 5.5,
+            "p90": 10,
+            "max": 10,
+            "mean": 4.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "26 centers.askJev": {
+          "path": "centers.askJev",
+          "outcomes": [
+            "committed ok:null",
+            "committed ok:null",
+            "committed ok:null"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 4.7,
+            "p50": 38.2,
+            "p90": 64.9,
+            "max": 64.9,
+            "mean": 36
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 14,
+          "statements": 37,
+          "consistent": true
+        },
+        "27 settings.togglePlugin": {
+          "path": "settings.togglePlugin",
+          "outcomes": [
+            "committed ok:\"2fadef32-de05-8dc3-80b9-265dc2f39f5e\"",
+            "committed ok:\"2fadef32-de05-8dc3-80b9-265dc2f39f5e\"",
+            "committed ok:\"2fadef32-de05-8dc3-80b9-265dc2f39f5e\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 19.1,
+            "p50": 35,
+            "p90": 61.9,
+            "max": 61.9,
+            "mean": 38.7
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 6,
+          "consistent": true
+        },
+        "28 boards.create": {
+          "path": "boards.create",
+          "outcomes": [
+            "committed ok:\"board-1\"",
+            "committed ok:\"board-1\"",
+            "committed ok:\"board-1\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -3.3,
+            "p50": 40.4,
+            "p90": 42,
+            "max": 42,
+            "mean": 26.4
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 3,
+          "statements": 10,
+          "consistent": true
+        },
+        "29 boards.createMessage": {
+          "path": "boards.createMessage",
+          "outcomes": [
+            "committed ok:\"msg-1\"",
+            "committed ok:\"msg-1\"",
+            "committed ok:\"msg-1\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 27.9,
+            "p50": 28.1,
+            "p90": 41.5,
+            "max": 41.5,
+            "mean": 32.5
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 4,
+          "statements": 17,
+          "consistent": true
+        },
+        "30 boards.createComment": {
+          "path": "boards.createComment",
+          "outcomes": [
+            "committed ok:\"cmt-1\"",
+            "committed ok:\"cmt-1\"",
+            "committed ok:\"cmt-1\""
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 26.9,
+            "p50": 38.8,
+            "p90": 42.5,
+            "max": 42.5,
+            "mean": 36.1
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 4,
+          "statements": 14,
+          "consistent": true
+        },
+        "31 tasks.create": {
+          "path": "tasks.create",
+          "outcomes": [
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found",
+            "rolled back handler:Error: Workspace not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -14.4,
+            "p50": -1,
+            "p90": 3,
+            "max": 3,
+            "mean": -4.2
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 1,
+          "statements": 4,
+          "consistent": true
+        },
+        "32 approvals.create": {
+          "path": "approvals.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 4,
+            "p50": 5.1,
+            "p90": 5.2,
+            "max": 5.2,
+            "mean": 4.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "33 approvals.create": {
+          "path": "approvals.create",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -5.3,
+            "p50": -3.5,
+            "p90": 6.4,
+            "max": 6.4,
+            "mean": -0.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 5,
+          "statements": 20,
+          "consistent": true
+        },
+        "34 tasks.assign": {
+          "path": "tasks.assign",
+          "outcomes": [
+            "rolled back handler:Error: Task not found: task-2. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-2. Use its exact _id or task number from a fresh task query.",
+            "rolled back handler:Error: Task not found: task-2. Use its exact _id or task number from a fresh task query."
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 2.2,
+            "p50": 3.6,
+            "p90": 7.1,
+            "max": 7.1,
+            "mean": 4.3
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "35 tasks.archive": {
+          "path": "tasks.archive",
+          "outcomes": [
+            "rolled back handler:Error: Task not found",
+            "rolled back handler:Error: Task not found",
+            "rolled back handler:Error: Task not found"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 6,
+            "p50": 8.1,
+            "p90": 26.7,
+            "max": 26.7,
+            "mean": 13.6
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 8,
+          "consistent": true
+        },
+        "S1 caught mid-batch failure": {
+          "path": "s2.caughtBatchFailure",
+          "outcomes": [
+            "committed ok:{\"caught\":\"error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id\"}",
+            "committed ok:{\"caught\":\"error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id\"}",
+            "committed ok:{\"caught\":\"error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id\"}"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 14.9,
+            "p50": 28,
+            "p90": 42.3,
+            "max": 42.3,
+            "mean": 28.4
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 9,
+          "statements": 12,
+          "consistent": true
+        },
+        "S2 uncaught mid-batch failure": {
+          "path": "s2.uncaughtBatchFailure",
+          "outcomes": [
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+            "rolled back handler:GonvexHostError: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": 0.7,
+            "p50": 5.1,
+            "p90": 8,
+            "max": 8,
+            "mean": 4.6
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 8,
+          "statements": 11,
+          "consistent": true
+        },
+        "S3 nested savepoints, ROLLBACK TO, continue": {
+          "path": "s2.nestedSavepoints",
+          "outcomes": [
+            "committed ok:{\"rows\":[\"s3-kept\"],\"clockPinned\":true,\"random\":[0.11764705833047628,0.7655943611171097]}",
+            "committed ok:{\"rows\":[\"s3-kept\"],\"clockPinned\":true,\"random\":[0.11764705833047628,0.7655943611171097]}",
+            "committed ok:{\"rows\":[\"s3-kept\"],\"clockPinned\":true,\"random\":[0.11764705833047628,0.7655943611171097]}"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -7.4,
+            "p50": 31.2,
+            "p90": 146.7,
+            "max": 146.7,
+            "mean": 56.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 11,
+          "statements": 12,
+          "consistent": true
+        },
+        "S4 caught SQL error without ROLLBACK TO": {
+          "path": "s2.caughtSqlErrorWithoutRecovery",
+          "outcomes": [
+            "rolled back commit:transaction failed and was not committed: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+            "rolled back commit:transaction failed and was not committed: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+            "rolled back commit:transaction failed and was not committed: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id"
+          ],
+          "clientMs": {
+            "n": 3,
+            "min": -25.1,
+            "p50": -2.9,
+            "p90": 1.7,
+            "max": 1.7,
+            "mean": -8.8
+          },
+          "doMs": {
+            "n": 3,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          },
+          "hostCalls": 2,
+          "statements": 5,
+          "consistent": true
+        }
+      },
+      "repeated": {
+        "spots.create": {
+          "ok": 75,
+          "failed": [],
+          "doMs": {
+            "n": 75,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          }
+        },
+        "boards.createMessage": {
+          "ok": 75,
+          "failed": [],
+          "doMs": {
+            "n": 75,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          }
+        },
+        "s5.noop": {
+          "ok": 75,
+          "failed": [],
+          "doMs": {
+            "n": 75,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          }
+        },
+        "s5.slow": {
+          "ok": 75,
+          "failed": [],
+          "doMs": {
+            "n": 75,
+            "min": 0,
+            "p50": 0,
+            "p90": 0,
+            "max": 0,
+            "mean": 0
+          }
+        },
+        "_batch": {
+          "clientMsPerCall": {
+            "n": 15,
+            "min": 3.3,
+            "p50": 4.9,
+            "p90": 9.2,
+            "max": 10.1,
+            "mean": 5.8
+          }
+        }
+      }
+    }
+  },
+  "comparison": [
+    {
+      "name": "01 teams.create",
+      "same": true,
+      "facet": "committed ok:\"team-ops\"",
+      "inline": "committed ok:\"team-ops\""
+    },
+    {
+      "name": "02 workspaces.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_workspaces",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_workspaces"
+    },
+    {
+      "name": "03 categories.create",
+      "same": true,
+      "facet": "rolled back commit:FOREIGN KEY constraint failed (recordStorage_categories -> recordStorage_workspaces)",
+      "inline": "rolled back commit:FOREIGN KEY constraint failed (recordStorage_categories -> recordStorage_workspaces)"
+    },
+    {
+      "name": "04 statuses.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+    },
+    {
+      "name": "05 statuses.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+    },
+    {
+      "name": "06 priorities.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+    },
+    {
+      "name": "07 priorities.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+    },
+    {
+      "name": "08 spots.create",
+      "same": true,
+      "facet": "committed ok:\"spot-101\"",
+      "inline": "committed ok:\"spot-101\""
+    },
+    {
+      "name": "09 tags.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskTagSearchDocuments",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskTagSearchDocuments"
+    },
+    {
+      "name": "10 approvals.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+    },
+    {
+      "name": "11 approvals.createApprover",
+      "same": true,
+      "facet": "rolled back commit:FOREIGN KEY constraint failed (recordStorage_approvalApprovers -> recordStorage_approvals)",
+      "inline": "rolled back commit:FOREIGN KEY constraint failed (recordStorage_approvalApprovers -> recordStorage_approvals)"
+    },
+    {
+      "name": "12 tasks.create",
+      "same": true,
+      "facet": "rolled back handler:Error: Workspace not found",
+      "inline": "rolled back handler:Error: Workspace not found"
+    },
+    {
+      "name": "13 tasks.create",
+      "same": true,
+      "facet": "rolled back handler:Error: Workspace not found",
+      "inline": "rolled back handler:Error: Workspace not found"
+    },
+    {
+      "name": "14 tasks.update",
+      "same": true,
+      "facet": "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+      "inline": "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+    },
+    {
+      "name": "15 tasks.assign",
+      "same": true,
+      "facet": "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+      "inline": "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+    },
+    {
+      "name": "16 tasks.setFlag",
+      "same": true,
+      "facet": "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query.",
+      "inline": "rolled back handler:Error: Task not found: task-1. Use its exact _id or task number from a fresh task query."
+    },
+    {
+      "name": "17 taskResources.createNote",
+      "same": true,
+      "facet": "rolled back handler:Error: Task not found",
+      "inline": "rolled back handler:Error: Task not found"
+    },
+    {
+      "name": "18 tasks.decideApproval",
+      "same": true,
+      "facet": "rolled back handler:Error: Approval request not found",
+      "inline": "rolled back handler:Error: Approval request not found"
+    },
+    {
+      "name": "19 cleaningStatuses.create",
+      "same": true,
+      "facet": "committed ok:\"cs-dirty\"",
+      "inline": "committed ok:\"cs-dirty\""
+    },
+    {
+      "name": "20 cleaningAutomation.create",
+      "same": true,
+      "facet": "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+      "inline": "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)"
+    },
+    {
+      "name": "21 statuses.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.whTaskGridProjection"
+    },
+    {
+      "name": "22 cleaningStatuses.create",
+      "same": true,
+      "facet": "committed ok:\"cs-clean\"",
+      "inline": "committed ok:\"cs-clean\""
+    },
+    {
+      "name": "23 cleaningAutomation.create",
+      "same": true,
+      "facet": "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)",
+      "inline": "rolled back commit:FOREIGN KEY constraint failed (recordStorage_cleaningResetRules -> recordStorage_statuses)"
+    },
+    {
+      "name": "24 cleaningReports.create",
+      "same": true,
+      "facet": "committed ok:\"crs-1\"",
+      "inline": "committed ok:\"crs-1\""
+    },
+    {
+      "name": "25 priorities.remove",
+      "same": true,
+      "facet": "rolled back handler:Error: Priority not found",
+      "inline": "rolled back handler:Error: Priority not found"
+    },
+    {
+      "name": "26 centers.askJev",
+      "same": true,
+      "facet": "committed ok:null",
+      "inline": "committed ok:null"
+    },
+    {
+      "name": "27 settings.togglePlugin",
+      "same": true,
+      "facet": "committed ok:\"2fadef32-de05-8dc3-80b9-265dc2f39f5e\"",
+      "inline": "committed ok:\"2fadef32-de05-8dc3-80b9-265dc2f39f5e\""
+    },
+    {
+      "name": "28 boards.create",
+      "same": true,
+      "facet": "committed ok:\"board-1\"",
+      "inline": "committed ok:\"board-1\""
+    },
+    {
+      "name": "29 boards.createMessage",
+      "same": true,
+      "facet": "committed ok:\"msg-1\"",
+      "inline": "committed ok:\"msg-1\""
+    },
+    {
+      "name": "30 boards.createComment",
+      "same": true,
+      "facet": "committed ok:\"cmt-1\"",
+      "inline": "committed ok:\"cmt-1\""
+    },
+    {
+      "name": "31 tasks.create",
+      "same": true,
+      "facet": "rolled back handler:Error: Workspace not found",
+      "inline": "rolled back handler:Error: Workspace not found"
+    },
+    {
+      "name": "32 approvals.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+    },
+    {
+      "name": "33 approvals.create",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1) no such table: main.referenceExpected_approvals"
+    },
+    {
+      "name": "34 tasks.assign",
+      "same": true,
+      "facet": "rolled back handler:Error: Task not found: task-2. Use its exact _id or task number from a fresh task query.",
+      "inline": "rolled back handler:Error: Task not found: task-2. Use its exact _id or task number from a fresh task query."
+    },
+    {
+      "name": "35 tasks.archive",
+      "same": true,
+      "facet": "rolled back handler:Error: Task not found",
+      "inline": "rolled back handler:Error: Task not found"
+    },
+    {
+      "name": "S1 caught mid-batch failure",
+      "same": true,
+      "facet": "committed ok:{\"caught\":\"error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id\"}",
+      "inline": "committed ok:{\"caught\":\"error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id\"}"
+    },
+    {
+      "name": "S2 uncaught mid-batch failure",
+      "same": true,
+      "facet": "rolled back handler:GonvexHostError: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+      "inline": "rolled back handler:GonvexHostError: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id"
+    },
+    {
+      "name": "S3 nested savepoints, ROLLBACK TO, continue",
+      "same": true,
+      "facet": "committed ok:{\"rows\":[\"s3-kept\"],\"clockPinned\":true,\"random\":[0.11764705833047628,0.7655943611171097]}",
+      "inline": "committed ok:{\"rows\":[\"s3-kept\"],\"clockPinned\":true,\"random\":[0.11764705833047628,0.7655943611171097]}"
+    },
+    {
+      "name": "S4 caught SQL error without ROLLBACK TO",
+      "same": true,
+      "facet": "rolled back commit:transaction failed and was not committed: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id",
+      "inline": "rolled back commit:transaction failed and was not committed: error returned from database: (code: 1555) UNIQUE constraint failed: s2SavepointRows._id"
+    }
+  ],
+  "allSame": true,
+  "countsSame": true
+}

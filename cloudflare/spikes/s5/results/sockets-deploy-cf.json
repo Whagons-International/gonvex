@@ -1,0 +1,226 @@
+{
+  "tenant": "ws-mwbw0r8t",
+  "count": 500,
+  "opened": 500,
+  "code": "whagons",
+  "swaps": [
+    {
+      "k": 1,
+      "gen": "whagons:S1:mwbw0r8t",
+      "activateClientMs": 680,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S0",
+        "active": "S1",
+        "preloadMs": 539,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794387562648,
+        "inst": "eae96077"
+      },
+      "reloadReceived": 500,
+      "load": null,
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -14,
+        "p50": -10,
+        "p90": -7,
+        "max": 1,
+        "mean": -9.6
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 2,
+      "gen": "whagons:S2:mwbw0r8t",
+      "activateClientMs": 449,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S1",
+        "active": "S2",
+        "preloadMs": 358,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794387566307,
+        "inst": "eae96077"
+      },
+      "reloadReceived": 500,
+      "load": null,
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -10,
+        "p50": -5,
+        "p90": -3,
+        "max": 0,
+        "mean": -5.6
+      },
+      "closesSoFar": 0
+    }
+  ],
+  "closesDuringSwaps": 0,
+  "framesDuringSwaps": 9999,
+  "statsAfterSwaps": {
+    "inst": "eae96077",
+    "isolate": "c52b9340",
+    "build": "loader",
+    "constructedAt": 1794387556073,
+    "active": {
+      "id": "whagons:S2:mwbw0r8t",
+      "code": "whagons",
+      "label": "S2",
+      "nonce": "mwbw0r8t"
+    },
+    "sockets": 501,
+    "loads": [
+      {
+        "id": "whagons:S0:mwbw0r8t",
+        "at": 1794387556191,
+        "fetchMs": 102,
+        "appBytes": 4157917
+      },
+      {
+        "id": "whagons:S1:mwbw0r8t",
+        "at": 1794387562648,
+        "fetchMs": 96,
+        "appBytes": 4157917
+      },
+      {
+        "id": "whagons:S2:mwbw0r8t",
+        "at": 1794387566307,
+        "fetchMs": 119,
+        "appBytes": 4157917
+      }
+    ],
+    "ballastMb": 0
+  },
+  "deploy": {
+    "code": 0,
+    "t0": 1794387569781,
+    "t1": 1794387573422,
+    "ms": 3641,
+    "version": "e4da8ad7-6c26-4211-a850-b86464089b8a",
+    "closed": 0,
+    "codes": {},
+    "closeAfterDeployMs": null,
+    "samples": [
+      {
+        "t": 2,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 4,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 6,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 8,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 10,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 12,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 14,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 16,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 18,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 20,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 22,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 24,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 26,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 28,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 30,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 32,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 34,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 36,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 38,
+        "open": 500,
+        "closes": 0
+      },
+      {
+        "t": 40,
+        "open": 500,
+        "closes": 0
+      }
+    ],
+    "openAtEnd": 500,
+    "generationStillWarm": false,
+    "afterDeployLoad": {
+      "ms": 465,
+      "callbackRan": true,
+      "fetchMs": 152,
+      "info": {
+        "generation": "S2",
+        "code": "whagons",
+        "nonce": "mwbw0r8t",
+        "isolate": "01df58b3",
+        "evaluatedAt": 0,
+        "appExports": 1519
+      },
+      "inst": "eae96077"
+    }
+  }
+}

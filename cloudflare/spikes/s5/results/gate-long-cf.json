@@ -1,0 +1,18 @@
+{
+  "facet": {
+    "slowDoneAtMs": 965,
+    "slowStatus": "Error: planned failure after 30000 host calls",
+    "markDoneAtMs": 996,
+    "markWaitedForSlow": true,
+    "markSurvived": true,
+    "instanceAfter": "91d34836"
+  },
+  "inline": {
+    "slowDoneAtMs": 972,
+    "slowStatus": "Error: planned failure after 30000 host calls",
+    "markDoneAtMs": 991,
+    "markWaitedForSlow": true,
+    "markSurvived": true,
+    "instanceAfter": "a751e9f1"
+  }
+}
