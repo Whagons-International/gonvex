@@ -6,3 +6,4 @@ export * from "./capture.ts";
 export * from "./host.ts";
 export * from "./masks.ts";
 export * from "./scheduler.ts";
+export * from "./tasks.ts";
