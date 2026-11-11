@@ -1,3 +1,3 @@
-# Generated staging runtime image deployment record.
-# Built from commit 0bf3ad13419d25d9370607e1470ae58da4c43235.
-FROM ghcr.io/whagons-international/gonvex-runtime:0bf3ad13419d25d9370607e1470ae58da4c43235@sha256:4a9078f54297ca41a804ba1499b48e84972f31d03a82d855d52d74ee6e43d345
+# Staging runtime image. Written by scripts/deploy-staging-runtime.sh on the
+# gonvex repo; do not edit by hand. Built from commit 8ceec72180904446b884d45712832628a9dd4053.
+FROM ghcr.io/whagons-international/gonvex-runtime:8ceec72180904446b884d45712832628a9dd4053@sha256:77270092e064d0a4addc145a274265e17417a6112949ff2c894601ca784e8926
