@@ -13,11 +13,12 @@ cloudflare/conformance/
   src/differ.mjs       compares traces, prints readable diffs
   src/checksum.mjs     per-table checksums
   src/digest-check.mjs per-backend digest self-check (digests are masked in diffs)
+  src/capture-golden.mjs records Rust's change log for `change-capture` as the kernel's parity golden (K03)
   src/fixture.mjs      builds the fixture bundle with the repo's own `gonvex codegen`
   src/backend.mjs      backend adapter interface
   src/backends/        rust.mjs (reference), cloudflare.mjs (kernel on local workerd), mutant.mjs (harness self-test), index.mjs (registry)
   scenarios/           one module per scenario, plus index.mjs (registry, run order)
-  fixtures/app         test module bundle: board, notes, note_shares, errors (generation 1)
+  fixtures/app         test module bundle: board, notes, note_shares, errors, capture (generation 1)
   fixtures/app-v2      overlay for generation 2 (upgrade scenario)
   fixtures/app-v3      overlay for generation 3: generation 1 with a client contract (session-handshake)
   test/                unit tests (no backend) and the mutation self-test (needs the Rust binary)
@@ -111,6 +112,7 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `receipt-owner-switch` | One SDK socket switching account A to B to A (owner-scoped notes, receipts per owner, a foreign write refused) and tenant A to B to A (no leak in either direction) | `sdk_owner_switch` |
 | `session-handshake` | `session.ready` first; every `auth` branch and error code; the replica directive's `scope` and `visibilityScope` recomputed from the result; re-auth in place with and without `subscriptionsPreserved`; a tenant switch; a failed re-auth tearing the session down (the unauthenticated reply of every frame kind); `clientContract` gating at auth and on a deploy while connected (`client.updateRequired`, `system.reload`); the real SDK logging in, authenticating and switching tenant | K05 |
 | `session-frames` | The decoder's accept/close boundary (82 vectors: integer widths and lexemes, `null`, duplicates, the sequence form, nesting depth, lone surrogates); binary frames; the public transport (mismatch, non-public tenant, the 64 KiB limit); 64 KiB on unscoped sockets and 16 MiB after auth; the 10 s pending-auth deadline | K05 |
+| `change-capture` | 18 Reducer transactions through `capture.apply`, then the tenant's change log read through the adapter (`readChangeLog`, capability `changeLog`): change rows, ordinals, command ids, revisions (relative), provenance and the clock. Covers every column kind and edge values, no-op updates, savepoints, trigger-written rows, a composite `WITHOUT ROWID` key, a derived table, a logical record with an owned table and a record dependency, a rejected Reducer. `node src/capture-golden.mjs` writes Rust's result to `kernel/capture/test/golden/`, which the kernel's capture is replayed against in workerd | K03 |
 
 Two receipt checks stay in `verification/backend-receipts/`, because they inject faults inside the Rust process through test-only coordinators that a black-box harness cannot reach: the SDK's own SQLite outbox replay, and the injected replica and receipt write failures.
 
@@ -187,6 +189,7 @@ To extend the fixture, edit `fixtures/app`, and `fixtures/app-v2` for the upgrad
    - `createMember(projectId, tenantId, { email, password, name })`. It creates or reuses an account with a password login and makes it an active Member. It returns `{ accountId, memberId }`.
    - `readTable(projectId, tenantId, table)`, which returns every row as a plain object.
    - Optional: `restart({ crash })`, with `capabilities` returning `{ restart: true, crash: true }`. `wsUrl` must stay the same across a restart, because connected clients reconnect to it.
+   - Optional: `readChangeLog(projectId, tenantId)`, with `capabilities.changeLog`, returning the tenant's `_gonvex_sync_clock` row and every `_gonvex_sync_changes` and `_gonvex_sync_transactions` row (`change-capture`). Rust reads the tenant file directly: its `/dev/data` routes refuse `_gonvex_*` tables.
 2. Register it in `src/backends/index.mjs`, or pass a module path: `--backend cf=path/to/backend.mjs`, where the default export is the class.
 3. Run `node src/cli.mjs --backend rust=rust --backend cf=cloudflare`. Rust is the reference. A diff is printed per step and per session, and the report is written to `--json`.
 
