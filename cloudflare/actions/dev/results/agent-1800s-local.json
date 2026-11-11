@@ -1,0 +1,93 @@
+{
+ "seconds": 1800,
+ "wallSeconds": 1806.316,
+ "enqueued": {
+  "id": "66266c6f-a442-8aa4-9228-ec19eb9ae414",
+  "instance": "66266c6f-a442-8aa4-9228-ec19eb9ae414-d1"
+ },
+ "workflow": {
+  "status": "complete",
+  "__LOCAL_DEV_STEP_OUTPUTS": [
+   {
+    "kind": "done",
+    "origin": "outbox",
+    "attempt": 1,
+    "ok": true,
+    "bytes": 58,
+    "renewals": 60,
+    "persisted": 11,
+    "gapsMs": {
+     "min": 30001,
+     "max": 30003
+    },
+    "hostCalls": 6180,
+    "fetches": 60
+   },
+   {
+    "v": 1,
+    "applied": true,
+    "appliedAttempt": 1
+   }
+  ],
+  "output": {
+   "kind": "done",
+   "origin": "outbox",
+   "attempt": 1,
+   "ok": true,
+   "bytes": 58,
+   "renewals": 60,
+   "persisted": 11,
+   "gapsMs": {
+    "min": 30001,
+    "max": 30003
+   },
+   "hostCalls": 6180,
+   "fetches": 60,
+   "completion": {
+    "v": 1,
+    "applied": true,
+    "appliedAttempt": 1
+   }
+  }
+ },
+ "tenant": {
+  "row": {
+   "id": "66266c6f-a442-8aa4-9228-ec19eb9ae414",
+   "origin": "outbox",
+   "state": "done",
+   "path": "",
+   "args": "null",
+   "actor_user_id": null,
+   "actor_email": null,
+   "provenance": null,
+   "status": "pending",
+   "attempts": 1,
+   "available_at": 0,
+   "locked_at": null,
+   "last_error": null,
+   "owner": null,
+   "dispatched_at": 1794419515199,
+   "dispatch_count": 1,
+   "session": null,
+   "result": null,
+   "leaseExpiry": null
+  },
+  "runs": [
+   {
+    "id": "66266c6f-a442-8aa4-9228-ec19eb9ae414",
+    "origin": "outbox",
+    "state": "done",
+    "attempts": 1,
+    "dispatch_count": 1,
+    "last_error": null
+   }
+  ],
+  "outbox": [],
+  "stats": {
+   "rowsRead": 10,
+   "rowsWritten": 5,
+   "dispatches": 0
+  }
+ },
+ "measuredAt": "2026-11-11T18:22:01.248Z"
+}
