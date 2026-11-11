@@ -40,6 +40,7 @@ export const RECEIPT_RETENTION_MS = 7 * 24 * 3600_000;
 export const MAX_STORED_RESULT_BYTES = 1 << 20;
 export const SCHEDULE_OUTBOX_PATH = "_gonvex.scheduler.enqueue";
 const PAGE = 100;
+const DISPATCH_CONCURRENCY = 16;
 
 export const OUTBOX = "_gonvex_action_outbox";
 export const RUNS = "_gonvex_st_action_runs";
@@ -214,29 +215,49 @@ export class ActionOutbox {
 
   // ---- hand-off --------------------------------------------------------------
 
-  private async dispatch(job: Pick<Job, "id" | "origin" | "dispatch_count">): Promise<boolean> {
-    const n = job.dispatch_count + 1;
-    try {
-      await this.options.dispatcher.dispatch({ v: 1, projectId: this.options.projectId, tenantId: this.options.tenantId, id: job.id, n });
-    } catch {
-      // The sweep tries again; the row stays as it was.
-      return false;
+  /**
+   * Hands a page of jobs to runners: the creates run concurrently (16 at a
+   * time; S4 measured 740 ms p50 per Workflow `create()`), then one statement
+   * records every hand-off that succeeded. A failed create leaves its row for
+   * the next sweep. Returns the ids handed off.
+   */
+  private async dispatchMany(jobs: ReadonlyArray<Pick<Job, "id" | "origin" | "dispatch_count">>): Promise<Set<string>> {
+    const done: Array<{ id: string; origin: string; n: number }> = [];
+    for (let start = 0; start < jobs.length; start += DISPATCH_CONCURRENCY) {
+      await Promise.all(jobs.slice(start, start + DISPATCH_CONCURRENCY).map(async (job) => {
+        const n = job.dispatch_count + 1;
+        try {
+          await this.options.dispatcher.dispatch({ v: 1, projectId: this.options.projectId, tenantId: this.options.tenantId, id: job.id, n });
+          done.push({ id: job.id, origin: job.origin, n });
+        } catch {
+          // The sweep tries again; the row stays as it was.
+        }
+      }));
     }
-    this.stats.dispatches++;
-    this.upsertRun(job.id, job.origin, { dispatched_at: this.clock(), dispatch_count: n });
-    return true;
+    if (done.length) {
+      this.stats.dispatches += done.length;
+      this.exec(
+        `INSERT INTO ${RUNS} (id, origin, dispatched_at, dispatch_count)
+         SELECT json_extract(value, '$.id'), json_extract(value, '$.origin'), ?, json_extract(value, '$.n') FROM json_each(?) WHERE true
+         ON CONFLICT (id) DO UPDATE SET dispatched_at = excluded.dispatched_at, dispatch_count = excluded.dispatch_count`,
+        this.clock(), JSON.stringify(done),
+      );
+    }
+    return new Set(done.map((job) => job.id));
   }
 
   /**
    * After the commit of a Reducer that queued Actions: hands every pending,
-   * due, never-dispatched Action to a runner, then arms the sweep.
+   * due, never-dispatched Action to a runner, then arms the sweep. The tenant
+   * calls it after answering the Reducer (`waitUntil`), so the hand-off adds
+   * nothing to the Reducer's latency.
    */
   async afterCommit(): Promise<void> {
     const now = this.clock();
     let after = "";
     for (;;) {
       const page = this.exec(`${JOB_FROM_OUTBOX} WHERE o.status = 'pending' AND o.action_path <> ? AND o.available_at <= ? AND r.dispatched_at IS NULL AND o.id > ? ORDER BY o.id LIMIT ${PAGE}`, SCHEDULE_OUTBOX_PATH, now, after) as unknown as Job[];
-      for (const job of page) await this.dispatch(job);
+      await this.dispatchMany(page);
       if (page.length < PAGE) break;
       after = page[page.length - 1]!.id;
     }
@@ -253,7 +274,7 @@ export class ActionOutbox {
       id, input.path, JSON.stringify(input.args ?? null), input.session.account.id, input.session.account.email ?? "",
       input.provenance === undefined ? null : JSON.stringify(input.provenance), now, JSON.stringify(input.session),
     );
-    await this.dispatch({ id, origin: "call", dispatch_count: 0 });
+    await this.dispatchMany([{ id, origin: "call", dispatch_count: 0 }]);
     await this.options.wake(now + this.leaseMs);
     return id;
   }
@@ -395,27 +416,29 @@ export class ActionOutbox {
   async sweep(): Promise<number | null> {
     const now = this.clock();
     let next = Infinity;
-    const visit = async (job: Job) => {
-      if (job.path === SCHEDULE_OUTBOX_PATH) return;
+    /** When a job next needs the sweep; `now` means hand it off now. */
+    const dueAt = (job: Job): number => {
       const handedOffRecently = job.dispatched_at !== null && job.dispatched_at + this.leaseMs > now;
-      let due: number;
       if (job.status === "processing") {
         const expiry = this.leaseExpiry(job);
-        due = expiry > now ? expiry : handedOffRecently ? job.dispatched_at! + this.leaseMs : now;
-      } else if (job.available_at > now) {
-        due = job.available_at;
-      } else {
-        due = handedOffRecently ? job.dispatched_at! + this.leaseMs : now;
+        return expiry > now ? expiry : handedOffRecently ? job.dispatched_at! + this.leaseMs : now;
       }
-      if (due > now) { next = Math.min(next, due); return; }
-      next = Math.min(next, (await this.dispatch(job)) ? now + this.leaseMs : now + this.renewMs);
+      if (job.available_at > now) return job.available_at;
+      return handedOffRecently ? job.dispatched_at! + this.leaseMs : now;
     };
-    for (const source of [`${JOB_FROM_OUTBOX} WHERE o.status IN ('pending', 'processing') AND o.id > ? ORDER BY o.id LIMIT ${PAGE}`,
+    for (const source of [`${JOB_FROM_OUTBOX} WHERE o.status IN ('pending', 'processing') AND o.action_path <> '${SCHEDULE_OUTBOX_PATH}' AND o.id > ? ORDER BY o.id LIMIT ${PAGE}`,
       `${JOB_FROM_RUNS} WHERE origin = 'call' AND state = 'live' AND id > ? ORDER BY id LIMIT ${PAGE}`]) {
       let after = "";
       for (;;) {
         const page = this.exec(source, after) as unknown as Job[];
-        for (const job of page) await visit(job);
+        const due: Job[] = [];
+        for (const job of page) {
+          const at = dueAt(job);
+          if (at > now) next = Math.min(next, at);
+          else due.push(job);
+        }
+        const handed = await this.dispatchMany(due);
+        for (const job of due) next = Math.min(next, handed.has(job.id) ? now + this.leaseMs : now + this.renewMs);
         if (page.length < PAGE) break;
         after = page[page.length - 1]!.id;
       }
@@ -459,7 +482,7 @@ export class ActionOutbox {
       this.exec(`UPDATE ${RUNS} SET state = 'live', finished_at = NULL, action_path = NULL, args = NULL, actor_user_id = NULL, actor_email = NULL, provenance = NULL, attempts = 0, last_error = NULL, dispatched_at = NULL WHERE id = ?`, id);
     });
     const job = this.load(id);
-    if (job) await this.dispatch(job);
+    if (job) await this.dispatchMany([job]);
     await this.options.wake(now + this.leaseMs);
     return true;
   }
