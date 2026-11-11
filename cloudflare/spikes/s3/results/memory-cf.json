@@ -1,0 +1,46 @@
+{
+  "tenant": "mem-mwbjwa5w",
+  "steps": [
+    {
+      "sockets": 0,
+      "heap": null,
+      "inst": "c412715d"
+    }
+  ],
+  "probeWithSockets": {
+    "label": "with 0 sockets",
+    "resetAtMB": 112,
+    "lastOkMB": 108,
+    "why": "new instance dc6600cd (ballast 4 MB)"
+  },
+  "socketsAfterReset": {
+    "open": 0,
+    "closes": 0,
+    "codes": []
+  },
+  "objectAfterReset": {
+    "inst": "dc6600cd",
+    "build": "a",
+    "wakes": 2,
+    "bootAt": 1794367198036,
+    "now": 1794367203249,
+    "sockets": 0,
+    "rebuiltSockets": 0,
+    "rebuildCount": 1,
+    "ballastMB": 4,
+    "classes": {},
+    "auto": {
+      "count": 0,
+      "missing": 0,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  },
+  "probeEmpty": {
+    "label": "0 sockets",
+    "resetAtMB": 128,
+    "lastOkMB": 128,
+    "why": "new instance bf4f90bf (ballast 4 MB)"
+  }
+}

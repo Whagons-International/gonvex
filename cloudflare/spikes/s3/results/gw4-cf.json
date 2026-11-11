@@ -1,0 +1,640 @@
+{
+  "label": "gw4",
+  "tenant": "fan-mwbir127",
+  "count": 1000,
+  "deflate": false,
+  "gateways": 4,
+  "startedAt": "2026-11-11T02:47:46.975Z",
+  "localBefore": null,
+  "open": {
+    "wallMs": 4185,
+    "ok": 1000,
+    "failed": [],
+    "retried": 0,
+    "retryErrors": [],
+    "connectP50": 360,
+    "connectP99": 833,
+    "extensions": [
+      ""
+    ]
+  },
+  "localAfterOpen": null,
+  "stats": {
+    "inst": "fec3a18a",
+    "build": "a",
+    "wakes": 1,
+    "bootAt": 1794365267570,
+    "now": 1794365272342,
+    "sockets": 1,
+    "rebuiltSockets": 0,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  },
+  "singles": {
+    "perCommit": [
+      {
+        "seq": 1,
+        "ackMs": 354,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          87,
+          58,
+          71,
+          84
+        ],
+        "bytes": 2297,
+        "delivered": 1000,
+        "firstMs": 70,
+        "lastMs": 710
+      },
+      {
+        "seq": 2,
+        "ackMs": 143,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          87,
+          80,
+          102,
+          120
+        ],
+        "bytes": 2313,
+        "delivered": 1000,
+        "firstMs": 90,
+        "lastMs": 759
+      },
+      {
+        "seq": 3,
+        "ackMs": 105,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          89,
+          66,
+          62,
+          89
+        ],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 69,
+        "lastMs": 213
+      },
+      {
+        "seq": 4,
+        "ackMs": 129,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          84,
+          73,
+          70,
+          110
+        ],
+        "bytes": 2300,
+        "delivered": 1000,
+        "firstMs": 75,
+        "lastMs": 170
+      },
+      {
+        "seq": 5,
+        "ackMs": 110,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          76,
+          56,
+          78,
+          89
+        ],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 65,
+        "lastMs": 144
+      },
+      {
+        "seq": 6,
+        "ackMs": 150,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          79,
+          64,
+          66,
+          131
+        ],
+        "bytes": 2300,
+        "delivered": 1000,
+        "firstMs": 69,
+        "lastMs": 336
+      },
+      {
+        "seq": 7,
+        "ackMs": 127,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          79,
+          59,
+          70,
+          111
+        ],
+        "bytes": 2330,
+        "delivered": 1000,
+        "firstMs": 66,
+        "lastMs": 144
+      },
+      {
+        "seq": 8,
+        "ackMs": 135,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          106,
+          61,
+          68,
+          113
+        ],
+        "bytes": 2321,
+        "delivered": 1000,
+        "firstMs": 71,
+        "lastMs": 187
+      },
+      {
+        "seq": 9,
+        "ackMs": 123,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          71,
+          57,
+          74,
+          100
+        ],
+        "bytes": 2273,
+        "delivered": 1000,
+        "firstMs": 65,
+        "lastMs": 221
+      },
+      {
+        "seq": 10,
+        "ackMs": 163,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          75,
+          61,
+          66,
+          148
+        ],
+        "bytes": 2304,
+        "delivered": 1000,
+        "firstMs": 61,
+        "lastMs": 177
+      },
+      {
+        "seq": 11,
+        "ackMs": 144,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          105,
+          61,
+          74,
+          125
+        ],
+        "bytes": 2311,
+        "delivered": 1000,
+        "firstMs": 69,
+        "lastMs": 290
+      },
+      {
+        "seq": 12,
+        "ackMs": 120,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          81,
+          64,
+          71,
+          97
+        ],
+        "bytes": 2310,
+        "delivered": 1000,
+        "firstMs": 71,
+        "lastMs": 310
+      },
+      {
+        "seq": 13,
+        "ackMs": 160,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          82,
+          66,
+          66,
+          143
+        ],
+        "bytes": 2310,
+        "delivered": 1000,
+        "firstMs": 71,
+        "lastMs": 832
+      },
+      {
+        "seq": 14,
+        "ackMs": 223,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          77,
+          82,
+          105,
+          201
+        ],
+        "bytes": 2325,
+        "delivered": 1000,
+        "firstMs": 83,
+        "lastMs": 311
+      },
+      {
+        "seq": 15,
+        "ackMs": 145,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          96,
+          64,
+          75,
+          127
+        ],
+        "bytes": 2306,
+        "delivered": 1000,
+        "firstMs": 68,
+        "lastMs": 233
+      },
+      {
+        "seq": 16,
+        "ackMs": 117,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          84,
+          74,
+          70,
+          96
+        ],
+        "bytes": 2306,
+        "delivered": 1000,
+        "firstMs": 79,
+        "lastMs": 133
+      },
+      {
+        "seq": 17,
+        "ackMs": 196,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          70,
+          87,
+          69,
+          173
+        ],
+        "bytes": 2289,
+        "delivered": 1000,
+        "firstMs": 77,
+        "lastMs": 239
+      },
+      {
+        "seq": 18,
+        "ackMs": 147,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          82,
+          61,
+          68,
+          120
+        ],
+        "bytes": 2252,
+        "delivered": 1000,
+        "firstMs": 72,
+        "lastMs": 358
+      },
+      {
+        "seq": 19,
+        "ackMs": 121,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          71,
+          66,
+          73,
+          103
+        ],
+        "bytes": 2280,
+        "delivered": 1000,
+        "firstMs": 70,
+        "lastMs": 152
+      },
+      {
+        "seq": 20,
+        "ackMs": 144,
+        "sent": 0,
+        "gwSent": 1000,
+        "hop": [
+          86,
+          57,
+          66,
+          127
+        ],
+        "bytes": 2311,
+        "delivered": 1000,
+        "firstMs": 65,
+        "lastMs": 178
+      }
+    ],
+    "latency": {
+      "n": 20000,
+      "p50": 91,
+      "p90": 148,
+      "p99": 603,
+      "max": 832
+    },
+    "ackMs": 144,
+    "lastDeliveryP50": 233,
+    "lastDeliveryMax": 832,
+    "hopMsAll": [
+      56,
+      57,
+      57,
+      58,
+      59,
+      61,
+      61,
+      61,
+      61,
+      62,
+      64,
+      64,
+      64,
+      66,
+      66,
+      66,
+      66,
+      66,
+      66,
+      66,
+      68,
+      68,
+      69,
+      70,
+      70,
+      70,
+      70,
+      71,
+      71,
+      71,
+      71,
+      73,
+      73,
+      74,
+      74,
+      74,
+      75,
+      75,
+      76,
+      77,
+      78,
+      79,
+      79,
+      80,
+      81,
+      82,
+      82,
+      82,
+      84,
+      84,
+      84,
+      86,
+      87,
+      87,
+      87,
+      89,
+      89,
+      89,
+      96,
+      96,
+      97,
+      100,
+      102,
+      103,
+      105,
+      105,
+      106,
+      110,
+      111,
+      113,
+      120,
+      120,
+      125,
+      127,
+      127,
+      131,
+      143,
+      148,
+      173,
+      201
+    ]
+  },
+  "echoRtt": {
+    "p50": 17,
+    "min": 14,
+    "max": 23
+  },
+  "bursts": [
+    {
+      "rate": 10,
+      "seconds": 20,
+      "size": 2048,
+      "writesSent": 200,
+      "sendMs": 19901,
+      "acks": 200,
+      "drainMs": 501,
+      "achievedWritesPerSec": 9.8,
+      "ackP50": 147,
+      "ackP99": 349,
+      "ackMax": 370,
+      "hopP50": 78,
+      "hopP99": 240,
+      "framesReceived": 200000,
+      "framesExpected": 200000,
+      "latency": {
+        "n": 200000,
+        "p50": 90,
+        "p90": 126,
+        "p99": 254,
+        "max": 831
+      },
+      "bytesReadDelta": 376914375,
+      "bytesPerFrame": 1885,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T02:48:20.833Z",
+      "writerClosed": null,
+      "objectAfter": {
+        "inst": "fec3a18a",
+        "build": "a",
+        "wakes": 1,
+        "bootAt": 1794365267570,
+        "now": 1794365323369,
+        "sockets": 1,
+        "rebuiltSockets": 0,
+        "rebuildCount": 1,
+        "ballastMB": 0,
+        "classes": {
+          "-1": 1
+        },
+        "auto": {
+          "count": 0,
+          "missing": 1,
+          "minAge": null,
+          "medianAge": null,
+          "maxAge": null
+        }
+      }
+    },
+    {
+      "rate": 20,
+      "seconds": 20,
+      "size": 2048,
+      "writesSent": 400,
+      "sendMs": 19950,
+      "acks": 400,
+      "drainMs": 250,
+      "achievedWritesPerSec": 19.8,
+      "ackP50": 350,
+      "ackP99": 1382,
+      "ackMax": 1503,
+      "hopP50": 97,
+      "hopP99": 1202,
+      "framesReceived": 400000,
+      "framesExpected": 400000,
+      "latency": {
+        "n": 400000,
+        "p50": 106,
+        "p90": 389,
+        "p99": 1197,
+        "max": 1637
+      },
+      "bytesReadDelta": 753733125,
+      "bytesPerFrame": 1884,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T02:48:46.392Z",
+      "writerClosed": null,
+      "objectAfter": {
+        "inst": "fec3a18a",
+        "build": "a",
+        "wakes": 1,
+        "bootAt": 1794365267570,
+        "now": 1794365348709,
+        "sockets": 1,
+        "rebuiltSockets": 0,
+        "rebuildCount": 1,
+        "ballastMB": 0,
+        "classes": {
+          "-1": 1
+        },
+        "auto": {
+          "count": 0,
+          "missing": 1,
+          "minAge": null,
+          "medianAge": null,
+          "maxAge": null
+        }
+      }
+    },
+    {
+      "rate": 30,
+      "seconds": 60,
+      "size": 2048,
+      "writesSent": 1800,
+      "sendMs": 59967,
+      "acks": 1391,
+      "drainMs": 30044,
+      "achievedWritesPerSec": 15.5,
+      "ackP50": 11692,
+      "ackP99": 16294,
+      "ackMax": 16548,
+      "hopP50": 404,
+      "hopP99": 16010,
+      "framesReceived": 1664250,
+      "framesExpected": 1800000,
+      "latency": {
+        "n": 1664250,
+        "p50": 379,
+        "p90": 12276,
+        "p99": 15957,
+        "max": 16687
+      },
+      "bytesReadDelta": 3177190250,
+      "bytesPerFrame": 1909,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T02:49:11.740Z",
+      "writerClosed": null,
+      "objectAfter": {
+        "inst": "8c9cfc3f",
+        "build": "a",
+        "wakes": 2,
+        "bootAt": 1794365443870,
+        "now": 1794365443870,
+        "sockets": 1,
+        "rebuiltSockets": 1,
+        "rebuildCount": 1,
+        "ballastMB": 0,
+        "classes": {
+          "-1": 1
+        },
+        "auto": {
+          "count": 0,
+          "missing": 1,
+          "minAge": null,
+          "medianAge": null,
+          "maxAge": null
+        }
+      }
+    }
+  ],
+  "final": {
+    "inst": "8c9cfc3f",
+    "build": "a",
+    "wakes": 2,
+    "bootAt": 1794365443870,
+    "now": 1794365443949,
+    "sockets": 1,
+    "rebuiltSockets": 1,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  }
+}

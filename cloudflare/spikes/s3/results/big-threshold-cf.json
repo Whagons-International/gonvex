@@ -1,0 +1,102 @@
+{
+  "inbound": [
+    {
+      "bytes": 33553664,
+      "sub": 768,
+      "result": "message",
+      "len": 45,
+      "ms": 1974
+    },
+    {
+      "bytes": 33553920,
+      "sub": 512,
+      "result": "message",
+      "len": 45,
+      "ms": 1561
+    },
+    {
+      "bytes": 33554176,
+      "sub": 256,
+      "result": "message",
+      "len": 45,
+      "ms": 1500
+    },
+    {
+      "bytes": 33554304,
+      "sub": 128,
+      "result": "message",
+      "len": 45,
+      "ms": 1511
+    },
+    {
+      "bytes": 33554368,
+      "sub": 64,
+      "result": "timeout",
+      "ms": 20005
+    },
+    {
+      "bytes": 33554400,
+      "sub": 32,
+      "result": "closed",
+      "code": 1006,
+      "reason": "",
+      "ms": 1418
+    }
+  ],
+  "outbound": [
+    {
+      "bytes": 4194304,
+      "admin": {
+        "sent": 4194304
+      },
+      "result": "message",
+      "len": 4194304,
+      "ms": 630
+    },
+    {
+      "bytes": 8388608,
+      "admin": {
+        "sent": 8388608
+      },
+      "result": "message",
+      "len": 8388608,
+      "ms": 389
+    },
+    {
+      "bytes": 16777216,
+      "admin": {
+        "sent": 16777216
+      },
+      "result": "message",
+      "len": 16777216,
+      "ms": 572
+    },
+    {
+      "bytes": 25165824,
+      "admin": {
+        "sent": 25165824
+      },
+      "result": "message",
+      "len": 25165824,
+      "ms": 802
+    },
+    {
+      "bytes": 32505856,
+      "admin": {
+        "sent": 32505856
+      },
+      "result": "message",
+      "len": 32505856,
+      "ms": 890
+    },
+    {
+      "bytes": 33553408,
+      "admin": {
+        "sent": 33553408
+      },
+      "result": "message",
+      "len": 33553408,
+      "ms": 1103
+    }
+  ]
+}

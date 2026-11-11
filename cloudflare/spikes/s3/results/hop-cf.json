@@ -1,0 +1,69 @@
+{
+  "tenantColo": "SJC",
+  "tenantCreated": {
+    "tenantColo": "SJC",
+    "hops": [
+      {
+        "name": "hop-mwbizpiv/gw0",
+        "colo": "SJC",
+        "min": 5,
+        "p50": 7,
+        "max": 293
+      },
+      {
+        "name": "hop-mwbizpiv/gw1",
+        "colo": "SJC",
+        "min": 4,
+        "p50": 6,
+        "max": 306
+      },
+      {
+        "name": "hop-mwbizpiv/gw2",
+        "colo": "LAX",
+        "min": 14,
+        "p50": 16,
+        "max": 333
+      },
+      {
+        "name": "hop-mwbizpiv/gw3",
+        "colo": "SJC",
+        "min": 5,
+        "p50": 8,
+        "max": 238
+      }
+    ]
+  },
+  "edgeCreated": {
+    "tenantColo": "LAX",
+    "hops": [
+      {
+        "name": "hop-mwbizpivb/gw0",
+        "colo": "LAX",
+        "min": 5,
+        "p50": 9,
+        "max": 113
+      },
+      {
+        "name": "hop-mwbizpivb/gw1",
+        "colo": "LAX",
+        "min": 10,
+        "p50": 17,
+        "max": 109
+      },
+      {
+        "name": "hop-mwbizpivb/gw2",
+        "colo": "SJC",
+        "min": 13,
+        "p50": 15,
+        "max": 62
+      },
+      {
+        "name": "hop-mwbizpivb/gw3",
+        "colo": "SJC",
+        "min": 16,
+        "p50": 20,
+        "max": 44
+      }
+    ]
+  }
+}

@@ -1,0 +1,655 @@
+{
+  "label": "deflate",
+  "tenant": "fan-mwbjwxew",
+  "count": 1000,
+  "deflate": true,
+  "gateways": 0,
+  "startedAt": "2026-11-11T03:20:21.800Z",
+  "localBefore": null,
+  "open": {
+    "wallMs": 31502,
+    "ok": 1000,
+    "failed": [],
+    "retried": 3,
+    "retryErrors": [
+      "Opening handshake has timed out"
+    ],
+    "connectP50": 338,
+    "connectP99": 594,
+    "extensions": [
+      "permessage-deflate"
+    ]
+  },
+  "localAfterOpen": null,
+  "stats": {
+    "inst": "5758b84b",
+    "build": "a",
+    "wakes": 2,
+    "bootAt": 1794367253224,
+    "now": 1794367254510,
+    "sockets": 1001,
+    "rebuiltSockets": 997,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 125,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125,
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1001,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  },
+  "colos": {
+    "tenant": "SJC",
+    "gateways": []
+  },
+  "singles": {
+    "perCommit": [
+      {
+        "seq": 1,
+        "ackMs": 192,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2297,
+        "delivered": 1000,
+        "firstMs": 85,
+        "lastMs": 252
+      },
+      {
+        "seq": 2,
+        "ackMs": 149,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2313,
+        "delivered": 1000,
+        "firstMs": 117,
+        "lastMs": 289
+      },
+      {
+        "seq": 3,
+        "ackMs": 139,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 121,
+        "lastMs": 257
+      },
+      {
+        "seq": 4,
+        "ackMs": 139,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2300,
+        "delivered": 1000,
+        "firstMs": 111,
+        "lastMs": 369
+      },
+      {
+        "seq": 5,
+        "ackMs": 98,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 79,
+        "lastMs": 139
+      },
+      {
+        "seq": 6,
+        "ackMs": 141,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2300,
+        "delivered": 1000,
+        "firstMs": 119,
+        "lastMs": 180
+      },
+      {
+        "seq": 7,
+        "ackMs": 102,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2330,
+        "delivered": 1000,
+        "firstMs": 78,
+        "lastMs": 134
+      },
+      {
+        "seq": 8,
+        "ackMs": 92,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2321,
+        "delivered": 1000,
+        "firstMs": 77,
+        "lastMs": 331
+      },
+      {
+        "seq": 9,
+        "ackMs": 119,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2273,
+        "delivered": 1000,
+        "firstMs": 102,
+        "lastMs": 250
+      },
+      {
+        "seq": 10,
+        "ackMs": 101,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2304,
+        "delivered": 1000,
+        "firstMs": 80,
+        "lastMs": 124
+      },
+      {
+        "seq": 11,
+        "ackMs": 138,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2311,
+        "delivered": 1000,
+        "firstMs": 122,
+        "lastMs": 257
+      },
+      {
+        "seq": 12,
+        "ackMs": 113,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2310,
+        "delivered": 1000,
+        "firstMs": 97,
+        "lastMs": 172
+      },
+      {
+        "seq": 13,
+        "ackMs": 117,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2310,
+        "delivered": 1000,
+        "firstMs": 89,
+        "lastMs": 430
+      },
+      {
+        "seq": 14,
+        "ackMs": 112,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2325,
+        "delivered": 1000,
+        "firstMs": 91,
+        "lastMs": 144
+      },
+      {
+        "seq": 15,
+        "ackMs": 132,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2306,
+        "delivered": 1000,
+        "firstMs": 96,
+        "lastMs": 158
+      },
+      {
+        "seq": 16,
+        "ackMs": 118,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2306,
+        "delivered": 1000,
+        "firstMs": 101,
+        "lastMs": 184
+      },
+      {
+        "seq": 17,
+        "ackMs": 115,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2289,
+        "delivered": 1000,
+        "firstMs": 77,
+        "lastMs": 148
+      },
+      {
+        "seq": 18,
+        "ackMs": 139,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2252,
+        "delivered": 1000,
+        "firstMs": 87,
+        "lastMs": 142
+      },
+      {
+        "seq": 19,
+        "ackMs": 88,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2280,
+        "delivered": 1000,
+        "firstMs": 73,
+        "lastMs": 127
+      },
+      {
+        "seq": 20,
+        "ackMs": 89,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2311,
+        "delivered": 1000,
+        "firstMs": 71,
+        "lastMs": 141
+      }
+    ],
+    "latency": {
+      "n": 20000,
+      "p50": 110,
+      "p90": 154,
+      "p99": 228,
+      "max": 430
+    },
+    "ackMs": 118,
+    "lastDeliveryP50": 180,
+    "lastDeliveryMax": 430,
+    "hopMsAll": []
+  },
+  "echoRtt": {
+    "p50": 34,
+    "min": 19,
+    "max": 265
+  },
+  "probes": [
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 309,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 259,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 271,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 254,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 340,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 248,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 359,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 234,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 305,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 43,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 41,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 120,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "5758b84b",
+      "localCpuMs": null
+    },
+    {
+      "op": "touch",
+      "reps": 1,
+      "ms": 53,
+      "touched": 1000,
+      "localCpuMs": null
+    },
+    {
+      "op": "rebuild",
+      "reps": 10,
+      "ms": 101,
+      "rebuilt": 1000,
+      "localCpuMs": null
+    },
+    {
+      "op": "touch",
+      "reps": 10,
+      "ms": 77,
+      "touched": 10000,
+      "localCpuMs": null
+    },
+    {
+      "op": "rebuild",
+      "reps": 100,
+      "ms": 293,
+      "rebuilt": 1000,
+      "localCpuMs": null
+    }
+  ],
+  "bursts": [
+    {
+      "rate": 5,
+      "seconds": 20,
+      "size": 2048,
+      "writesSent": 100,
+      "sendMs": 19800,
+      "acks": 100,
+      "drainMs": 249,
+      "achievedWritesPerSec": 5,
+      "ackP50": 111,
+      "ackP99": 176,
+      "ackMax": 176,
+      "hopP50": null,
+      "hopP99": null,
+      "framesReceived": 99900,
+      "framesExpected": 100000,
+      "latency": {
+        "n": 99900,
+        "p50": 102,
+        "p90": 134,
+        "p99": 163,
+        "max": 478
+      },
+      "bytesReadDelta": 42336636,
+      "bytesPerFrame": 424,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T03:21:47.470Z",
+      "writerClosed": null,
+      "objectAfter": {
+        "inst": "5758b84b",
+        "build": "a",
+        "wakes": 2,
+        "bootAt": 1794367253224,
+        "now": 1794367329581,
+        "sockets": 1000,
+        "rebuiltSockets": 997,
+        "rebuildCount": 111,
+        "ballastMB": 0,
+        "classes": {
+          "0": 125,
+          "1": 125,
+          "2": 125,
+          "3": 124,
+          "4": 125,
+          "5": 125,
+          "6": 125,
+          "7": 125,
+          "-1": 1
+        },
+        "auto": {
+          "count": 0,
+          "missing": 1000,
+          "minAge": null,
+          "medianAge": null,
+          "maxAge": null
+        }
+      }
+    },
+    {
+      "rate": 10,
+      "seconds": 20,
+      "size": 2048,
+      "writesSent": 200,
+      "sendMs": 19900,
+      "acks": 200,
+      "drainMs": 249,
+      "achievedWritesPerSec": 9.9,
+      "ackP50": 132,
+      "ackP99": 537,
+      "ackMax": 571,
+      "hopP50": null,
+      "hopP99": null,
+      "framesReceived": 199800,
+      "framesExpected": 200000,
+      "latency": {
+        "n": 199800,
+        "p50": 121,
+        "p90": 215,
+        "p99": 476,
+        "max": 607
+      },
+      "bytesReadDelta": 84712849,
+      "bytesPerFrame": 424,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T03:22:12.613Z",
+      "writerClosed": null,
+      "objectAfter": {
+        "inst": "5758b84b",
+        "build": "a",
+        "wakes": 2,
+        "bootAt": 1794367253224,
+        "now": 1794367354821,
+        "sockets": 1000,
+        "rebuiltSockets": 997,
+        "rebuildCount": 111,
+        "ballastMB": 0,
+        "classes": {
+          "0": 125,
+          "1": 125,
+          "2": 125,
+          "3": 124,
+          "4": 125,
+          "5": 125,
+          "6": 125,
+          "7": 125,
+          "-1": 1
+        },
+        "auto": {
+          "count": 0,
+          "missing": 1000,
+          "minAge": null,
+          "medianAge": null,
+          "maxAge": null
+        }
+      }
+    },
+    {
+      "rate": 15,
+      "seconds": 20,
+      "size": 2048,
+      "writesSent": 300,
+      "sendMs": 19933,
+      "acks": 300,
+      "drainMs": 1252,
+      "achievedWritesPerSec": 14.2,
+      "ackP50": 522,
+      "ackP99": 1497,
+      "ackMax": 1546,
+      "hopP50": null,
+      "hopP99": null,
+      "framesReceived": 299700,
+      "framesExpected": 300000,
+      "latency": {
+        "n": 299700,
+        "p50": 495,
+        "p90": 979,
+        "p99": 1449,
+        "max": 1874
+      },
+      "bytesReadDelta": 127116931,
+      "bytesPerFrame": 424,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T03:22:37.877Z",
+      "writerClosed": null,
+      "objectAfter": {
+        "inst": "5758b84b",
+        "build": "a",
+        "wakes": 2,
+        "bootAt": 1794367253224,
+        "now": 1794367381118,
+        "sockets": 1000,
+        "rebuiltSockets": 997,
+        "rebuildCount": 111,
+        "ballastMB": 0,
+        "classes": {
+          "0": 125,
+          "1": 125,
+          "2": 125,
+          "3": 124,
+          "4": 125,
+          "5": 125,
+          "6": 125,
+          "7": 125,
+          "-1": 1
+        },
+        "auto": {
+          "count": 0,
+          "missing": 1000,
+          "minAge": null,
+          "medianAge": null,
+          "maxAge": null
+        }
+      }
+    }
+  ],
+  "final": {
+    "inst": "5758b84b",
+    "build": "a",
+    "wakes": 2,
+    "bootAt": 1794367253224,
+    "now": 1794367381164,
+    "sockets": 1000,
+    "rebuiltSockets": 997,
+    "rebuildCount": 111,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 124,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125,
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1000,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  }
+}

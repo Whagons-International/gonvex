@@ -1,0 +1,591 @@
+{
+  "tenant": "dep-mwbk0qtf",
+  "count": 1000,
+  "steps": [
+    {
+      "name": "A",
+      "mode": "default (deferred 300 s)",
+      "active": false,
+      "deploy": {
+        "code": 0,
+        "t0": 1794367464192,
+        "t1": 1794367468790,
+        "ms": 4598,
+        "version": "60b34d8d-faf8-499d-b6f8-5fde8f24c29e"
+      },
+      "before": {
+        "build": "a",
+        "inst": "e649b676",
+        "sockets": 1001,
+        "wakes": 2,
+        "rtt": 29
+      },
+      "after": {
+        "build": "b",
+        "inst": "d1afb73a",
+        "sockets": 1001,
+        "wakes": 3,
+        "rtt": 28
+      },
+      "closes": 0,
+      "closeCodes": {},
+      "firstCloseAfterDeployMs": null,
+      "lastCloseAfterDeployMs": null,
+      "reconnected": 0,
+      "reconnectFailures": 0,
+      "allBackAfterFirstCloseMs": null,
+      "reconnectMsP50": null,
+      "reconnectMsP99": null,
+      "openAtEnd": 1000,
+      "samples": [
+        {
+          "t": 2,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 4,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 6,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 8,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 10,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 12,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 14,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 16,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 18,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 20,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 22,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 24,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 26,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 28,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 30,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 32,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 34,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 36,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 38,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 40,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 42,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 44,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 46,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 48,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 50,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 52,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 54,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 56,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 58,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 60,
+          "open": 1000,
+          "closes": 0
+        }
+      ]
+    },
+    {
+      "name": "B",
+      "mode": "deferred 30s",
+      "active": true,
+      "deploy": {
+        "code": 0,
+        "t0": 1794367534509,
+        "t1": 1794367538323,
+        "ms": 3814,
+        "version": "38e60e1d-55db-4468-9a04-c7ed4c2a7085"
+      },
+      "before": {
+        "build": "b",
+        "inst": "d1afb73a",
+        "sockets": 1002,
+        "wakes": 3,
+        "rtt": 65
+      },
+      "after": {
+        "build": "c",
+        "inst": "bd90fc36",
+        "sockets": 1001,
+        "wakes": 5,
+        "rtt": 36
+      },
+      "closes": 1000,
+      "closeCodes": {
+        "1006 ": 1000
+      },
+      "firstCloseAfterDeployMs": 29883,
+      "lastCloseAfterDeployMs": 30026,
+      "reconnected": 1000,
+      "reconnectFailures": 0,
+      "allBackAfterFirstCloseMs": 5998,
+      "reconnectMsP50": 3181,
+      "reconnectMsP99": 5292,
+      "openAtEnd": 1000,
+      "samples": [
+        {
+          "t": 2,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 4,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 6,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 8,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 10,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 12,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 14,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 16,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 18,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 20,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 22,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 24,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 26,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 28,
+          "open": 1000,
+          "closes": 0
+        },
+        {
+          "t": 30,
+          "open": 2,
+          "closes": 998
+        },
+        {
+          "t": 32,
+          "open": 191,
+          "closes": 1000
+        },
+        {
+          "t": 34,
+          "open": 543,
+          "closes": 1000
+        },
+        {
+          "t": 36,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 38,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 40,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 42,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 44,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 46,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 48,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 50,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 52,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 54,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 56,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 58,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 60,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 62,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 64,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 66,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 68,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 70,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 72,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 74,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 76,
+          "open": 1000,
+          "closes": 1000
+        }
+      ]
+    },
+    {
+      "name": "C",
+      "mode": "immediate",
+      "active": true,
+      "deploy": {
+        "code": 0,
+        "t0": 1794367620067,
+        "t1": 1794367625208,
+        "ms": 5141,
+        "version": "b09719e0-89b0-49f4-aded-ff26bf444aed"
+      },
+      "before": {
+        "build": "c",
+        "inst": "bd90fc36",
+        "sockets": 1002,
+        "wakes": 5,
+        "rtt": 31
+      },
+      "after": {
+        "build": "d",
+        "inst": "f7195951",
+        "sockets": 1001,
+        "wakes": 7,
+        "rtt": 31
+      },
+      "closes": 1000,
+      "closeCodes": {
+        "1006 ": 1000
+      },
+      "firstCloseAfterDeployMs": -584,
+      "lastCloseAfterDeployMs": -437,
+      "reconnected": 1000,
+      "reconnectFailures": 0,
+      "allBackAfterFirstCloseMs": 4143,
+      "reconnectMsP50": 2351,
+      "reconnectMsP99": 3146,
+      "openAtEnd": 1000,
+      "samples": [
+        {
+          "t": 2,
+          "open": 364,
+          "closes": 1000
+        },
+        {
+          "t": 4,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 6,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 8,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 10,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 12,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 14,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 16,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 18,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 20,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 22,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 24,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 26,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 28,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 30,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 32,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 34,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 36,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 38,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 40,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 42,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 44,
+          "open": 1000,
+          "closes": 1000
+        },
+        {
+          "t": 46,
+          "open": 1000,
+          "closes": 1000
+        }
+      ]
+    }
+  ],
+  "open": {
+    "wallMs": 4088,
+    "ok": 1000,
+    "failed": [],
+    "retried": 0,
+    "retryErrors": [],
+    "connectP50": 351,
+    "connectP99": 651,
+    "extensions": [
+      ""
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "tenant": "mem-mwbho9pl",
+  "steps": [
+    {
+      "sockets": 0,
+      "heap": null,
+      "inst": "cd593add"
+    },
+    {
+      "sockets": 250,
+      "heap": {
+        "usedMB": 2.6,
+        "totalMB": 6,
+        "embedderMB": 0.86,
+        "backingMB": 0.26
+      },
+      "inst": "cd593add"
+    },
+    {
+      "sockets": 500,
+      "heap": {
+        "usedMB": 3.72,
+        "totalMB": 7,
+        "embedderMB": 1.48,
+        "backingMB": 0.26
+      },
+      "inst": "cd593add"
+    },
+    {
+      "sockets": 1000,
+      "heap": {
+        "usedMB": 5.79,
+        "totalMB": 10.75,
+        "embedderMB": 2.71,
+        "backingMB": 0.26
+      },
+      "inst": "cd593add"
+    }
+  ]
+}

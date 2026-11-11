@@ -1,0 +1,298 @@
+{
+  "label": "small",
+  "tenant": "fan-mwbiml9h",
+  "count": 1000,
+  "deflate": false,
+  "gateways": 0,
+  "startedAt": "2026-11-11T02:44:19.877Z",
+  "localBefore": null,
+  "open": {
+    "wallMs": 4446,
+    "ok": 1000,
+    "failed": [],
+    "retried": 0,
+    "retryErrors": [],
+    "connectP50": 365,
+    "connectP99": 509,
+    "extensions": [
+      ""
+    ]
+  },
+  "localAfterOpen": null,
+  "stats": {
+    "inst": "5dd9e24c",
+    "build": "a",
+    "wakes": 1,
+    "bootAt": 1794365060282,
+    "now": 1794365065474,
+    "sockets": 1001,
+    "rebuiltSockets": 0,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 125,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125,
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1001,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  },
+  "singles": {
+    "perCommit": [
+      {
+        "seq": 1,
+        "ackMs": 307,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2297,
+        "delivered": 1000,
+        "firstMs": 152,
+        "lastMs": 970
+      },
+      {
+        "seq": 2,
+        "ackMs": 135,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2313,
+        "delivered": 1000,
+        "firstMs": 103,
+        "lastMs": 1030
+      },
+      {
+        "seq": 3,
+        "ackMs": 176,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 127,
+        "lastMs": 206
+      }
+    ],
+    "latency": {
+      "n": 3000,
+      "p50": 167,
+      "p90": 537,
+      "p99": 658,
+      "max": 1030
+    },
+    "ackMs": 176,
+    "lastDeliveryP50": 970,
+    "lastDeliveryMax": 1030,
+    "hopMsAll": []
+  },
+  "echoRtt": {
+    "p50": 28,
+    "min": 24,
+    "max": 32
+  },
+  "bursts": [
+    {
+      "rate": 10,
+      "seconds": 20,
+      "size": 256,
+      "writesSent": 200,
+      "sendMs": 19901,
+      "acks": 200,
+      "drainMs": 1251,
+      "achievedWritesPerSec": 9.5,
+      "ackP50": 966,
+      "ackP99": 3051,
+      "ackMax": 3060,
+      "hopP50": null,
+      "hopP99": null,
+      "framesReceived": 200000,
+      "framesExpected": 200000,
+      "latency": {
+        "n": 200000,
+        "p50": 914,
+        "p90": 2430,
+        "p99": 2983,
+        "max": 3296
+      },
+      "bytesReadDelta": 87807500,
+      "bytesPerFrame": 439,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T02:44:34.781Z",
+      "writerClosed": null,
+      "objectAfter": {
+        "inst": "5dd9e24c",
+        "build": "a",
+        "wakes": 1,
+        "bootAt": 1794365060282,
+        "now": 1794365097989,
+        "sockets": 1001,
+        "rebuiltSockets": 0,
+        "rebuildCount": 1,
+        "ballastMB": 0,
+        "classes": {
+          "0": 125,
+          "1": 125,
+          "2": 125,
+          "3": 125,
+          "4": 125,
+          "5": 125,
+          "6": 125,
+          "7": 125,
+          "-1": 1
+        },
+        "auto": {
+          "count": 0,
+          "missing": 1001,
+          "minAge": null,
+          "medianAge": null,
+          "maxAge": null
+        }
+      }
+    },
+    {
+      "rate": 20,
+      "seconds": 20,
+      "size": 256,
+      "writesSent": 400,
+      "sendMs": 19957,
+      "acks": 400,
+      "drainMs": 10783,
+      "achievedWritesPerSec": 13,
+      "ackP50": 14382,
+      "ackP99": 17098,
+      "ackMax": 17184,
+      "hopP50": null,
+      "hopP99": null,
+      "framesReceived": 400000,
+      "framesExpected": 400000,
+      "latency": {
+        "n": 400000,
+        "p50": 14341,
+        "p90": 16479,
+        "p99": 17063,
+        "max": 22426
+      },
+      "bytesReadDelta": 175607000,
+      "bytesPerFrame": 439,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T02:45:01.038Z",
+      "writerClosed": null,
+      "objectAfter": "Cloudflare HTML error page 1101: Worker threw exception"
+    },
+    {
+      "rate": 30,
+      "seconds": 20,
+      "size": 256,
+      "writesSent": 600,
+      "sendMs": 19967,
+      "acks": 600,
+      "drainMs": 23549,
+      "achievedWritesPerSec": 13.8,
+      "ackP50": 21020,
+      "ackP99": 23276,
+      "ackMax": 23358,
+      "hopP50": null,
+      "hopP99": null,
+      "framesReceived": 600000,
+      "framesExpected": 600000,
+      "latency": {
+        "n": 600000,
+        "p50": 20998,
+        "p90": 22933,
+        "p99": 23256,
+        "max": 30000
+      },
+      "bytesReadDelta": 264610000,
+      "bytesPerFrame": 441,
+      "closes": 0,
+      "localCpuMs": null,
+      "at": "2026-11-11T02:45:38.458Z",
+      "writerClosed": null,
+      "objectAfter": "Cloudflare HTML error page 1101: Worker threw exception"
+    },
+    {
+      "rate": 60,
+      "seconds": 20,
+      "size": 256,
+      "writesSent": 1200,
+      "sendMs": 19983,
+      "acks": 0,
+      "drainMs": 30084,
+      "achievedWritesPerSec": 0,
+      "ackP50": null,
+      "ackP99": null,
+      "hopP50": null,
+      "hopP99": null,
+      "framesReceived": 0,
+      "framesExpected": 1200000,
+      "latency": {
+        "n": 0,
+        "p50": null,
+        "p90": null,
+        "p99": null,
+        "max": null
+      },
+      "bytesReadDelta": 0,
+      "bytesPerFrame": 0,
+      "closes": 1000,
+      "localCpuMs": null,
+      "at": "2026-11-11T02:46:28.907Z",
+      "writerClosed": {
+        "code": 1013,
+        "reason": "Service overloaded; retry later.",
+        "at": 1794365188941
+      },
+      "objectAfter": {
+        "inst": "8c0b604d",
+        "build": "a",
+        "wakes": 3,
+        "bootAt": 1794365241236,
+        "now": 1794365241236,
+        "sockets": 0,
+        "rebuiltSockets": 0,
+        "rebuildCount": 1,
+        "ballastMB": 0,
+        "classes": {},
+        "auto": {
+          "count": 0,
+          "missing": 0,
+          "minAge": null,
+          "medianAge": null,
+          "maxAge": null
+        }
+      }
+    }
+  ],
+  "final": {
+    "inst": "8c0b604d",
+    "build": "a",
+    "wakes": 3,
+    "bootAt": 1794365241236,
+    "now": 1794365241400,
+    "sockets": 0,
+    "rebuiltSockets": 0,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {},
+    "auto": {
+      "count": 0,
+      "missing": 0,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  }
+}

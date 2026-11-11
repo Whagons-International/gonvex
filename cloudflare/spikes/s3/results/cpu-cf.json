@@ -1,0 +1,108 @@
+{
+  "stamp": "mwbkdev5",
+  "variants": [
+    {
+      "name": "cache",
+      "mode": "cache",
+      "encodeOnly": 0,
+      "deflate": false,
+      "tenant": "cpu-cache-mwbkdev5",
+      "opened": 1000,
+      "extensions": [
+        ""
+      ],
+      "from": "2026-11-11T03:33:42.815Z",
+      "to": "2026-11-11T03:34:35.508Z",
+      "fanouts": 300,
+      "framesReceived": 300000,
+      "bytesRead": 561333474,
+      "wallMsP50": 229
+    },
+    {
+      "name": "tags",
+      "mode": "tags",
+      "encodeOnly": 0,
+      "deflate": false,
+      "tenant": "cpu-tags-mwbkdev5",
+      "opened": 1000,
+      "extensions": [
+        ""
+      ],
+      "from": "2026-11-11T03:34:46.908Z",
+      "to": "2026-11-11T03:35:46.810Z",
+      "fanouts": 300,
+      "framesReceived": 300000,
+      "bytesRead": 561333582,
+      "wallMsP50": 467
+    },
+    {
+      "name": "attach",
+      "mode": "attach",
+      "encodeOnly": 0,
+      "deflate": false,
+      "tenant": "cpu-attach-mwbkdev5",
+      "opened": 1000,
+      "extensions": [
+        ""
+      ],
+      "from": "2026-11-11T03:35:55.239Z",
+      "to": "2026-11-11T03:36:46.060Z",
+      "fanouts": 300,
+      "framesReceived": 300000,
+      "bytesRead": 561333334,
+      "wallMsP50": 160
+    },
+    {
+      "name": "encode",
+      "mode": "cache",
+      "encodeOnly": 1,
+      "deflate": false,
+      "tenant": "cpu-encode-mwbkdev5",
+      "opened": 1000,
+      "extensions": [
+        ""
+      ],
+      "from": "2026-11-11T03:37:21.729Z",
+      "to": "2026-11-11T03:38:08.265Z",
+      "fanouts": 300,
+      "framesReceived": 0,
+      "bytesRead": 640844,
+      "wallMsP50": 49
+    },
+    {
+      "name": "deflate",
+      "mode": "cache",
+      "encodeOnly": 0,
+      "deflate": true,
+      "tenant": "cpu-deflate-mwbkdev5",
+      "opened": 1000,
+      "extensions": [
+        "permessage-deflate"
+      ],
+      "from": "2026-11-11T03:38:15.853Z",
+      "to": "2026-11-11T03:39:15.645Z",
+      "fanouts": 300,
+      "framesReceived": 300000,
+      "bytesRead": 13945549,
+      "wallMsP50": 461
+    },
+    {
+      "name": "idle",
+      "mode": "cache",
+      "encodeOnly": 0,
+      "deflate": false,
+      "idle": true,
+      "tenant": "cpu-idle-mwbkdev5",
+      "opened": 1000,
+      "extensions": [
+        ""
+      ],
+      "from": "2026-11-11T03:39:23.093Z",
+      "to": "2026-11-11T03:40:23.153Z",
+      "fanouts": 0,
+      "framesReceived": 0,
+      "bytesRead": 641018,
+      "wallMsP50": null
+    }
+  ]
+}

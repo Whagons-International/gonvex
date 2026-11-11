@@ -1,0 +1,185 @@
+{
+  "label": "fanout-deflate",
+  "tenant": "fan-mwbhsqcg",
+  "count": 1000,
+  "deflate": true,
+  "gateways": 0,
+  "startedAt": "2026-11-11T02:21:06.784Z",
+  "localBefore": {
+    "cpuMs": 10530,
+    "rssMB": 1003.6
+  },
+  "open": {
+    "wallMs": 1592,
+    "ok": 1000,
+    "failed": [],
+    "connectP50": 135,
+    "connectP99": 262,
+    "extensions": [
+      "permessage-deflate"
+    ]
+  },
+  "localAfterOpen": {
+    "cpuMs": 12900,
+    "rssMB": 1012.7
+  },
+  "stats": {
+    "inst": "84541aac",
+    "build": "a",
+    "wakes": 1,
+    "bootAt": 1794363666968,
+    "now": 1794363669455,
+    "sockets": 1001,
+    "rebuiltSockets": 0,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 125,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125,
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1001,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  },
+  "singles": {
+    "perCommit": [
+      {
+        "seq": 1,
+        "ackMs": 158,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2297,
+        "delivered": 1000,
+        "firstMs": 20,
+        "lastMs": 157
+      },
+      {
+        "seq": 2,
+        "ackMs": 95,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2313,
+        "delivered": 1000,
+        "firstMs": 20,
+        "lastMs": 95
+      },
+      {
+        "seq": 3,
+        "ackMs": 98,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 15,
+        "lastMs": 98
+      },
+      {
+        "seq": 4,
+        "ackMs": 121,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2300,
+        "delivered": 1000,
+        "firstMs": 31,
+        "lastMs": 121
+      },
+      {
+        "seq": 5,
+        "ackMs": 106,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 14,
+        "lastMs": 105
+      }
+    ],
+    "latency": {
+      "n": 5000,
+      "p50": 65,
+      "p90": 103,
+      "p99": 147,
+      "max": 157
+    },
+    "ackMs": 106,
+    "lastDeliveryP50": 105,
+    "lastDeliveryMax": 157,
+    "hopMsAll": []
+  },
+  "echoRtt": {
+    "p50": 12,
+    "min": 1,
+    "max": 18
+  },
+  "burst": {
+    "rate": 10,
+    "seconds": 10,
+    "writesSent": 100,
+    "sendMs": 9901,
+    "acks": 66,
+    "ackP50": 4068,
+    "ackP99": 8204,
+    "ackMax": 8204,
+    "hopP50": null,
+    "hopP99": null,
+    "framesReceived": 66968,
+    "framesExpected": 100000,
+    "latency": {
+      "n": 66968,
+      "p50": 3951,
+      "p90": 7458,
+      "p99": 8201,
+      "max": 8320
+    },
+    "bytesReadDelta": 28482842,
+    "bytesPerFrame": 425,
+    "closes": 0,
+    "localCpuMs": 15130,
+    "localRssMB": 1134.5
+  },
+  "final": {
+    "inst": "84541aac",
+    "build": "a",
+    "wakes": 1,
+    "bootAt": 1794363666968,
+    "now": 1794363699398,
+    "sockets": 1001,
+    "rebuiltSockets": 0,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 125,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125,
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1001,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  }
+}

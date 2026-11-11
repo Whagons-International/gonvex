@@ -1,0 +1,213 @@
+{
+  "inbound": [
+    {
+      "label": "1 MiB",
+      "bytes": 1048576,
+      "kind": "text",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 1048576,
+        "kind": "text"
+      },
+      "ms": 130
+    },
+    {
+      "label": "1 MiB",
+      "bytes": 1048576,
+      "kind": "binary",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 1048576,
+        "kind": "binary"
+      },
+      "ms": 67
+    },
+    {
+      "label": "16 MiB",
+      "bytes": 16777216,
+      "kind": "text",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 16777216,
+        "kind": "text"
+      },
+      "ms": 629
+    },
+    {
+      "label": "16 MiB",
+      "bytes": 16777216,
+      "kind": "binary",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 16777216,
+        "kind": "binary"
+      },
+      "ms": 553
+    },
+    {
+      "label": "32 MiB - 1 KiB",
+      "bytes": 33553408,
+      "kind": "text",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 33553408,
+        "kind": "text"
+      },
+      "ms": 1326
+    },
+    {
+      "label": "32 MiB - 1 KiB",
+      "bytes": 33553408,
+      "kind": "binary",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 33553408,
+        "kind": "binary"
+      },
+      "ms": 1062
+    },
+    {
+      "label": "32 MiB - 16",
+      "bytes": 33554416,
+      "kind": "text",
+      "result": "timeout",
+      "ms": 60004
+    },
+    {
+      "label": "32 MiB - 16",
+      "bytes": 33554416,
+      "kind": "binary",
+      "result": "closed",
+      "code": 1006,
+      "reason": "",
+      "ms": 456
+    },
+    {
+      "label": "32 MiB",
+      "bytes": 33554432,
+      "kind": "text",
+      "result": "timeout",
+      "ms": 60058
+    },
+    {
+      "label": "32 MiB",
+      "bytes": 33554432,
+      "kind": "binary",
+      "result": "closed",
+      "code": 1006,
+      "reason": "",
+      "ms": 442
+    },
+    {
+      "label": "32 MiB + 1",
+      "bytes": 33554433,
+      "kind": "text",
+      "result": "closed",
+      "code": 1009,
+      "reason": "Message is too large: 33554433 > 33554432",
+      "ms": 484
+    },
+    {
+      "label": "32 MiB + 1",
+      "bytes": 33554433,
+      "kind": "binary",
+      "result": "closed",
+      "code": 1009,
+      "reason": "Message is too large: 33554433 > 33554432",
+      "ms": 403
+    },
+    {
+      "label": "33 MiB",
+      "bytes": 34603008,
+      "kind": "text",
+      "result": "closed",
+      "code": 1009,
+      "reason": "Message is too large: 34603008 > 33554432",
+      "ms": 474
+    },
+    {
+      "label": "33 MiB",
+      "bytes": 34603008,
+      "kind": "binary",
+      "result": "closed",
+      "code": 1009,
+      "reason": "Message is too large: 34603008 > 33554432",
+      "ms": 432
+    }
+  ],
+  "outbound": [
+    {
+      "label": "1 MiB",
+      "bytes": 1048576,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 1048576
+        }
+      },
+      "client": {
+        "result": "received",
+        "len": 1048576,
+        "ms": 225
+      }
+    },
+    {
+      "label": "32 MiB",
+      "bytes": 33554432,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 33554432
+        }
+      },
+      "client": {
+        "result": "timeout"
+      }
+    },
+    {
+      "label": "33 MiB",
+      "bytes": 34603008,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 34603008
+        }
+      },
+      "client": {
+        "result": "timeout"
+      }
+    },
+    {
+      "label": "64 MiB",
+      "bytes": 67108864,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 67108864
+        }
+      },
+      "client": {
+        "result": "timeout"
+      }
+    },
+    {
+      "label": "100 MiB",
+      "bytes": 104857600,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 104857600
+        }
+      },
+      "client": {
+        "result": "timeout"
+      }
+    }
+  ]
+}

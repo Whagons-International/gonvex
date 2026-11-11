@@ -1,0 +1,237 @@
+{
+  "inbound": [
+    {
+      "label": "1 MiB",
+      "bytes": 1048576,
+      "kind": "text",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 1048576,
+        "kind": "text"
+      },
+      "ms": 129
+    },
+    {
+      "label": "1 MiB",
+      "bytes": 1048576,
+      "kind": "binary",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 1048576,
+        "kind": "binary"
+      },
+      "ms": 9
+    },
+    {
+      "label": "16 MiB",
+      "bytes": 16777216,
+      "kind": "text",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 16777216,
+        "kind": "text"
+      },
+      "ms": 683
+    },
+    {
+      "label": "16 MiB",
+      "bytes": 16777216,
+      "kind": "binary",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 16777216,
+        "kind": "binary"
+      },
+      "ms": 231
+    },
+    {
+      "label": "32 MiB - 1 KiB",
+      "bytes": 33553408,
+      "kind": "text",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 33553408,
+        "kind": "text"
+      },
+      "ms": 356
+    },
+    {
+      "label": "32 MiB - 1 KiB",
+      "bytes": 33553408,
+      "kind": "binary",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 33553408,
+        "kind": "binary"
+      },
+      "ms": 830
+    },
+    {
+      "label": "32 MiB - 16",
+      "bytes": 33554416,
+      "kind": "text",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 33554416,
+        "kind": "text"
+      },
+      "ms": 228
+    },
+    {
+      "label": "32 MiB - 16",
+      "bytes": 33554416,
+      "kind": "binary",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 33554416,
+        "kind": "binary"
+      },
+      "ms": 169
+    },
+    {
+      "label": "32 MiB",
+      "bytes": 33554432,
+      "kind": "text",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 33554432,
+        "kind": "text"
+      },
+      "ms": 228
+    },
+    {
+      "label": "32 MiB",
+      "bytes": 33554432,
+      "kind": "binary",
+      "result": "reply",
+      "reply": {
+        "type": "big",
+        "len": 33554432,
+        "kind": "binary"
+      },
+      "ms": 170
+    },
+    {
+      "label": "32 MiB + 1",
+      "bytes": 33554433,
+      "kind": "text",
+      "result": "closed",
+      "code": 1009,
+      "reason": "Message is too large: 33554433 > 33554432",
+      "ms": 10229
+    },
+    {
+      "label": "32 MiB + 1",
+      "bytes": 33554433,
+      "kind": "binary",
+      "result": "closed",
+      "code": 1009,
+      "reason": "Message is too large: 33554433 > 33554432",
+      "ms": 10173
+    },
+    {
+      "label": "33 MiB",
+      "bytes": 34603008,
+      "kind": "text",
+      "result": "closed",
+      "code": 1009,
+      "reason": "Message is too large: 34603008 > 33554432",
+      "ms": 10164
+    },
+    {
+      "label": "33 MiB",
+      "bytes": 34603008,
+      "kind": "binary",
+      "result": "closed",
+      "code": 1009,
+      "reason": "Message is too large: 34603008 > 33554432",
+      "ms": 10310
+    }
+  ],
+  "outbound": [
+    {
+      "label": "1 MiB",
+      "bytes": 1048576,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 1048576
+        }
+      },
+      "client": {
+        "result": "received",
+        "len": 1048576,
+        "ms": 33
+      }
+    },
+    {
+      "label": "32 MiB",
+      "bytes": 33554432,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 33554432
+        }
+      },
+      "client": {
+        "result": "received",
+        "len": 33554432,
+        "ms": 421
+      }
+    },
+    {
+      "label": "33 MiB",
+      "bytes": 34603008,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 34603008
+        }
+      },
+      "client": {
+        "result": "received",
+        "len": 34603008,
+        "ms": 229
+      }
+    },
+    {
+      "label": "64 MiB",
+      "bytes": 67108864,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 67108864
+        }
+      },
+      "client": {
+        "result": "received",
+        "len": 67108864,
+        "ms": 509
+      }
+    },
+    {
+      "label": "100 MiB",
+      "bytes": 104857600,
+      "admin": {
+        "status": 200,
+        "body": {
+          "sent": 104857600
+        }
+      },
+      "client": {
+        "result": "received",
+        "len": 104857600,
+        "ms": 878
+      }
+    }
+  ]
+}
