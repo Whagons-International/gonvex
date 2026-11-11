@@ -14,6 +14,7 @@ import receiptOwnerSwitch from './receipt-owner-switch.mjs';
 import receiptUpgrade from './receipt-upgrade.mjs';
 import receiptCrash from './receipt-crash.mjs';
 import storageSql from './storage-sql.mjs';
+import moduleHost from './module-host.mjs';
 
 export const SCENARIOS = [
   thinSdkParity,
@@ -27,6 +28,7 @@ export const SCENARIOS = [
   receiptOwnerSwitch,
   receiptUpgrade,
   storageSql,
+  moduleHost,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
 ];

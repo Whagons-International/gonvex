@@ -1,0 +1,12 @@
+// Local-only bench Worker: the Whagons Query/Reducer bundle behind the K04
+// module host. `node bench/run.mjs` prepares .build/ and runs it with
+// `wrangler dev --local`. Never deployed; the name keeps the prefix anyway.
+{
+  "name": "gonvex-cf-dev-k04-bench",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": { "bindings": [{ "name": "TENANT", "class_name": "BenchTenant" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BenchTenant"] }],
+  "rules": [{ "type": "ESModule", "globs": [".build/app.js"] }]
+}
