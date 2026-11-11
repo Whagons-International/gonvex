@@ -337,3 +337,26 @@ describe("socket side", () => {
     expect(JSON.parse(sent[1]!).items.length).toBe(2);
   });
 });
+
+describe("payload limits", () => {
+  it("splits a payload under the RPC cap, keeping each socket's order and the watermark last", async () => {
+    const { splitPayload } = await import("../engine.ts");
+    const big = "x".repeat(400);
+    const payload: ReplicaDelivery = {
+      v: 1, instance: "A", shared: [big, `{"type":"replica.delta","id":"~t"${big}`], watermark: 9,
+      sockets: {
+        a: { ops: [["i", 0], ["d", "s", "~t", 1, "}"], ["f", big], ["f", big]], watermark: 9, opened: { s: "p" } },
+        b: { ops: [["i", 0], ["f", big]], watermark: 9 },
+      },
+    };
+    const parts = splitPayload(payload, 1000);
+    expect(parts.length).toBeGreaterThan(2);
+    const opsOf = (id: string) => parts.flatMap((p) => (p.sockets[id]?.ops ?? []).map((op) => (op[0] === "i" ? ["i", p.shared[op[1]]] : op[0] === "d" ? ["d", p.shared[op[3]]] : op)));
+    expect(opsOf("a")).toEqual([["i", big], ["d", payload.shared[1]], ["f", big], ["f", big]]);
+    expect(opsOf("b")).toEqual([["i", big], ["f", big]]);
+    expect(parts.slice(0, -1).every((p) => p.watermark === undefined)).toBe(true);
+    expect(parts.at(-1)!.watermark).toBe(9);
+    expect(parts.filter((p) => p.sockets.a?.opened).length).toBe(1);
+    expect(splitPayload({ ...payload, sockets: {} }, 1000)).toHaveLength(1);
+  });
+});

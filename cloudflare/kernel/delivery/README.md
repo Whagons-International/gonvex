@@ -53,7 +53,7 @@ holder (any object):  Session ─ SocketDelivery (socket.ts) ─ ReplicaBatcher 
   after the scan (truncation and digest must be known before page 0). A larger window is scanned twice: once for its
   digest, boundary and truncation, once to stream its pages, 2 MiB at a time, each chunk handed to the holder before
   the next is read; the second pass hashes nothing. Measured on the platform: a 144 MB window (5,000 rows × 30 KB)
-  streamed through 128 MB isolates in 625 pages (15-35 s, network bound) while the object kept serving (0040 §3).
+  streamed through 128 MB isolates in 625 pages (15-35 s, network bound) while the object kept serving (0046 §3).
 - **Resume.** `cursor_resumable` (same epoch, at or below the clock, at or above `retained_revision`). An aggregate
   digest (`xor1:`, or `sum128-v1:` when negotiated) replays the log since the cursor and verifies the client's claim;
   a whole-set digest and keys with hashes reconcile against SQL. Visibility inputs moving since the cursor, a
@@ -89,7 +89,7 @@ holder (any object):  Session ─ SocketDelivery (socket.ts) ─ ReplicaBatcher 
 
 ## Differences from Rust
 
-See contract-changes 0040. In short: the scan holds the tenant's invocation queue while it pages (writers wait for
+See contract-changes 0046. In short: the scan holds the tenant's invocation queue while it pages (writers wait for
 it, never longer than the read itself); a window over 4 MiB is read twice; watermarks are monotonic on every socket
 (Rust can send a socket without subscriptions a call's watermark before the previous commit's); a restarted tenant
 object resets the collections it served; IB5. Caches (`snapshot_cache`, `resume_validation`, delivery v4 shapes,
@@ -113,7 +113,7 @@ cd conformance && node src/cli.mjs --backend rust=rust --backend cf=cloudflare-d
   platform, with each backend's digests and watermarks self-checked (0024 §2). `reducer-second-client` is G1: a
   writer's Reducer commit reaches a second client's collection through the real `@gonvex/client` SDK (and the thin
   client).
-- Platform (0040 §3, `harness/platform.mjs`, `bench/platform.mjs`): every replica scenario passes Rust against the
+- Platform (0046 §3, `harness/platform.mjs`, `bench/platform.mjs`): every replica scenario passes Rust against the
   deployed kernel; G1 reader latency p50 74 ms, p95 97 ms from this machine (call → the reader's delta).
 - Cost per commit: two statements (the clock, one page of change rows joined with their transaction); rows read ≈ 1 +
   2 × change rows; nothing written. A cold open: the clock, the principal (one statement with a warm principal cache),

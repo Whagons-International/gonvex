@@ -34,6 +34,58 @@ export const MAX_WAITING_OPENS = 4096;
 export const OPEN_REQUEST_MAX_BYTES = 32 * 1024 * 1024;
 /** Payloads queued to one holder before its sockets are reset `change-feed-lagged`. */
 export const MAX_QUEUED_PAYLOADS = 256;
+/**
+ * Characters of text in one payload (at most 3 UTF-8 bytes each, so 24 MiB): Workers RPC refuses an argument over
+ * 32 MiB (0020 §6, 0022 §4.4). A larger delivery goes as several payloads, in order.
+ */
+export const MAX_PAYLOAD_CHARS = 8 << 20;
+
+const opChars = (op: SocketOp): number => op.reduce<number>((n, part) => n + (typeof part === "string" ? part.length : 8), 0);
+
+/**
+ * Splits a payload under `MAX_PAYLOAD_CHARS`: whole sockets first, then one socket's ops across consecutive parts.
+ * Each part carries only the shared texts it references; the watermark, membership and a socket's `opened`/`removed`
+ * ride in the last part that touches it. One op larger than the limit still goes alone (the holder refuses a frame
+ * over the platform's outbound limit, 0018).
+ */
+export function splitPayload(payload: ReplicaDelivery, limit = MAX_PAYLOAD_CHARS): ReplicaDelivery[] {
+  const size = (ops: readonly SocketOp[]) => ops.reduce((n, op) => n + opChars(op) + (op[0] === "i" ? payload.shared[op[1]]!.length : op[0] === "d" ? payload.shared[op[3]]!.length : 0), 0);
+  const total = Object.values(payload.sockets).reduce((n, work) => n + size(work.ops), 0);
+  if (total <= limit) return [payload];
+  type Part = { sockets: Record<string, SocketWork>; chars: number };
+  const parts: Part[] = [{ sockets: {}, chars: 0 }];
+  for (const [id, work] of Object.entries(payload.sockets)) {
+    let current: SocketOp[] = [];
+    for (const op of work.ops) {
+      const chars = size([op]);
+      let part = parts[parts.length - 1]!;
+      if (part.chars + chars > limit && (part.chars > 0 || current.length)) {
+        if (current.length) part.sockets[id] = { ops: current };
+        parts.push((part = { sockets: {}, chars: 0 }));
+        current = [];
+      }
+      current.push(op);
+      part.chars += chars;
+    }
+    const { ops: _ops, ...rest } = work;
+    parts[parts.length - 1]!.sockets[id] = { ops: current, ...rest };
+  }
+  return parts.map((part, index) => {
+    const shared: string[] = [];
+    const at = new Map<number, number>();
+    const ref = (i: number) => { let j = at.get(i); if (j === undefined) { j = shared.length; shared.push(payload.shared[i]!); at.set(i, j); } return j; };
+    const sockets: Record<string, SocketWork> = {};
+    for (const [id, work] of Object.entries(part.sockets)) {
+      sockets[id] = { ...work, ops: work.ops.map((op): SocketOp => (op[0] === "i" ? ["i", ref(op[1])] : op[0] === "d" ? ["d", op[1], op[2], ref(op[3]), op[4]] : op)) };
+    }
+    const last = index === parts.length - 1;
+    return {
+      v: payload.v, instance: payload.instance, shared, sockets,
+      ...(last && payload.watermark !== undefined ? { watermark: payload.watermark } : {}),
+      ...(last && payload.membership ? { membership: payload.membership } : {}),
+    };
+  });
+}
 
 /** Where a connection's frames go: one ordered channel per holder. */
 export interface DeliveryOutlet {
@@ -514,6 +566,12 @@ export class ReplicaDeliveryEngine {
   }
 
   private send(host: string, payload: ReplicaDelivery, revision: number): Promise<void> {
+    const parts = splitPayload(payload);
+    for (const part of parts.slice(0, -1)) void this.sendOne(host, part, 0);
+    return this.sendOne(host, parts[parts.length - 1]!, revision);
+  }
+
+  private sendOne(host: string, payload: ReplicaDelivery, revision: number): Promise<void> {
     this.stats.payloads += 1;
     return this.options.outlet.send(host, payload).then((receipt) => {
       if (revision) this.accepted.set(host, Math.max(this.accepted.get(host) ?? 0, revision));

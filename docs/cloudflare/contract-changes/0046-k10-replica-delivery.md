@@ -1,4 +1,4 @@
-# 0040: K10 replica delivery: adaptations, findings and proposals
+# 0046: K10 replica delivery: adaptations, findings and proposals
 
 Date: 2026-11-11. Status: **proposed** (K10). Affects: K05 (session and gateway files edited additively), K07
 (tenant object hook), A01 (capture SQL), K08, K14, P02 (harness), R02, R05, X01, V01.
@@ -71,7 +71,21 @@ second SDK client (and a thin client) receives it through its collection.
 | The same, first attempt | stalled: no frame for 10 minutes. It ran before the tail was attached and before the second pass stopped hashing, so the cause is not known. **Follow-up:** repeat under tail in V01 or R05. |
 | Reconnect wave (`replica-reconnect-wave`, six SDK clients drop at once with commits in the outage) | passes on the platform |
 
-## 4. Not in this package
+## 4. Obligations from the decision log
+
+| Obligation | Where |
+|---|---|
+| 0032 IB5: deliver the row a parent's appearance reveals; kernel-only scenario | `feed.ts` `mask_step` (parents that appear or disappear re-decide their children); `replica-orphan-reveal` (Rust skips it, so it is outside the Rust-vs-kernel comparison) |
+| 0031 §2 / 0032: release class bindings on unsubscribe and rebind | `HandleCache.clear()` on close, reopen of an id, needHashes, reset, drop, and when a transaction changes the principal |
+| 0024 §2: per-backend watermark self-check | `conformance/src/watermark-check.mjs`, scoped to subscribed sockets (§2.1) |
+| 0030 #4: `subscriptionFloor(socket)` for the Reducer path | `ReducerTenantObject.subscriptionFloor` (hook) → `ReplicaDeliveryEngine.subscriptionFloor` |
+| 0033 #3: per-socket frames ordered before replica frames | The delivery payload is per socket and ordered (`SocketWork.ops`); live query frames go there first once K08 is wired (§5) |
+| 0033 #4: resubscribe after a tenant-object restart | Replica collections: the holder resets them on a new instance (§2.4). Live queries: with K08's wiring (§5) |
+| 0036 §8: `operatorDataChanged` after commits | `ReplicaTenantObject.operatorSink()`: one call per 100 ms of delivered commits once the Worker version binds the operator object (K19 follow-up of 0037) |
+| 0022 §4.4 / 0018: payloads under 32 MiB, no frame ≥ 32 MiB − 1 KiB | `splitPayload` (24 MiB of text per payload, sockets and ops split in order); snapshot pages ≤ 256 KiB; a non-paged snapshot over the limit is refused with an error; the holder closes 1011 rather than send a larger frame (K05) |
+| K14 follow-up: presence rides in an open `replica.batch` | `ReplicaBatcher.presence` (leading edge, `delivery.rs` `push_item`) |
+
+## 5. Not in this package
 
 - **K08 live queries are not wired into delivery.** No tenant object imports K08's engine yet; its `live.applyFeed`
   hook, `bySocket` frames and the live-query part of the call floor and bootstrap watermark are the next integration

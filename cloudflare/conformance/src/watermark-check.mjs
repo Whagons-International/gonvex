@@ -17,7 +17,7 @@
  * As in the diff (README, "Normalization"), only sockets that subscribed to
  * something are checked: on a socket with no subscription a watermark only
  * completes calls. Rust sends such a socket a call's immediate watermark R and
- * then the feed's watermark of the previous commit R-1 (contract-changes 0040).
+ * then the feed's watermark of the previous commit R-1 (contract-changes 0046).
  */
 import { expand } from './normalize.mjs';
 

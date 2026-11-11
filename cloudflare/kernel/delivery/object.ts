@@ -20,6 +20,15 @@ import { GatewayOutlet, type ReplicaHolderRpc } from "./outlet.ts";
 export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTenantEnv> extends ReducerTenantObject<E> {
   readonly delivery: ReplicaDeliveryEngine;
   private cachedModule: { key: string; module: ReplicaModule } | undefined;
+  private dataChangedScheduled = false;
+
+  /**
+   * Where the operator dashboard learns of commits (K19 0036 §8, 0037): the operator control object's
+   * `operatorDataChanged`. The Worker version that binds it overrides this; without it nothing is sent.
+   */
+  protected operatorSink(): { operatorDataChanged(projectId: string, tenantId: string): Promise<void> } | undefined {
+    return undefined;
+  }
 
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
@@ -30,6 +39,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
       read: snapshotRunner(this.kernel.storage),
       module: () => this.replicaModule(),
       outlet: new GatewayOutlet(tenantId, (name) => rpc<ReplicaHolderRpc>(env.GATEWAY, name), () => this.gateways.list()),
+      delivered: () => this.dataChanged(tenantId),
     });
     this.kernel.capture.wake.subscribe((wake) => this.delivery.wake(wake.revision));
     // Commits after this point are owed to the sockets; a tenant not provisioned yet has no clock.
@@ -39,6 +49,19 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
     } catch {
       this.delivery.start(undefined);
     }
+  }
+
+  /** One `operatorDataChanged` per 100 ms of delivered commits (as K19's local tenant object coalesces them). */
+  private dataChanged(tenantId: string): void {
+    const sink = this.operatorSink();
+    const projectId = this.kernel.module?.projectId;
+    if (!sink || !projectId || this.dataChangedScheduled) return;
+    this.dataChangedScheduled = true;
+    this.ctx.waitUntil((async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      this.dataChangedScheduled = false;
+      await sink.operatorDataChanged(projectId, tenantId).catch((error) => console.error("delivery: operatorDataChanged failed", error));
+    })());
   }
 
   /** The replica view of the active generation, rebuilt when the generation changes. */

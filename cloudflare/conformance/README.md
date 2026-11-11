@@ -78,7 +78,7 @@ Each scenario runs on every backend in a fresh project. Generation 1 of the fixt
   watermarks never go down, never exceed the highest committed revision any session was shown by the end of that
   step, and never fall below the highest `replica.transaction` the socket applied. A problem fails that backend's
   run. Sockets with no subscription are not checked, as the diff does not compare their watermarks: Rust can send
-  such a socket a call's immediate watermark before the previous commit's (0040 §2.1).
+  such a socket a call's immediate watermark before the previous commit's (0046 §2.1).
 - **Table checksums.** For every seeded tenant, the harness reads all rows of `board`, `notes` and `note_shares` through `readTable`. It masks them, sorts them, and hashes them with sha256 over canonical JSON lines. When a checksum differs, the diff shows the differing rows.
 
 ### Normalization
@@ -97,7 +97,7 @@ The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `te
 | In error text, JavaScript stack frame lines (`\n    at …`) are stripped. | The message, which is the first line and includes the host wording such as `host call failed:`, is contract and compared exactly. Stack positions are not contract (ruling 0015). |
 | Digests and row hashes become `<digest>`. | They cover values that differ between runs. The digest self-check verifies each one on its own backend instead. |
 | `session.ready` loses `replicaNativeRows`, `replicaSetDigest` and `replicaFieldPatches`. | Rust advertises them to every socket, but the shipped SDK never uses them and the kernel does not advertise them (contract-changes 0012 R20). |
-| `replica.batch`, `replica.readyMany`, `query.batch`, `query.fanout` and `reducer.callMany` are expanded into the frames they stand for. Outbound `replica.openMany` becomes one frame per open, in path and args order. | Batching is a transport choice. How many integrity reopens the SDK groups into one `replica.openMany` depends on whether the `replica.needHashes` frames that prompted them arrived in one tick (0040 §2.9). |
+| `replica.batch`, `replica.readyMany`, `query.batch`, `query.fanout` and `reducer.callMany` are expanded into the frames they stand for. Outbound `replica.openMany` becomes one frame per open, in path and args order. | Batching is a transport choice. How many integrity reopens the SDK groups into one `replica.openMany` depends on whether the `replica.needHashes` frames that prompted them arrived in one tick (0046 §2.9). |
 | Snapshot pages are merged into one `replica.snapshot` with rows sorted by key. ACKs are dropped. | Page size and credits are tuning. |
 | The `opens` of a batch are sorted by path and args. | The SDK orders them by random subscription id. |
 | `replica.needHashes`, followed by the client's integrity reopen and a reply that moves no row, is dropped, also when the reopen answers several `needHashes` in one frame. Episodes that move rows are kept. | Rust asks for hashes depending on timing. |
