@@ -1,0 +1,245 @@
+{
+  "trials": 6,
+  "cases": {
+    "idle": {
+      "rows": [
+        {
+          "activate": "ok",
+          "inflight": null,
+          "after": [
+            "B0",
+            "B0",
+            "B0",
+            "B0",
+            "B0"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": null,
+          "after": [
+            "B1",
+            "B1",
+            "B1",
+            "B1",
+            "B1"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": null,
+          "after": [
+            "B2",
+            "B2",
+            "B2",
+            "B2",
+            "B2"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": null,
+          "after": [
+            "B3",
+            "B3",
+            "B3",
+            "B3",
+            "B3"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": null,
+          "after": [
+            "B4",
+            "B4",
+            "B4",
+            "B4",
+            "B4"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": null,
+          "after": [
+            "B5",
+            "B5",
+            "B5",
+            "B5",
+            "B5"
+          ],
+          "objectReset": false
+        }
+      ],
+      "switchedCleanly": 6,
+      "facetBrokenAfter": 0,
+      "activateFailed": 0,
+      "objectReset": 0
+    },
+    "sync-inflight": {
+      "rows": [
+        {
+          "activate": "ok",
+          "inflight": "ok",
+          "after": [
+            "B0",
+            "B0",
+            "B0",
+            "B0",
+            "B0"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "ok",
+          "after": [
+            "B1",
+            "B1",
+            "B1",
+            "B1",
+            "B1"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "ok",
+          "after": [
+            "B2",
+            "B2",
+            "B2",
+            "B2",
+            "B2"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "ok",
+          "after": [
+            "B3",
+            "B3",
+            "B3",
+            "B3",
+            "B3"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "ok",
+          "after": [
+            "B4",
+            "B4",
+            "B4",
+            "B4",
+            "B4"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "ok",
+          "after": [
+            "B5",
+            "B5",
+            "B5",
+            "B5",
+            "B5"
+          ],
+          "objectReset": false
+        }
+      ],
+      "switchedCleanly": 6,
+      "facetBrokenAfter": 0,
+      "activateFailed": 0,
+      "objectReset": 0
+    },
+    "yielding-inflight": {
+      "rows": [
+        {
+          "activate": "ok",
+          "inflight": "module generation changed",
+          "after": [
+            "B0",
+            "B0",
+            "B0",
+            "B0",
+            "B0"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "module generation changed",
+          "after": [
+            "B1",
+            "B1",
+            "B1",
+            "B1",
+            "B1"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "module generation changed",
+          "after": [
+            "B2",
+            "B2",
+            "B2",
+            "B2",
+            "B2"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "module generation changed",
+          "after": [
+            "B3",
+            "B3",
+            "B3",
+            "B3",
+            "B3"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "module generation changed",
+          "after": [
+            "B4",
+            "B4",
+            "B4",
+            "B4",
+            "B4"
+          ],
+          "objectReset": false
+        },
+        {
+          "activate": "ok",
+          "inflight": "module generation changed",
+          "after": [
+            "B5",
+            "B5",
+            "B5",
+            "B5",
+            "B5"
+          ],
+          "objectReset": false
+        }
+      ],
+      "switchedCleanly": 6,
+      "facetBrokenAfter": 0,
+      "activateFailed": 0,
+      "objectReset": 0
+    }
+  }
+}

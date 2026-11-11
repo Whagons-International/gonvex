@@ -1,0 +1,23 @@
+{
+  "step": 4,
+  "dyn-whagons": {
+    "maxBallastMb": 68,
+    "stoppedBecause": "new isolate/instance 31ae38ee with 4 MB"
+  },
+  "dyn-tiny": {
+    "maxBallastMb": 68,
+    "stoppedBecause": "new isolate/instance 95cdbfe1 with 4 MB"
+  },
+  "facet": {
+    "maxBallastMb": 120,
+    "stoppedBecause": "new isolate/instance 9d89d602 with 4 MB"
+  },
+  "do-loader": {
+    "maxBallastMb": 72,
+    "stoppedBecause": "new isolate/instance 8e275d21 with 4 MB"
+  },
+  "do-baked": {
+    "maxBallastMb": 60,
+    "stoppedBecause": "new isolate/instance ffa66e97 with 4 MB"
+  }
+}

@@ -18,7 +18,7 @@ cloudflare/conformance/
   src/backend.mjs      backend adapter interface
   src/backends/        rust.mjs (reference), cloudflare.mjs (kernel on local workerd), mutant.mjs (harness self-test), index.mjs (registry)
   scenarios/           one module per scenario, plus index.mjs (registry, run order)
-  fixtures/app         test module bundle: board, notes, note_shares, errors, capture (generation 1)
+  fixtures/app         test module bundle: board, notes, note_shares, errors, storage, capture (generation 1)
   fixtures/app-v2      overlay for generation 2 (upgrade scenario)
   fixtures/app-v3      overlay for generation 3: generation 1 with a client contract (session-handshake)
   test/                unit tests (no backend) and the mutation self-test (needs the Rust binary)
@@ -53,7 +53,7 @@ node --test test/mutation.check.mjs          # self-test: injected drift must be
 
 The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
 
-The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 13 scenarios on two debug-build backends takes about 2.5 minutes.
+The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 15 scenarios on two debug-build backends takes about 2.5 minutes.
 
 The `cloudflare` backend runs `wrangler dev` from `cloudflare/` (install its dependencies first) with the session layer's stub routes enabled; see `src/backends/cloudflare.mjs`.
 
@@ -81,7 +81,7 @@ The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `te
 | Client-minted ids (`id`, `idempotencyKey`, `originCommandId`, UUIDs) become `<id#n>` or `<uuid#n>`, numbered by first appearance in the session and keyed by value. | The same id stays linked across frames. |
 | Server-minted race tokens (`snapshotId`, `windowRevision`, `stream`) become `<snapshotId>` and similar, unnumbered. | Two Live Query windows changing in one commit may be answered in either order. |
 | Opaque scopes and epochs become `<scope#n>` and `<epoch#n>`. | They are hashes or random values. |
-| Revisions become ranks `r1, r2, …`. Live Query `sequence` values get their own ranks, `s1, …`. In observations they become `<revision>`. | Order is contract. Absolute numbers depend on provisioning. |
+| Revisions become ranks `r1, r2, …`. Live Query `sequence` values get their own ranks, `s1, …`. In observations they become `<revision>`. Ranks are built from exactly-compared frames only; a watermark keeps the rank of an equal compared revision, else shows `<barrier>`. | Order is contract. Absolute numbers depend on provisioning. Watermarks are compared only as sent or not, and Rust sends or coalesces quiet-tenant watermarks on a timer, so their values must not renumber the session (0022 §6). |
 | Clocks (`*At`, `*Ms`, `since`, `serverTime`) become `<time>`. `trace` and `device` are dropped. Durations inside error text (`1999 ms`) become `<n> ms`. | They vary from run to run. |
 | In error text, JavaScript stack frame lines (`\n    at …`) are stripped. | The message, which is the first line and includes the host wording such as `host call failed:`, is contract and compared exactly. Stack positions are not contract (ruling 0015). |
 | Digests and row hashes become `<digest>`. | They cover values that differ between runs. The digest self-check verifies each one on its own backend instead. |
@@ -90,6 +90,7 @@ The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `te
 | Snapshot pages are merged into one `replica.snapshot` with rows sorted by key. ACKs are dropped. | Page size and credits are tuning. |
 | The `opens` of a batch are sorted by path and args. | The SDK orders them by random subscription id. |
 | `replica.needHashes`, followed by the client's integrity reopen and a reply that moves no row, is dropped. Episodes that move rows are kept. | Rust asks for hashes depending on timing. |
+| In an integrity reopen that answers a `replica.needHashes` (same id, same socket), `cursor.revision` becomes `<persisted-watermark>`, before revisions are ranked. Integrity opens a client sends on its own keep their cursor. | The client resumes from the cursor it persisted, which includes the last watermark it applied, and Rust sends quiet-tenant watermarks on a timer. In `thin-sdk-parity` the r6 watermark lands before or after the `needHashes` depending on timing (0022 §6). |
 | `replica.watermark`, `control.watermark`, `query.progress` and `replica.syncing` are compared over the whole scenario per session, as sent or not sent, not per step. Watermarks are compared only for sessions that subscribed to something. | These are coalescible barriers. Rust also sends quiet-tenant watermarks on a timer. |
 | Telemetry and error-reporting frames (`telemetry.*`, `error.register`, `error.envelope`, `error.heartbeat`, `error.ack`) are ignored. | The SDK sends them on timers, so their sequence is not comparable. `CONTRACT.md` A.2 marks the `error.*` frames **keep**, so they still need coverage: **K15 owns a dedicated scenario for them**, with its own client that sends each frame and asserts its `error.ack`. |
 

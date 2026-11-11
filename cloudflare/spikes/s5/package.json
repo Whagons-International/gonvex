@@ -1,0 +1,12 @@
+{
+  "name": "gonvex-cf-s5-worker-loader-spike",
+  "private": true,
+  "type": "module",
+  "description": "S5: load the Whagons Query/Reducer bundle per generation through the Worker Loader (Dynamic Workers). Not part of the pnpm workspace.",
+  "devDependencies": {
+    "wrangler": "4.158.0"
+  },
+  "dependencies": {
+    "ws": "8.18.3"
+  }
+}
