@@ -26,6 +26,7 @@ import sessionFrames from './session-frames.mjs';
 import changeCapture from './change-capture.mjs';
 import visibilityMasks from './visibility-masks.mjs';
 import receiptExpiry from './receipt-expiry.mjs';
+import scheduler from './scheduler.mjs';
 import liveQueryTaskGrid from './live-query-task-grid.mjs';
 
 export const SCENARIOS = [
@@ -52,6 +53,7 @@ export const SCENARIOS = [
   changeCapture,
   visibilityMasks,
   receiptExpiry,
+  scheduler,
   liveQueryTaskGrid,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
