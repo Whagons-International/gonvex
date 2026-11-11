@@ -41,8 +41,8 @@ await mkdir(workDir, { recursive: true });
 console.log(`work directory: ${workDir}`);
 
 const started = Date.now();
-const fixtures = { 1: await buildFixture(workDir, 1), 2: await buildFixture(workDir, 2) };
-console.log(`fixture bundles: v1 ${fixtures[1].hash.slice(0, 12)}, v2 ${fixtures[2].hash.slice(0, 12)}`);
+const fixtures = { 1: await buildFixture(workDir, 1), 2: await buildFixture(workDir, 2), 3: await buildFixture(workDir, 3) };
+console.log(`fixture bundles: ${Object.values(fixtures).map(f => `v${f.generation} ${f.hash.slice(0, 12)}`).join(', ')}`);
 
 const backends = [];
 for (const { label, kind } of specs) {
