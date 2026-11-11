@@ -294,10 +294,12 @@ describe("ledger and directives", () => {
     const release = await plan(files, { chunk: { maxStatements: 1 } });
     await withObject(async (state) => {
       const failures: unknown[] = [];
-      const { m, restores } = migrator(state, new MemoryPlanStore(release), { reportFailure: (f) => void failures.push(f) });
+      // One table per check step, so the check spans several events before it reaches `c`.
+      const { m, restores } = migrator(state, new MemoryPlanStore(release), { reportFailure: (f) => void failures.push(f), budget: { maxChunksPerEvent: 1, foreignKeyTablesPerStep: 1 } });
       await m.applyRelease(release.id);
       const s = await drain(m);
       expect(s.error).toBe("migration 0002_b.sql: foreign-key rebuild rejected: c -> p (constraint 0)");
+      expect(s.events).toBeGreaterThan(12);
       expect(failures).toMatchObject([{ unit: "migration 0002_b.sql", restored: true }]);
       expect(restores).toHaveLength(1);
       expect(state.storage.sql.exec("PRAGMA foreign_keys").one()).toEqual({ foreign_keys: 1 });

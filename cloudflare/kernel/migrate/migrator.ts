@@ -463,7 +463,10 @@ export class TenantMigrator {
     // A foreign-key rebuild ends with the check and then the ledger, in steps of their own
     // (chunk == chunks: check tables; then finish). Foreign keys stay off and the gate closed.
     if (m.foreignKeyRebuild && p.chunk >= m.chunks) {
-      if (p.fkTable >= 0) return this.foreignKeyCheck(p, m);
+      if (p.fkTable >= 0) {
+        await this.attempt(p, `migration ${m.name} foreign-key check from table ${p.fkTable}`);
+        return this.foreignKeyCheck(p, m);
+      }
       return this.finish(p, m, manifest, []);
     }
     const last = p.chunk === m.chunks - 1 && !m.foreignKeyRebuild;
@@ -516,6 +519,7 @@ export class TenantMigrator {
       checked += 1;
     }
     if (p.fkTable >= tables.length) p.fkTable = -1;
+    p.attempts = 0;
     p.unitMs += Date.now() - started;
     this.save(p);
     this.options.observe?.({ planId: p.planId, unit: `fk-check/${m.name}`, chunk: p.fkTable, statements: checked, ms: Date.now() - started });
