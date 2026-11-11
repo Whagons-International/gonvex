@@ -13,6 +13,8 @@ import receiptLostReply from './receipt-lost-reply.mjs';
 import receiptOwnerSwitch from './receipt-owner-switch.mjs';
 import receiptUpgrade from './receipt-upgrade.mjs';
 import receiptCrash from './receipt-crash.mjs';
+import sessionHandshake from './session-handshake.mjs';
+import sessionFrames from './session-frames.mjs';
 
 export const SCENARIOS = [
   thinSdkParity,
@@ -25,6 +27,8 @@ export const SCENARIOS = [
   receiptLostReply,
   receiptOwnerSwitch,
   receiptUpgrade,
+  sessionHandshake,
+  sessionFrames,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
 ];

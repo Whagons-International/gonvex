@@ -1,8 +1,8 @@
 /**
  * Builds the conformance fixture bundle with the repository's own CLI
  * (`gonvex codegen`), so every backend receives byte-identical `/dev/sync`
- * payloads. Generation 1 is `fixtures/app`; generation 2 is the same tree with
- * `fixtures/app-v2` copied on top.
+ * payloads. Generation 1 is `fixtures/app`; generation n > 1 is the same tree
+ * with `fixtures/app-v<n>` copied on top (v2: upgrade, v3: client contract).
  *
  * Nothing generated is committed: bundles are built into a temp directory once
  * per run and shared by all backends.
@@ -18,14 +18,14 @@ const run = promisify(execFile);
 
 /**
  * @param {string} workDir scratch directory for this run
- * @param {1|2} generation
+ * @param {1|2|3} generation
  * @returns {Promise<{ generation: number, manifest: any, api: any, hash: string }>}
  */
 export async function buildFixture(workDir, generation) {
   const dir = join(workDir, `fixture-v${generation}`);
   await rm(dir, { recursive: true, force: true });
   await cp(join(CONFORMANCE, 'fixtures/app'), dir, { recursive: true });
-  if (generation === 2) await cp(join(CONFORMANCE, 'fixtures/app-v2'), dir, { recursive: true, force: true });
+  if (generation > 1) await cp(join(CONFORMANCE, `fixtures/app-v${generation}`), dir, { recursive: true, force: true });
   await mkdir(join(dir, 'node_modules/@gonvex'), { recursive: true });
   for (const pkg of ['module-sdk', 'client', 'protocol']) {
     await symlink(join(REPO, 'packages', pkg), join(dir, 'node_modules/@gonvex', pkg), 'dir');
