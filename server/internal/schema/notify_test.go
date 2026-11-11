@@ -8,13 +8,13 @@ import (
 )
 
 func TestNotifySchemaVersionReinstallsChangedTriggerDefinitions(t *testing.T) {
-	if NotifySchemaVersion != "15" {
-		t.Fatalf("notify schema version = %q, want 15 for task relationship update metadata", NotifySchemaVersion)
+	if NotifySchemaVersion != "16" {
+		t.Fatalf("notify schema version = %q, want 16 for sync predicate capture columns", NotifySchemaVersion)
 	}
 	if notifySchemaVersionFunction != "gonvex_notify_schema_v"+NotifySchemaVersion {
 		t.Fatalf("version function %q does not track notify schema version %q", notifySchemaVersionFunction, NotifySchemaVersion)
 	}
-	for _, want := range []string{`"gonvex_notify_schema_v15"`, "RETURN 15"} {
+	for _, want := range []string{`"gonvex_notify_schema_v16"`, "RETURN 16"} {
 		if !strings.Contains(notifySchemaVersionSQL(), want) {
 			t.Fatalf("expected notify schema marker SQL to contain %q: %s", want, notifySchemaVersionSQL())
 		}
