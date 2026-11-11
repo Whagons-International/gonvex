@@ -77,10 +77,17 @@ const time = (fn) => {
 // --- 1. transformed copy --------------------------------------------------------
 const orig = new DatabaseSync(origPath, { readOnly: true });
 const schema = orig.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY rowid").all();
-const records = orig.prepare("SELECT name, storage_table, key_column, schema FROM _gonvex_record_views ORDER BY name").all();
+const hasRecords = orig.prepare("SELECT 1 FROM sqlite_schema WHERE name = '_gonvex_record_views'").get();
+const records = hasRecords ? orig.prepare("SELECT name, storage_table, key_column, schema FROM _gonvex_record_views ORDER BY name").all() : [];
 const recordsByName = new Map(records.map((r) => [r.name, recordView(r)]));
+// Tables whose capture triggers call gonvex_capture (feed::capture_triggers_sql): their shapes for T5.
+const capturedTables = [...new Set(schema.filter((o) => o.type === "trigger" && /gonvex_capture\s*\(/i.test(o.sql ?? "")).map((o) => o.tbl_name))].sort();
+const tables = capturedTables.map((name) => ({
+  name,
+  columns: orig.prepare("SELECT name, type AS declared, pk FROM pragma_table_info(?) ORDER BY cid").all(name).map((c) => ({ name: c.name, declared: c.declared, pk: c.pk })),
+}));
 const transform = new SchemaTransform();
-const [image, transformMs] = time(() => transform.image(report.tenant, schema, { records }));
+const [image, transformMs] = time(() => transform.image(report.tenant, schema, { records, tables }));
 const rules = {};
 for (const r of image.rewrites) rules[r.rule] = (rules[r.rule] ?? 0) + 1;
 
@@ -115,7 +122,7 @@ const [, applyMs] = time(() => {
 });
 const xfSchema = xf.prepare("SELECT type, count(*) n, sum(length(sql)) bytes FROM sqlite_schema GROUP BY type ORDER BY type").all();
 log("transform", {
-  objects: schema.length, outputStatements: image.statements.length, rewrites: rules, added: transform.addedObjects().length,
+  objects: schema.length, capturedTables: capturedTables.length, records: records.length, outputStatements: image.statements.length, rewrites: rules, added: transform.addedObjects().length,
   maxStatementBytes: Math.max(...image.statements.map((s) => Buffer.byteLength(s))), transformMs, applyMs,
   schema: Object.fromEntries(xfSchema.map((r) => [r.type, { n: r.n, bytes: r.bytes }])),
 });
@@ -277,6 +284,31 @@ for (const rec of [...recordsByName.values()]) {
     });
   }
 }
+// Captured plain tables (gonvex_capture): a no-op update, a swap of every
+// non-key column with the last row's values and back, and a reinsert.
+for (const shape of tables) {
+  const table = shape.name;
+  const cols = shape.columns.map((c) => c.name);
+  const keys = shape.columns.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+  if (!keys.length) continue;
+  const rest = cols.filter((c) => !keys.includes(c));
+  const order = keys.map(q).join(", ");
+  const literals = (where) => orig.prepare(`SELECT ${cols.map((c) => `quote(${q(c)}) AS ${q(c)}`).join(", ")} FROM ${q(table)} ${where}`).all();
+  const rows = literals(`ORDER BY ${order} LIMIT ${rowsPerRecord}`);
+  const last = literals(`ORDER BY ${keys.map((k) => `${q(k)} DESC`).join(", ")} LIMIT 1`)[0];
+  for (const [i, row] of rows.entries()) {
+    const where = keys.map((k) => `${q(k)} = ${row[k]}`).join(" AND ");
+    if (rest.length) {
+      writes.push({ id: `${table}#${i}:noop`, statements: [`UPDATE ${q(table)} SET ${q(rest[0])} = ${q(rest[0])} WHERE ${where}`] });
+      if (last && keys.some((k) => last[k] !== row[k])) {
+        writes.push({ id: `${table}#${i}:swap`, statements: [`UPDATE ${q(table)} SET ${rest.map((c) => `${q(c)} = ${last[c]}`).join(", ")} WHERE ${where}`] });
+        writes.push({ id: `${table}#${i}:restore`, statements: [`UPDATE ${q(table)} SET ${rest.map((c) => `${q(c)} = ${row[c]}`).join(", ")} WHERE ${where}`] });
+      }
+    }
+    writes.push({ id: `${table}#${i}:reinsert`, statements: [`DELETE FROM ${q(table)} WHERE ${where}`, `INSERT INTO ${q(table)}(${cols.map(q).join(", ")}) VALUES (${cols.map((c) => row[c]).join(", ")})`] });
+  }
+}
+
 // A duplicate live key for every unique index T3 folded, through the full write path (identity key, record capture, triggers).
 for (const index of folds.filter((i) => /UNIQUE/i.test(i.sql))) {
   const rec = [...recordsByName.values()].find((r) => r.storageTable.toLowerCase() === index.tbl_name.toLowerCase());
@@ -391,18 +423,18 @@ log("replay", {
 // --- 5. final content of every table -------------------------------------------------
 const after = new DatabaseSync(origPath, { readOnly: true });
 const skip = new Set(["_gonvex_sync_changes", "_gonvex_sync_transactions", "_gonvex_sync_clock", "sqlite_stat1", "sqlite_stat4", "sqlite_sequence"]);
-const tables = after.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite%' AND sql NOT LIKE 'CREATE VIRTUAL%' ORDER BY name").all().map((r) => r.name)
+const allTables = after.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite%' AND sql NOT LIKE 'CREATE VIRTUAL%' ORDER BY name").all().map((r) => r.name)
   .filter((t) => !skip.has(t) && !/_fts_(data|idx|content|docsize|config)$/.test(t));
 const tableDiffs = [];
 let tableRows = 0;
-for (const t of tables) {
+for (const t of allTables) {
   const a = canonicalRows(after, t);
   const b = canonicalRows(xf, t);
   tableRows += a.length;
   if (a.length !== b.length || digest(a) !== digest(b)) tableDiffs.push({ table: t, rows: [a.length, b.length] });
 }
 const leftover = transform.addedObjects().filter((o) => o.type === "table").map((o) => ({ table: o.name, rows: xf.prepare(`SELECT count(*) n FROM ${q(o.name)}`).get().n })).filter((x) => x.rows);
-log("tables", { compared: tables.length, rows: tableRows, different: tableDiffs, scratchRowsLeft: leftover });
+log("tables", { compared: allTables.length, rows: tableRows, different: tableDiffs, scratchRowsLeft: leftover });
 after.close();
 xf.close();
 
