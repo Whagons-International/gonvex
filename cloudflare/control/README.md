@@ -78,7 +78,7 @@ buffer. Measured on the dev account with `wrangler tail`: **about 125 ms CPU per
 
 ## Deviations from the reference
 
-Each is either in the contract already or listed in `docs/cloudflare/contract-changes/0020-k06-control-object.md`.
+Each is either in the contract already or listed in `docs/cloudflare/contract-changes/0025-k06-control-object.md`.
 
 - Control idempotency rows expire after 24 h; an expired key runs the call again (0012 R9).
 - `tenants.mine`, the default tenant at sign-in and `support.listTenants` answer from

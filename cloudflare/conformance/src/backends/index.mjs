@@ -6,12 +6,14 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { RustBackend } from './rust.mjs';
 import { CloudflareControlBackend } from './cloudflare-control.mjs';
+import { CloudflareBackend } from './cloudflare.mjs';
 
 export const BACKENDS = {
   rust: RustBackend,
   // K06: the control object in local workerd (control-plane scenarios only).
   'cloudflare-control': CloudflareControlBackend,
-  // cloudflare: the full kernel (local workerd, then the dev account), added by the kernel packages.
+  // The kernel on local workerd (K05: session layer; later packages fill in the rest).
+  cloudflare: CloudflareBackend,
 };
 
 export async function backendClass(kind) {

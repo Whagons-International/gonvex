@@ -1,0 +1,11 @@
+0 200 {"previous":"A","active":"B0","preloadMs":34,"draining":0,"drainMs":0,"sent":0,"at":1794386553926,"inst":"8fa5b282"} next {"generation":"B0","isolate":"84d6a550"} active B0
+1 200 {"previous":"A","active":"B1","preloadMs":26,"draining":0,"drainMs":0,"sent":0,"at":1794386554585,"inst":"746d119c"} next {"generation":"B1","isolate":"e44f1738"} active B1
+2 200 {"previous":"A","active":"B2","preloadMs":30,"draining":0,"drainMs":0,"sent":0,"at":1794386555097,"inst":"ad599cfa"} next {"generation":"B2","isolate":"724abad5"} active B2
+3 200 {"previous":"A","active":"B3","preloadMs":57,"draining":0,"drainMs":0,"sent":0,"at":1794386555798,"inst":"f44b0dad"} next {"generation":"B3","isolate":"10fe4478"} active B3
+4 200 {"previous":"A","active":"B4","preloadMs":34,"draining":0,"drainMs":0,"sent":0,"at":1794386556491,"inst":"0d85e801"} next {"generation":"B4","isolate":"83c0a588"} active B4
+5 200 {"previous":"A","active":"B5","preloadMs":35,"draining":0,"drainMs":0,"sent":0,"at":1794386557009,"inst":"02db778b"} next {"generation":"B5","isolate":"e0ceb838"} active B5
+6 200 {"previous":"A","active":"B6","preloadMs":54,"draining":0,"drainMs":0,"sent":0,"at":1794386557679,"inst":"7c2ef6df"} next {"generation":"B6","isolate":"3d77ee96"} active B6
+7 200 {"previous":"A","active":"B7","preloadMs":35,"draining":0,"drainMs":0,"sent":0,"at":1794386558426,"inst":"e4783294"} next {"generation":"B7","isolate":"fd322539"} active B7
+8 200 {"previous":"A","active":"B8","preloadMs":34,"draining":0,"drainMs":0,"sent":0,"at":1794386559103,"inst":"f1768ebe"} next {"generation":"B8","isolate":"8dfaa0e8"} active B8
+9 200 {"previous":"A","active":"B9","preloadMs":44,"draining":0,"drainMs":0,"sent":0,"at":1794386559703,"inst":"c3eaad73"} next {"generation":"B9","isolate":"52f37689"} active B9
+activate failures 0 of 10

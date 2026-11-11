@@ -1,4 +1,4 @@
-# 0020: K06 control object: findings and adaptations
+# 0025: K06 control object: findings and adaptations
 
 Date: 2026-11-11. Status: **proposed by K06**, for the lead. Affects: K06, K05, K01/K02/K04, 0007.
 

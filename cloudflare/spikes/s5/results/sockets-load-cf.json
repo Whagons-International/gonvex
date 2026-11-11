@@ -1,0 +1,284 @@
+{
+  "tenant": "ws-mwbvzex2",
+  "count": 500,
+  "opened": 500,
+  "code": "tiny",
+  "swaps": [
+    {
+      "k": 1,
+      "gen": "tiny:S1:mwbvzex2",
+      "activateClientMs": 1684,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S0",
+        "active": "S1",
+        "preloadMs": 151,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794387501365,
+        "inst": "aafb58f9"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "ok"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -17,
+        "p50": -9,
+        "p90": -5,
+        "max": -1,
+        "mean": -9.2
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 2,
+      "gen": "tiny:S2:mwbvzex2",
+      "activateClientMs": 993,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S1",
+        "active": "S2",
+        "preloadMs": 158,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794387505044,
+        "inst": "aafb58f9"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "ok"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -29,
+        "p50": -18,
+        "p90": -6,
+        "max": -1,
+        "mean": -16.6
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 3,
+      "gen": "tiny:S3:mwbvzex2",
+      "activateClientMs": 942,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S2",
+        "active": "S3",
+        "preloadMs": 164,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794387509295,
+        "inst": "aafb58f9"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "ok"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -15,
+        "p50": -8,
+        "p90": -4,
+        "max": 6,
+        "mean": -7.9
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 4,
+      "gen": "tiny:S4:mwbvzex2",
+      "activateClientMs": 900,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S3",
+        "active": "S4",
+        "preloadMs": 142,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794387513567,
+        "inst": "aafb58f9"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "ok"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -13,
+        "p50": -7,
+        "p90": -3,
+        "max": 5,
+        "mean": -6.7
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 5,
+      "gen": "tiny:S5:mwbvzex2",
+      "activateClientMs": 1583,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S4",
+        "active": "S5",
+        "preloadMs": 424,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794387517934,
+        "inst": "aafb58f9"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "ok"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -23,
+        "p50": -16,
+        "p90": -12,
+        "max": -1,
+        "mean": -16
+      },
+      "closesSoFar": 0
+    },
+    {
+      "k": 6,
+      "gen": "tiny:S6:mwbvzex2",
+      "activateClientMs": 1293,
+      "activateStatus": 200,
+      "activate": {
+        "previous": "S5",
+        "active": "S6",
+        "preloadMs": 208,
+        "draining": 0,
+        "drainMs": 0,
+        "sent": 501,
+        "at": 1794387522713,
+        "inst": "aafb58f9"
+      },
+      "reloadReceived": 500,
+      "load": {
+        "status": 200,
+        "envelope": "ok"
+      },
+      "reloadAfterResponseMs": {
+        "n": 500,
+        "min": -13,
+        "p50": -6,
+        "p90": -2,
+        "max": 2,
+        "mean": -6.2
+      },
+      "closesSoFar": 0
+    }
+  ],
+  "closesDuringSwaps": 0,
+  "framesDuringSwaps": 29999,
+  "statsAfterSwaps": {
+    "inst": "aafb58f9",
+    "isolate": "5d6c5756",
+    "build": "loader",
+    "constructedAt": 1794387493397,
+    "active": {
+      "id": "tiny:S6:mwbvzex2",
+      "code": "tiny",
+      "label": "S6",
+      "nonce": "mwbvzex2"
+    },
+    "sockets": 501,
+    "loads": [
+      {
+        "id": "tiny:S0:mwbvzex2",
+        "at": 1794387493477,
+        "fetchMs": 66,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S0:mwbvzex2",
+        "at": 1794387500023,
+        "fetchMs": 21,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S1:mwbvzex2",
+        "at": 1794387501365,
+        "fetchMs": 97,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S1:mwbvzex2",
+        "at": 1794387504965,
+        "fetchMs": 28,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S2:mwbvzex2",
+        "at": 1794387505044,
+        "fetchMs": 116,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S2:mwbvzex2",
+        "at": 1794387509215,
+        "fetchMs": 27,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S3:mwbvzex2",
+        "at": 1794387509295,
+        "fetchMs": 107,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S3:mwbvzex2",
+        "at": 1794387513487,
+        "fetchMs": 32,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S4:mwbvzex2",
+        "at": 1794387513567,
+        "fetchMs": 107,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S4:mwbvzex2",
+        "at": 1794387517664,
+        "fetchMs": 32,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S5:mwbvzex2",
+        "at": 1794387517934,
+        "fetchMs": 181,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S5:mwbvzex2",
+        "at": 1794387522540,
+        "fetchMs": 27,
+        "appBytes": 11
+      },
+      {
+        "id": "tiny:S6:mwbvzex2",
+        "at": 1794387522713,
+        "fetchMs": 160,
+        "appBytes": 11
+      }
+    ],
+    "ballastMb": 0
+  }
+}

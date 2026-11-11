@@ -131,8 +131,12 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
       await c.authenticate({ project: projectId, token: session.accessToken, tenant: tenants[tenant] });
       return c;
     },
-    /** Raw frame socket (opened, not authenticated). */
-    async raw(tag) { const s = await new RawSocket(backend.wsUrl, tag, recorder).open(); clients.push(s); return s; },
+    /** Raw frame socket (opened, not authenticated). `public: true` uses the `?public=1` transport. */
+    async raw(tag, { public: publicTransport = false } = {}) {
+      const s = await new RawSocket(publicTransport ? `${backend.wsUrl}?public=1` : backend.wsUrl, tag, recorder).open();
+      clients.push(s);
+      return s;
+    },
     /** Logs in over a raw socket; returns the control session. */
     async rawLogin(socket, member) {
       if (sessions.has(member)) return sessions.get(member);

@@ -2,7 +2,7 @@
 
 The conformance harness shows that a backend behaves like the Rust runtime. It runs the same scenarios against two or more backends. It drives them with the real `@gonvex/client` SDK, the thin protocol client (`bench/whagons/thin-client.mjs`) and raw frames. Then it compares the results, normalized frame by frame, and checksums every table.
 
-Today it runs Rust against Rust: two processes of the same build. The Cloudflare kernel plugs in as a second backend when it exists.
+It runs Rust against Rust (two processes of the same build), or Rust against the Cloudflare kernel on local workerd (`--backend rust=rust --backend cf=cloudflare`). The kernel serves the session layer (K05) today, so only the `session-*` scenarios pass on it until the Reducer, Query and replica packages land.
 
 ```text
 cloudflare/conformance/
@@ -15,10 +15,11 @@ cloudflare/conformance/
   src/digest-check.mjs per-backend digest self-check (digests are masked in diffs)
   src/fixture.mjs      builds the fixture bundle with the repo's own `gonvex codegen`
   src/backend.mjs      backend adapter interface
-  src/backends/        rust.mjs (reference), mutant.mjs (harness self-test), index.mjs (registry)
+  src/backends/        rust.mjs (reference), cloudflare.mjs (kernel on local workerd), mutant.mjs (harness self-test), index.mjs (registry)
   scenarios/           one module per scenario, plus index.mjs (registry, run order)
-  fixtures/app         test module bundle: board, notes, note_shares, errors (generation 1)
+  fixtures/app         test module bundle: board, notes, note_shares, errors, storage (generation 1)
   fixtures/app-v2      overlay for generation 2 (upgrade scenario)
+  fixtures/app-v3      overlay for generation 3: generation 1 with a client contract (session-handshake)
   test/                unit tests (no backend) and the mutation self-test (needs the Rust binary)
 ```
 
@@ -51,7 +52,9 @@ node --test test/mutation.check.mjs          # self-test: injected drift must be
 
 The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
 
-The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 11 scenarios on two debug-build backends takes about 2 minutes.
+The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 20 scenarios on two debug-build backends takes a few minutes.
+
+The `cloudflare` backend runs `wrangler dev` from `cloudflare/` (install its dependencies first) with the session layer's stub routes enabled; see `src/backends/cloudflare.mjs`.
 
 ### CI
 
@@ -77,7 +80,7 @@ The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `te
 | Client-minted ids (`id`, `idempotencyKey`, `originCommandId`, UUIDs) become `<id#n>` or `<uuid#n>`, numbered by first appearance in the session and keyed by value. | The same id stays linked across frames. |
 | Server-minted race tokens (`snapshotId`, `windowRevision`, `stream`) become `<snapshotId>` and similar, unnumbered. | Two Live Query windows changing in one commit may be answered in either order. |
 | Opaque scopes and epochs become `<scope#n>` and `<epoch#n>`. | They are hashes or random values. |
-| Revisions become ranks `r1, r2, …`. Live Query `sequence` values get their own ranks, `s1, …`. In observations they become `<revision>`. | Order is contract. Absolute numbers depend on provisioning. |
+| Revisions become ranks `r1, r2, …`. Live Query `sequence` values get their own ranks, `s1, …`. In observations they become `<revision>`. Ranks are built from exactly-compared frames only; a watermark keeps the rank of an equal compared revision, else shows `<barrier>`. | Order is contract. Absolute numbers depend on provisioning. Watermarks are compared only as sent or not, and Rust sends or coalesces quiet-tenant watermarks on a timer, so their values must not renumber the session (0022 §6). |
 | Clocks (`*At`, `*Ms`, `since`, `serverTime`) become `<time>`, as numbers and as RFC 3339 strings (Control Plane timestamps such as `expiresAt`). `trace` and `device` are dropped. Durations inside error text (`1999 ms`) become `<n> ms`. | They vary from run to run. |
 | JWTs (`eyJ….eyJ….sig`) become `<jwt>`. | They are ID tokens an identity provider (the Firebase emulator) mints per run with clocks inside; a scenario sends them as `exchangeExternalToken` arguments. |
 | In error text, JavaScript stack frame lines (`\n    at …`) are stripped. | The message, which is the first line and includes the host wording such as `host call failed:`, is contract and compared exactly. Stack positions are not contract (ruling 0015). |
@@ -87,6 +90,7 @@ The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `te
 | Snapshot pages are merged into one `replica.snapshot` with rows sorted by key. ACKs are dropped. | Page size and credits are tuning. |
 | The `opens` of a batch are sorted by path and args. | The SDK orders them by random subscription id. |
 | `replica.needHashes`, followed by the client's integrity reopen and a reply that moves no row, is dropped. Episodes that move rows are kept. | Rust asks for hashes depending on timing. |
+| In an integrity reopen that answers a `replica.needHashes` (same id, same socket), `cursor.revision` becomes `<persisted-watermark>`, before revisions are ranked. Integrity opens a client sends on its own keep their cursor. | The client resumes from the cursor it persisted, which includes the last watermark it applied, and Rust sends quiet-tenant watermarks on a timer. In `thin-sdk-parity` the r6 watermark lands before or after the `needHashes` depending on timing (0022 §6). |
 | `replica.watermark`, `control.watermark`, `query.progress` and `replica.syncing` are compared over the whole scenario per session, as sent or not sent, not per step. Watermarks are compared only for sessions that subscribed to something. | These are coalescible barriers. Rust also sends quiet-tenant watermarks on a timer. |
 | Telemetry and error-reporting frames (`telemetry.*`, `error.register`, `error.envelope`, `error.heartbeat`, `error.ack`) are ignored. | The SDK sends them on timers, so their sequence is not comparable. `CONTRACT.md` A.2 marks the `error.*` frames **keep**, so they still need coverage: **K15 owns a dedicated scenario for them**, with its own client that sends each frame and asserts its `error.ack`. |
 
@@ -113,6 +117,8 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `receipt-crash` | A client process killed with SIGKILL after sending a keyed call; the backend killed after a commit (receipt, rows and SDK recovery intact) and right after a keyed send (exactly-once replay) | `sdk_process_crash`, `check_restart` |
 | `receipt-upgrade` | `/dev/sync` of generation 2 while connected: migration default for old rows, the new Reducer, a call pinned to the old artifact (`update_required`), generation 1 receipts still answering, SDKs on the v1 and v2 definitions | `sdk_module_upgrade`, `check_module_upgrade` |
 | `receipt-owner-switch` | One SDK socket switching account A to B to A (owner-scoped notes, receipts per owner, a foreign write refused) and tenant A to B to A (no leak in either direction) | `sdk_owner_switch` |
+| `session-handshake` | `session.ready` first; every `auth` branch and error code; the replica directive's `scope` and `visibilityScope` recomputed from the result; re-auth in place with and without `subscriptionsPreserved`; a tenant switch; a failed re-auth tearing the session down (the unauthenticated reply of every frame kind); `clientContract` gating at auth and on a deploy while connected (`client.updateRequired`, `system.reload`); the real SDK logging in, authenticating and switching tenant | K05 |
+| `session-frames` | The decoder's accept/close boundary (82 vectors: integer widths and lexemes, `null`, duplicates, the sequence form, nesting depth, lone surrogates); binary frames; the public transport (mismatch, non-public tenant, the 64 KiB limit); 64 KiB on unscoped sockets and 16 MiB after auth; the 10 s pending-auth deadline | K05 |
 
 Two receipt checks stay in `verification/backend-receipts/`, because they inject faults inside the Rust process through test-only coordinators that a black-box harness cannot reach: the SDK's own SQLite outbox replay, and the injected replica and receipt write failures.
 
@@ -154,14 +160,14 @@ Two receipt checks stay in `verification/backend-receipts/`, because they inject
 | --- | --- |
 | `ctx.sdk(tag, { member, tenant, options, authenticate, fresh })` | A `GonvexClient`. A Member's first client logs in with `control.auth.passwordLogin` on its own socket. Later clients reuse that session, unless `fresh` is set. `options` go to the SDK constructor. |
 | `ctx.thin(tag, { member, tenant, options, fresh })` | A `ThinClient`. Pass `options: { presenceV2: true }` for presence. |
-| `ctx.raw(tag)` and `ctx.rawLogin(socket, member)` | A `RawSocket` with `send(frame)`, `next(match)`, `auth({ project, tenant, token, capabilities })`, `close()` and `drop()`. |
+| `ctx.raw(tag, { public })` and `ctx.rawLogin(socket, member)` | A `RawSocket` with `send(frame)`, `sendRaw(textOrBytes)`, `next(match)`, `auth({ project, tenant, token, capabilities })`, `whenClosed(ms)`, `closeEvent` (`{ code, reason, at }`), `close()` and `drop()`. `public: true` connects with `?public=1`. |
 | `ctx.step(name, fn)` | Groups frames and observations. A throw is recorded, and the next step still runs. |
 | `ctx.observe(label, value)` | Records a value that every backend must reproduce. |
 | `ctx.expect(cond, msg)` | Asserts a fact that must hold on every backend. |
 | `ctx.until(check, label, ms)` | Polls until `check` returns true. The default limit is 15 s, or `GONVEX_CONFORMANCE_UNTIL_MS`. |
 | `ctx.quiesce()` | Waits until no frame has arrived for 300 ms. |
 | `ctx.frames(tag, { dir, type })` | The raw frames of a session. |
-| `ctx.deploy(2)` | Deploys generation 2 of the fixture. |
+| `ctx.deploy(n)` | Deploys generation `n` of the fixture (2: upgrade, 3: client contract). |
 | `ctx.restart({ crash })` | Restarts the backend. `crash: true` kills it without shutdown. |
 | `ctx.api` and `ctx.fixtures[n].api` | Generated function references. |
 | `ctx.alias(value, name)` | Registers a server-minted id (a created tenant, invitation, account, grant) as `<name>`, as seeded ids are, so it compares across backends. |
@@ -232,7 +238,7 @@ The lead has accepted the following as Rust contract, as observed against Rust a
 2. **Stale `clientContract: 0`.** A Reducer call with a lower contract is accepted (`reducer-errors`, step 7). Only a stale `artifactHash` gives `update_required`.
 3. **Tenant ids are unique per runtime, not per project.** `gonvex_runtime_tenants.relationship_id` is the primary key, so the harness names tenants `<scenario>-<name>`.
 4. **Rust nondeterminism.** Quiet-tenant watermarks, no-op `needHashes` episodes and Live Query arrival order are absorbed by the normalization rules above.
-5. **`ControlChanged` echo.** Rust sends every `ControlChanged` locally and again through its database listener, so a live Control Query can refresh a second time shortly after a write. That only shows state that changed without a notification, such as the claim a failed `invitations.accept` leaves. The control object notifies once per write (contract-changes 0020). `control-invitations` reads the list on demand around failed acceptances instead of racing the echo.
+5. **`ControlChanged` echo.** Rust sends every `ControlChanged` locally and again through its database listener, so a live Control Query can refresh a second time shortly after a write. That only shows state that changed without a notification, such as the claim a failed `invitations.accept` leaves. The control object notifies once per write (contract-changes 0025). `control-invitations` reads the list on demand around failed acceptances instead of racing the echo.
 
 Other notes:
 

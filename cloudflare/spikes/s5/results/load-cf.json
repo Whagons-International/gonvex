@@ -1,0 +1,382 @@
+{
+  "reps": 6,
+  "runner": {
+    "whagons": [
+      {
+        "cold": {
+          "doMs": 884,
+          "clientMs": 906.1,
+          "callbackRan": true,
+          "fetchMs": 323,
+          "isolate": "91bb08a6"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 18.7,
+          "callbackRan": false,
+          "isolate": "91bb08a6"
+        },
+        "otherObject": {
+          "doMs": 830,
+          "clientMs": 850.3,
+          "callbackRan": true,
+          "isolate": "a083a249"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 774,
+          "clientMs": 804.2,
+          "callbackRan": true,
+          "fetchMs": 130,
+          "isolate": "66810251"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": -3.6,
+          "callbackRan": false,
+          "isolate": "66810251"
+        },
+        "otherObject": {
+          "doMs": 497,
+          "clientMs": 512.7,
+          "callbackRan": true,
+          "isolate": "dad396f7"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 681,
+          "clientMs": 725.8,
+          "callbackRan": true,
+          "fetchMs": 90,
+          "isolate": "f47a53c0"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 1.5,
+          "callbackRan": false,
+          "isolate": "f47a53c0"
+        },
+        "otherObject": {
+          "doMs": 682,
+          "clientMs": 714.5,
+          "callbackRan": true,
+          "isolate": "7f1accf9"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 378,
+          "clientMs": 397,
+          "callbackRan": true,
+          "fetchMs": 79,
+          "isolate": "dc3eef23"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 4.5,
+          "callbackRan": false,
+          "isolate": "dc3eef23"
+        },
+        "otherObject": {
+          "doMs": 810,
+          "clientMs": 828.2,
+          "callbackRan": true,
+          "isolate": "66feebaf"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 877,
+          "clientMs": 896.1,
+          "callbackRan": true,
+          "fetchMs": 294,
+          "isolate": "118e0552"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 8.2,
+          "callbackRan": false,
+          "isolate": "118e0552"
+        },
+        "otherObject": {
+          "doMs": 369,
+          "clientMs": 425.9,
+          "callbackRan": true,
+          "isolate": "eae872ba"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 556,
+          "clientMs": 574,
+          "callbackRan": true,
+          "fetchMs": 114,
+          "isolate": "0037588e"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 4.9,
+          "callbackRan": false,
+          "isolate": "0037588e"
+        },
+        "otherObject": {
+          "doMs": 692,
+          "clientMs": 712.8,
+          "callbackRan": true,
+          "isolate": "17138554"
+        }
+      }
+    ],
+    "tiny": [
+      {
+        "cold": {
+          "doMs": 44,
+          "clientMs": 47.2,
+          "callbackRan": true,
+          "fetchMs": 21,
+          "isolate": "8f45ad53"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 7,
+          "callbackRan": false,
+          "isolate": "8f45ad53"
+        },
+        "otherObject": {
+          "doMs": 60,
+          "clientMs": 62.6,
+          "callbackRan": true,
+          "isolate": "677b9645"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 24,
+          "clientMs": 26.1,
+          "callbackRan": true,
+          "fetchMs": 11,
+          "isolate": "80124da7"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 4.5,
+          "callbackRan": false,
+          "isolate": "80124da7"
+        },
+        "otherObject": {
+          "doMs": 46,
+          "clientMs": 52,
+          "callbackRan": true,
+          "isolate": "91da9f33"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 34,
+          "clientMs": 32.4,
+          "callbackRan": true,
+          "fetchMs": 15,
+          "isolate": "f8515ce6"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 5.4,
+          "callbackRan": false,
+          "isolate": "f8515ce6"
+        },
+        "otherObject": {
+          "doMs": 84,
+          "clientMs": 88.4,
+          "callbackRan": true,
+          "isolate": "2a14f187"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 35,
+          "clientMs": 34.4,
+          "callbackRan": true,
+          "fetchMs": 16,
+          "isolate": "8eb45c99"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": -0.8,
+          "callbackRan": false,
+          "isolate": "8eb45c99"
+        },
+        "otherObject": {
+          "doMs": 22,
+          "clientMs": 25.8,
+          "callbackRan": true,
+          "isolate": "a748f1e9"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 43,
+          "clientMs": 38,
+          "callbackRan": true,
+          "fetchMs": 15,
+          "isolate": "c34f56e3"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": -8.2,
+          "callbackRan": false,
+          "isolate": "c34f56e3"
+        },
+        "otherObject": {
+          "doMs": 37,
+          "clientMs": 37.5,
+          "callbackRan": true,
+          "isolate": "4ebf8a32"
+        }
+      },
+      {
+        "cold": {
+          "doMs": 45,
+          "clientMs": 52.4,
+          "callbackRan": true,
+          "fetchMs": 31,
+          "isolate": "e63d6fd2"
+        },
+        "warm": {
+          "doMs": 0,
+          "clientMs": 14.7,
+          "callbackRan": false,
+          "isolate": "e63d6fd2"
+        },
+        "otherObject": {
+          "doMs": 21,
+          "clientMs": 22.2,
+          "callbackRan": true,
+          "isolate": "711155f5"
+        }
+      }
+    ]
+  },
+  "facet": {
+    "whagons": [
+      {
+        "coldClientMs": 659.2,
+        "warmClientMs": 12.2,
+        "firstInvokeDoMs": 0,
+        "isolate": "dafd9d0f"
+      },
+      {
+        "coldClientMs": 598.7,
+        "warmClientMs": 2.2,
+        "firstInvokeDoMs": 0,
+        "isolate": "2dc59e87"
+      },
+      {
+        "coldClientMs": 670.5,
+        "warmClientMs": 4,
+        "firstInvokeDoMs": 0,
+        "isolate": "503f131a"
+      },
+      {
+        "coldClientMs": 529.2,
+        "warmClientMs": -2.4,
+        "firstInvokeDoMs": 0,
+        "isolate": "72260745"
+      },
+      {
+        "coldClientMs": 653.5,
+        "warmClientMs": 9.2,
+        "firstInvokeDoMs": 0,
+        "isolate": "5628bdc0"
+      },
+      {
+        "coldClientMs": 631.5,
+        "warmClientMs": 4,
+        "firstInvokeDoMs": 0,
+        "isolate": "621f5dd4"
+      }
+    ]
+  },
+  "summary": {
+    "runnerWhagons": {
+      "coldDoMs": {
+        "n": 6,
+        "min": 378,
+        "p50": 774,
+        "p90": 884,
+        "max": 884,
+        "mean": 691.7
+      },
+      "coldFetchMs": {
+        "n": 6,
+        "min": 79,
+        "p50": 130,
+        "p90": 323,
+        "max": 323,
+        "mean": 171.7
+      },
+      "warmDoMs": {
+        "n": 6,
+        "min": 0,
+        "p50": 0,
+        "p90": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "otherObjectDoMs": {
+        "n": 6,
+        "min": 369,
+        "p50": 692,
+        "p90": 830,
+        "max": 830,
+        "mean": 646.7
+      },
+      "otherObjectCallbackRan": 6
+    },
+    "runnerTiny": {
+      "coldDoMs": {
+        "n": 6,
+        "min": 24,
+        "p50": 43,
+        "p90": 45,
+        "max": 45,
+        "mean": 37.5
+      },
+      "warmDoMs": {
+        "n": 6,
+        "min": 0,
+        "p50": 0,
+        "p90": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "otherObjectDoMs": {
+        "n": 6,
+        "min": 21,
+        "p50": 46,
+        "p90": 84,
+        "max": 84,
+        "mean": 45
+      }
+    },
+    "facetWhagons": {
+      "coldClientMs": {
+        "n": 6,
+        "min": 529.2,
+        "p50": 653.5,
+        "p90": 670.5,
+        "max": 670.5,
+        "mean": 623.8
+      },
+      "warmClientMs": {
+        "n": 6,
+        "min": -2.4,
+        "p50": 4,
+        "p90": 12.2,
+        "max": 12.2,
+        "mean": 4.9
+      }
+    }
+  }
+}
