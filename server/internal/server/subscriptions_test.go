@@ -157,6 +157,61 @@ func TestResultTaskPredicateDoesNotFanOutAcrossUnrelatedPages(t *testing.T) {
 	}
 }
 
+func TestTaskIDsArgPredicateRerunsOnlyForListedTasks(t *testing.T) {
+	reads := []manifest.ReadDependency{
+		{Table: "tasks", Columns: []string{"_id", "workspaceId", "spotId"}, Predicate: "taskIdsArg:taskIdsJson,taskId"},
+		{Table: "taskTags", Predicate: "taskIdsArg:taskIdsJson,taskId"},
+	}
+	tasksChange := func(operation string, ids ...string) tableChange {
+		rows := map[string]bool{}
+		for _, id := range ids {
+			rows[id] = true
+		}
+		return tableChange{table: "tasks", operation: operation, rowIDs: rows, changedColumns: []string{"spotId"},
+			details: map[string]tableChangeDetail{"tasks": {operation: operation, rowIDs: rows, changedColumns: []string{"spotId"}, precise: true}}}
+	}
+	tagChange := func(taskID string) tableChange {
+		return tableChange{table: "taskTags", operation: "insert", rowIDs: map[string]bool{"tag-row-1": true}, taskIDs: map[string]bool{taskID: true},
+			details: map[string]tableChangeDetail{"taskTags": {operation: "insert", rowIDs: map[string]bool{"tag-row-1": true}, taskIDs: map[string]bool{taskID: true}, precise: true}}}
+	}
+	for _, test := range []struct {
+		name   string
+		args   string
+		change tableChange
+		want   bool
+	}{
+		{"new task outside the list", `{"taskIdsJson":"[\"task-a\",\"task-b\"]","limit":500}`, tasksChange("insert", "task-new"), false},
+		{"listed task moved", `{"taskIdsJson":"[\"task-a\",\"task-b\"]"}`, tasksChange("update", "task-b"), true},
+		{"unlisted task moved", `{"taskIdsJson":"[\"task-a\",\"task-b\"]"}`, tasksChange("update", "task-z"), false},
+		{"tag on a listed task", `{"taskIdsJson":"[\"task-a\"]"}`, tagChange("task-a"), true},
+		{"tag on an unlisted task", `{"taskIdsJson":"[\"task-a\"]"}`, tagChange("task-z"), false},
+		{"array argument", `{"taskIdsJson":["task-a"]}`, tagChange("task-a"), true},
+		{"single taskId argument", `{"taskId":"task-z"}`, tagChange("task-z"), true},
+		{"taskId unions with the list", `{"taskId":"task-z","taskIdsJson":"[\"task-a\"]"}`, tagChange("task-z"), true},
+		{"no explicit ids (workspace mode) fails open", `{"workspaceId":"ws-1"}`, tasksChange("insert", "task-new"), true},
+		{"empty list fails open", `{"taskIdsJson":"[]"}`, tasksChange("insert", "task-new"), true},
+		{"unparsable list fails open", `{"taskIdsJson":"[not json"}`, tasksChange("insert", "task-new"), true},
+		{"change without ids fails open", `{"taskIdsJson":"[\"task-a\"]"}`, tableChange{table: "taskTags", operation: "insert",
+			details: map[string]tableChangeDetail{"taskTags": {operation: "insert", precise: true}}}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			group := &sharedSubscription{reads: reads, args: json.RawMessage(test.args)}
+			if got := group.matches(test.change); got != test.want {
+				t.Fatalf("matches = %v, want %v", got, test.want)
+			}
+			// The memoized group form and the stateless form agree.
+			detail := test.change.details[test.change.table]
+			if got := readPredicateMatches("taskIdsArg:taskIdsJson,taskId", group.args, callerContext{}, detail, nil); got != test.want && detail.precise {
+				t.Fatalf("readPredicateMatches = %v, want %v", got, test.want)
+			}
+		})
+	}
+	broad := tableChange{table: "tasks", broad: true}
+	if !(&sharedSubscription{reads: reads, args: json.RawMessage(`{"taskIdsJson":"[\"task-a\"]"}`)}).matches(broad) {
+		t.Fatal("broad task change must fail open")
+	}
+}
+
 func TestResultTaskOrWorkspacePredicatePreservesMembershipChanges(t *testing.T) {
 	group := &sharedSubscription{
 		args:   json.RawMessage(`{"workspaceId":"workspace-b"}`),

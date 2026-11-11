@@ -173,6 +173,9 @@ type sharedSubscription struct {
 	// gonvex.ReportCallerUserIDs; nil when it reported none or the group's
 	// result is shared across users.
 	callerUserIDs map[string]bool
+	// taskIDArgs memoizes the task id sets taskIdsArg predicates parse from the
+	// immutable group args (keyed by the predicate's argument list).
+	taskIDArgs map[string]map[string]bool
 }
 
 func newSubscriptionManager(server *Server) *subscriptionManager {
@@ -702,7 +705,7 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 		}
 		intersected = true
 		detail := tableDetail(change, read.Table)
-		if detail.precise && !readPredicateMatches(read.Predicate, group.args, caller, detail, rowIDs) {
+		if detail.precise && !group.readPredicateMatches(read.Predicate, caller, detail, rowIDs) {
 			continue
 		}
 		if !detail.precise || detail.broad || detail.operation == "insert" || detail.operation == "delete" {
@@ -733,6 +736,95 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 	return false, !intersected
 }
 
+// readPredicateMatches is the group form of readPredicateMatches: it parses a
+// taskIdsArg list once per group instead of once per change.
+func (group *sharedSubscription) readPredicateMatches(predicate string, caller callerContext, detail tableChangeDetail, rowIDs map[string]bool) bool {
+	if names, ok := strings.CutPrefix(strings.TrimSpace(predicate), "taskIdsArg:"); ok {
+		group.mu.Lock()
+		requested, cached := group.taskIDArgs[names]
+		if !cached {
+			requested = requestedTaskIDs(names, group.args)
+			if group.taskIDArgs == nil {
+				group.taskIDArgs = map[string]map[string]bool{}
+			}
+			group.taskIDArgs[names] = requested
+		}
+		group.mu.Unlock()
+		return taskIDsArgMatches(requested, detail)
+	}
+	return readPredicateMatches(predicate, group.args, caller, detail, rowIDs)
+}
+
+// requestedTaskIDs reads the task ids a subscription names explicitly in the
+// comma-separated arguments: a JSON array of ids, a string holding such an
+// array (clients send large lists as taskIdsJson), or a single id string. It
+// returns nil (unknown) when no named argument yields an id or one cannot be
+// parsed; callers then stay conservative.
+func requestedTaskIDs(names string, args json.RawMessage) map[string]bool {
+	values := map[string]json.RawMessage{}
+	if json.Unmarshal(args, &values) != nil {
+		return nil
+	}
+	requested := map[string]bool{}
+	for _, name := range strings.Split(names, ",") {
+		raw, ok := values[strings.TrimSpace(name)]
+		if !ok || len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		var list []any
+		if json.Unmarshal(raw, &list) != nil {
+			var text string
+			if json.Unmarshal(raw, &text) != nil {
+				return nil
+			}
+			text = strings.TrimSpace(text)
+			if strings.HasPrefix(text, "[") {
+				if json.Unmarshal([]byte(text), &list) != nil {
+					return nil
+				}
+			} else if text != "" {
+				list = []any{text}
+			}
+		}
+		for _, item := range list {
+			id, ok := item.(string)
+			if !ok {
+				return nil
+			}
+			if id = strings.TrimSpace(id); id != "" {
+				requested[id] = true
+			}
+		}
+	}
+	if len(requested) == 0 {
+		return nil
+	}
+	return requested
+}
+
+// taskIDsArgMatches implements taskIdsArg:<arg>[,<arg>...]: a change to a
+// task-linked table (or to tasks itself) can only affect a subscription that
+// lists its task ids explicitly when one of the changed tasks is listed. The
+// changed ids are the trigger's taskId metadata plus the row ids (for the
+// tasks table the row id is the task id; other tables' row ids never collide
+// with task ids). A change without ids, or an unknown requested set, matches.
+func taskIDsArgMatches(requested map[string]bool, detail tableChangeDetail) bool {
+	if requested == nil || len(detail.taskIDs)+len(detail.rowIDs) == 0 {
+		return true
+	}
+	for id := range detail.taskIDs {
+		if requested[id] {
+			return true
+		}
+	}
+	for id := range detail.rowIDs {
+		if requested[id] {
+			return true
+		}
+	}
+	return false
+}
+
 // readPredicateMatches implements predicates whose safety can be proven from
 // the trigger metadata, subscription arguments, and the previous result rows.
 // resultTaskIds scopes a task-linked table to tasks already in the result;
@@ -742,6 +834,9 @@ func readPredicateMatches(predicate string, args json.RawMessage, caller callerC
 	predicate = strings.TrimSpace(predicate)
 	if predicate == "" {
 		return true
+	}
+	if names, ok := strings.CutPrefix(predicate, "taskIdsArg:"); ok {
+		return taskIDsArgMatches(requestedTaskIDs(names, args), detail)
 	}
 	resultTaskIDsMatch := func() (bool, bool) {
 		if len(detail.taskIDs) == 0 {
