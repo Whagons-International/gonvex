@@ -28,6 +28,7 @@ import visibilityMasks from './visibility-masks.mjs';
 import receiptExpiry from './receipt-expiry.mjs';
 import scheduler from './scheduler.mjs';
 import liveQueryTaskGrid from './live-query-task-grid.mjs';
+import operatorRoutes from './operator-routes.mjs';
 
 export const SCENARIOS = [
   thinSdkParity,
@@ -55,6 +56,8 @@ export const SCENARIOS = [
   receiptExpiry,
   scheduler,
   liveQueryTaskGrid,
+  // K19: deploy and operator routes over HTTP (no seeded tenants).
+  operatorRoutes,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
 ];
