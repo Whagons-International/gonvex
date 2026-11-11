@@ -24,3 +24,20 @@ CREATE TABLE IF NOT EXISTS note_shares (
   member_id TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS note_shares_by_member ON note_shares (member_id);
+
+-- Storage layer (K01): declared types, a deferred foreign key and document
+-- numbers for the `storage-sql` scenario. Not checksummed.
+CREATE TABLE IF NOT EXISTS storage_values (
+  id TEXT PRIMARY KEY NOT NULL,
+  label TEXT,
+  meta JSON,
+  flag BOOLEAN,
+  n INTEGER,
+  data BLOB
+);
+CREATE TABLE IF NOT EXISTS storage_parents (id TEXT PRIMARY KEY NOT NULL);
+CREATE TABLE IF NOT EXISTS storage_children (
+  id TEXT PRIMARY KEY NOT NULL,
+  parent_id TEXT REFERENCES storage_parents (id) DEFERRABLE INITIALLY DEFERRED
+);
+CREATE TABLE IF NOT EXISTS storage_documents (id TEXT PRIMARY KEY NOT NULL, number TEXT NOT NULL);
