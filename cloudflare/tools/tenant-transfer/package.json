@@ -1,0 +1,18 @@
+{
+  "name": "@gonvex/cf-tenant-transfer",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "P03: move one tenant's SQLite file into a Durable Object and back out, losslessly.",
+  "bin": { "tenant-transfer": "bin/tenant-transfer.mjs" },
+  "scripts": {
+    "dev": "wrangler dev --local --persist-to ${TENANT_TRANSFER_PERSIST:-.wrangler/state}",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/*.test.mjs",
+    "test:workerd": "node --test --test-concurrency=1 test/workerd.roundtrip.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.152.0"
+  },
+  "engines": { "node": ">=22.13" }
+}

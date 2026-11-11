@@ -1,0 +1,16 @@
+// P03 tenant transfer worker. Development account only; every resource name
+// starts with gonvex-cf-dev-. TRANSFER_TOKEN is a secret (wrangler secret put,
+// or .dev.vars locally) and is never committed.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-p03",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{ "name": "TENANT_STORE", "class_name": "TenantStore" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantStore"] }],
+  "observability": { "enabled": true }
+}
