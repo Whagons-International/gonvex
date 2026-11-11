@@ -172,6 +172,12 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
     },
     /** Raw frames a session sent or received (unnormalized). */
     frames: (tag, filter) => recorder.frames(tag, filter),
+    /**
+     * Registers a server-minted identifier (a created tenant, invitation,
+     * account or grant) under a stable alias, as seeded ids are, so frames and
+     * observations compare across backends. Returns the value.
+     */
+    alias(value, name) { aliases.add(value, `<${name}>`); return value; },
     async deploy(generation) { const r = await backend.deploy(projectId, fixtures[generation].manifest); if (!r.ok) throw new Error(`deploy of generation ${generation} failed`); return r; },
     restart: (options) => backend.restart(options),
     quiesce,

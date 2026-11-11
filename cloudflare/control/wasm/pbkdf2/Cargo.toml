@@ -1,0 +1,26 @@
+# PBKDF2-HMAC-SHA256 for the control object (decision 0007), built from the
+# same crates the Rust runtime uses (control.rs `pbkdf2_hmac::<Sha256>`).
+# Build: ./build.sh (writes ../../src/pbkdf2.wasm). Not part of the rust/ workspace.
+[package]
+name = "gonvex-control-pbkdf2"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+pbkdf2 = { version = "=0.12.2", default-features = false, features = ["hmac"] }
+sha2 = { version = "=0.10.9", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true
+
+[workspace]

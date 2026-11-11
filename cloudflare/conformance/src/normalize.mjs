@@ -66,6 +66,10 @@ export const RULES = {
   hashKeys: new Set(['digest', 'hashes', 'contentHash', 'bundleHash']),
   uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
   token: /^gvx_[a-z]+_/,
+  /** RFC 3339 instants (Control Plane timestamps are strings, e.g. `expiresAt`). */
+  /** JWTs (`header.payload.signature`, base64url JSON): ID tokens an identity provider mints per run. */
+  jwt: /^eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*$/,
+  rfc3339: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/,
 };
 
 /**
@@ -202,10 +206,12 @@ export function normalizeSession(records) {
       return v;
     }
     if (typeof v === 'string') {
+      if (key && RULES.timeKey.test(key) && RULES.rfc3339.test(v)) return '<time>';
       if (key && envelope && RULES.serverTokens.has(key)) return `<${key}>`;
       if (key && envelope && RULES.idKeys.has(key) && opaque(v)) return names.name(key === 'epoch' ? 'epoch' : key.endsWith('Scope') || key === 'scope' ? 'scope' : key === 'artifactHash' ? 'artifact' : 'id', v);
       if (key && RULES.opaqueKeys.has(key) && opaque(v)) return names.name(key === 'epoch' ? 'epoch' : 'scope', v);
       if (RULES.token.test(v)) return '<token>';
+      if (RULES.jwt.test(v)) return '<jwt>';
       if (RULES.uuid.test(v)) return names.name('uuid', v);
       return key === 'error' || key === 'reason' || key === 'message' ? text(v, names) : v;
     }
@@ -285,8 +291,10 @@ export function normalizeValue(value, names = new Names()) {
     // Absolute revisions depend on how a backend provisions a tenant; frames keep their order as ranks.
     if (typeof v === 'number' && key && RULES.revisionKeys.has(key)) return '<revision>';
     if (typeof v === 'string') {
+      if (key && RULES.timeKey.test(key) && RULES.rfc3339.test(v)) return '<time>';
       if (key && RULES.opaqueKeys.has(key) && opaque(v)) return names.name(key === 'epoch' ? 'epoch' : 'scope', v);
       if (RULES.token.test(v)) return '<token>';
+      if (RULES.jwt.test(v)) return '<jwt>';
       if (RULES.uuid.test(v)) return names.name('uuid', v);
       return text(v, names);
     }

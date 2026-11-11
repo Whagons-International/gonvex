@@ -29,6 +29,26 @@ export function rustBinary() {
   return found;
 }
 
+/**
+ * Fixed configuration both backends get, so control-plane scenarios can use
+ * provider secrets (C.3.3) and the native OAuth routes (C.3.5).
+ */
+export const CONFORMANCE_SECRETS = {
+  GONVEX_DASHBOARD_SESSION_SECRET: 'conformance-control-secret',
+  GONVEX_GOOGLE_CLIENT_ID: 'conformance-google-client',
+  GONVEX_GOOGLE_CLIENT_SECRET: 'conformance-google-secret',
+};
+
+/**
+ * Firebase Auth Emulator test decoder (docs/firebase-auth-emulator.md), on
+ * when GONVEX_CONFORMANCE_FIREBASE_EMULATOR names the emulator (host:port).
+ * The Rust binary must be built with `--features test-firebase-auth-emulator`.
+ */
+export function firebaseEmulatorEnv() {
+  const host = process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR;
+  return host ? { GONVEX_TEST_AUTH_EMULATOR: 'true', GONVEX_ENV: 'test', FIREBASE_AUTH_EMULATOR_HOST: host } : {};
+}
+
 const freePort = () => new Promise((resolve, reject) => {
   const server = createServer();
   server.unref();
@@ -46,7 +66,7 @@ export class RustBackend extends Backend {
     this.restarts = 0;
   }
 
-  get capabilities() { return { restart: true, crash: true }; }
+  get capabilities() { return { restart: true, crash: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
 
   async start() {
     await mkdir(this.dataDir, { recursive: true });
@@ -68,6 +88,9 @@ export class RustBackend extends Backend {
         GONVEX_SQLITE_SYNCHRONOUS: 'full',
         // A Reducer that never returns fails `transient` within the scenario budget.
         GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS: '2000',
+        GONVEX_AUTH_URL: this.httpUrl,
+        ...CONFORMANCE_SECRETS,
+        ...firebaseEmulatorEnv(),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -124,6 +147,22 @@ export class RustBackend extends Backend {
   async createMember(project, tenantId, { email, password, name }) {
     const r = await this.request('POST', '/dev/internal/e2e/members', { body: { projectId: project, tenantId, email, password, name } });
     return { accountId: r.accountId, memberId: r.memberId };
+  }
+
+  /** An account with a password login and no membership. */
+  async createAccount(project, { email, password, name }) {
+    const r = await this.request('POST', '/dev/internal/e2e/members', { body: { projectId: project, email, password, name, accountOnly: true } });
+    return { accountId: r.accountId };
+  }
+
+  /** A project developer (`gonvex_project_members`): grants `dev` / `pAdmin` Control access. */
+  async addProjectMember(project, { email, name = '', role = 'dev' }) {
+    await this.request('POST', `/dev/projects/${encodeURIComponent(project)}/members`, { body: { email, name, role } });
+  }
+
+  /** Native Google OAuth with a registered app redirect URI (operator route). */
+  async configureGoogleAuth(project, { redirectUri, signupMode = 'personal' }) {
+    await this.request('PUT', `/dev/projects/${encodeURIComponent(project)}/auth/google`, { body: { redirectUri, signupMode } });
   }
 
   async readTable(project, tenantId, table) {

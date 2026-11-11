@@ -14,6 +14,7 @@ non-draft PR back to it with the package id in the title.
 | `src/index.ts` | Worker entry: routes requests to objects, re-exports every Durable Object class. |
 | `src/hello.ts` | P01 hello-world object (SQLite write + WebSocket echo). Template only; the tenant object replaces it. |
 | `test/*.test.ts` | Vitest tests that run **inside workerd** (`@cloudflare/vitest-plugin`), with real Durable Objects and SQLite. |
+| `control/` | K06 control object (Control Plane schema, `control.*`, auth, native OAuth, tenant routing), with its own `wrangler.jsonc`, tests and README. `pnpm test` and `pnpm typecheck` include it. |
 | `scripts/deploy-preview.mjs` | Deploys/deletes preview Worker `gonvex-cf-dev-preview-<branch-slug>`. Node tests beside it. |
 | `.github/workflows/cloudflare.yml` | PRs to `cloudflare/integration`: typecheck, tests, bundle size, preview deploy, delete on close. |
 
