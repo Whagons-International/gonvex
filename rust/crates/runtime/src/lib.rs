@@ -43,6 +43,7 @@ pub mod profiling;
 pub mod public_functions;
 mod raw_log;
 pub mod raw_sites;
+pub mod reducer_feed;
 pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
@@ -142,6 +143,8 @@ struct RuntimeInner {
     action_gate: Arc<action_gate::ActionGate>,
     /// Tenants whose Action outbox the single drainer should visit.
     outbox_queue: Arc<action_gate::OutboxQueue>,
+    /// Reducer log feed switches (`reducer_feed.rs`), both off by default.
+    reducer_feed: reducer_feed::ReducerFeed,
 }
 
 impl Drop for RuntimeInner {
@@ -336,6 +339,7 @@ impl Runtime {
                 permissions: permission_bits::PermissionRegistry::default(),
                 action_gate: action_gate::ActionGate::from_env(),
                 outbox_queue: Arc::default(),
+                reducer_feed: reducer_feed::ReducerFeed::from_env(),
             }),
         }
     }
@@ -541,7 +545,13 @@ impl Runtime {
             *self.inner.control_plane.write().await = Some(control);
             self.start_control_event_listener().await?;
             self.inner.membership_projector.start(self.clone());
-            self.inner.scheduler.start(self.clone());
+            if self.inner.reducer_feed.replaying() {
+                // A shadow applies the source's Reducer feed; crons, scheduled
+                // jobs and Actions already ran on the source.
+                tracing::warn!("reducer feed replay: the scheduler and Action outbox are off");
+            } else {
+                self.inner.scheduler.start(self.clone());
+            }
         } else if self.inner.config.require_auth {
             self.inner.module_host.shutdown().await;
             return Err(RuntimeStartError::MissingControlPlane);
@@ -557,6 +567,7 @@ impl Runtime {
             .merge(native_auth::router())
             .merge(operations::router())
             .merge(operator_data::router())
+            .merge(reducer_feed::router())
             .route(
                 "/storage/{*key}",
                 get(storage_download)
