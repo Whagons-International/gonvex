@@ -1,0 +1,43 @@
+{
+  "worker": "gonvex-cf-dev-preview-cf-k16-public (deleted after the run)",
+  "at": "2026-11-11T22:28:59.281Z",
+  "connection": {
+    "first30": [
+      "public tenant session is unavailable"
+    ],
+    "call31": "public call rate limit exceeded"
+  },
+  "address": {
+    "admittedPerSocket": [
+      30,
+      30,
+      29
+    ],
+    "expected": [
+      30,
+      30,
+      29
+    ]
+  },
+  "publicSockets": {
+    "refusedOf20": 0,
+    "socket21": {
+      "status": 429,
+      "body": "public connection limit exceeded"
+    },
+    "fillMs": 834,
+    "afterClose": "admitted"
+  },
+  "pending": {
+    "refusedOf100": 0,
+    "socket101": {
+      "status": 429,
+      "body": "pending connection limit exceeded"
+    },
+    "socket101Public": {
+      "status": 429,
+      "body": "pending connection limit exceeded"
+    }
+  },
+  "ms": 22351
+}

@@ -11,12 +11,18 @@
  *   round) and the 20 s liveness watermark (G0-6).
  * - `{"type":"ping"}` is answered `{"type":"pong"}` by the runtime's
  *   auto-response, without waking the object (G0-6).
+ * - K16: the public admission monitor runs on the same alarm, one Control
+ *   Plane read per pinned scope per round; slots a socket holds in its
+ *   address limiter are freed on first auth (pending) and on close.
  */
 import type { ReadyOptions } from "./capabilities";
 import { CLOSE } from "./protocol";
 import { ModuleCache, Session, type SessionHooks, type SessionRecord } from "./session";
 import type { ModuleInfo, Ports, TenantSession } from "./ports";
 import type { PresenceConfig } from "../presence/hub";
+import { UNKNOWN_ADDRESS } from "../public/address";
+import { type PublicGuard, validatePublicScope } from "../public/guard";
+import type { SlotKind } from "../public/limiter";
 
 /** Liveness and revalidation due within this window run in the same alarm (deadlines never run early). */
 const ALARM_SLACK_MS = 2_000;
@@ -31,6 +37,8 @@ export interface HostOptions {
   tenantChanged?(socket: WebSocket, previous: TenantSession | null, next: TenantSession | null): void;
   /** Presence v2 settings (K14); default: on when `ready.presence`. */
   presence?: PresenceConfig;
+  /** K16: public-function limits and the address budgets. */
+  publicGuard?: PublicGuard;
 }
 
 interface Attachment { session: SessionRecord }
@@ -50,8 +58,11 @@ export class SocketHost {
     }
   }
 
-  /** Accepts an upgrade. `publicTransport` comes from the router (`?public=1`). */
-  accept(publicTransport: boolean, connectionId: string): Response {
+  /**
+   * Accepts an upgrade. `publicTransport` comes from the router (`?public=1`);
+   * `address` and `slots` from the router's reservation in the address limiter (K16).
+   */
+  accept(publicTransport: boolean, connectionId: string, address: string = UNKNOWN_ADDRESS, slots: SlotKind[] = []): Response {
     const pair = new WebSocketPair();
     const client = pair[0], server = pair[1];
     this.options.ctx.acceptWebSocket(server);
@@ -59,6 +70,8 @@ export class SocketHost {
       ...this.sessionOptions(server),
       connectionId,
       publicTransport,
+      address,
+      slots,
     });
     this.sessions.set(server, session);
     this.persist(server, session);
@@ -82,6 +95,7 @@ export class SocketHost {
       if (attachment?.session) session = this.restore(ws, attachment.session);
     }
     this.sessions.delete(ws);
+    if (session) this.releaseSlots(ws, session, session.record.slots ?? []);
     await session?.closedByPeer();
   }
 
@@ -91,11 +105,23 @@ export class SocketHost {
     const now = Date.now();
     const work: Array<Promise<void>> = [];
     const revalidate: Session[] = [];
+    const admissions = new Map<string, { scope: readonly [string, string]; sessions: Session[] }>();
     for (const session of this.sessions.values()) {
       const r = session.record;
       if (r.pendingUntil !== null && now >= r.pendingUntil) work.push(session.deadline(now));
       work.push(session.liveness(now + ALARM_SLACK_MS));
       if (r.revalidateAt !== null && now + ALARM_SLACK_MS >= r.revalidateAt) revalidate.push(session);
+      const due = session.admissionDueAt(), scope = session.publicScope();
+      if (due !== null && scope && now >= due) {
+        const key = `${scope[0]}\u0000${scope[1]}`;
+        let group = admissions.get(key);
+        if (!group) admissions.set(key, group = { scope, sessions: [] });
+        group.sessions.push(session);
+      }
+    }
+    // K16: the admission monitor, one Control Plane read per pinned scope (not per socket).
+    for (const { scope, sessions } of admissions.values()) {
+      work.push(validatePublicScope(this.options.ports.control, scope).then(valid => Promise.all(sessions.map(s => s.admissionMonitored(valid, now)))).then(() => {}));
     }
     await Promise.all(work);
     const items = revalidate.map(s => s.revalidationItem());
@@ -141,6 +167,10 @@ export class SocketHost {
       persist: () => this.persist(ws, this.sessions.get(ws)),
       tenantChanged: (previous, next) => this.options.tenantChanged?.(ws, previous, next),
       waitUntil: (promise) => this.options.ctx.waitUntil(promise),
+      pendingCleared: () => {
+        const session = this.sessions.get(ws);
+        if (session) this.releaseSlots(ws, session, ["pending"]);
+      },
     };
     return {
       ports: this.options.ports,
@@ -149,14 +179,39 @@ export class SocketHost {
       modules: this.modules,
       hooks,
       ...(this.options.presence ? { presence: this.options.presence } : {}),
+      ...(this.options.publicGuard ? { publicGuard: this.options.publicGuard } : {}),
       sink: {
         send: (text: string) => ws.send(text),
         close: (frame: { code: number; reason: string }) => {
+          const session = this.sessions.get(ws);
+          if (session) this.releaseSlots(ws, session, session.record.slots ?? []);
           try { ws.close(frame.code, frame.reason); } catch (error) { console.error("session host: close failed", error); }
           this.sessions.delete(ws);
         },
       },
     };
+  }
+
+  /**
+   * K16: frees `kinds` of the slots `session` holds in its address limiter,
+   * and records that in the attachment at once, so a close that restores the
+   * record afterwards does not release them a second time.
+   */
+  private releaseSlots(ws: WebSocket, session: Session, kinds: readonly SlotKind[]): void {
+    const held = session.record.slots ?? [];
+    const freed = held.filter(k => kinds.includes(k));
+    if (!freed.length) return;
+    session.record.slots = held.filter(k => !freed.includes(k));
+    try { ws.serializeAttachment({ session: session.record } satisfies Attachment); } catch { /* over 16 KiB: the release below is idempotent */ }
+    const guard = this.options.publicGuard;
+    if (guard) this.options.ctx.waitUntil(guard.release(session.record.address ?? UNKNOWN_ADDRESS, session.record.connectionId, freed));
+  }
+
+  /** K16: which of `connectionIds` are open on this object (the address limiter's audit). */
+  liveConnections(connectionIds: readonly string[]): string[] {
+    const open = new Set<string>();
+    for (const session of this.sessions.values()) if (!session.closed) open.add(session.record.connectionId);
+    return connectionIds.filter(id => open.has(id));
   }
 
   private restore(ws: WebSocket, record: SessionRecord): Session {

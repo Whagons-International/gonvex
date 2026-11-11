@@ -40,7 +40,7 @@ const freePort = () => new Promise((resolve, reject) => {
 
 export class CloudflareReducerBackend extends CloudflareBackend {
   /** `receiptExpiry`: receipts expire after the offline window (0009); Rust keeps them forever. */
-  get capabilities() { return { restart: true, crash: true, receiptExpiry: true }; }
+  get capabilities() { return { restart: true, crash: true, receiptExpiry: true, publicCalls: true }; }
 
   /**
    * Runs the tenant's receipt expiry (0009) as the alarm would at time `now`,

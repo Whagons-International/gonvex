@@ -19,7 +19,9 @@
       { "name": "GATEWAY", "class_name": "GatewayObject" },
       // K05 stand-ins for the control object (K06) and the tenant object; replaced by those packages.
       { "name": "CONTROL_STUB", "class_name": "ControlStubObject" },
-      { "name": "TENANT_STUB", "class_name": "TenantStubObject" }
+      { "name": "TENANT_STUB", "class_name": "TenantStubObject" },
+      // K16: one object per client address bucket: pending and public sockets, calls per address (0040).
+      { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" }
     ]
   },
   "vars": {
@@ -33,6 +35,7 @@
   // Durable Object classes must be SQLite-backed: always `new_sqlite_classes`.
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["HelloObject"] },
-    { "tag": "v2", "new_sqlite_classes": ["GatewayObject", "ControlStubObject", "TenantStubObject"] }
+    { "tag": "v2", "new_sqlite_classes": ["GatewayObject", "ControlStubObject", "TenantStubObject"] },
+    { "tag": "v3", "new_sqlite_classes": ["PublicLimiterObject"] }
   ]
 }
