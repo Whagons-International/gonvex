@@ -1,4 +1,4 @@
-# 0030: K14 presence: placement, memory loss and the measured dead-peer gap
+# 0033: K14 presence: placement, memory loss and the measured dead-peer gap
 
 Date: 2026-11-11. Status: **proposed** (K14). Affects: K05 (session files edited), K07/K10 (the tenant object
 embeds presence), K06 (support sessions), V01. Code: `cloudflare/kernel/presence/` (README has the details).
