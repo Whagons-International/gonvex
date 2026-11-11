@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +48,7 @@ func Open(databaseURL string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	applySessionDefaults(config)
 	db := sql.OpenDB(&limitedConnector{
 		connector: stdlib.GetConnector(*config),
 		budget:    runtimeBudget,
@@ -264,4 +267,23 @@ func (c *limitedConn) CheckNamedValue(value *driver.NamedValue) error {
 		return connection.CheckNamedValue(value)
 	}
 	return driver.ErrSkip
+}
+
+// applySessionDefaults turns PostgreSQL JIT off for runtime sessions unless the
+// URL or GONVEX_PG_JIT says otherwise. Runtime statements are short OLTP reads
+// whose plan costs still cross jit_above_cost (correlated per-row projections
+// over a workspace window): compiling them took ~126 ms of a 157 ms query, and
+// about half of all PostgreSQL execution time in the load lab.
+func applySessionDefaults(config *pgx.ConnConfig) {
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = map[string]string{}
+	}
+	if _, explicit := config.RuntimeParams["jit"]; explicit {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GONVEX_PG_JIT"))) {
+	case "on", "true", "1", "server":
+		return // keep the server's setting
+	}
+	config.RuntimeParams["jit"] = "off"
 }
