@@ -7,12 +7,19 @@
 // kernel way (infrastructure, the fixture migration through A01, the capture
 // install), replays the same Reducer transactions through `invokeCaptured`
 // with the provenance Rust recorded, and compares.
+//
+// The transactions run on K01's real storage layer (`TenantStorage`,
+// `StorageSession`: admission, binding, savepoints, the aborted rule and the
+// deferred-FK check), in the mixed write tracking K07 uses (0028 §2d, §2e),
+// not on the stand-in K03 was written against before K01 merged.
 
 import { describe, expect, it } from "vitest";
 import { SchemaTransform } from "../../schema-transform/index.ts";
 import { CaptureState, ChangeWake, directSql, installChangeFeed, invokeCaptured, planChangeFeedInstall, type CommitNotice, type Provenance } from "../index.ts";
 import golden from "./golden/rust-change-capture.json";
-import { rows, StandInStorage, withObject, type StandInSession } from "./helpers.ts";
+import { TenantStorage, type StorageSession } from "../../storage/index";
+import type { WriteOperation } from "../index.ts";
+import { rows, withObject } from "./helpers.ts";
 import { numbersByValue } from "./numbers.ts";
 
 interface Step {
@@ -84,21 +91,39 @@ function provision(state: DurableObjectState, capture: boolean): { units: number
   });
 }
 
+/** What one replayed transaction's K01 session saw: its row counters and the rows capture reported. */
+interface SessionView {
+  stats: { statements: number; rowsRead: number; rowsWritten: number };
+  noted: Array<{ table: string; operation: WriteOperation; rowids: number[] }>;
+}
+
 interface Replayed {
   replies: Record<string, unknown>;
   notices: Array<CommitNotice | undefined>;
-  sessions: StandInSession[];
+  sessions: SessionView[];
   captureRows: number[];
 }
 
+/** Captured entity tables with rowids: capture reports their rows, so K01 keeps them row-level (mixed mode). */
+function rowReported(state: DurableObjectState): (table: string) => boolean {
+  const tables = new Set(rows<{ name: string; ddl: string }>(state.storage.sql,
+    `SELECT t.name AS name, t.sql AS ddl FROM sqlite_schema t WHERE t.type = 'table' AND EXISTS (SELECT 1 FROM sqlite_schema g
+       WHERE g.type = 'trigger' AND g.tbl_name = t.name AND g.name = '_gonvex_sync_' || t.name || '_insert' AND g.sql LIKE '%AFTER INSERT%')`)
+    .filter((t) => !/\bWITHOUT\s+ROWID\b/i.test(t.ddl)).map((t) => t.name.toLowerCase()));
+  return (table) => tables.has(table);
+}
+
 async function replay(state: DurableObjectState, capture: boolean): Promise<Replayed> {
-  const storage = new StandInStorage(state.storage);
+  const storage = new TenantStorage(state.storage, { writeTracking: "mixed", rowReported: rowReported(state) });
   const context = { state: new CaptureState(), wake: new ChangeWake(), reportRows: true };
   const out: Replayed = { replies: {}, notices: [], sessions: [], captureRows: [] };
   for (const t of golden.transactions as Transaction[]) {
-    let session!: StandInSession;
-    const body = async (s: StandInSession) => {
-      session = s;
+    let session!: SessionView;
+    const body = async (s: StorageSession) => {
+      const noted: SessionView["noted"] = [];
+      const note = s.noteRows.bind(s);
+      s.noteRows = (table, operation, rowids) => { noted.push({ table, operation, rowids: [...rowids] }); note(table, operation, rowids); };
+      session = { stats: s.stats, noted };
       const errors: Array<string | null> = [];
       for (const step of t.steps) {
         try {
