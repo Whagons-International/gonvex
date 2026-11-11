@@ -1,0 +1,13 @@
+// Test-only Worker for the Action runtime (K12). Never deployed; the name keeps
+// the gonvex-cf-dev- prefix anyway.
+{
+  "name": "gonvex-cf-dev-k12-actions-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // AsyncLocalStorage carries the active invocation across awaits (K04 globals.ts).
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": { "bindings": [{ "name": "TENANT", "class_name": "TestTenant" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestTenant"] }],
+  "workflows": [{ "name": "gonvex-cf-dev-k12-action", "binding": "ACTION_WORKFLOW", "class_name": "ActionWorkflow" }],
+  "vars": { "ACTION_STEP_TIMEOUT": "1 hour", "ACTION_STEP_RETRY_DELAY": "250 milliseconds" }
+}

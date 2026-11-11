@@ -1,0 +1,23 @@
+// Local-only Worker for long Action runs (K12): the test tenant object, the
+// Action Workflow and a small HTTP API for the driver (run-agent.mjs). The
+// Actions fetch the conformance upstream over the real network. Never deployed;
+// the name keeps the gonvex-cf-dev- prefix anyway.
+{
+  "name": "gonvex-cf-dev-k12-actions-dev",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": ["nodejs_als"],
+  // Streaming through a JavaScript transform costs 40-100 ms CPU per MB (S4, 0016 G0-8).
+  "limits": { "cpu_ms": 300000 },
+  // The test Worker's vitest aliases, by exact specifier.
+  "alias": {
+    "@conformance-fixture/actions.ts": "../../conformance/fixtures/app/gonvex/actions.ts",
+    "@conformance-fixture/board.ts": "../../conformance/fixtures/app/gonvex/board.ts",
+    "@conformance-scenarios/actions-upstream.mjs": "../../conformance/scenarios/actions-upstream.mjs",
+    "@gonvex/module-sdk": "../../../packages/module-sdk/src/index.ts"
+  },
+  "durable_objects": { "bindings": [{ "name": "TENANT", "class_name": "TestTenant" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestTenant"] }],
+  "workflows": [{ "name": "gonvex-cf-dev-k12-action-dev", "binding": "ACTION_WORKFLOW", "class_name": "ActionWorkflow" }],
+  "vars": { "ACTION_STEP_TIMEOUT": "24 hours" }
+}

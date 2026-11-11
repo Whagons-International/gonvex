@@ -130,6 +130,7 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `scheduler` | One Reducer schedules `runAfter(0)` and `runAt(+300 ms)` of `scheduler.tick` and three identical `wakeAt` calls that must coalesce into one run, and a Reducer reschedules itself with `runAfter(0)` until the durable hop limit (32) stops it; after a fixed settle time (`GONVEX_CONFORMANCE_SCHEDULER_SETTLE_MS`, default 5 s) the `board` rows must show two ticks, one wake and 32 hops. The kernel's scheduler rules are unit-tested in `kernel/scheduler/test/` | K11 |
 | `live-query-task-grid` | Whagons' real `tasks.grid` plan (whagons5-client `2457bb65f`) over Whagons' legacy masks: windows with exact count, the index sort by status and priority, NULL ordering, search over the projection and the related documents (plain and `$or`), filter operators, a second Member's class; rows entering and leaving through assignment, team membership and `inRelation` workspace contexts (share, finding, revocation), an invisible write (no frame), dependency writes, a delete; resume (`query.progress`) and a stale `windowRevision`; `subscribeMany`, `unsubscribe`; the one-shot plan `tasks.byIds` over 150 ids; error texts. Writes wait for quiet once windows are open (Rust coalesces racing reruns by timing, 0038 §2). `node src/live-query-golden.mjs` writes Rust's run to `kernel/query/test/golden/`, which the kernel's engine replays in workerd | K08 |
 | `presence-edges` | Presence v2 on raw sockets: invalid states ignored, trimmed and case-insensitive states, `gone` = offline without grace, a re-auth that re-announces inside the grace (no transition), a re-auth dropping the subscription, unsubscribe and resubscribe, a socket without the `presence` capability, tenant isolation, a dropped socket offline after the 10 s grace (asserted 9.5-12.5 s on every backend). Snapshots are asserted sorted by Member id on each backend | K14 |
+| `actions` | Every Action capability through raw `action.call` frames: the ctx surface, `fetch` (status text, headers, request bodies, redirects inside and outside the declared origins, the 8 MiB cap by content-length and by body, lossy UTF-8, an invalid method), event streams read as they arrive (`fetchRead`, a cancelled stream, the cumulative 8 MiB cap), the origin allowlist as a sticky denial, an unconfigured secret, `tools.*` (Query, Reducer and internal Reducer bindings), `ctx.functions.invoke` (Query, Reducer and Action targets; stale artifact, internal, system, missing, recursive and replica targets), `scheduler` (runAfter, runAt, wakeAt coalescing, refusals), `storage` on a backend without an object store, and the errors of a failing, unknown, wrong-kind, bad-argument and internal Action. The Actions fetch `scenarios/actions-upstream.mjs`, served on 127.0.0.1:47812. Until K05/K07 serve `action.call`, the kernel runs the same steps in `cloudflare/actions/test/parity.test.ts` against the recorded Rust answers | K12 |
 
 Two receipt checks stay in `verification/backend-receipts/`, because they inject faults inside the Rust process through test-only coordinators that a black-box harness cannot reach: the SDK's own SQLite outbox replay, and the injected replica and receipt write failures.
 
@@ -275,4 +276,15 @@ Values each backend mints (tokens, ids, times, project keys, session revisions, 
 the named rules at the top of the scenario; everything else is compared exactly. The kernel backend waits for the
 new Worker version after each sync, because the local builder swaps it just after the sync answers and
 `wrangler dev` restarts workerd (0036 §4). Other scenarios need seeded Members and the wave-2 tenant object.
+## Action runtime (package K12)
+
+The `actions` scenario needs port 47812 free: its Actions declare `http://127.0.0.1:47812` as their network
+origin, and the scenario serves `scenarios/actions-upstream.mjs` there for every backend at once. Anonymous
+callers are not covered here, because the harness seeds no public tenant; the 60 s public deadline is tested in
+`cloudflare/actions/test/runtime.test.ts`.
+
+The kernel cannot answer `action.call` until K05 and K07 route it to the Action Worker. Until then
+`cloudflare/actions/test/parity.test.ts` runs the same fixture Actions, in the same order, through the K12
+runtime against a real tenant object, and compares them with Rust's answers recorded from this scenario
+(`cloudflare/actions/scripts/record-golden.mjs`). Rerun the recording whenever the fixture's `actions.ts` changes.
 
