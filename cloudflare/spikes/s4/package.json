@@ -1,0 +1,18 @@
+{
+  "name": "@gonvex/cf-spike-s4",
+  "private": true,
+  "type": "module",
+  "description": "S4 spike: long Gonvex Actions on Cloudflare (Queue consumer vs Workflow step vs Durable Object alarm runner).",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev:upstream": "wrangler dev -c wrangler.upstream.jsonc --port 8788",
+    "dev:runner": "wrangler dev -c wrangler.runner.jsonc --port 8787 --var UPSTREAM_URL:http://127.0.0.1:8788 --var LOCAL:1",
+    "deploy:upstream": "wrangler deploy -c wrangler.upstream.jsonc",
+    "deploy:runner": "wrangler deploy -c wrangler.runner.jsonc"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261026.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.153.0"
+  }
+}

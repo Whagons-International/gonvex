@@ -1,0 +1,9 @@
+{
+  // Test upstream (SSE, slow endpoint, download, upload sink, poll).
+  "name": "gonvex-cf-dev-s4-upstream",
+  "main": "src/upstream.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "limits": { "cpu_ms": 300000 },
+  "observability": { "enabled": true }
+}
