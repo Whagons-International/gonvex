@@ -116,6 +116,9 @@ pub(crate) struct ExecutionAccess {
     /// A root Action admitted by its caller (the outbox drainer claims a row
     /// only after it holds the permit). Otherwise a root Action takes one.
     pub action_permit: Option<crate::action_gate::ActionPermit>,
+    /// `ctx.now` pinned by the caller (a Reducer feed replay). Otherwise the
+    /// module host stamps it, or the runtime does when the feed records.
+    pub now_unix_ms: Option<u64>,
 }
 
 pub(crate) struct NestedExecutionAccess {
@@ -534,6 +537,24 @@ impl Runtime {
             )
         });
         install_execution_deadline(self, &mut provenance, false);
+        let feed = &self.inner.reducer_feed;
+        let now_unix_ms = access
+            .now_unix_ms
+            .or_else(|| feed.recording().then(|| unix_millis(SystemTime::now())));
+        let feed_capture = feed.recording().then(|| {
+            crate::reducer_feed::Capture::new(
+                session,
+                command_id,
+                path,
+                &args,
+                &provenance,
+                now_unix_ms.unwrap_or_default(),
+                access.intent_entropy.as_deref(),
+                idempotency_key,
+                &receipt_path,
+                &module.artifact_hash,
+            )
+        });
         // The tenant's single SQLite writer is taken at the Reducer's first
         // database call, never while it waits for a V8 isolate. The receipt
         // claim happens when the transaction opens; a key already claimed by a
@@ -599,6 +620,9 @@ impl Runtime {
             });
         }
         invocation.context.intent_entropy = access.intent_entropy;
+        if let Some(now_unix_ms) = now_unix_ms {
+            invocation.context.now_unix_ms = now_unix_ms;
+        }
         let profile_prepare = profile_timer.lap(gonvex_profiler::Stage::FnPrepare, profile_label);
         let invoke_timer = crate::cron_profile::InvokeTimer::start(scheduled);
         let result = self
@@ -631,6 +655,27 @@ impl Runtime {
                             .await;
                     }
                     stored?;
+                }
+                // Same transaction as the call's writes; a Reducer that never
+                // opened one changed nothing and is not recorded.
+                if let Some(capture) = feed_capture.as_ref().filter(|_| handler.transaction_open())
+                {
+                    let appended = match handler.ensure_transaction().await {
+                        Ok(transaction) => {
+                            crate::reducer_feed::append(transaction, capture, &value)
+                                .await
+                                .map_err(|error| error.to_string())
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = appended {
+                        let _ = handler.finish(false).await;
+                        return Err(ExecutionError::Transient(Box::new(
+                            ExecutionError::HostCall(format!(
+                                "reducer feed append failed: {error}"
+                            )),
+                        )));
+                    }
                 }
                 profile_timer.skip();
                 let (invoke_times, writer_wait, sql) = handler.profile_times();
@@ -706,7 +751,9 @@ impl Runtime {
                 if let Some(tracker) = committed_revisions {
                     tracker.observe(committed_revision);
                 }
-                if outbox_written {
+                // A replaying shadow never runs Actions: their Reducer calls
+                // are in the feed.
+                if outbox_written && !self.inner.reducer_feed.replaying() {
                     // Queue the tenant for the single drainer; no task per commit.
                     self.wake_outbox(session.clone());
                 }

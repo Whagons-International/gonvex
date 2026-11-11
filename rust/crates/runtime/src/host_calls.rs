@@ -232,6 +232,11 @@ impl DatabaseHostCalls {
         self.claim_conflict
     }
 
+    /// Whether the invocation's write transaction has opened.
+    pub(crate) fn transaction_open(&self) -> bool {
+        self.transaction.is_some()
+    }
+
     /// The invocation transaction, opening a pending Reducer write first.
     pub(crate) async fn ensure_transaction(&mut self) -> Result<&mut TenantTransaction, String> {
         if self.claim_conflict {

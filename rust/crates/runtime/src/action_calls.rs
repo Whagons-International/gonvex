@@ -337,6 +337,7 @@ impl ActionHostCalls {
                         module: Some(self.module.clone()),
                         committed_revisions: Some(self.committed_revisions.clone()),
                         action_permit: None,
+                        now_unix_ms: None,
                     },
                 )
                 .await
@@ -359,6 +360,7 @@ impl ActionHostCalls {
                         module: Some(self.module.clone()),
                         committed_revisions: Some(self.committed_revisions.clone()),
                         action_permit: None,
+                        now_unix_ms: None,
                     },
                 )
                 .await
