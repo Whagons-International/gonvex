@@ -891,3 +891,42 @@ async fn entity_definitions_capture_their_dependent_logical_records() {
     );
     database.pools.close().await;
 }
+
+#[tokio::test]
+async fn migrations_may_change_primary_keys_that_ordinary_writes_cannot() {
+    let database = Database::new("gonvex-migration-key-change");
+    database
+        .execute("CREATE TABLE parents(id TEXT PRIMARY KEY,value TEXT); INSERT INTO parents VALUES('old','v');")
+        .await;
+    database.install().await.unwrap();
+    // A repair migration on the capturing writer may re-point a key.
+    apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![SqlMigration::new(
+            "repair".into(),
+            MigrationScope::Tenant,
+            false,
+            "UPDATE parents SET id='new' WHERE id='old';".into(),
+        )],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM parents WHERE id='new'")
+            .await,
+        1
+    );
+    // The exemption ends with the migration.
+    let error = sqlx::raw_sql("UPDATE parents SET id='newer' WHERE id='new'")
+        .execute(&database.pools.pool(&database.url).await.unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("cannot change the primary key"),
+        "{error}"
+    );
+    database.pools.close().await;
+}
