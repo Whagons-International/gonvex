@@ -1,0 +1,21 @@
+// Platform proof for K20 on the development account: the sandbox classes and
+// a probe route (dev/worker.ts). Deploy and delete with dev/platform.mjs.
+{
+  "name": "gonvex-cf-dev-k20-sandbox",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "workers_dev": true,
+  "preview_urls": false,
+  "worker_loaders": [{ "binding": "LOADER" }],
+  // A long statement in an analysis object may use up to the longest run timeout (note 0040 §6).
+  "limits": { "cpu_ms": 120000 },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SANDBOX_WORKSPACE", "class_name": "SandboxWorkspace" },
+      { "name": "SANDBOX_ANALYSIS", "class_name": "SandboxAnalysis" },
+      { "name": "SANDBOX_REGISTRY", "class_name": "SandboxRegistry" }
+    ]
+  },
+  "vars": { "GONVEX_SANDBOX_ENABLED": "true" },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SandboxWorkspace", "SandboxAnalysis", "SandboxRegistry"] }]
+}
