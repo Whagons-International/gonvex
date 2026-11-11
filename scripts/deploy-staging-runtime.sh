@@ -196,6 +196,27 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 [ -n "$health" ] || { echo "deployment finished but $HEALTH_URL is not healthy" >&2; exit 1; }
+
+# 4. Readiness stays OK while individual tenants failed provisioning (the
+# runtime serves the others), so ask for operator diagnostics and refuse a
+# partial outage. The admin key is read from the app's env and never printed.
+admin_key="$(coolify GET "/applications/$APP_UUID/envs" |
+  jq -r '[.[] | select(.key=="GONVEX_ADMIN_KEY" and (.is_preview|not)) | .value][0] // empty')"
+[ -n "$admin_key" ] || { echo "GONVEX_ADMIN_KEY not found on $APP_UUID; cannot check tenant availability" >&2; exit 1; }
+diagnostics="$(curl -fsS --max-time 10 -H @- "$HEALTH_URL" <<<"Authorization: Bearer $admin_key")" ||
+  { echo "operator diagnostics at $HEALTH_URL failed" >&2; exit 1; }
+unset admin_key
+jq -e '.runtimeManifests' >/dev/null <<<"$diagnostics" ||
+  { echo "operator diagnostics were not returned (admin key rejected?)" >&2; exit 1; }
+if jq -e '.runtimeManifests | has("unavailableTenants") | not' >/dev/null <<<"$diagnostics"; then
+  echo "note: this runtime does not report unavailable tenants"
+elif jq -e '.runtimeManifests.unavailableTenants | length > 0' >/dev/null <<<"$diagnostics"; then
+  echo "deployment is serving, but tenants are unavailable (roll back with --rollback):" >&2
+  jq -r '.runtimeManifests.unavailableTenants | to_entries[] | "  \(.key): \(.value)"' <<<"$diagnostics" >&2
+  exit 1
+else
+  echo "tenants: none unavailable"
+fi
 echo "live:    $ref"
 echo "commit:  $commit ($DEPLOY_BRANCH)"
 echo "healthz: $health"

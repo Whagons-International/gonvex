@@ -28,6 +28,11 @@ scripts/deploy-staging-runtime.sh --status
 The deploy script commits the new `FROM` line to `runtime-image/staging` and
 sets the Coolify app's `git_commit_sha` to that commit. It then triggers a
 deploy, waits for Coolify, and checks `https://gonvex-stg.whagons.com/healthz`.
+It then reads the operator diagnostics on `/healthz` with the app's
+`GONVEX_ADMIN_KEY` and fails when `runtimeManifests.unavailableTenants` lists
+any tenant: readiness stays OK while a tenant that failed provisioning is out
+of service, so a partial outage would otherwise pass. Roll back with
+`--rollback` (runtimes without that field print a note instead).
 Images are referenced by digest, so a moved tag can't change what runs.
 
 ## What changed in Coolify (app `qijlnydkhsixirfc0ms6rwy8`)
