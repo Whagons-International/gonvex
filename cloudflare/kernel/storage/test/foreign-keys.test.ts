@@ -126,6 +126,42 @@ describe("deferred foreign keys", () => {
     expect(await db.sql("SELECT id FROM tasks WHERE id = 't10'")).toEqual([]);
   });
 
+  it("mixed mode (0028 §2d): reported tables stay row-level, every other written table is checked by table", async () => {
+    const db = await tenant();
+    // A violation that predates the invocation in each child table.
+    await db.run((_tenant, state) => {
+      state.storage.sql.exec("PRAGMA foreign_keys = OFF");
+      state.storage.sql.exec("INSERT INTO tasks (id, status_id) VALUES ('old-orphan', 'gone')");
+      state.storage.sql.exec("INSERT INTO link_notes VALUES ('old-note', 'gone')");
+      state.storage.sql.exec("PRAGMA foreign_keys = ON");
+    });
+    await db.run((tenant) => { tenant.writeTracking = "mixed"; tenant.rowReported = (table) => table === "tasks"; });
+    // tasks is reported (capture's rows): the pre-existing orphan is not this invocation's, so it commits.
+    const reported = await db.invoke("reducer", async (session) => {
+      const inserted = session.run("INSERT INTO tasks (id, status_id) VALUES (?1, ?2) RETURNING rowid", ["t11", "done"]);
+      session.noteRows("tasks", "insert", inserted.rows.map((row) => Number(row[0])));
+    });
+    expect(outcome(reported)).toBe("ok");
+    expect(reported.stats.foreignKeyCheck).toMatchObject({ targeted: 1, tablesChecked: 0 });
+    // A bad reported row fails.
+    const bad = await db.invoke("reducer", async (session) => {
+      const inserted = session.run("INSERT INTO tasks (id, status_id) VALUES (?1, ?2) RETURNING rowid", ["t12", "missing"]);
+      session.noteRows("tasks", "insert", inserted.rows.map((row) => Number(row[0])));
+    });
+    expect(outcome(bad)).toBe(FOREIGN_KEY_FAILED);
+    // link_notes is not reported (derived, metadata, record storage, _gonvex_*): table level, as in statement mode.
+    const unreported = await db.invoke("reducer", (session) => session.query("INSERT INTO link_notes VALUES ('n2', 'l1')"));
+    expect(outcome(unreported)).toBe(FOREIGN_KEY_FAILED);
+    expect(unreported.stats.foreignKeyCheck).toMatchObject({ tablesChecked: 1 });
+  });
+
+  it("reads the model on an object that uses storage.kv (the platform's _cf_KV refuses pragma reads)", async () => {
+    const db = await tenant();
+    await db.run((_tenant, state) => { state.storage.kv.put("k01/marker", 1); });
+    const result = await db.invoke("reducer", (session) => session.query("INSERT INTO tasks (id, status_id) VALUES ('t13', 'missing')"));
+    expect(outcome(result)).toBe(FOREIGN_KEY_FAILED);
+  });
+
   it("reads deferrability from the table SQL in SQLite's foreign key order", () => {
     expect(deferredClauses(`CREATE TABLE x (
       a TEXT REFERENCES p(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED,

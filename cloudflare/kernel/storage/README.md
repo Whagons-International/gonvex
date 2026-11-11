@@ -42,7 +42,10 @@ const result = await storage.invoke("reducer", async (db) => {
   (insert/update) and as a parent (update/delete), closed over the schema's triggers and `ON DELETE/UPDATE`
   actions. In `writeTracking: "statements"` mode (today) each table is checked with
   `pragma_foreign_key_check(table)` restricted to its deferred keys. In `"rows"` mode, K03's capture reports rows
-  with `noteRows(table, op, rowids)` and child rows are checked by rowid only.
+  with `noteRows(table, op, rowids)` and child rows are checked by rowid only. In `"mixed"` mode (0028 §2d, what the
+  tenant object uses since K07), statements are tracked, but the tables `rowReported(table)` names (captured entity
+  tables with rowids) stay row-level and take capture's reports; every other written table is checked per table.
+  The platform's `_cf_*` tables are left out of the model (they refuse pragma reads).
 - **Statements.** One statement per call (`sql.exec` would run all of them). Refusals and their texts are Rust's.
   `$N` binds by number in any order, repeated or not (0011 §1); a missing value binds NULL, and so does every
   later parameter (`direct.rs` breaks); `:name` and `$name` fail with sqlx's text. Durable Object SQL binds every

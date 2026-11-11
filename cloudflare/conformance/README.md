@@ -17,6 +17,7 @@ cloudflare/conformance/
   src/fixture.mjs      builds the fixture bundle with the repo's own `gonvex codegen`
   src/backend.mjs      backend adapter interface
   src/backends/        rust.mjs (reference), cloudflare.mjs (kernel on local workerd), mutant.mjs (harness self-test), index.mjs (registry)
+                       cloudflare-reducer.mjs (K07: the kernel with the Reducer path and the fixture bundles built in)
   scenarios/           one module per scenario, plus index.mjs (registry, run order)
   fixtures/app         test module bundle: board, notes, note_shares, errors, storage, capture (generation 1)
   fixtures/app-v2      overlay for generation 2 (upgrade scenario)
@@ -123,6 +124,7 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `session-frames` | The decoder's accept/close boundary (82 vectors: integer widths and lexemes, `null`, duplicates, the sequence form, nesting depth, lone surrogates); binary frames; the public transport (mismatch, non-public tenant, the 64 KiB limit); 64 KiB on unscoped sockets and 16 MiB after auth; the 10 s pending-auth deadline | K05 |
 | `change-capture` | 18 Reducer transactions through `capture.apply`, then the tenant's change log read through the adapter (`readChangeLog`, capability `changeLog`): change rows, ordinals, command ids, revisions (relative), provenance and the clock. Covers every column kind and edge values, no-op updates, savepoints, trigger-written rows, a composite `WITHOUT ROWID` key, a derived table, a logical record with an owned table and a record dependency, a rejected Reducer. `node src/capture-golden.mjs` writes Rust's result to `kernel/capture/test/golden/`, which the kernel's capture is replayed against in workerd | K03 |
 | `visibility-masks` | Masks v2 through two Replica Collections for three Members (SDK and thin): a principal set over two permission tables (team join, workspace link), a grant set (assignment and revocation), a creator context, and notes that `inherits` their task with `onMissing` for orphans (a task moving out of reach takes its notes; a deleted task leaves its notes to their author). Tables `mask_*` in the fixture | K09 |
+| `receipt-expiry` | Intended behavior IB3 (0001, 0009), kernel only (`receiptExpiry`): a keyed call replays inside the offline window + 24 h; after it the result expires and a late duplicate gets `Reducer receipt expired` (rejected), as does the receipt query; 365 days later the tombstone is gone and the key runs again. Rust never prunes receipts, so it skips this scenario | K07 |
 
 Two receipt checks stay in `verification/backend-receipts/`, because they inject faults inside the Rust process through test-only coordinators that a black-box harness cannot reach: the SDK's own SQLite outbox replay, and the injected replica and receipt write failures.
 

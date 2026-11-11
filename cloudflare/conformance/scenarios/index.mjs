@@ -25,6 +25,7 @@ import sessionHandshake from './session-handshake.mjs';
 import sessionFrames from './session-frames.mjs';
 import changeCapture from './change-capture.mjs';
 import visibilityMasks from './visibility-masks.mjs';
+import receiptExpiry from './receipt-expiry.mjs';
 
 export const SCENARIOS = [
   thinSdkParity,
@@ -49,6 +50,7 @@ export const SCENARIOS = [
   sessionFrames,
   changeCapture,
   visibilityMasks,
+  receiptExpiry,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
 ];
