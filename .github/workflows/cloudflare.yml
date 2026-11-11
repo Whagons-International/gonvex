@@ -1,0 +1,139 @@
+name: Cloudflare
+
+# Typecheck and workerd tests for cloudflare/ on pull requests to the
+# integration branch, plus a per-PR preview Worker
+# (gonvex-cf-dev-preview-<branch-slug>) that is deleted when the PR closes.
+# This workflow never runs for main or staging and never deploys them.
+on:
+  pull_request:
+    branches: [cloudflare/integration]
+    types: [opened, synchronize, reopened, ready_for_review, closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event.action != 'closed' }}
+
+jobs:
+  check:
+    name: Typecheck and workerd tests
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: cloudflare
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Enable pinned pnpm
+        run: corepack enable && corepack prepare pnpm@11.1.2 --activate
+      - name: Install cloudflare workspace
+        run: pnpm install --frozen-lockfile --filter @gonvex/cloudflare
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Test in workerd
+        run: pnpm test
+      - name: Bundle size
+        run: |
+          pnpm bundle
+          echo "### Worker bundle" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`dist/index.js\`: $(wc -c < dist/index.js) bytes, $(gzip -c dist/index.js | wc -c) gzip" >> "$GITHUB_STEP_SUMMARY"
+
+  preview:
+    name: Deploy preview Worker
+    needs: check
+    # Same-repo PRs only: fork PRs never receive secrets.
+    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cloudflare
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_DEV_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEV_API_TOKEN }}
+      PREVIEW_BRANCH: ${{ github.head_ref }}
+    steps:
+      - name: Check deploy secrets
+        id: secrets
+        working-directory: .
+        run: |
+          if [ -n "$CLOUDFLARE_ACCOUNT_ID" ] && [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::CLOUDFLARE_DEV_ACCOUNT_ID / CLOUDFLARE_DEV_API_TOKEN are not set; skipping the preview deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          node-version: "24"
+      - name: Enable pinned pnpm
+        if: steps.secrets.outputs.ready == 'true'
+        run: corepack enable && corepack prepare pnpm@11.1.2 --activate
+      - name: Install cloudflare workspace
+        if: steps.secrets.outputs.ready == 'true'
+        run: pnpm install --frozen-lockfile --filter @gonvex/cloudflare
+      - name: Deploy and smoke-test preview
+        id: deploy
+        if: steps.secrets.outputs.ready == 'true'
+        run: node scripts/deploy-preview.mjs deploy --branch "$PREVIEW_BRANCH"
+      - name: Summary
+        if: steps.secrets.outputs.ready == 'true'
+        working-directory: .
+        env:
+          PREVIEW_NAME: ${{ steps.deploy.outputs.name }}
+          PREVIEW_URL: ${{ steps.deploy.outputs.url }}
+        run: echo "Preview $PREVIEW_NAME at $PREVIEW_URL" >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup:
+    name: Delete preview Worker
+    if: github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cloudflare
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_DEV_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEV_API_TOKEN }}
+      PREVIEW_BRANCH: ${{ github.head_ref }}
+    steps:
+      - name: Check deploy secrets
+        id: secrets
+        working-directory: .
+        run: |
+          if [ -n "$CLOUDFLARE_ACCOUNT_ID" ] && [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Deploy secrets are not set; nothing to delete."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          node-version: "24"
+      - name: Enable pinned pnpm
+        if: steps.secrets.outputs.ready == 'true'
+        run: corepack enable && corepack prepare pnpm@11.1.2 --activate
+      - name: Install cloudflare workspace
+        if: steps.secrets.outputs.ready == 'true'
+        run: pnpm install --frozen-lockfile --filter @gonvex/cloudflare
+      - name: Delete preview
+        if: steps.secrets.outputs.ready == 'true'
+        run: node scripts/deploy-preview.mjs delete --branch "$PREVIEW_BRANCH"
