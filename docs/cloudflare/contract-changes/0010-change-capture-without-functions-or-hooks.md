@@ -1,6 +1,6 @@
 # 0010: Change capture relies on a custom SQL function and SQLite hooks
 
-Date: 2026-11-10. Status: **open; S1 measures, the lead decides before K03**. Affects: S1, K02, K03, L03.
+Date: 2026-11-10. Status: **decided in 0016 G0-4** (plain-SQL capture via the A01 transform, proven by S1). Affects: S1, K02, K03, L03.
 
 ## Finding
 

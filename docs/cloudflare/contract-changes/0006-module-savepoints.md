@@ -1,6 +1,6 @@
 # 0006: Module SQL that opens savepoints
 
-Date: 2026-11-10. Status: **open; S2 decides feasibility**. Affects: K01, K04, K07, S2.
+Date: 2026-11-10. Status: **decided in 0016 G0-3** (nested storage transactions, proven by S2). Affects: K01, K04, K07, S2.
 
 ## Finding
 

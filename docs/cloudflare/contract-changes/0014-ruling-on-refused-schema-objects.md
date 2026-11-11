@@ -1,63 +1,60 @@
-# 0014: Ruling on the 26 schema objects Durable Object SQLite refuses (0013)
+# 0014: Ruling on the schema objects Durable Object SQLite refuses (0013)
 
-Date: 2026-11-11. Status: **decided (lead); needs Gabriel's approval for the app-repo exception A01**.
-Affects: A01 (new), S1, K02, K03, K07, G1.
+Date: 2026-11-11 (revised the same day). Status: **decided (lead, per Gabriel's direction)**.
+Affects: A01, K02, K03, K07, P02, G1.
 
-## What the 26 objects are (read from `whagons5-client` `migrations/` and `scripts/`)
+## Revision
 
-All 26 are on the **write path**, not only the read side. The triggers that read them fire when they run,
-so in a Durable Object a write to the source table fails ("no such table") once its trigger runs:
+The first version of this note put the fix in the Whagons app's schema generator. Gabriel directed that
+nothing from this work goes into the app repository or Gonvex `staging` before cutover. **The fix is a
+deterministic schema transform inside the kernel** (package A01, `cloudflare/kernel/schema-transform/`).
+Its input is the app's migrations, unchanged. No app PR is opened. (An app-repo agent had been started; it
+was stopped before it committed or pushed anything.)
 
-| Group | Objects | Read by | Cause |
+## What has to be transformed (P03, S1 and S2, measured on the platform)
+
+| # | Construct | Objects in the current app schema | Transform (S1 verified each on the largest staging tenant's data) |
 |---|---|---|---|
-| D (depth) | unique index `roles_live_name_key_unique` on `recordStorage_roles`; views `whTaskGridProjection`, `whTaskCustomFieldSearchDocuments`, `whTaskTagSearchDocuments` | the index on every role write; the views by the `taskGridRows` and search-document projection triggers on every task, tag and custom-field write (`migrations/0001_sqlite_projections.sql:47,84,279-324`, `0003_sql_relationship_integrity.sql:10686-10692`) | One generator construct: Postgres `lower()` emulated as about 200 nested `replace()` calls, one per non-ASCII capital (`scripts/generate-sqlite-projections.mjs:7,42`), because SQLite's `lower()` folds ASCII only. Depth about 200-250 > 100. |
-| R (reference) | 22 `referenceExpected_*` views (19 over the 5-term compound limit, 3 also over 100 KB) | `referenceBindings_<table>_source_insert` / `_source_update` triggers on the 22 source tables, including `tasks`, `templates`, `workplanItems` (`migrations/0004_sql_document_relationships.sql`, e.g. 4873-4875) | `scripts/schema/reference-sql.mjs:75-81` emits one `UNION ALL` term per JSON reference path (6 to 114) plus a `GROUP BY ownerId, path`. |
+| T1 | Compound SELECT over 5 terms | 22 `referenceExpected_*` views | Left-nested chain of at most 5 terms per level |
+| T2 | Statement over 100 KB (effective length; SQLite doubles quotes in `sqlite_schema`) | 4 views | Partition by union branch, keeping `MATERIALIZED` |
+| T3 | Expression depth over 100 | 3 `whTask*` views; unique index `roles_live_name_key_unique` (Unicode `lower()` emulated by about 200 nested `replace()` calls) | Views: recursive CTE fold (under the 99-CTE-chain cap). Index: chained VIRTUAL generated columns, with an expression index of the same name, `CASE` and `WHERE`, so the uniqueness error text is unchanged |
+| T4 | `CREATE TEMP TABLE` (not authorized) | 27 migration guard tables | Ordinary tables created and dropped inside the same migration chunk |
+| T5 | Custom SQL functions and hooks (`gonvex_capture`, `gonvex_record_value`) | 1,140 capture and record triggers | Plain-SQL capture triggers (`json_object` row images). S1 showed correct change rows on the platform (also settles 0010) |
+| T6 | Trigger bodies that read a reference union view | `referenceBindings_*_source_insert/_source_update` on 136 tables (incl. every `tasks` write) | **Per-branch statements.** One `INSERT` per union branch into a scratch table, then one aggregate statement from the scratch table into `referenceBindings_<table>`. No statement reads a union view. See below |
+| T7 | One migration too large for one storage operation | 0003 (45 s CPU) | Apply in chunks of at most 200 statements with a restore point (S1: 135 s for the full set) |
 
-Consequence: without a fix, a Reducer that writes a task cannot commit in a Durable Object. That is a
-**G1 blocker** (G1 needs a real Reducer to commit). It is **not a G0 blocker**, because G0 asks for a written
-workaround, which this note is.
+**Why T6 exists.** S1 found that some platform hosts refuse any single statement that reads ten or more
+branches of a reference union ("VIEWs and/or subqueries nested too deep"), however the view is split. Trigger
+programs inline the views, so on those hosts 301 write statements on 136 tables fail to compile. Cloudflare
+rolls out runtime builds host by host, so the strict behavior is the one to design for. T1 and T2 fix
+loading; only T6 fixes writes on strict hosts.
 
-## Ruling: smallest fix per group, in the app's schema generator
+## Rules for the transform
 
-The kernel never rewrites application DDL (it would silently diverge from Rust and break shadow checksums,
-M02). Reference checks do not move into kernel code in stage 1 (that is L03's direction and much larger).
-Instead, the **generator** emits SQL that loads on both stock SQLite and Durable Object SQLite and gives the
-same results, and the change ships as an ordinary app migration on the **Rust runtime first**, so both
-backends run one schema.
+1. **Deterministic and pure.** The same migrations always give the same output, byte for byte. The output is
+   versioned with the transform's own version, and the version is recorded in the tenant object's migration
+   ledger metadata.
+2. **Fail loudly.** A construct the transform cannot handle, or output that still breaks a limit, stops
+   provisioning or migration with an error naming the migration, the object and the limit. Nothing is ever
+   skipped silently. The output is checked against every limit (statement length, compound terms,
+   expression depth, union branches read per statement, TEMP, custom functions) before it is applied.
+3. **Same results.** For every staging tenant, the transformed schema and the original return identical
+   results:
+   - every rewritten view: `EXCEPT` in both directions is empty;
+   - every rewritten index key: equal on every row, plus a 10,000-string Unicode fuzz corpus;
+   - reference bindings: identical rows after replaying the same writes;
+   - change rows: identical to Rust's capture for the same writes (K03's `done_when`).
 
-**Group D: stage the Unicode fold.**
-- The views: compute the fold in at most three nested subquery stages (`SELECT …, <stage 2>(x) FROM (SELECT
-  …, <stage 1>(name) AS x FROM …)`), each stage under 80 `replace()` deep. The views keep their names and
-  output columns.
-- The index: add VIRTUAL generated columns on `recordStorage_roles` that hold the staged fold (each under
-  80 deep, the second built on the first). Keep `CREATE UNIQUE INDEX "roles_live_name_key_unique"` as an
-  **expression** index with the same `CASE … 'owner' THEN 'tenant_owner' …` and the same `WHERE`, over the
-  last stage. Same index name, so the module-visible error stays
-  `UNIQUE constraint failed: index 'roles_live_name_key_unique'`.
-- The run-collapse step (`generate-sqlite-projections.mjs:83`) stays as it is; it is already 3 deep.
-
-**Group R: split each compound view into a tree of views.**
-- Each leaf view holds at most 5 `UNION ALL` terms and stays under 90 KB. Each inner view unions at most 5
-  child views. The top view keeps the name `referenceExpected_<table>`, its columns and its
-  `GROUP BY ownerId, path` aggregation. So every trigger that reads it is unchanged.
-- Shared `WITH RECURSIVE … MATERIALIZED` prefixes are repeated in each leaf that needs them.
-
-## Proof required before A01 merges
-
-1. On stock SQLite (the Rust runtime), for each of the 15 staging tenants: every rewritten view returns the
-   same rows as the original (`EXCEPT` both ways is empty), and the generated index key equals the
-   original expression for every `recordStorage_roles` row plus a fuzz corpus of 10,000 Unicode names.
-2. On the platform (`gonvex-cf-dev-*`): the full tenant schema loads with **zero** refused objects, and S1's
-   cold-wake and memory numbers are re-measured with it.
-3. A duplicate live role name is refused in a Durable Object with the same error text as in Rust.
-4. A task insert through the projection and reference triggers commits in a Durable Object.
+   The P02 harness runs Rust against the kernel on the same writes.
+4. **Rust is untouched.** The Rust runtime keeps the original schema. Objects the transform adds (scratch
+   tables, generated columns, partition views) are listed by name. The shadow (M02) and checksum tools
+   exclude exactly that list, and nothing else.
+5. **CI.** A job runs the transform over the app's current `staging` migrations (read-only fetch of
+   `whagons5-client` `staging`) on every PR to `cloudflare/integration` and nightly. It fails on any new
+   unhandled construct, so app drift shows up before cutover.
 
 ## Package
 
-New package **A01** (`work-packages.json`): a named app-repo exception like K21, owned in `whagons5-client`
-`scripts/schema/`, `scripts/generate-sqlite-projections.mjs` and one new migration. It needs Gabriel's approval
-because rule 5 forbids changing the Whagons app. It is released to Rust staging through the normal app release.
-It depends on S1 and blocks K02, K03, K07 and G1.
-
-`gonvex_record_value()` / `gonvex_capture()` in 1,153 insert triggers is a separate problem (0010) and is
-not fixed by A01.
+**A01** (`cloudflare/kernel/schema-transform/`, stage 1 wave 1, depends on S1 and P01; blocks K02, K03 and
+K07). The `done_when` is in `work-packages.json`. Not a G0 blocker, because this note is the written
+workaround. It **is a G1 blocker**: until T3 and T6 land, a task write cannot commit in an object.

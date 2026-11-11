@@ -1,6 +1,6 @@
 # 0017: Presence liveness needs a client ping frame
 
-Date: 2026-11-11. Status: **open, needs the lead and Gabriel**. Reported by S3 (measured on the platform,
+Date: 2026-11-11. Status: **decided in 0016 G0-6** (no SDK change in stage 1). Reported by S3 (measured on the platform,
 `docs/cloudflare/spikes/S3-sockets.md` §6). Affects: K05, K14, R22 in 0012, `packages/client`, `packages/protocol`.
 
 ## Finding

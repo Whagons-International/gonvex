@@ -9,6 +9,7 @@
  "stages": {
   "0": "prove",
   "1": "kernel to contract parity",
+  "1b": "feel responsive (before any customer moves)",
   "2": "migration",
   "3": "toward whagons-lite"
  },
@@ -28,6 +29,10 @@
   {
    "id": "G3",
    "passes_if": "V01-V06 pass including 1,000 users on one tenant; staging on the kernel for 14 days"
+  },
+  {
+   "id": "G3b",
+   "passes_if": "On the same scenarios, the kernel equals or beats R01's baseline on every user-facing number (cold and warm boot, confirmation time, feed delay, reconnect)"
   },
   {
    "id": "G4",
@@ -208,23 +213,42 @@
    "reference": []
   },
   {
+   "id": "S5",
+   "stage": 1,
+   "wave": 1,
+   "title": "Worker Loader spike: load a tenant module bundle per generation into a dynamic isolate with host calls bound to the tenant object, to keep in-place system.reload without dropping sockets",
+   "depends_on": [
+    "S2"
+   ],
+   "owns": [
+    "docs/cloudflare/spikes/S5-worker-loader.md",
+    "cloudflare/spikes/s5/"
+   ],
+   "done_when": "Report states: does the Worker Loader load the 4.2 MB Query/Reducer bundle, cold and warm load time, host-call round-trip cost (sync SQL vs RPC) for the S2 Reducers, memory per generation, and whether a generation switch keeps every socket open. Decides 0016 G0-2 for K19",
+   "reference": [
+    "docs/cloudflare/spikes/S2-execution.md",
+    "docs/cloudflare/contract-changes/0016-g0-rulings.md"
+   ]
+  },
+  {
    "id": "A01",
    "stage": 1,
    "wave": 1,
-   "title": "App schema generator fix for Durable Object SQLite limits: stage the Unicode lower() fold (3 views, roles_live_name_key_unique) and split the 22 referenceExpected_* compound views into view trees (named app-repo exception, needs Gabriel's approval)",
+   "title": "Schema transform: deterministic kernel-side rewrite of the app's unchanged migrations for Durable Object SQLite (T1 compound chains, T2 partitioning, T3 recursive-CTE fold and chained generated columns, T4 TEMP to ordinary tables, T5 plain-SQL capture, T6 per-branch reference statements, T7 chunked apply); fails loudly on unhandled constructs; CI over the app's current staging migrations",
    "depends_on": [
-    "S1"
+    "S1",
+    "P01"
    ],
-   "repo": "whagons5-client",
    "owns": [
-    "scripts/schema/reference-sql.mjs",
-    "scripts/generate-sqlite-projections.mjs",
-    "migrations/ (one new migration)"
+    "cloudflare/kernel/schema-transform/",
+    ".github/workflows/cloudflare.yml (transform drift job only)"
    ],
-   "done_when": "Rewritten views and index give identical results to the originals on stock SQLite for all 15 staging tenants; the full tenant schema loads in a Durable Object with zero refused objects; a duplicate live role name is refused with the same error text; a task insert commits in a Durable Object. See contract-changes/0014",
+   "done_when": "For every staging tenant the transformed schema and the original return identical results on the reference queries (rewritten views EXCEPT both ways empty, index keys equal on every row and a 10,000-string Unicode fuzz corpus, identical reference bindings and change rows for the same writes) and in the P02 harness; the full schema loads on the platform with zero refused objects and every write statement compiles on a strict host; an unhandled construct fails with an error naming migration, object and limit; CI runs the transform over whagons5-client staging migrations on every PR and nightly. See contract-changes/0014",
    "reference": [
-    "docs/cloudflare/contract-changes/0013-schema-objects-refused-by-do-sqlite.md",
-    "docs/cloudflare/contract-changes/0014-ruling-on-refused-schema-objects.md"
+    "docs/cloudflare/contract-changes/0014-ruling-on-refused-schema-objects.md",
+    "docs/cloudflare/spikes/S1-schema.md",
+    "cloudflare/spikes/s1/scripts/verify-workarounds.mjs",
+    "rust/crates/store/src/capture.rs"
    ]
   },
   {
@@ -646,7 +670,8 @@
     "K03",
     "K04",
     "K05",
-    "K06"
+    "K06",
+    "S5"
    ],
    "owns": [
     "cloudflare/control/operator/",
@@ -686,7 +711,7 @@
    "id": "K21",
    "stage": 1,
    "wave": 2,
-   "title": "Bridge support: the Go bridge passes its compatibility suite against the kernel; its direct database access becomes a service-principal function (named app-repo exception)",
+   "title": "Bridge support: the Go bridge passes its compatibility suite against the kernel; its direct database access becomes a service-principal function (named exception; the app-repo part is prepared on a branch and lands only at cutover)",
    "depends_on": [
     "K01",
     "K02",
@@ -900,6 +925,108 @@
    ]
   },
   {
+   "id": "R01",
+   "stage": "1b",
+   "wave": "1b",
+   "title": "Outside-in synthetic probe: Playwright against current staging and production on a test tenant, run from the Americas; measures cold and warm boot, confirmation time, feed delay and reconnect. No app change. The baseline for G3b",
+   "depends_on": [
+    "G0"
+   ],
+   "owns": [
+    "cloudflare/tools/probe/"
+   ],
+   "done_when": "Two weeks of probe numbers per environment exist for cold and warm boot, confirmation time, feed delay and reconnect, from at least two Americas locations, on a test tenant only; the same probe runs unchanged against a kernel preview",
+   "reference": [
+    "docs/cloudflare/contract-changes/0019-stage-1b-responsiveness.md"
+   ]
+  },
+  {
+   "id": "R02",
+   "stage": "1b",
+   "wave": "1b",
+   "title": "Wake budget: keep each tenant object warm during its working hours, and pre-warm the tenant object on login",
+   "depends_on": [
+    "K05",
+    "K06",
+    "K11"
+   ],
+   "owns": [
+    "cloudflare/kernel/wake/"
+   ],
+   "done_when": "No cold wake is felt during a tenant's working hours in R01's scenarios; after a cold wake, the first sync adds under 100 ms",
+   "reference": [
+    "docs/cloudflare/spikes/S1-schema.md"
+   ]
+  },
+  {
+   "id": "R03",
+   "stage": "1b",
+   "wave": "1b",
+   "title": "Server-side schema diet: hot-path trigger and view logic moves into kernel code (replaces L03)",
+   "depends_on": [
+    "A01",
+    "K02",
+    "K03",
+    "K07"
+   ],
+   "owns": [
+    "cloudflare/kernel/diet/"
+   ],
+   "done_when": "Cold wake under 300 ms and warm Reducer commit under 10 ms on the largest staging tenant, with harness results unchanged",
+   "reference": [
+    "docs/cloudflare/contract-changes/0014-ruling-on-refused-schema-objects.md"
+   ]
+  },
+  {
+   "id": "R04",
+   "stage": "1b",
+   "wave": "1b",
+   "title": "In-memory catalog cache per schema generation",
+   "depends_on": [
+    "K04"
+   ],
+   "owns": [
+    "cloudflare/kernel/host/catalog/"
+   ],
+   "done_when": "Rows read per Reducer down 90% against the V04 record, with harness results unchanged",
+   "reference": [
+    "docs/cloudflare/spikes/S2-execution.md"
+   ]
+  },
+  {
+   "id": "R05",
+   "stage": "1b",
+   "wave": "1b",
+   "title": "Change log without row images; fan-out reads each changed row once per batch (replaces L04)",
+   "depends_on": [
+    "K03",
+    "K10"
+   ],
+   "owns": [
+    "cloudflare/kernel/capture/lean/"
+   ],
+   "done_when": "Feed delay median under 150 ms in R01's scenarios; rows written per write drop against V04",
+   "reference": [
+    "docs/cloudflare/spikes/S3-sockets.md"
+   ]
+  },
+  {
+   "id": "R06",
+   "stage": "1b",
+   "wave": "1b",
+   "title": "Kernel timers instead of polling crons (replaces L02)",
+   "depends_on": [
+    "K11"
+   ],
+   "owns": [
+    "cloudflare/kernel/scheduler/timers/"
+   ],
+   "done_when": "No per-minute wakes; idle tenants are not woken; all 14 Whagons crons still fire on schedule",
+   "reference": [
+    "rust/crates/runtime/src/scheduler.rs"
+   ]
+  },
+  {
    "id": "M01",
    "stage": 2,
    "wave": 4,
@@ -1046,58 +1173,10 @@
    "reference": []
   },
   {
-   "id": "L02",
-   "stage": 3,
-   "wave": 5,
-   "title": "Timers for polling crons",
-   "depends_on": [
-    "G6"
-   ],
-   "owns": [],
-   "done_when": "No cron runs more often than hourly; idle tenants are not woken",
-   "reference": []
-  },
-  {
-   "id": "L03",
-   "stage": 3,
-   "wave": 5,
-   "title": "Schema diet: move the trigger and view layer into the kernel write path",
-   "depends_on": [
-    "G6"
-   ],
-   "owns": [],
-   "done_when": "Cold wake time and memory drop against the V04 record",
-   "reference": []
-  },
-  {
-   "id": "L04",
-   "stage": 3,
-   "wave": 5,
-   "title": "Change log without row images",
-   "depends_on": [
-    "G6"
-   ],
-   "owns": [],
-   "done_when": "Fan-out reads each changed row once per batch; rows written per write drops",
-   "reference": []
-  },
-  {
-   "id": "L05",
-   "stage": 3,
-   "wave": 5,
-   "title": "Session parking and signed session tokens",
-   "depends_on": [
-    "G6"
-   ],
-   "owns": [],
-   "done_when": "Objects hibernate with sockets open; the router verifies sessions without the control object",
-   "reference": []
-  },
-  {
    "id": "L06",
    "stage": 3,
    "wave": 5,
-   "title": "Packed column pages as a new protocol version",
+   "title": "Packed column pages as a new protocol version (client side; built in parallel after migration behind a capability flag)",
    "depends_on": [
     "G6"
    ],
@@ -1109,7 +1188,7 @@
    "id": "L07",
    "stage": 3,
    "wave": 5,
-   "title": "Columnar client replica from whagons-lite",
+   "title": "Columnar client replica from whagons-lite (client side; built in parallel after migration behind a capability flag)",
    "depends_on": [
     "G6"
    ],
@@ -1166,5 +1245,5 @@
    "reference": []
   }
  ],
- "base_branch": "staging"
+ "base_branch": "cloudflare/integration (long-lived; cut from staging; independent of staging until cutover, decided by Gabriel)"
 }
