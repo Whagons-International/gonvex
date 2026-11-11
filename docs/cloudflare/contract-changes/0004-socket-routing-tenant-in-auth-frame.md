@@ -1,6 +1,6 @@
 # 0004: The tenant arrives in the first `auth` frame, not in the URL
 
-Date: 2026-11-10. Status: **open, lead recommendation below; needs S3 numbers and Gabriel's approval**.
+Date: 2026-11-10. Status: **decided in 0016 G0-1** (option 2, gateway objects).
 Affects: K05, K06, X01, M01.
 
 ## Finding

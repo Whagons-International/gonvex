@@ -208,23 +208,42 @@
    "reference": []
   },
   {
+   "id": "S5",
+   "stage": 1,
+   "wave": 1,
+   "title": "Worker Loader spike: load a tenant module bundle per generation into a dynamic isolate with host calls bound to the tenant object, to keep in-place system.reload without dropping sockets",
+   "depends_on": [
+    "S2"
+   ],
+   "owns": [
+    "docs/cloudflare/spikes/S5-worker-loader.md",
+    "cloudflare/spikes/s5/"
+   ],
+   "done_when": "Report states: does the Worker Loader load the 4.2 MB Query/Reducer bundle, cold and warm load time, host-call round-trip cost (sync SQL vs RPC) for the S2 Reducers, memory per generation, and whether a generation switch keeps every socket open. Decides 0016 G0-2 for K19",
+   "reference": [
+    "docs/cloudflare/spikes/S2-execution.md",
+    "docs/cloudflare/contract-changes/0016-g0-rulings.md"
+   ]
+  },
+  {
    "id": "A01",
    "stage": 1,
    "wave": 1,
-   "title": "App schema generator fix for Durable Object SQLite limits: stage the Unicode lower() fold (3 views, roles_live_name_key_unique) and split the 22 referenceExpected_* compound views into view trees (named app-repo exception, needs Gabriel's approval)",
+   "title": "Schema transform: deterministic kernel-side rewrite of the app's unchanged migrations for Durable Object SQLite (T1 compound chains, T2 partitioning, T3 recursive-CTE fold and chained generated columns, T4 TEMP to ordinary tables, T5 plain-SQL capture, T6 per-branch reference statements, T7 chunked apply); fails loudly on unhandled constructs; CI over the app's current staging migrations",
    "depends_on": [
-    "S1"
+    "S1",
+    "P01"
    ],
-   "repo": "whagons5-client",
    "owns": [
-    "scripts/schema/reference-sql.mjs",
-    "scripts/generate-sqlite-projections.mjs",
-    "migrations/ (one new migration)"
+    "cloudflare/kernel/schema-transform/",
+    ".github/workflows/cloudflare.yml (transform drift job only)"
    ],
-   "done_when": "Rewritten views and index give identical results to the originals on stock SQLite for all 15 staging tenants; the full tenant schema loads in a Durable Object with zero refused objects; a duplicate live role name is refused with the same error text; a task insert commits in a Durable Object. See contract-changes/0014",
+   "done_when": "For every staging tenant the transformed schema and the original return identical results on the reference queries (rewritten views EXCEPT both ways empty, index keys equal on every row and a 10,000-string Unicode fuzz corpus, identical reference bindings and change rows for the same writes) and in the P02 harness; the full schema loads on the platform with zero refused objects and every write statement compiles on a strict host; an unhandled construct fails with an error naming migration, object and limit; CI runs the transform over whagons5-client staging migrations on every PR and nightly. See contract-changes/0014",
    "reference": [
-    "docs/cloudflare/contract-changes/0013-schema-objects-refused-by-do-sqlite.md",
-    "docs/cloudflare/contract-changes/0014-ruling-on-refused-schema-objects.md"
+    "docs/cloudflare/contract-changes/0014-ruling-on-refused-schema-objects.md",
+    "docs/cloudflare/spikes/S1-schema.md",
+    "cloudflare/spikes/s1/scripts/verify-workarounds.mjs",
+    "rust/crates/store/src/capture.rs"
    ]
   },
   {
@@ -646,7 +665,8 @@
     "K03",
     "K04",
     "K05",
-    "K06"
+    "K06",
+    "S5"
    ],
    "owns": [
     "cloudflare/control/operator/",
@@ -686,7 +706,7 @@
    "id": "K21",
    "stage": 1,
    "wave": 2,
-   "title": "Bridge support: the Go bridge passes its compatibility suite against the kernel; its direct database access becomes a service-principal function (named app-repo exception)",
+   "title": "Bridge support: the Go bridge passes its compatibility suite against the kernel; its direct database access becomes a service-principal function (named exception; the app-repo part is prepared on a branch and lands only at cutover)",
    "depends_on": [
     "K01",
     "K02",
@@ -1166,5 +1186,5 @@
    "reference": []
   }
  ],
- "base_branch": "staging"
+ "base_branch": "cloudflare/integration (long-lived; cut from staging; independent of staging until cutover, decided by Gabriel)"
 }

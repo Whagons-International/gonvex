@@ -1,6 +1,6 @@
 # 0013: Tenant schema objects that Durable Object SQLite refuses
 
-Date: 2026-11-10. Status: **ruled in 0014** (P03 confirmed the same 26 objects on the platform). Reported by P03
+Date: 2026-11-10. Status: **ruled in 0014** (revised: kernel-side schema transform, A01). Reported by P03
 (measured in local workerd with the real Whagons tenant schema). Affects: S1, P03, K02, K03, K09, L03.
 
 ## Finding (P03, local workerd)

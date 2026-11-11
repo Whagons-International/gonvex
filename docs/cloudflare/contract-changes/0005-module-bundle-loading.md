@@ -1,6 +1,6 @@
 # 0005: Loading tenant module bundles without `eval`
 
-Date: 2026-11-10. Status: **open; S2 reports the numbers, the lead decides**. Affects: K04, K19, S2.
+Date: 2026-11-10. Status: **decided in 0016 G0-2** (bundle in the deployed Worker version for stage 1; S5 tests the Worker Loader). Affects: K04, K19, S2.
 
 ## Finding
 

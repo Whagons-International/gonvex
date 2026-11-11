@@ -1,6 +1,6 @@
 # 0018: The platform's WebSocket message caps are not exactly 32 MiB
 
-Date: 2026-11-11. Status: **open, for the lead** (amends 0012 R21). Reported by S3, measured on the platform
+Date: 2026-11-11. Status: **decided in 0016 G0-7** (accepted). (amends 0012 R21). Reported by S3, measured on the platform
 (`docs/cloudflare/spikes/S3-sockets.md` §5, `cloudflare/spikes/s3/results/big-cf.json`,
 `big-threshold-cf.json`). Affects: K05, K10, P02 (conformance), 0012 R21.
 

@@ -1710,16 +1710,21 @@ new note and waits for the lead.
 | 0001 | Intended behavior IB1-IB4 | decided | K07, K11, K12, K13, K18 |
 | 0002 | Webhooks have no runtime route; the Ingress Worker replaces external adapters | decided | K18 |
 | 0003 | P01 scaffold decisions (vitest plugin, lockfile churn, CI secrets) | decided | none |
-| 0004 | Tenant arrives in the first `auth` frame; socket routing | **open** (S3 numbers, Gabriel) | K05, K06 |
-| 0005 | Loading module bundles without `eval` | **open** (S2 numbers) | K04, K19 |
-| 0006 | Module SQL that opens savepoints | **open** (S2) | K01, K04, K07 |
+| 0004 | Tenant arrives in the first `auth` frame; socket routing | decided in 0016 G0-1 (gateway objects) | K05, K06 |
+| 0005 | Loading module bundles without `eval` | decided in 0016 G0-2 (bundle in the Worker version; S5 tests the Worker Loader) | K04, K19 |
+| 0006 | Module SQL that opens savepoints | decided in 0016 G0-3 (nested storage transactions) | K01, K04, K07 |
 | 0007 | PBKDF2-SHA256 at 210,000 rounds | decided, K06 verifies | K06 |
-| 0008 | Replica epoch hashes the stored `database_url` | decided | P03, K10, M03 |
+| 0008 | Replica epoch hashes the stored `database_url` (cutover duties in M03) | decided | P03, K10, M03 |
 | 0009 | Reducer receipt expiry with tombstones | decided | K07 |
-| 0010 | Change capture without custom functions or hooks | **open** (S1 numbers) | K02, K03 |
+| 0010 | Change capture without custom functions or hooks | decided in 0016 G0-4 (plain-SQL capture via A01) | K02, K03 |
 | 0011 | `$N` placeholders, read-only Queries, 100-parameter limit | decided | K01, K04 |
-| 0012 | Lead rulings R1-R26 on items found during the freeze (R22, R25 open) | decided except R22 (S3), R25 (S2) | K05, K06, K11, K12, K13, K14, K19 |
-| 0013 | Tenant schema objects DO SQLite refuses (compound-select 5, 100 KB statements, expression depth 100, custom functions) | ruled in 0014 | K02, K03, K09 |
-| 0014 | Ruling on the 26 refused objects: fix in the app's schema generator (package A01, app-repo exception) | decided; **needs Gabriel's approval** | A01, K02, K03, K07, G1 |
+| 0012 | Lead rulings R1-R26 on items found during the freeze (R22 closed by 0016 G0-6; R25 open) | decided except R25 | K05, K06, K11, K12, K13, K14, K19 |
+| 0013 | Tenant schema objects DO SQLite refuses | ruled in 0014 | A01 |
+| 0014 | Kernel-side deterministic schema transform of the unchanged app migrations (package A01) | decided | A01, K02, K03, K07, G1 |
+| 0015 | Rulings from stage-0 package reviews (error text, digests, P03/P04 acceptance, stream bindings) | decided | P02, K15, M02, M03 |
+| 0016 | Rulings at gate G0 from the spikes | decided except G0-11 (R25) | K01-K05, K11-K14, K19 |
+| 0017 | Presence liveness without server pings | decided in 0016 G0-6 (no SDK change in stage 1) | K14 |
+| 0018 | Platform WebSocket message caps | decided in 0016 G0-7 | K05, K10, P02 |
 
-Stage 1 cannot start K01-K06 until 0004, 0005, 0006 and 0010 are decided at gate G0. G1 cannot pass until A01 (0014) has landed on Rust staging.
+Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
+(`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
