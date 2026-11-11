@@ -17,7 +17,7 @@ cloudflare/conformance/
   src/backend.mjs      backend adapter interface
   src/backends/        rust.mjs (reference), cloudflare.mjs (kernel on local workerd), mutant.mjs (harness self-test), index.mjs (registry)
   scenarios/           one module per scenario, plus index.mjs (registry, run order)
-  fixtures/app         test module bundle: board, notes, note_shares, errors (generation 1)
+  fixtures/app         test module bundle: board, notes, note_shares, errors, storage (generation 1)
   fixtures/app-v2      overlay for generation 2 (upgrade scenario)
   fixtures/app-v3      overlay for generation 3: generation 1 with a client contract (session-handshake)
   test/                unit tests (no backend) and the mutation self-test (needs the Rust binary)
@@ -52,7 +52,7 @@ node --test test/mutation.check.mjs          # self-test: injected drift must be
 
 The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
 
-The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 13 scenarios on two debug-build backends takes about 2.5 minutes.
+The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 14 scenarios on two debug-build backends takes about 2.5 minutes.
 
 The `cloudflare` backend runs `wrangler dev` from `cloudflare/` (install its dependencies first) with the session layer's stub routes enabled; see `src/backends/cloudflare.mjs`.
 

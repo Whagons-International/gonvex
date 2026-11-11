@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
@@ -6,6 +7,11 @@ import { defineConfig } from "vitest/config";
 // routes (kernel/session/stub/routes.ts) for the session tests.
 export default defineConfig({
   plugins: [cloudflareTest({ wrangler: { configPath: "./wrangler.jsonc" }, miniflare: { bindings: { GONVEX_STUB_ADMIN_KEY: "test-key" } } })],
+  resolve: {
+    // The kernel storage tests (K01) run the SDK's own SQL suites against
+    // Durable Object SQLite, from the SDK's sources.
+    alias: { "@gonvex/module-sdk": fileURLToPath(new URL("../packages/module-sdk/src/index.ts", import.meta.url)) },
+  },
   // scripts/*.test.mjs are Node tests (node --test), not workerd tests.
   test: { include: ["test/**/*.test.ts", "kernel/**/*.test.ts"] },
 });
