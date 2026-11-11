@@ -63,3 +63,13 @@ GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS=true
 The opt-in is deliberately runtime-side: an older or rolled-back application bundle must not gain destructive behavior merely by being deployed. Operators should enable it only where deploy ordering and rollback policy make declarative cleanup acceptable. Explicit destructive or data-aware cleanup belongs in a versioned SQL migration.
 
 For tenant tables, Gonvex enumerates every registered tenant database and approves a drop only when the same undeclared column is empty in all of them. It then rechecks emptiness immediately before each physical drop. This fleet-wide rule avoids intentionally creating per-tenant schema drift. If any tenant has a non-NULL value, every tenant keeps the column. Control Plane tables receive the same undeclared-and-empty checks against the single Control Plane database and are also protected by the opt-in flag.
+
+## Primary keys
+
+Primary keys are immutable outside migrations. A row's key is its identity in the change feed and in every client replica, so changing it in place would orphan both.
+
+- `ctx.db.update(table, id, patch)` ignores a patch entry that repeats the row's own key (callers often pass a whole record) and rejects one that changes it. A patch that only repeats the key writes nothing and returns the row.
+- An SQL `UPDATE` that changes the primary key of a captured table fails with `gonvex_capture: an UPDATE cannot change the primary key`.
+- Migration transactions are exempt, so a repair migration can still re-point keys.
+
+To change a key, delete the row and insert a new one.
