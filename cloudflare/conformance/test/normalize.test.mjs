@@ -35,8 +35,8 @@ test('the same id links across envelope and nested positions', () => {
 });
 
 test('revisions become ranks that keep order', () => {
-  const n = normalizeSession([rec('in', { type: 'replica.watermark', revision: 90 }), rec('in', { type: 'replica.watermark', revision: 12 })]);
-  assert.deepEqual(n.map(x => x.frame.revision), ['r2', 'r1']);
+  const n = normalizeSession([rec('in', { type: 'reducer.result', id: 'a', committedRevision: 90 }), rec('in', { type: 'reducer.result', id: 'b', committedRevision: 12 })]);
+  assert.deepEqual(n.map(x => x.frame.committedRevision), ['r2', 'r1']);
 });
 
 test('times, digests, tokens and uuids are masked', () => {
@@ -60,6 +60,40 @@ test('replica.batch expands like separate frames', () => {
   ], watermark: 2 })]);
   const plain = normalizeSession([rec('in', { type: 'replica.delta', id: 'sub', cursor: { epoch: 'e', revision: 2 }, upserts: [{ id: 'a' }] }), rec('in', { type: 'replica.watermark', revision: 2 })]);
   assert.deepEqual(batched, plain);
+});
+
+test('the resume cursor of an integrity reopen answering needHashes is masked, and nothing else', () => {
+  const episode = (persisted) => [
+    rec('in', { type: 'replica.watermark', revision: 5 }),
+    rec('in', { type: 'replica.watermark', revision: 6 }),
+    rec('in', { type: 'replica.needHashes', id: 'sub', path: 'p' }),
+    rec('out', { type: 'replica.openMany', opens: [{ id: 'sub', path: 'p', args: {}, cursor: { epoch: 'e', revision: persisted }, fullIntegrity: true, keys: [], hashes: {} }] }),
+    rec('in', { type: 'replica.delta', id: 'sub', cursor: { epoch: 'e', revision: 7 }, upserts: [{ id: 'row' }], deleted: [] }),
+    rec('in', { type: 'replica.ready', id: 'sub', cursor: { epoch: 'e', revision: 7 }, digest: 'd' }),
+  ];
+  const a = normalizeSession(episode(5)), b = normalizeSession(episode(6));
+  assert.deepEqual(a, b);
+  assert.equal(a[3].frame.opens[0].cursor.revision, '<persisted-watermark>');
+  assert.equal(a[5].frame.cursor.revision, 'r1'); // the only compared revision; watermark-only values do not rank
+  // An integrity open the client sends on its own (no needHashes) keeps its cursor.
+  const own = normalizeSession([rec('out', { type: 'replica.openMany', opens: [{ id: 'x', path: 'p', cursor: { epoch: 'e', revision: 4 }, fullIntegrity: true }] })]);
+  assert.equal(own[0].frame.opens[0].cursor.revision, 'r1');
+  // A plain reopen of an asked id (not fullIntegrity) keeps its cursor too.
+  const plain = normalizeSession([rec('in', { type: 'replica.needHashes', id: 'y' }), rec('out', { type: 'replica.open', id: 'y', path: 'p', cursor: { epoch: 'e', revision: 4 } })]);
+  assert.equal(plain[1].frame.cursor.revision, 'r1');
+});
+
+test('a watermark the backend coalesced away does not renumber later revisions', () => {
+  const session = (quietWatermark) => normalizeSession([
+    rec('in', { type: 'replica.ready', id: 'sub', cursor: { epoch: 'e', revision: 5 }, digest: 'd' }),
+    ...(quietWatermark ? [rec('in', { type: 'replica.watermark', revision: 6 })] : []),
+    rec('in', { type: 'replica.delta', id: 'sub', cursor: { epoch: 'e', revision: 7 }, upserts: [{ id: 'row' }], deleted: [] }),
+    rec('in', { type: 'replica.watermark', revision: 7 }),
+  ]).filter(e => e.frame.type !== 'replica.watermark');
+  assert.deepEqual(session(true), session(false));
+  assert.deepEqual(session(true).map(e => e.frame.cursor.revision), ['r1', 'r2']);
+  const marks = normalizeSession([rec('in', { type: 'replica.delta', id: 's', cursor: { epoch: 'e', revision: 7 }, upserts: [], deleted: [] }), rec('in', { type: 'replica.watermark', revision: 6 }), rec('in', { type: 'replica.watermark', revision: 7 })]);
+  assert.deepEqual(marks.slice(1).map(e => e.frame.revision), ['<barrier>', 'r1']);
 });
 
 test('diffFrames reports field-level differences and policies', () => {

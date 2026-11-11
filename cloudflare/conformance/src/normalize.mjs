@@ -18,8 +18,11 @@
  *  - Clocks become `<time>`; `trace` and `device` are dropped.
  *  - Revisions become ranks `r1, r2, ...` (Live Query sequences `s1, ...`),
  *    so order is kept but absolute numbers (which depend on provisioning) are not.
+ *    Ranks come from exactly-compared frames only, not from watermark barriers.
  *  - Digests and row hashes become `<digest>`.
  *  - A `replica.needHashes` episode that moves no row is dropped.
+ *  - The resume cursor revision of an integrity reopen that answers a
+ *    `replica.needHashes` becomes `<persisted-watermark>` (contract-changes 0022 §6).
  *  - Object keys are sorted; batched opens are sorted by path and args.
  *  - `session.ready` loses the three capabilities of 0012 R20.
  *  - Error text loses JavaScript stack frame lines (ruling 0015).
@@ -168,7 +171,7 @@ export function normalizeSession(records) {
       expanded.push({ dir: r.dir, step: r.step, socket: r.socket, frame });
     }
   }
-  const kept = dropNoopReconciles(expanded);
+  const kept = maskAnsweredReopenCursors(dropNoopReconciles(expanded));
   // Revisions (and, separately, Live Query sequences) become ranks over the
   // distinct values the session saw.
   const family = (key) => (key === 'sequence' ? 's' : 'r');
@@ -178,10 +181,15 @@ export function normalizeSession(records) {
     if (v && typeof v === 'object') return Object.entries(v).forEach(([k, x]) => collect(x, k));
     if (typeof v === 'number' && RULES.revisionKeys.has(key)) seen[family(key)].add(v);
   };
-  kept.forEach(e => collect(e.frame));
+  // Only exactly-compared frames set the ranks. A barrier (`present` policy:
+  // watermarks) is compared as sent or not, never by value, and Rust sends or
+  // coalesces quiet-tenant watermarks on a timer; letting their values in would
+  // renumber every later revision of the session (0022 §6). Barrier revisions
+  // keep the rank of an equal compared revision, else become `<barrier>`.
+  kept.forEach(e => { if (policyOf(e.frame) !== 'present') collect(e.frame); });
   const ranks = Object.fromEntries(Object.entries(seen).map(([f, values]) => [f,
     new Map([...values].sort((a, b) => a - b).map((v, i) => [v, v === 0 ? `${f}0` : `${f}${i + (values.has(0) ? 0 : 1)}`]))]));
-  const rank = (key, v) => ranks[family(key)].get(v);
+  const rank = (key, v) => ranks[family(key)].get(v) ?? '<barrier>';
   // `depth` 0 is the frame itself: only there (and in `cursor`/`provenance`)
   // are `id`-like keys protocol identifiers. Below that they are row data,
   // compared as-is except for clocks, UUID-shaped values and tokens.
@@ -242,6 +250,40 @@ function dropNoopReconciles(list) {
     if (noop) for (const k of episode) drop.add(k);
   }
   return list.filter((_, k) => !drop.has(k));
+}
+
+/**
+ * When a backend asks for hashes (`replica.needHashes`), the client reopens the
+ * collection with `fullIntegrity` and the cursor it has persisted. That cursor
+ * includes the last watermark the client applied, and watermarks are coalescible
+ * barriers sent on a timer (compared only as sent or not, FRAME_POLICY). So the
+ * revision depends on whether a quiet-tenant watermark landed before the
+ * `needHashes` (thin-sdk-parity, 0022 §6). Only that value is masked, before
+ * ranking so no other rank moves. The epoch, the other fields and every
+ * integrity open a client sends on its own (replica-resume) stay compared.
+ */
+function maskAnsweredReopenCursors(list) {
+  const asked = new Map(); // socket -> ids with an unanswered needHashes
+  return list.map(e => {
+    const f = e.frame;
+    if (e.dir === 'in' && f?.type === 'replica.needHashes') {
+      (asked.get(e.socket) ?? asked.set(e.socket, new Set()).get(e.socket)).add(f.id);
+      return e;
+    }
+    const opens = e.dir === 'out' && (f?.type === 'replica.openMany' ? f.opens : f?.type === 'replica.open' ? [f] : null);
+    const ids = asked.get(e.socket);
+    if (!Array.isArray(opens) || !ids?.size) return e;
+    let changed = false;
+    const masked = opens.map(o => {
+      if (!o?.fullIntegrity || !ids.has(o.id)) return o;
+      ids.delete(o.id);
+      if (typeof o.cursor?.revision !== 'number') return o;
+      changed = true;
+      return { ...o, cursor: { ...o.cursor, revision: '<persisted-watermark>' } };
+    });
+    if (!changed) return e;
+    return { ...e, frame: f.type === 'replica.open' ? masked[0] : { ...f, opens: masked } };
+  });
 }
 
 function sortRows(rows, key = '_id') {
