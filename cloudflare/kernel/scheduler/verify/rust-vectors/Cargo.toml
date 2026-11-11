@@ -1,0 +1,17 @@
+# Golden vectors for the kernel scheduler (K11). The functions in src/reference.rs
+# are copied from rust/crates/runtime/src/scheduler.rs and rust/crates/store/src/lib.rs
+# at 0bf3ad13 with the same crate versions as rust/Cargo.lock, so the vectors are
+# what the Rust runtime computes. Not part of the rust/ workspace.
+[package]
+name = "gonvex-k11-vectors"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+cron = "=0.15.0"
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"

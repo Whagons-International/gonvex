@@ -7,6 +7,8 @@ import { resolve } from 'node:path';
 import { RustBackend } from './rust.mjs';
 import { CloudflareControlBackend } from './cloudflare-control.mjs';
 import { CloudflareBackend } from './cloudflare.mjs';
+import { CloudflareReducerBackend } from './cloudflare-reducer.mjs';
+import { CloudflareKernelBackend } from './cloudflare-kernel.mjs';
 
 export const BACKENDS = {
   rust: RustBackend,
@@ -14,6 +16,10 @@ export const BACKENDS = {
   'cloudflare-control': CloudflareControlBackend,
   // The kernel on local workerd (K05: session layer; later packages fill in the rest).
   cloudflare: CloudflareBackend,
+  // K07: the kernel with the Reducer path (receipt scenarios), fixture bundles built into the Worker.
+  'cloudflare-reducer': CloudflareReducerBackend,
+  // K19: the local kernel with the deploy and operator routes (operator-routes scenario).
+  'cloudflare-kernel': CloudflareKernelBackend,
 };
 
 export async function backendClass(kind) {

@@ -138,10 +138,12 @@ export class ForeignKeyModel {
   readonly deferredCount: number;
 
   constructor(reader: SchemaReader) {
+    // The platform's own tables (`_cf_KV`, `_cf_METADATA`) refuse pragma reads with SQLITE_AUTH
+    // ("not authorized"); they exist as soon as the object uses `storage.kv` and have no foreign keys.
     const rows = reader.rows(
       `SELECT m.name AS child, m.sql AS sql, f.id AS id, f.seq AS seq, f."table" AS parent, f."from" AS "from", f."to" AS "to", f.on_update AS on_update, f.on_delete AS on_delete
        FROM sqlite_schema AS m JOIN pragma_foreign_key_list(m.name) AS f
-       WHERE m.type = 'table' ORDER BY m.name, f.id, f.seq`,
+       WHERE m.type = 'table' AND substr(m.name, 1, 4) <> '_cf_' ORDER BY m.name, f.id, f.seq`,
     );
     const grouped = new Map<string, { sql: string; keys: Map<number, Record<string, unknown>[]> }>();
     for (const row of rows) {
@@ -292,25 +294,32 @@ export class WrittenSet {
     this.tables.set(table, set);
   }
 
-  /** A module or kernel statement that wrote (rowsWritten > 0 or a write head). */
-  noteStatement(tokens: readonly Token[], model: ForeignKeyModel | undefined): void {
+  /**
+   * A module or kernel statement that wrote (rowsWritten > 0 or a write head).
+   * `rowReported` (mixed mode, 0028 §2d) names the tables whose written rows
+   * change capture reports before the check: those stay row-level.
+   */
+  noteStatement(tokens: readonly Token[], model: ForeignKeyModel | undefined, rowReported?: (table: string) => boolean): void {
     const written = writtenTable(tokens);
     if (!written) {
       this.everything = true;
       return;
     }
-    this.noteTable(written.table, written.operations, model);
+    this.noteTable(written.table, written.operations, model, rowReported);
   }
 
   /** A write to `table` whose rows are not known, closed over triggers and FK actions. */
-  noteTable(table: string, operations: ReadonlySet<WriteOperation>, model: ForeignKeyModel | undefined): void {
+  noteTable(table: string, operations: ReadonlySet<WriteOperation>, model: ForeignKeyModel | undefined, rowReported?: (table: string) => boolean): void {
     const bare = (table.includes(".") ? table.slice(table.indexOf(".") + 1) : table).toLowerCase();
     const reached = new Map<string, Set<WriteOperation>>();
     if (model) model.closure(bare, operations, reached);
     else reached.set(bare, new Set(operations));
     for (const [name, set] of reached) {
       for (const operation of set) this.add(name, operation);
-      this.rowids.set(name, null);
+      // Mixed mode: capture reports this table's rows (noteRows); keep it row-level.
+      if (rowReported?.(name)) {
+        if (!this.rowids.has(name)) this.rowids.set(name, new Set());
+      } else this.rowids.set(name, null);
     }
   }
 

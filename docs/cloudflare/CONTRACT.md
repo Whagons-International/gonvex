@@ -54,6 +54,7 @@ pings. Queue consumers: 15 minutes. Workflow steps: no wall-clock limit.
 | IB2 | Actions | `actions.enqueue` jobs retry forever (backoff from 1 s, capped at 15 min); scheduled jobs never retry (E.b) | Outbox Actions: at most 8 attempts, then `dead`. Scheduled jobs: still one attempt, a failure ends `dead` not `completed` (E.b.5) | 0001 |
 | IB3 | Reducer receipts | Receipt table never pruned (E.receipts) | Receipt results expire after the client's offline window; a tombstone refuses late duplicates | 0001, 0009 |
 | IB4 | Webhooks | No runtime route: external adapters verify and invoke an Action (D.1 Webhooks) | One Ingress Worker for every webhook | 0001, 0002 |
+| IB5 | Visibility delivery | Rust never delivers a row that becomes visible when its parent is inserted later, though a fresh snapshot shows it (0031) | The kernel delivers it, converging on the snapshot state | 0032 |
 
 Out of scope by decision of the brief: the native-rows binary snapshot path (the shipped SDK never
 negotiates it), the Go runtime, and Rust caches, lanes, offload threads and tuning variables.
@@ -1736,6 +1737,16 @@ new note and waits for the lead.
 | 0027 | K02 migration findings (proposed by K02) | ruled in 0028 §3 | K02, K04, K07, K19 |
 | 0028 | Third wave-1 pass: S5 (G0-2 stands; Facet is a stage-3 candidate), K03 and K02 rulings | decided | K02, K03, K04, K07, K19, M02, R05 |
 | 0029 | K06 merged over a known external CI failure (GitHub runner DNS outage) | decided | none |
+| 0030 | K07 Reducer path findings | ruled in 0032 | K07, K10, K11 |
+| 0031 | K09 visibility findings | ruled in 0032 (IB5) | K08, K10 |
+| 0032 | First wave-2 review: K09, K07, K08, K11, K13 rulings; IB5; note renumbering | decided | K07, K08, K10, K11, K13, K19, V01 |
+| 0033 | K08 live-query findings | ruled in 0032 | K08, K10 |
+| 0034 | K11 scheduler findings | ruled in 0032 | K11, K12, R06 |
+| 0035 | K13 files findings | ruled in 0032 | K13, K19, V01 |
+| 0036 | K19 deploy and operator routes findings | ruled in 0037 | K02, K07, K10, K19 |
+| 0037 | Second wave-2 review: K08, K11, K19, K14, K12 rulings; numbering | decided | K02, K11, K12, K14, K19, G3b |
+| 0038 | K14 presence findings (dead-peer detection) | ruled in 0037 | K14, G3b |
+| 0039 | K12 Action runtime findings (renumbered by K12) | ruled in 0037 | K11, K12 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

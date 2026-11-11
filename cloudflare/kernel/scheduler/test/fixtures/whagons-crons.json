@@ -1,0 +1,119 @@
+{
+  "source": "whagons5-client 2457bb65f gonvex/_generated/manifest.json (module.crons, and the kind of each cron function)",
+  "crons": [
+    {
+      "name": "agents.dispatch-every-minute",
+      "function": "agents.dispatch",
+      "scope": "tenant",
+      "args": {},
+      "intervalMs": 60000
+    },
+    {
+      "name": "analyticsDelivery.process-every-minute",
+      "function": "analyticsDelivery.processQueue",
+      "scope": "tenant",
+      "args": {},
+      "expression": "* * * * *"
+    },
+    {
+      "name": "billing.synchronize-every-fifteen-minutes",
+      "function": "billing.synchronize",
+      "scope": "tenant",
+      "args": {},
+      "intervalMs": 900000
+    },
+    {
+      "name": "boards.generate-birthday-messages",
+      "function": "boards.generateBirthdayMessages",
+      "scope": "tenant",
+      "args": {},
+      "expression": "*/15 * * * *"
+    },
+    {
+      "name": "centerClassification.queue-every-fifteen-minutes",
+      "function": "centerClassification.queue",
+      "scope": "tenant",
+      "args": {},
+      "expression": "*/15 * * * *"
+    },
+    {
+      "name": "cleaning.tick-hourly",
+      "function": "cleaning.tick",
+      "scope": "tenant",
+      "args": {},
+      "expression": "0 * * * *"
+    },
+    {
+      "name": "deepResearch.tick-every-minute",
+      "function": "deepResearch.tick",
+      "scope": "tenant",
+      "args": {},
+      "intervalMs": 60000
+    },
+    {
+      "name": "grantProjection.reconcile-hourly",
+      "function": "grantProjection.reconcile",
+      "scope": "tenant",
+      "args": {},
+      "expression": "7 * * * *"
+    },
+    {
+      "name": "journeySync.process-every-minute",
+      "function": "journeySync.processDue",
+      "scope": "tenant",
+      "args": {},
+      "intervalMs": 60000
+    },
+    {
+      "name": "slaExecution.evaluate-hourly",
+      "function": "slaExecution.evaluate",
+      "scope": "tenant",
+      "args": {},
+      "expression": "0 * * * *"
+    },
+    {
+      "name": "taskRecurrences.reconcile-recurring-schedules",
+      "function": "taskRecurrences.reconcileRecurringSchedules",
+      "scope": "tenant",
+      "args": {},
+      "expression": "0 */6 * * *"
+    },
+    {
+      "name": "tools.check-overdue-items",
+      "function": "tools.checkOverdueItems",
+      "scope": "tenant",
+      "args": {},
+      "expression": "0 8 * * *"
+    },
+    {
+      "name": "workflowRuntime.resume-due-delays-hourly",
+      "function": "workflowRuntime.resumeDueDelays",
+      "scope": "tenant",
+      "args": {},
+      "expression": "0 * * * *"
+    },
+    {
+      "name": "workplans.reconcile-schedules",
+      "function": "workplans.reconcileSchedules",
+      "scope": "tenant",
+      "args": {},
+      "expression": "0 */6 * * *"
+    }
+  ],
+  "kinds": {
+    "agents.dispatch": "reducer",
+    "analyticsDelivery.processQueue": "reducer",
+    "billing.synchronize": "action",
+    "boards.generateBirthdayMessages": "reducer",
+    "centerClassification.queue": "reducer",
+    "cleaning.tick": "reducer",
+    "deepResearch.tick": "reducer",
+    "grantProjection.reconcile": "reducer",
+    "journeySync.processDue": "action",
+    "slaExecution.evaluate": "reducer",
+    "taskRecurrences.reconcileRecurringSchedules": "reducer",
+    "tools.checkOverdueItems": "reducer",
+    "workflowRuntime.resumeDueDelays": "reducer",
+    "workplans.reconcileSchedules": "reducer"
+  }
+}

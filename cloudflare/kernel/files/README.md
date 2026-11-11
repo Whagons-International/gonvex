@@ -3,7 +3,7 @@
 File storage for the tenant object, on an R2 binding. The reference is `rust/crates/runtime/src/storage.rs` and the
 `/storage` routes in `rust/crates/runtime/src/lib.rs:560-885` at `0bf3ad13`; the contract rows are `CONTRACT.md`
 D.1 "Storage and files" and E.d, with IB1 (0001) and 0012 R6, R12, R13 and R26. Findings and proposed rulings are in
-`docs/cloudflare/contract-changes/0030-k13-files.md`.
+`docs/cloudflare/contract-changes/0035-k13-files.md`.
 
 ## Where each part runs
 
