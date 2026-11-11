@@ -66,7 +66,7 @@ export class RustBackend extends Backend {
     this.restarts = 0;
   }
 
-  get capabilities() { return { restart: true, crash: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
+  get capabilities() { return { restart: true, crash: true, changeLog: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
 
   async start() {
     await mkdir(this.dataDir, { recursive: true });
@@ -172,6 +172,27 @@ export class RustBackend extends Backend {
       const page = await this.request('GET', `/dev/data/tables/${encodeURIComponent(table)}/rows?${q}`, { key: this.keys.get(project) });
       rows.push(...page.rows);
       if (page.rows.length < 1000 || rows.length >= page.total) return rows;
+    }
+  }
+
+  /**
+   * Optional (`capabilities.changeLog`): the tenant's change log, read from its
+   * SQLite file. The runtime's `/dev/data` routes refuse `_gonvex_*` tables, and
+   * the change log is not visible through the contract with its old values,
+   * ordinals and provenance.
+   * @returns {Promise<{ clock: any, changes: any[], transactions: any[] }>}
+   */
+  async readChangeLog(project, tenantId) {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(this.dataDir, 'projects', project, 'tenants', `${tenantId}.db`), { readOnly: true });
+    try {
+      return {
+        clock: db.prepare('SELECT epoch, revision, retained_revision FROM _gonvex_sync_clock WHERE singleton = 1').get(),
+        changes: db.prepare('SELECT * FROM _gonvex_sync_changes ORDER BY event_id').all(),
+        transactions: db.prepare('SELECT * FROM _gonvex_sync_transactions ORDER BY revision').all(),
+      };
+    } finally {
+      db.close();
     }
   }
 }

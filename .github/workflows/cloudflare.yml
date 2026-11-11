@@ -214,7 +214,7 @@ jobs:
         if: steps.access.outputs.ready == 'true'
         run: |
           node cloudflare/kernel/schema-transform/verify/transform-migrations.mjs "$RUNNER_TEMP/client/migrations" \
-            --prelude cloudflare/spikes/s1/scripts/runtime-prelude.sql --json "$RUNNER_TEMP/drift.json"
+            --prelude cloudflare/kernel/migrate/runtime-prelude.sql --json "$RUNNER_TEMP/drift.json"
       - name: REGEXP patterns and generated-column tables in the app's module sources
         if: steps.access.outputs.ready == 'true'
         run: |
