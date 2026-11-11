@@ -333,7 +333,7 @@
    "owns": [
     "cloudflare/kernel/host/"
    ],
-   "done_when": "Runtime-contract vectors pass; a real Query and Reducer run from the app bundle",
+   "done_when": "Runtime-contract vectors pass; a real Reducer runs from the app bundle; the Query dispatch path passes the vectors (real Whagons Queries are runtime-executed plans and belong to K08; 0022)",
    "reference": [
     "rust/crates/module-runtime/src/",
     "rust/crates/module-runtime-v8/src/gonvex_bootstrap.js",
@@ -426,7 +426,7 @@
    "owns": [
     "cloudflare/kernel/query/"
    ],
-   "done_when": "Live query frames equal the Rust runtime's on the task grid scenarios",
+   "done_when": "Live query frames equal the Rust runtime's on the task grid scenarios; a real Whagons Query (plan) from the app bundle runs and matches Rust (moved from K04, 0022)",
    "reference": [
     "rust/crates/runtime/src/live_query.rs",
     "rust/crates/runtime/src/live_query_projection.rs",
