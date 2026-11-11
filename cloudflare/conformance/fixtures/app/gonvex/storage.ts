@@ -40,7 +40,7 @@ export const statements = reducer({
 });
 
 /** Module savepoints: ROLLBACK TO keeps the savepoint; a caught batch failure keeps the rest. */
-export const savepoints = reducer({
+export const sqlSavepoints = reducer({
   args: schema.object({}),
   result: schema.any(),
   offline: { mode: "onlineOnly", reason: "conformance fixture" },

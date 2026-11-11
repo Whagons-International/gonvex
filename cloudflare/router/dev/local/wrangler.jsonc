@@ -1,0 +1,36 @@
+// K19 local kernel: router /dev/* and /auth/*, rollout queue, control object
+// with the operator surface, local tenant object. `node local/start.mjs`
+// runs it with the release builder; never deployed (the name keeps the
+// gonvex-cf-dev- prefix anyway).
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-k19-local",
+  "main": "worker.ts",
+  // Must not be newer than the pinned workerd (wrangler 4.155.0 -> workerd 1.20261023.1).
+  "compatibility_date": "2026-10-23",
+  // node:crypto (K06 PBKDF2, HMAC sessions) and AsyncLocalStorage (K04).
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  // The Worker version's releases (0016 G0-2): written by the release builder.
+  // gonvex:module-globals: K04's prelude, which every stored app bundle imports.
+  "alias": { "gonvex:releases": "./.generated/releases.js", "gonvex:module-globals": "../../../kernel/host/src/module-globals.ts" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONTROL", "class_name": "OperatorControlObject" },
+      { "name": "TENANT", "class_name": "LocalKernelTenant" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OperatorControlObject", "LocalKernelTenant"] }],
+  "r2_buckets": [{ "binding": "RELEASES", "bucket_name": "gonvex-cf-dev-k19-releases" }],
+  "queues": {
+    "producers": [{ "binding": "ROLLOUT", "queue": "gonvex-cf-dev-k19-rollout" }],
+    "consumers": [{ "queue": "gonvex-cf-dev-k19-rollout", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 10 }]
+  },
+  // 0022 §3b: tenant objects run with cpu_ms 5000.
+  "limits": { "cpu_ms": 5000 },
+  "vars": {
+    "GONVEX_RUNTIME_VERSION": "development"
+  }
+}

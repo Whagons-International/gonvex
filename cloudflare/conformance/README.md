@@ -14,6 +14,7 @@ cloudflare/conformance/
   src/checksum.mjs     per-table checksums
   src/digest-check.mjs per-backend digest self-check (digests are masked in diffs)
   src/capture-golden.mjs records Rust's change log for `change-capture` as the kernel's parity golden (K03)
+  src/live-query-golden.mjs records Rust's run of `live-query-task-grid` as the query engine's parity golden (K08)
   src/fixture.mjs      builds the fixture bundle with the repo's own `gonvex codegen`
   src/backend.mjs      backend adapter interface
   src/backends/        rust.mjs (reference), cloudflare.mjs (kernel on local workerd), mutant.mjs (harness self-test), index.mjs (registry)
@@ -126,6 +127,8 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `change-capture` | 18 Reducer transactions through `capture.apply`, then the tenant's change log read through the adapter (`readChangeLog`, capability `changeLog`): change rows, ordinals, command ids, revisions (relative), provenance and the clock. Covers every column kind and edge values, no-op updates, savepoints, trigger-written rows, a composite `WITHOUT ROWID` key, a derived table, a logical record with an owned table and a record dependency, a rejected Reducer. `node src/capture-golden.mjs` writes Rust's result to `kernel/capture/test/golden/`, which the kernel's capture is replayed against in workerd | K03 |
 | `visibility-masks` | Masks v2 through two Replica Collections for three Members (SDK and thin): a principal set over two permission tables (team join, workspace link), a grant set (assignment and revocation), a creator context, and notes that `inherits` their task with `onMissing` for orphans (a task moving out of reach takes its notes; a deleted task leaves its notes to their author). Tables `mask_*` in the fixture | K09 |
 | `receipt-expiry` | Intended behavior IB3 (0001, 0009), kernel only (`receiptExpiry`): a keyed call replays inside the offline window + 24 h; after it the result expires and a late duplicate gets `Reducer receipt expired` (rejected), as does the receipt query; 365 days later the tombstone is gone and the key runs again. Rust never prunes receipts, so it skips this scenario | K07 |
+| `scheduler` | One Reducer schedules `runAfter(0)` and `runAt(+300 ms)` of `scheduler.tick` and three identical `wakeAt` calls that must coalesce into one run, and a Reducer reschedules itself with `runAfter(0)` until the durable hop limit (32) stops it; after a fixed settle time (`GONVEX_CONFORMANCE_SCHEDULER_SETTLE_MS`, default 5 s) the `board` rows must show two ticks, one wake and 32 hops. The kernel's scheduler rules are unit-tested in `kernel/scheduler/test/` | K11 |
+| `live-query-task-grid` | Whagons' real `tasks.grid` plan (whagons5-client `2457bb65f`) over Whagons' legacy masks: windows with exact count, the index sort by status and priority, NULL ordering, search over the projection and the related documents (plain and `$or`), filter operators, a second Member's class; rows entering and leaving through assignment, team membership and `inRelation` workspace contexts (share, finding, revocation), an invisible write (no frame), dependency writes, a delete; resume (`query.progress`) and a stale `windowRevision`; `subscribeMany`, `unsubscribe`; the one-shot plan `tasks.byIds` over 150 ids; error texts. Writes wait for quiet once windows are open (Rust coalesces racing reruns by timing, 0038 §2). `node src/live-query-golden.mjs` writes Rust's run to `kernel/query/test/golden/`, which the kernel's engine replays in workerd | K08 |
 | `presence-edges` | Presence v2 on raw sockets: invalid states ignored, trimmed and case-insensitive states, `gone` = offline without grace, a re-auth that re-announces inside the grace (no transition), a re-auth dropping the subscription, unsubscribe and resubscribe, a socket without the `presence` capability, tenant isolation, a dropped socket offline after the 10 s grace (asserted 9.5-12.5 s on every backend). Snapshots are asserted sorted by Member id on each backend | K14 |
 
 Two receipt checks stay in `verification/backend-receipts/`, because they inject faults inside the Rust process through test-only coordinators that a black-box harness cannot reach: the SDK's own SQLite outbox replay, and the injected replica and receipt write failures.
@@ -256,3 +259,20 @@ Other notes:
 - **Node 22 WebSocket.** Node 22.23 fires `error` but no `close` on a refused connection and leaves `readyState` at CONNECTING. Node 26 and browsers follow the spec. Both SDKs reconnect from `close`, so `src/sessions.mjs` completes the spec's failure steps. Without this, any client retrying while a backend restarts stalls for 30 s.
 - **Stream bindings outlive a re-auth.** When one socket re-authenticates without `subscriptionsPreserved`, for example on a tenant switch, Rust drops every subscription. But the delivery v2 stream token can be the same in the new auth, and `expandReplicaBatch` (used by the SDK, the thin client and this harness) keeps a socket's bindings across auths. So Rust's next `replica.delta` and `replica.ready` for that stream also expand to the dropped subscription id (`receipt-owner-switch`, step "tenant switch A -> B"). The SDK ignores the unknown id, and the digest self-check skips subscriptions dropped by a re-auth. Those phantom frames are still in the normalized trace, so a kernel that unbinds or renames its streams at auth shows a diff there. It needs a ruling: either the client clears its bindings at `auth.result`, or the server must unbind.
 - **The SDK alone reacts to a wrong digest.** It reopens the collection again and again (about 80,000 frames in one scenario) and the run eventually fails on timeouts. The digest self-check fails it at the first mismatch and names it. It also covers the thin and raw clients, which never verify digests.
+
+## Deploy and operator routes (K19)
+
+`operator-routes` drives the operator HTTP surface (CONTRACT D.1-D.3) and `/dev/sync` refusals over HTTP and
+compares status and body. It seeds no tenant or Member (`tenants: {}`) and creates its own tenant, so it runs on
+the K19 local kernel too (backend `cloudflare-kernel`: `cloudflare/router/dev/local` under `wrangler dev`, with
+the release builder):
+
+```bash
+node src/cli.mjs --backend rust=rust --backend kernel=cloudflare-kernel --scenario operator-routes
+```
+
+Values each backend mints (tokens, ids, times, project keys, session revisions, database aliases) are scrubbed by
+the named rules at the top of the scenario; everything else is compared exactly. The kernel backend waits for the
+new Worker version after each sync, because the local builder swaps it just after the sync answers and
+`wrangler dev` restarts workerd (0036 §4). Other scenarios need seeded Members and the wave-2 tenant object.
+
