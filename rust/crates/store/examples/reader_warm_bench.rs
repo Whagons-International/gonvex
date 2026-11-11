@@ -205,7 +205,8 @@ async fn mode_startup(data: &Path, files: &[PathBuf]) {
     let control = control(data, &pools).await;
     let started = Instant::now();
     let per_tenant = Arc::new(Mutex::new(Vec::new()));
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+    let concurrency: usize = env_or("CONCURRENCY", 8);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut tasks = Vec::new();
     for route in routes(files) {
         let (control, per_tenant, semaphore) =
@@ -224,7 +225,7 @@ async fn mode_startup(data: &Path, files: &[PathBuf]) {
         task.await.unwrap();
     }
     println!(
-        "== startup: {} tenants provisioned (8 at a time) in {:.1} ms; SQLite heap {:.1} MiB, RSS {:.1} MiB ==",
+        "== startup: {} tenants provisioned ({concurrency} at a time) in {:.1} ms; SQLite heap {:.1} MiB, RSS {:.1} MiB ==",
         files.len(),
         ms(started.elapsed()),
         gonvex_store::sqlite_memory_used() as f64 / 1048576.0,
@@ -257,10 +258,11 @@ async fn mode_idle(files: &[PathBuf]) {
         pools.pool(url).await.unwrap();
     }
     println!(
-        "== idle: {} tenants, {rounds} rounds, {}s gaps, burst {burst}, follow {follow}; after writers: heap {:.1} MiB ==",
+        "== idle: {} tenants, {rounds} rounds, {}s gaps, burst {burst}, follow {follow}; after writers: heap {:.1} MiB (writer schemas {:.1} MiB) ==",
         urls.len(),
         gap.as_secs(),
-        gonvex_store::sqlite_memory_used() as f64 / 1048576.0
+        gonvex_store::sqlite_memory_used() as f64 / 1048576.0,
+        gonvex_store::sqlite_writer_schema_heap() as f64 / 1048576.0
     );
     let mut all_burst = Vec::new();
     let mut all_follow = Vec::new();

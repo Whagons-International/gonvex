@@ -1646,6 +1646,7 @@ fn memory_json(runtime: &Runtime) -> Value {
         "sqliteUsedBytes": gonvex_store::sqlite_memory_used(),
         "sqliteBudgetMiB": gonvex_store::sqlite_cache_budget_mib(),
         "sqliteReaderOpens": gonvex_store::sqlite_reader_opens(),
+        "sqliteWriterSchemaBytes": gonvex_store::sqlite_writer_schema_heap(),
         "feedBacklog": crate::change_feed::backlog::metrics(),
         "eventShares": crate::feed_share::metrics(),
         "sqliteStatements": statements,
