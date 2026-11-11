@@ -2,7 +2,7 @@
 
 The conformance harness shows that a backend behaves like the Rust runtime. It runs the same scenarios against two or more backends. It drives them with the real `@gonvex/client` SDK, the thin protocol client (`bench/whagons/thin-client.mjs`) and raw frames. Then it compares the results, normalized frame by frame, and checksums every table.
 
-Today it runs Rust against Rust: two processes of the same build. The Cloudflare kernel plugs in as a second backend when it exists.
+It runs Rust against Rust (two processes of the same build), or Rust against the Cloudflare kernel on local workerd (`--backend rust=rust --backend cf=cloudflare`). The kernel serves the session layer (K05) today, so only the `session-*` scenarios pass on it until the Reducer, Query and replica packages land.
 
 ```text
 cloudflare/conformance/
@@ -15,10 +15,11 @@ cloudflare/conformance/
   src/digest-check.mjs per-backend digest self-check (digests are masked in diffs)
   src/fixture.mjs      builds the fixture bundle with the repo's own `gonvex codegen`
   src/backend.mjs      backend adapter interface
-  src/backends/        rust.mjs (reference), mutant.mjs (harness self-test), index.mjs (registry)
+  src/backends/        rust.mjs (reference), cloudflare.mjs (kernel on local workerd), mutant.mjs (harness self-test), index.mjs (registry)
   scenarios/           one module per scenario, plus index.mjs (registry, run order)
   fixtures/app         test module bundle: board, notes, note_shares, errors, storage (generation 1)
   fixtures/app-v2      overlay for generation 2 (upgrade scenario)
+  fixtures/app-v3      overlay for generation 3: generation 1 with a client contract (session-handshake)
   test/                unit tests (no backend) and the mutation self-test (needs the Rust binary)
 ```
 
@@ -51,7 +52,9 @@ node --test test/mutation.check.mjs          # self-test: injected drift must be
 
 The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
 
-The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 12 scenarios on two debug-build backends takes about 2 minutes.
+The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 14 scenarios on two debug-build backends takes about 2.5 minutes.
+
+The `cloudflare` backend runs `wrangler dev` from `cloudflare/` (install its dependencies first) with the session layer's stub routes enabled; see `src/backends/cloudflare.mjs`.
 
 ### CI
 
@@ -106,7 +109,8 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `receipt-crash` | A client process killed with SIGKILL after sending a keyed call; the backend killed after a commit (receipt, rows and SDK recovery intact) and right after a keyed send (exactly-once replay) | `sdk_process_crash`, `check_restart` |
 | `receipt-upgrade` | `/dev/sync` of generation 2 while connected: migration default for old rows, the new Reducer, a call pinned to the old artifact (`update_required`), generation 1 receipts still answering, SDKs on the v1 and v2 definitions | `sdk_module_upgrade`, `check_module_upgrade` |
 | `receipt-owner-switch` | One SDK socket switching account A to B to A (owner-scoped notes, receipts per owner, a foreign write refused) and tenant A to B to A (no leak in either direction) | `sdk_owner_switch` |
-| `storage-sql` | Module SQL through Reducer results: `$N` placeholders by number, integer and JSON parameters, decoding by declared type (JSON, BOOLEAN, BLOB, expressions, `RETURNING`), refused statements (several statements, ATTACH, PRAGMA, VACUUM, BEGIN), module savepoints and a caught batch failure, a caught SQL error that must not commit, a deferred foreign key failing at commit while the backend keeps serving, `existsDataRows` over 100 bound parameters, the `matches` predicate (REGEXP) | K01 storage layer |
+| `session-handshake` | `session.ready` first; every `auth` branch and error code; the replica directive's `scope` and `visibilityScope` recomputed from the result; re-auth in place with and without `subscriptionsPreserved`; a tenant switch; a failed re-auth tearing the session down (the unauthenticated reply of every frame kind); `clientContract` gating at auth and on a deploy while connected (`client.updateRequired`, `system.reload`); the real SDK logging in, authenticating and switching tenant | K05 |
+| `session-frames` | The decoder's accept/close boundary (82 vectors: integer widths and lexemes, `null`, duplicates, the sequence form, nesting depth, lone surrogates); binary frames; the public transport (mismatch, non-public tenant, the 64 KiB limit); 64 KiB on unscoped sockets and 16 MiB after auth; the 10 s pending-auth deadline | K05 |
 
 Two receipt checks stay in `verification/backend-receipts/`, because they inject faults inside the Rust process through test-only coordinators that a black-box harness cannot reach: the SDK's own SQLite outbox replay, and the injected replica and receipt write failures.
 
@@ -148,14 +152,14 @@ Two receipt checks stay in `verification/backend-receipts/`, because they inject
 | --- | --- |
 | `ctx.sdk(tag, { member, tenant, options, authenticate, fresh })` | A `GonvexClient`. A Member's first client logs in with `control.auth.passwordLogin` on its own socket. Later clients reuse that session, unless `fresh` is set. `options` go to the SDK constructor. |
 | `ctx.thin(tag, { member, tenant, options, fresh })` | A `ThinClient`. Pass `options: { presenceV2: true }` for presence. |
-| `ctx.raw(tag)` and `ctx.rawLogin(socket, member)` | A `RawSocket` with `send(frame)`, `next(match)`, `auth({ project, tenant, token, capabilities })`, `close()` and `drop()`. |
+| `ctx.raw(tag, { public })` and `ctx.rawLogin(socket, member)` | A `RawSocket` with `send(frame)`, `sendRaw(textOrBytes)`, `next(match)`, `auth({ project, tenant, token, capabilities })`, `whenClosed(ms)`, `closeEvent` (`{ code, reason, at }`), `close()` and `drop()`. `public: true` connects with `?public=1`. |
 | `ctx.step(name, fn)` | Groups frames and observations. A throw is recorded, and the next step still runs. |
 | `ctx.observe(label, value)` | Records a value that every backend must reproduce. |
 | `ctx.expect(cond, msg)` | Asserts a fact that must hold on every backend. |
 | `ctx.until(check, label, ms)` | Polls until `check` returns true. The default limit is 15 s, or `GONVEX_CONFORMANCE_UNTIL_MS`. |
 | `ctx.quiesce()` | Waits until no frame has arrived for 300 ms. |
 | `ctx.frames(tag, { dir, type })` | The raw frames of a session. |
-| `ctx.deploy(2)` | Deploys generation 2 of the fixture. |
+| `ctx.deploy(n)` | Deploys generation `n` of the fixture (2: upgrade, 3: client contract). |
 | `ctx.restart({ crash })` | Restarts the backend. `crash: true` kills it without shutdown. |
 | `ctx.api` and `ctx.fixtures[n].api` | Generated function references. |
 | `ctx.members.alice.memberIds.a` | The id of Member alice in tenant a. |

@@ -114,20 +114,30 @@ export function thinClient(wsUrl, tag, recorder, project, options = {}) {
 export class RawSocket {
   constructor(wsUrl, tag, recorder) {
     this.url = wsUrl; this.tag = tag; this.recorder = recorder; this.inbox = []; this.waiters = []; this.closed = false;
+    /** `{ code, reason, at }` once the socket closed (the close frame the server sent, or 1006). */
+    this.closeEvent = undefined;
   }
   async open() {
     this.ws = constructing(this.tag, this.recorder, () => new globalThis.WebSocket(this.url));
-    this.inbox = []; this.closed = false;
+    this.inbox = []; this.closed = false; this.closeEvent = undefined; this.openedAt = Date.now();
     this.ws.addEventListener('message', (e) => {
       let m; try { m = JSON.parse(String(e.data)); } catch { return; }
       this.inbox.push(m); this.wake();
     });
-    this.ws.addEventListener('close', () => { this.closed = true; this.wake(); });
+    this.ws.addEventListener('close', (e) => { this.closed = true; this.closeEvent = { code: e.code, reason: e.reason, at: Date.now() }; this.wake(); });
     await new Promise((resolve, reject) => { this.ws.addEventListener('open', resolve, { once: true }); this.ws.addEventListener('error', () => reject(new Error('raw socket failed to open')), { once: true }); });
     return this;
   }
   wake() { const w = this.waiters.splice(0); w.forEach(f => f()); }
   send(frame) { this.ws.send(JSON.stringify(frame)); }
+  /** Sends text or bytes exactly as given (malformed frames, oversized payloads). */
+  sendRaw(data) { this.ws.send(data); }
+  /** Resolves with `closeEvent` once the socket has closed, or undefined after `timeoutMs`. */
+  async whenClosed(timeoutMs = 15_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!this.closeEvent && Date.now() < deadline) await Promise.race([new Promise(r => this.waiters.push(r)), delay(Math.max(1, deadline - Date.now()))]);
+    return this.closeEvent;
+  }
   async next(match, { timeoutMs = 15_000, label } = {}) {
     const test = typeof match === 'function' ? match : (m) => Object.entries(match).every(([k, v]) => m[k] === v);
     const deadline = Date.now() + timeoutMs;
