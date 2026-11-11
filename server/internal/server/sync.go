@@ -650,7 +650,6 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		return nil
 	}
 	if latest.Revision <= subscription.cursor.Revision {
-		syncStat("current."+subscription.path, 1)
 		if !subscription.verified {
 			settled, err := s.deliverAuthoritativeSync(ctx, subscription, nil, latest)
 			if err != nil {
@@ -692,17 +691,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, latest))
 		return nil
 	}
-	syncStat("deliver."+subscription.path, 1)
-	if len(changes) == 0 && subscription.verified {
-		syncStat("skip.empty", 1)
-	}
-	if !subscription.verified {
-		syncStat("reconcile.unverified", 1)
-	}
 	authoritativeReconcile := syncNeedsAuthoritativeReconcile(subscription.definition, changes)
-	if authoritativeReconcile {
-		syncStat("reconcile."+subscription.path, 1)
-	}
 	if subscription.verified && authoritativeReconcile {
 		subscription.conn.write(serverMessage{
 			Type: "sync.syncing", ID: subscription.id, Path: subscription.path, Reason: "reconciling",

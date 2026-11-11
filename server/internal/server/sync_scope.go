@@ -3,12 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"log/slog"
-	"os"
-	"sort"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
 )
@@ -37,10 +32,8 @@ func scopedSyncChanges(definition manifest.SyncDefinition, args map[string]json.
 	kept := changes[:0:0]
 	for _, change := range changes {
 		if syncChangeOutOfScope(definition, args, visibleKeys, change) {
-			syncStat("drop."+change.table, 1)
 			continue
 		}
-		syncStat("keep."+change.table, 1)
 		kept = append(kept, change)
 	}
 	return kept
@@ -163,42 +156,4 @@ func columnMatchesArg(row map[string]json.RawMessage, column string, args map[st
 		return true
 	}
 	return jsonScalarEqual(left, right)
-}
-
-// Lab-only delivery accounting (GONVEX_SYNC_STATS=1): why sync deliveries
-// re-ran their handler, and which changes the scope check kept or dropped.
-var syncStats = struct {
-	sync.Mutex
-	counts map[string]int
-	once   sync.Once
-}{counts: map[string]int{}}
-
-func syncStat(key string, n int) {
-	if os.Getenv("GONVEX_SYNC_STATS") != "1" || n == 0 {
-		return
-	}
-	syncStats.once.Do(func() {
-		go func() {
-			for range time.Tick(10 * time.Second) {
-				syncStats.Lock()
-				keys := make([]string, 0, len(syncStats.counts))
-				for k := range syncStats.counts {
-					keys = append(keys, k)
-				}
-				sort.Strings(keys)
-				parts := make([]any, 0, 2*len(keys))
-				for _, k := range keys {
-					parts = append(parts, k, syncStats.counts[k])
-				}
-				syncStats.counts = map[string]int{}
-				syncStats.Unlock()
-				if len(parts) > 0 {
-					slog.Info("sync stats (10s)", parts...)
-				}
-			}
-		}()
-	})
-	syncStats.Lock()
-	syncStats.counts[key] += n
-	syncStats.Unlock()
 }
