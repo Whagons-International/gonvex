@@ -1,0 +1,205 @@
+# Conformance harness
+
+The conformance harness shows that a backend behaves like the Rust runtime. It runs the same scenarios against two or more backends. It drives them with the real `@gonvex/client` SDK, the thin protocol client (`bench/whagons/thin-client.mjs`) and raw frames. Then it compares the results, normalized frame by frame, and checksums every table.
+
+Today it runs Rust against Rust: two processes of the same build. The Cloudflare kernel plugs in as a second backend when it exists.
+
+```text
+cloudflare/conformance/
+  src/cli.mjs          entry point: builds the fixture, starts backends, runs, diffs, reports
+  src/runner.mjs       runs one scenario on one backend: seeds, gives the scenario its ctx, records the trace
+  src/sessions.mjs     SDK / thin / raw clients with frame capture
+  src/normalize.mjs    frame normalizer (every rule is listed in RULES)
+  src/differ.mjs       compares traces, prints readable diffs
+  src/checksum.mjs     per-table checksums
+  src/digest-check.mjs per-backend digest self-check (digests are masked in diffs)
+  src/fixture.mjs      builds the fixture bundle with the repo's own `gonvex codegen`
+  src/backend.mjs      backend adapter interface
+  src/backends/        rust.mjs (reference), mutant.mjs (harness self-test), index.mjs (registry)
+  scenarios/           one module per scenario, plus index.mjs (registry, run order)
+  fixtures/app         test module bundle: board, notes, note_shares, errors (generation 1)
+  fixtures/app-v2      overlay for generation 2 (upgrade scenario)
+  test/                unit tests (no backend) and the mutation self-test (needs the Rust binary)
+```
+
+## Running
+
+You need Node 22.18 or later. CI uses Node 24. You also need the built JavaScript packages and a `gonvex-runtime` binary:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build:packages                          # protocol, module-sdk, client, cli and the rest
+(cd rust && cargo build --locked -p gonvex-runtime)
+
+cd cloudflare/conformance
+node src/cli.mjs                             # every scenario, rust-a against rust-b
+node src/cli.mjs --scenario presence         # one scenario (repeat the flag for more)
+node src/cli.mjs --list                      # scenario names and descriptions
+node --test test/*.test.mjs                  # unit tests for the normalizer and differ
+node --test test/mutation.check.mjs          # self-test: injected drift must be caught
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--backend label=kind` | Add a backend. Repeat the flag for each one. `kind` is a registry name (`rust`) or a path to a module. The default is `rust-a=rust rust-b=rust`. The first backend is the reference, and every other backend is diffed against it. |
+| `--scenario name` | Run only the named scenario. Repeat the flag for more. |
+| `--json file` | Write the full report to a file: every trace, the normalized frames, observations, checksums and diffs. |
+| `--work dir` | Use this directory for scratch files: data directories, runtime logs and fixture builds. |
+| `--keep` | Keep the scratch directory. It is always kept when a run fails. |
+| `--serial` | Run the backends one after another. By default every scenario runs on all backends at once. |
+| `--verbose` | Print each step and its duration. |
+
+The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
+
+The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 11 scenarios on two debug-build backends takes about 2 minutes.
+
+### CI
+
+The `Conformance unit tests` job in `.github/workflows/cloudflare.yml` runs `node --test test/*.test.mjs` on every PR to `cloudflare/integration`. Those tests need no backend. Rust against Rust (`node src/cli.mjs`) and the mutation self-test (`node --test test/mutation.check.mjs`) need the Rust binary and are run by hand for now. For G0, the verifier runs them.
+
+## What is compared
+
+Each scenario runs on every backend in a fresh project. Generation 1 of the fixture is deployed through the adapter, which uses `POST /dev/sync` on Rust. Then the scenario's tenants and Members are seeded. Each scenario's trace has four parts:
+
+- **Steps.** Each step records the error it threw, if any. A step error or a failed `ctx.expect` fails that backend's run, even when the traces agree.
+- **Observations.** These are values the scenario chose to record: Reducer results, error classes, collection rows and presence maps.
+- **Frames.** Every frame each session sent and received, normalized and grouped by step. Within a step, frames are compared as a multiset per session. Ordering between sessions, and between frames that race, is not part of the contract.
+- **Digests (per backend).** The normalizer masks digests, because they cover values that differ between runs. So each backend's raw frames are checked on their own, before normalization. For every collection subscription, `src/digest-check.mjs` keeps the row hashes the client holds: from snapshots, from deltas, and from the `keys`/`hashes` a client claims when it resumes. It then recomputes every digest in `replica.ready` and `replica.delta` with the SDK's algorithm (`xor1` aggregate or the legacy pair hash, from `packages/client/src/replica-integrity.ts`). A mismatch fails that backend's run. The report prints how many digests were verified on each backend.
+- **Table checksums.** For every seeded tenant, the harness reads all rows of `board`, `notes` and `note_shares` through `readTable`. It masks them, sorts them, and hashes them with sha256 over canonical JSON lines. When a checksum differs, the diff shows the differing rows.
+
+### Normalization
+
+The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `test/normalize.test.mjs`. They cover only what the contract leaves free:
+
+| Rule | Why |
+| --- | --- |
+| Backend ids become aliases: `<project>`, `<tenant:a>`, `<account:alice>`, `<member:alice@a>`, `<access-token>`. | They are assigned by each backend. |
+| Client-minted ids (`id`, `idempotencyKey`, `originCommandId`, UUIDs) become `<id#n>` or `<uuid#n>`, numbered by first appearance in the session and keyed by value. | The same id stays linked across frames. |
+| Server-minted race tokens (`snapshotId`, `windowRevision`, `stream`) become `<snapshotId>` and similar, unnumbered. | Two Live Query windows changing in one commit may be answered in either order. |
+| Opaque scopes and epochs become `<scope#n>` and `<epoch#n>`. | They are hashes or random values. |
+| Revisions become ranks `r1, r2, …`. Live Query `sequence` values get their own ranks, `s1, …`. In observations they become `<revision>`. | Order is contract. Absolute numbers depend on provisioning. |
+| Clocks (`*At`, `*Ms`, `since`, `serverTime`) become `<time>`. `trace` and `device` are dropped. Durations inside error text (`1999 ms`) become `<n> ms`. | They vary from run to run. |
+| In error text, JavaScript stack frame lines (`\n    at …`) are stripped. | The message, which is the first line and includes the host wording such as `host call failed:`, is contract and compared exactly. Stack positions are not contract (ruling 0015). |
+| Digests and row hashes become `<digest>`. | They cover values that differ between runs. The digest self-check verifies each one on its own backend instead. |
+| `session.ready` loses `replicaNativeRows`, `replicaSetDigest` and `replicaFieldPatches`. | Rust advertises them to every socket, but the shipped SDK never uses them and the kernel does not advertise them (contract-changes 0012 R20). |
+| `replica.batch`, `replica.readyMany`, `query.batch`, `query.fanout` and `reducer.callMany` are expanded into the frames they stand for. | Batching is a transport choice. |
+| Snapshot pages are merged into one `replica.snapshot` with rows sorted by key. ACKs are dropped. | Page size and credits are tuning. |
+| The `opens` of a batch are sorted by path and args. | The SDK orders them by random subscription id. |
+| `replica.needHashes`, followed by the client's integrity reopen and a reply that moves no row, is dropped. Episodes that move rows are kept. | Rust asks for hashes depending on timing. |
+| `replica.watermark`, `control.watermark`, `query.progress` and `replica.syncing` are compared over the whole scenario per session, as sent or not sent, not per step. Watermarks are compared only for sessions that subscribed to something. | These are coalescible barriers. Rust also sends quiet-tenant watermarks on a timer. |
+| Telemetry and error-reporting frames (`telemetry.*`, `error.register`, `error.envelope`, `error.heartbeat`, `error.ack`) are ignored. | The SDK sends them on timers, so their sequence is not comparable. `CONTRACT.md` A.2 marks the `error.*` frames **keep**, so they still need coverage: **K15 owns a dedicated scenario for them**, with its own client that sends each frame and asserts its `error.ack`. |
+
+Error **text**: following ruling 0015, the message is compared exactly, host wording included. Only stack frame lines and the masks above are removed.
+
+## Scenarios
+
+| Scenario | Covers | From |
+| --- | --- | --- |
+| `thin-sdk-parity` | One Member through the SDK and through the thin client, kept equal in rows and in frames sent: creates, edits, share and revoke (row gain and loss through visibility sets), a collection released (`replica.close` after retention), the Members' own Reducers, a network drop and edits during recovery | `bench/whagons/thin-conformance.ts` |
+| `reducer-second-client` | A Reducer commit (insert, update, delete) reaching a second client's Replica Collection, through the SDK and the thin client | |
+| `replica-resume` | Open and snapshot; resume with cursor, keys and hashes after missed commits; resume with nothing changed; foreign epoch; wrong digest; SDK reconnect with commits during the outage | |
+| `reducer-errors` | `rejected` for a throw (the earlier write rolls back), bad args, a bad result, an unknown path and the wrong kind; `transient` for the deadline; `update_required` for a stale artifact; `unauthenticated` for a control-only session | |
+| `presence` | Snapshot, active / idle / offline patches, a socket drop, two sockets for one Member, control-only refusal; SDK and thin client | |
+| `live-query-window` | Window initial result, a row entering and pushing one out, updates outside and inside the window, a delete inside, moving the window, the limit cap, unsubscribe | |
+| `control-auth` | Public settings, login failures, login, `accounts.me`, tenant auth in two tenants, refresh rotation and reuse of a rotated token, logout, invalid and unknown tokens, tenants and projects | |
+| `receipt-lost-reply` | A keyed call whose reply is lost; replay returns the stored result once; receipt query (found, unknown key, other path, missing args); same key with other args; a replayed rejection | `backend-receipts` lost_reply |
+| `receipt-crash` | A client process killed with SIGKILL after sending a keyed call; the backend killed after a commit (receipt, rows and SDK recovery intact) and right after a keyed send (exactly-once replay) | `sdk_process_crash`, `check_restart` |
+| `receipt-upgrade` | `/dev/sync` of generation 2 while connected: migration default for old rows, the new Reducer, a call pinned to the old artifact (`update_required`), generation 1 receipts still answering, SDKs on the v1 and v2 definitions | `sdk_module_upgrade`, `check_module_upgrade` |
+| `receipt-owner-switch` | One SDK socket switching account A to B to A (owner-scoped notes, receipts per owner, a foreign write refused) and tenant A to B to A (no leak in either direction) | `sdk_owner_switch` |
+
+Two receipt checks stay in `verification/backend-receipts/`, because they inject faults inside the Rust process through test-only coordinators that a black-box harness cannot reach: the SDK's own SQLite outbox replay, and the injected replica and receipt write failures.
+
+## Adding a scenario
+
+1. Create `scenarios/<name>.mjs`:
+
+   ```js
+   import { watch, call, rowsWhen, project, rawReducer, RAW_CAPABILITIES } from './helpers.mjs';
+
+   export default {
+     name: 'my-scenario',                       // unique; used in tenant ids and --scenario
+     description: 'One line for --list',
+     tenants: { a: ['alice', 'bob'] },          // seeded per backend; Members get a password login
+     requires: [],                              // backend capabilities, e.g. ['crash']; missing -> skipped
+     tables: ['board', 'notes', 'note_shares'], // optional: tables to checksum (this is the default)
+     async run(ctx) {
+       let alice, view;
+       await ctx.step('alice watches the board', async () => {
+         alice = await ctx.sdk('alice', { member: 'alice' });      // real SDK, logged in and authenticated
+         view = watch(alice, ctx.api.board.all);
+         await rowsWhen(ctx, view, rows => rows.length === 0, 'empty board');
+       });
+       await ctx.step('bob adds a row', async () => {
+         const bob = await ctx.thin('bob', { member: 'bob' });      // thin protocol client
+         ctx.observe('add', await call(bob, ctx.api.board.add, { id: 'x', title: 'x', position: 1 }));
+         ctx.observe('rows', project(await rowsWhen(ctx, view, r => r.length === 1, 'row arrives'), ['id', 'title']));
+       });
+     },
+   };
+   ```
+
+2. Add it to `scenarios/index.mjs`. Scenarios that restart the backend go last.
+3. Run it with `node src/cli.mjs --scenario my-scenario --verbose`. Then run the whole suite three times. The scenario must pass Rust against Rust every time.
+
+**The `ctx` API**
+
+| Member | What it does |
+| --- | --- |
+| `ctx.sdk(tag, { member, tenant, options, authenticate, fresh })` | A `GonvexClient`. A Member's first client logs in with `control.auth.passwordLogin` on its own socket. Later clients reuse that session, unless `fresh` is set. `options` go to the SDK constructor. |
+| `ctx.thin(tag, { member, tenant, options, fresh })` | A `ThinClient`. Pass `options: { presenceV2: true }` for presence. |
+| `ctx.raw(tag)` and `ctx.rawLogin(socket, member)` | A `RawSocket` with `send(frame)`, `next(match)`, `auth({ project, tenant, token, capabilities })`, `close()` and `drop()`. |
+| `ctx.step(name, fn)` | Groups frames and observations. A throw is recorded, and the next step still runs. |
+| `ctx.observe(label, value)` | Records a value that every backend must reproduce. |
+| `ctx.expect(cond, msg)` | Asserts a fact that must hold on every backend. |
+| `ctx.until(check, label, ms)` | Polls until `check` returns true. The default limit is 15 s, or `GONVEX_CONFORMANCE_UNTIL_MS`. |
+| `ctx.quiesce()` | Waits until no frame has arrived for 300 ms. |
+| `ctx.frames(tag, { dir, type })` | The raw frames of a session. |
+| `ctx.deploy(2)` | Deploys generation 2 of the fixture. |
+| `ctx.restart({ crash })` | Restarts the backend. `crash: true` kills it without shutdown. |
+| `ctx.api` and `ctx.fixtures[n].api` | Generated function references. |
+| `ctx.members.alice.memberIds.a` | The id of Member alice in tenant a. |
+| `ctx.tenants.a` | The tenant id. |
+| `ctx.project` | The project id. |
+| `ctx.control` | The `@gonvex/client` control references. |
+
+**Determinism rules.** Every rule below came from a real flake.
+
+- Choose every id in the scenario: row ids, idempotency keys, tenant names. Never use `Date.now()` or random values in arguments.
+- Wait inside a step for everything that step causes. If a step drops a socket or restarts a backend, it must wait for the reconnect (`connectionState().connectionCount`, or a new `auth` frame). Otherwise the reconnect's frames land in whichever step is running.
+- Never send two things whose order the backend may choose freely and then compare the result. For example, `presence.set` and `presence.subscribe` from different sockets at the same moment. Sequence them, or observe only the end state.
+- Record values with `ctx.observe`, not `console.log`. Use `ctx.expect` for facts that must hold on every backend, and for anything the diff alone would miss when both backends agree on a wrong answer.
+- Do not weaken a scenario or an assertion to make a backend pass. If the reference itself is nondeterministic, add a normalization rule in `RULES`, with a unit test and a line in the table above, and say why in the PR.
+
+To extend the fixture, edit `fixtures/app`, and `fixtures/app-v2` for the upgrade. Codegen only accepts static `schema.*` literals inside `reducer(...)` and similar calls, so do not factor schemas or options into constants. Keep clock columns out of the tables, so checksums stay exact.
+
+## Plugging in a backend
+
+1. Subclass `Backend` from `src/backend.mjs` and implement these methods:
+   - `start()` and `stop()`. Each start begins with empty state. `start()` must set `this.wsUrl`.
+   - `createProject(name)`, which returns `{ projectId }`.
+   - `deploy(projectId, manifest)`, which takes the CLI manifest exactly as `/dev/sync` receives it. The adapter sets `manifest.project`.
+   - `createTenant(projectId, tenantId, name)`. It is called after the first deploy.
+   - `createMember(projectId, tenantId, { email, password, name })`. It creates or reuses an account with a password login and makes it an active Member. It returns `{ accountId, memberId }`.
+   - `readTable(projectId, tenantId, table)`, which returns every row as a plain object.
+   - Optional: `restart({ crash })`, with `capabilities` returning `{ restart: true, crash: true }`. `wsUrl` must stay the same across a restart, because connected clients reconnect to it.
+2. Register it in `src/backends/index.mjs`, or pass a module path: `--backend cf=path/to/backend.mjs`, where the default export is the class.
+3. Run `node src/cli.mjs --backend rust=rust --backend cf=cloudflare`. Rust is the reference. A diff is printed per step and per session, and the report is written to `--json`.
+
+Seeding goes through the adapter, because the routes that create test projects and password Members are not part of the contract. The session token always comes from `control.auth.passwordLogin` over the socket, because that is contract. `src/backends/mutant.mjs` is a worked example: Rust behind a proxy that rewrites frames, used by `test/mutation.check.mjs` to prove the differ catches drift.
+
+## Reference behaviours and known differences
+
+The lead has accepted the following as Rust contract, as observed against Rust at `0bf3ad13`:
+
+1. **Same idempotency key, different arguments.** Rust returns the stored result of the first call without error (`receipt-lost-reply`, step 5).
+2. **Stale `clientContract: 0`.** A Reducer call with a lower contract is accepted (`reducer-errors`, step 7). Only a stale `artifactHash` gives `update_required`.
+3. **Tenant ids are unique per runtime, not per project.** `gonvex_runtime_tenants.relationship_id` is the primary key, so the harness names tenants `<scenario>-<name>`.
+4. **Rust nondeterminism.** Quiet-tenant watermarks, no-op `needHashes` episodes and Live Query arrival order are absorbed by the normalization rules above.
+
+Other notes:
+
+- **Presence offline after a socket drop takes about 10 s on Rust.** The `presence` step "the last socket drops" waits for it. The kernel can be faster without failing the scenario.
+- **Legacy visibility manifest.** The fixture's `visibility()` plans make Rust log a deprecation warning for v1 masks. Moving to v2 masks is a fixture change if the contract freezes on v2.
+- **Node 22 WebSocket.** Node 22.23 fires `error` but no `close` on a refused connection and leaves `readyState` at CONNECTING. Node 26 and browsers follow the spec. Both SDKs reconnect from `close`, so `src/sessions.mjs` completes the spec's failure steps. Without this, any client retrying while a backend restarts stalls for 30 s.
+- **Stream bindings outlive a re-auth.** When one socket re-authenticates without `subscriptionsPreserved`, for example on a tenant switch, Rust drops every subscription. But the delivery v2 stream token can be the same in the new auth, and `expandReplicaBatch` (used by the SDK, the thin client and this harness) keeps a socket's bindings across auths. So Rust's next `replica.delta` and `replica.ready` for that stream also expand to the dropped subscription id (`receipt-owner-switch`, step "tenant switch A -> B"). The SDK ignores the unknown id, and the digest self-check skips subscriptions dropped by a re-auth. Those phantom frames are still in the normalized trace, so a kernel that unbinds or renames its streams at auth shows a diff there. It needs a ruling: either the client clears its bindings at `auth.result`, or the server must unbind.
+- **The SDK alone reacts to a wrong digest.** It reopens the collection again and again (about 80,000 frames in one scenario) and the run eventually fails on timeouts. The digest self-check fails it at the first mismatch and names it. It also covers the thin and raw clients, which never verify digests.

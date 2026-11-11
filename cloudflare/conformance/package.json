@@ -1,0 +1,15 @@
+{
+  "name": "@gonvex/cloudflare-conformance",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Conformance harness: drives backends with the real SDK and the thin client and diffs frames and table checksums.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "conformance": "node src/cli.mjs",
+    "test": "node --test test/*.test.mjs",
+    "selftest": "node --test test/mutation.check.mjs"
+  }
+}
