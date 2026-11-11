@@ -90,6 +90,8 @@ struct Event {
 struct TableShape {
     columns: Vec<(String, JsonKind)>,
     rowid_alias: Option<usize>,
+    /// Indexes of the primary-key columns.
+    key: Vec<usize>,
 }
 
 /// Captured tables of one schema, shared by every connection whose schema
@@ -104,6 +106,43 @@ struct Context {
     digest: Mutex<[u8; 32]>,
     events: Mutex<Vec<Event>>,
     records: RwLock<HashMap<String, Arc<crate::record_views::RecordDescriptor>>>,
+    /// Open [`KeyChanges`] guards: migrations may change primary keys.
+    key_changes: std::sync::atomic::AtomicUsize,
+}
+
+/// While alive, captured UPDATEs on its writer may change primary keys.
+/// Dropping it (also on cancellation) restores the guard.
+pub(crate) struct KeyChanges(Option<Arc<Context>>);
+
+impl Drop for KeyChanges {
+    fn drop(&mut self) {
+        if let Some(context) = &self.0 {
+            context
+                .key_changes
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// Allows key-changing UPDATEs on this connection for a migration.
+pub(crate) async fn allow_key_changes(
+    connection: &mut SqliteConnection,
+) -> Result<KeyChanges, DatabaseError> {
+    let key = {
+        let mut handle = connection.lock_handle().await?;
+        handle.as_raw_handle().as_ptr() as usize
+    };
+    let context = contexts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade);
+    if let Some(context) = &context {
+        context
+            .key_changes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    Ok(KeyChanges(context))
 }
 
 /// Contexts of open writer connections, keyed by `sqlite3*`.
@@ -301,6 +340,20 @@ unsafe extern "C" fn capture_function(
         };
         events.remove(position)
     };
+    if let (Some(old), Some(new)) = (&event.old, &event.new) {
+        // A row's key is its identity in the change feed and in every
+        // client replica: an UPDATE that changes it would orphan both.
+        if shape
+            .key
+            .iter()
+            .any(|index| old.get(*index) != new.get(*index))
+            && state.key_changes.load(std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return fail(&format!(
+                "gonvex_capture: an UPDATE cannot change the primary key of {table:?}; delete the row and insert a new one"
+            ));
+        }
+    }
     let old = event.old.as_deref().map(|cells| image(&shape, cells));
     let new = event.new.as_deref().map(|cells| image(&shape, cells));
     let changed = match (&event.old, &event.new) {
@@ -554,6 +607,7 @@ async fn load_shapes(
         let (shape, pk_columns) = shapes.entry(table).or_default();
         if pk > 0 {
             *pk_columns += 1;
+            shape.key.push(shape.columns.len());
         }
         if pk == 1 && declared.trim().eq_ignore_ascii_case("INTEGER") {
             shape.rowid_alias = Some(shape.columns.len());
@@ -668,6 +722,49 @@ mod tests {
             .unwrap();
         assert_eq!(stamp.1, json!({"id":"a","name":"new","updated_at":1}));
         assert_eq!(stamp.2, json!({"id":"a","name":"new","updated_at":99}));
+    }
+
+    #[tokio::test]
+    async fn key_changes_are_rejected_outside_migrations() {
+        let mut connection = connection_with(
+            "CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER NOT NULL)",
+            "t",
+            "id",
+        )
+        .await;
+        sqlx::query("INSERT INTO t VALUES ('a', 1)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        // Restating the key is not a change.
+        sqlx::query("UPDATE t SET id = 'a', n = 2 WHERE id = 'a'")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let error = sqlx::query("UPDATE t SET id = 'b' WHERE id = 'a'")
+            .execute(&mut connection)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("cannot change the primary key"),
+            "{error}"
+        );
+        {
+            let _migration = super::allow_key_changes(&mut connection).await.unwrap();
+            sqlx::query("UPDATE t SET id = 'b' WHERE id = 'a'")
+                .execute(&mut connection)
+                .await
+                .unwrap();
+        }
+        assert!(sqlx::query("UPDATE t SET id = 'c' WHERE id = 'b'")
+            .execute(&mut connection)
+            .await
+            .is_err());
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM t")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(ids, ["b"]);
     }
 
     #[tokio::test]
