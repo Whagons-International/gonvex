@@ -1477,10 +1477,11 @@ async fn apply_dev_sync(
     let record = gonvex_store::RuntimeManifestRecord {
         project_id: project.clone(),
         module_hash,
-        manifest: manifest.clone(),
+        manifest: std::mem::take(manifest),
     };
-    let migrations = modules::validate_manifest_record(&record)
+    let validated = modules::validate_manifest_record(&record)
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+    let migrations = validated.migrations.clone();
     control
         .clone()
         .apply_control_migrations(migrations.clone())
@@ -1496,7 +1497,7 @@ async fn apply_dev_sync(
     let installed = runtime
         .inner
         .modules
-        .install(&runtime.inner.module_host, record.clone())
+        .install_validated(&runtime.inner.module_host, &record, validated)
         .await
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     runtime
@@ -1521,7 +1522,7 @@ async fn apply_dev_sync(
         "project":project,
         "tenants":tenants,
         "functionCount":installed.functions.len(),
-        "schemaDefinition":manifest.get("schema").cloned().unwrap_or_else(|| serde_json::json!({})),
+        "schemaDefinition":record.manifest.get("schema").cloned().unwrap_or_else(|| serde_json::json!({})),
         "runtimeReloaded":true,
     }))
 }

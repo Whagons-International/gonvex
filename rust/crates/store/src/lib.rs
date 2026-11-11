@@ -911,7 +911,7 @@ impl ControlPlane {
             ") ON CONFLICT(project_id) DO UPDATE SET manifest=excluded.manifest,module_hash=excluded.module_hash,updated_at=excluded.updated_at"
         ))
         .bind(&record.project_id)
-        .bind(Json(record.manifest.clone()))
+        .bind(Json(&record.manifest))
         .bind(&record.module_hash)
         .execute(&self.pool)
         .await?;
