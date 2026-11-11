@@ -1,0 +1,20 @@
+// K02 verification Worker (local workerd or the development account only).
+// Deploy:  whagons-dev credentials exec full-cloudflare-access -- node kernel/migrate/verify/deploy.mjs deploy
+// The name keeps the gonvex-cf-dev- prefix; delete it after measuring.
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-k02",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-23",
+  "workers_dev": true,
+  "preview_urls": false,
+  // 0022 §3b: the tenant-object script sets cpu_ms = 5000.
+  "limits": { "cpu_ms": 5000 },
+  "durable_objects": {
+    "bindings": [
+      { "name": "TENANT", "class_name": "K02Tenant" },
+      { "name": "PLANS", "class_name": "K02Plans" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["K02Tenant", "K02Plans"] }]
+}

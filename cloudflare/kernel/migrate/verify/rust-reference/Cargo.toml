@@ -1,0 +1,22 @@
+# Reference side of K02's checks: provisions a fresh tenant database with the
+# Rust runtime's own code path (gonvex-store ControlPlane::provision_tenant_database:
+# tenant identity, reference ledger, schema options, migrations with the
+# gonvex_migrations ledger, change feed and capture install), parsing the
+# migration directives as rust/crates/runtime/src/modules.rs does. Standalone
+# workspace, like A01's rust-replay, so the Rust workspace is not edited.
+[package]
+name = "gonvex-k02-reference"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+gonvex-store = { path = "../../../../../rust/crates/store" }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[patch.crates-io]
+serde_json = { path = "../../../../../rust/vendor/serde_json" }
