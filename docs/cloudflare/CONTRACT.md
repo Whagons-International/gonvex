@@ -1735,6 +1735,7 @@ new note and waits for the lead.
 | 0026 | K03 change-capture differences (proposed by K03) | ruled in 0028 §2 | K03, K07, M02 |
 | 0027 | K02 migration findings (proposed by K02) | ruled in 0028 §3 | K02, K04, K07, K19 |
 | 0028 | Third wave-1 pass: S5 (G0-2 stands; Facet is a stage-3 candidate), K03 and K02 rulings | decided | K02, K03, K04, K07, K19, M02, R05 |
+| 0029 | K06 merged over a known external CI failure (GitHub runner DNS outage) | decided | none |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
