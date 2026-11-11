@@ -39,6 +39,9 @@ const freePort = () => new Promise((resolve, reject) => {
 });
 
 export class CloudflareReducerBackend extends CloudflareBackend {
+  /** The harness directory whose `wrangler.jsonc` this adapter runs (K10 points it at its own). */
+  get harness() { return HARNESS; }
+
   /** `receiptExpiry`: receipts expire after the offline window (0009); Rust keeps them forever. */
   get capabilities() { return { restart: true, crash: true, receiptExpiry: true }; }
 
@@ -80,7 +83,7 @@ export class CloudflareReducerBackend extends CloudflareBackend {
     this.inspectorPort = await freePort();
     const log = createWriteStream(process.env.GONVEX_CONFORMANCE_WRANGLER_LOG ?? join(this.workDir, 'wrangler.log'), { flags: 'a' });
     this.child = spawn(join(CLOUDFLARE, 'node_modules/.bin/wrangler'), [
-      'dev', '--config', join(HARNESS, 'wrangler.jsonc'), '--ip', '127.0.0.1', '--port', String(this.port), '--inspector-port', String(this.inspectorPort),
+      'dev', '--config', join(this.harness, 'wrangler.jsonc'), '--ip', '127.0.0.1', '--port', String(this.port), '--inspector-port', String(this.inspectorPort),
       '--persist-to', this.state, '--var', `GONVEX_STUB_ADMIN_KEY:${this.adminKey}`, '--show-interactive-dev-session=false',
     ], { cwd: CLOUDFLARE, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     this.child.stdout.pipe(log); this.child.stderr.pipe(log);

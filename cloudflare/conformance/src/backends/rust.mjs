@@ -66,7 +66,7 @@ export class RustBackend extends Backend {
     this.restarts = 0;
   }
 
-  get capabilities() { return { restart: true, crash: true, changeLog: true, servicePrincipals: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
+  get capabilities() { return { restart: true, crash: true, changeLog: true, servicePrincipals: true, epochReset: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
 
   async start() {
     await mkdir(this.dataDir, { recursive: true });
@@ -194,6 +194,22 @@ export class RustBackend extends Backend {
    * ordinals and provenance.
    * @returns {Promise<{ clock: any, changes: any[], transactions: any[] }>}
    */
+  /**
+   * K10: gives the tenant database a new replica epoch, as a restore or an
+   * import without `--keep-epoch` does (`_gonvex_sync_clock.epoch`). The
+   * runtime keeps running; SQLite's WAL lets this second writer in.
+   */
+  async resetEpoch(project, tenantId, epoch) {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(this.dataDir, 'projects', project, 'tenants', `${tenantId}.db`));
+    try {
+      db.exec('PRAGMA busy_timeout = 5000');
+      db.prepare('UPDATE _gonvex_sync_clock SET epoch = ? WHERE singleton = 1').run(epoch);
+    } finally {
+      db.close();
+    }
+  }
+
   async readChangeLog(project, tenantId) {
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(join(this.dataDir, 'projects', project, 'tenants', `${tenantId}.db`), { readOnly: true });

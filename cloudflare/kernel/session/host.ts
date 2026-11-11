@@ -73,7 +73,12 @@ export class SocketHost {
     this.reschedule();
   }
 
-  async closed(ws: WebSocket): Promise<void> {
+  async closed(ws: WebSocket, code?: number, reason?: string): Promise<void> {
+    // The hibernation API leaves the close handshake to the object: answer the client's close frame, as Rust does,
+    // so the client sees its socket closed (and reconnects) at once rather than when the TCP connection times out.
+    if (code !== undefined) {
+      try { ws.close(code === 1005 || code === 1006 || code === 1015 ? 1000 : code, reason ?? ""); } catch { /* already closed */ }
+    }
     let session = this.sessions.get(ws);
     if (!session) {
       // A close that wakes a hibernated object: the closing socket is not among `getWebSockets()`

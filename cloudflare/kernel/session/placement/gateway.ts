@@ -23,6 +23,7 @@ import { SocketHost } from "../host";
 import { deliveryClass } from "../session";
 import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../presence/hub";
 import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
+import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt } from "../../delivery/protocol";
 
 /** S3: about 125 sockets per gateway carried 30 commits/s to 1,000 sockets. */
 export const SOCKETS_PER_GATEWAY = 125;
@@ -122,8 +123,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     await this.host.message(ws, message);
   }
 
-  override async webSocketClose(ws: WebSocket): Promise<void> {
-    await this.host.closed(ws);
+  override async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    await this.host.closed(ws, code, reason);
   }
 
   override async webSocketError(ws: WebSocket): Promise<void> {
@@ -194,6 +195,37 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       if (report) out.push(report);
     }
     return out;
+  }
+
+  /**
+   * K10: one replica delivery from a tenant object (`kernel/delivery`): each
+   * socket's work is applied at once, in the order the tenant sent it (the
+   * tenant sends one payload at a time per gateway). Not queued behind frames
+   * the socket is still handling, so a call's reply never waits for, nor
+   * overtakes, the commit frames the tenant already delivered.
+   */
+  async deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+    const sockets = this.byTenant.get(tenantId);
+    const seen = new Set<string>();
+    const membership = payload.membership;
+    const work: Array<Promise<void>> = [];
+    for (const ws of sockets ?? []) {
+      const session = this.host.sessions.get(ws);
+      const tenant = session?.record.tenant;
+      if (!session || !tenant || tenant.anonymous) continue;
+      const id = session.record.connectionId;
+      seen.add(id);
+      if (membership && membership.revision > tenant.admissionRevision
+        && (membership.members.includes(tenant.member.id) || membership.accounts.includes(tenant.identity.account.id))) {
+        work.push(session.membershipChanged(membership.revision));
+        continue;
+      }
+      session.replicaDelivery(payload, payload.sockets[id]);
+    }
+    if (work.length) this.ctx.waitUntil(Promise.all(work).then(() => this.host.reschedule()));
+    this.host.reschedule();
+    const missing = Object.keys(payload.sockets).filter((id) => !seen.has(id));
+    return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}) };
   }
 
   /** Liveness of the RPC path itself; used by the hop benchmark. */

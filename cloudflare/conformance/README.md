@@ -13,12 +13,14 @@ cloudflare/conformance/
   src/differ.mjs       compares traces, prints readable diffs
   src/checksum.mjs     per-table checksums
   src/digest-check.mjs per-backend digest self-check (digests are masked in diffs)
+  src/watermark-check.mjs per-backend watermark self-check (0024 §2; watermarks are compared only as sent or not)
   src/capture-golden.mjs records Rust's change log for `change-capture` as the kernel's parity golden (K03)
   src/live-query-golden.mjs records Rust's run of `live-query-task-grid` as the query engine's parity golden (K08)
   src/fixture.mjs      builds the fixture bundle with the repo's own `gonvex codegen`
   src/backend.mjs      backend adapter interface
   src/backends/        rust.mjs (reference), cloudflare.mjs (kernel on local workerd), mutant.mjs (harness self-test), index.mjs (registry)
                        cloudflare-reducer.mjs (K07: the kernel with the Reducer path and the fixture bundles built in)
+                       cloudflare-delivery.mjs (K10: the K07 kernel plus replica delivery; also runs against a deployed harness)
   scenarios/           one module per scenario, plus index.mjs (registry, run order)
   fixtures/app         test module bundle: board, notes, note_shares, errors, storage, capture (generation 1)
   fixtures/app-v2      overlay for generation 2 (upgrade scenario)
@@ -71,6 +73,12 @@ Each scenario runs on every backend in a fresh project. Generation 1 of the fixt
 - **Observations.** These are values the scenario chose to record: Reducer results, error classes, collection rows and presence maps.
 - **Frames.** Every frame each session sent and received, normalized and grouped by step. Within a step, frames are compared as a multiset per session. Ordering between sessions, and between frames that race, is not part of the contract.
 - **Digests (per backend).** The normalizer masks digests, because they cover values that differ between runs. So each backend's raw frames are checked on their own, before normalization. For every collection subscription, `src/digest-check.mjs` keeps the row hashes the client holds: from snapshots, from deltas, and from the `keys`/`hashes` a client claims when it resumes. It then recomputes every digest in `replica.ready` and `replica.delta` with the SDK's algorithm (`xor1` aggregate or the legacy pair hash, from `packages/client/src/replica-integrity.ts`). A mismatch fails that backend's run. The report prints how many digests were verified on each backend.
+- **Watermarks (per backend).** Watermark values are not compared between backends, so `src/watermark-check.mjs`
+  checks them on each backend's raw frames (contract-changes 0024 §2): on every socket that subscribed to something,
+  watermarks never go down, never exceed the highest committed revision any session was shown by the end of that
+  step, and never fall below the highest `replica.transaction` the socket applied. A problem fails that backend's
+  run. Sockets with no subscription are not checked, as the diff does not compare their watermarks: Rust can send
+  such a socket a call's immediate watermark before the previous commit's (0040 §2.1).
 - **Table checksums.** For every seeded tenant, the harness reads all rows of `board`, `notes` and `note_shares` through `readTable`. It masks them, sorts them, and hashes them with sha256 over canonical JSON lines. When a checksum differs, the diff shows the differing rows.
 
 ### Normalization
@@ -89,10 +97,10 @@ The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `te
 | In error text, JavaScript stack frame lines (`\n    at …`) are stripped. | The message, which is the first line and includes the host wording such as `host call failed:`, is contract and compared exactly. Stack positions are not contract (ruling 0015). |
 | Digests and row hashes become `<digest>`. | They cover values that differ between runs. The digest self-check verifies each one on its own backend instead. |
 | `session.ready` loses `replicaNativeRows`, `replicaSetDigest` and `replicaFieldPatches`. | Rust advertises them to every socket, but the shipped SDK never uses them and the kernel does not advertise them (contract-changes 0012 R20). |
-| `replica.batch`, `replica.readyMany`, `query.batch`, `query.fanout` and `reducer.callMany` are expanded into the frames they stand for. | Batching is a transport choice. |
+| `replica.batch`, `replica.readyMany`, `query.batch`, `query.fanout` and `reducer.callMany` are expanded into the frames they stand for. Outbound `replica.openMany` becomes one frame per open, in path and args order. | Batching is a transport choice. How many integrity reopens the SDK groups into one `replica.openMany` depends on whether the `replica.needHashes` frames that prompted them arrived in one tick (0040 §2.9). |
 | Snapshot pages are merged into one `replica.snapshot` with rows sorted by key. ACKs are dropped. | Page size and credits are tuning. |
 | The `opens` of a batch are sorted by path and args. | The SDK orders them by random subscription id. |
-| `replica.needHashes`, followed by the client's integrity reopen and a reply that moves no row, is dropped. Episodes that move rows are kept. | Rust asks for hashes depending on timing. |
+| `replica.needHashes`, followed by the client's integrity reopen and a reply that moves no row, is dropped, also when the reopen answers several `needHashes` in one frame. Episodes that move rows are kept. | Rust asks for hashes depending on timing. |
 | In an integrity reopen that answers a `replica.needHashes` (same id, same socket), `cursor.revision` becomes `<persisted-watermark>`, before revisions are ranked. Integrity opens a client sends on its own keep their cursor. | The client resumes from the cursor it persisted, which includes the last watermark it applied, and Rust sends quiet-tenant watermarks on a timer. In `thin-sdk-parity` the r6 watermark lands before or after the `needHashes` depending on timing (0022 §6). |
 | `replica.watermark`, `control.watermark`, `query.progress` and `replica.syncing` are compared over the whole scenario per session, as sent or not sent, not per step. Watermarks are compared only for sessions that subscribed to something. | These are coalescible barriers. Rust also sends quiet-tenant watermarks on a timer. |
 | `presence.snapshot` members and `presence.patch` changes are sorted by their aliased Member id. | Both are sorted by Member id on the wire, and each backend assigns Member ids at random, so the aliased order differs between backends. `presence-edges` asserts the raw order on each backend instead. |
@@ -129,6 +137,11 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `receipt-expiry` | Intended behavior IB3 (0001, 0009), kernel only (`receiptExpiry`): a keyed call replays inside the offline window + 24 h; after it the result expires and a late duplicate gets `Reducer receipt expired` (rejected), as does the receipt query; 365 days later the tombstone is gone and the key runs again. Rust never prunes receipts, so it skips this scenario | K07 |
 | `scheduler` | One Reducer schedules `runAfter(0)` and `runAt(+300 ms)` of `scheduler.tick` and three identical `wakeAt` calls that must coalesce into one run, and a Reducer reschedules itself with `runAfter(0)` until the durable hop limit (32) stops it; after a fixed settle time (`GONVEX_CONFORMANCE_SCHEDULER_SETTLE_MS`, default 5 s) the `board` rows must show two ticks, one wake and 32 hops. The kernel's scheduler rules are unit-tested in `kernel/scheduler/test/` | K11 |
 | `live-query-task-grid` | Whagons' real `tasks.grid` plan (whagons5-client `2457bb65f`) over Whagons' legacy masks: windows with exact count, the index sort by status and priority, NULL ordering, search over the projection and the related documents (plain and `$or`), filter operators, a second Member's class; rows entering and leaving through assignment, team membership and `inRelation` workspace contexts (share, finding, revocation), an invisible write (no frame), dependency writes, a delete; resume (`query.progress`) and a stale `windowRevision`; `subscribeMany`, `unsubscribe`; the one-shot plan `tasks.byIds` over 150 ids; error texts. Writes wait for quiet once windows are open (Rust coalesces racing reruns by timing, 0038 §2). `node src/live-query-golden.mjs` writes Rust's run to `kernel/query/test/golden/`, which the kernel's engine replays in workerd | K08 |
+| `replica-windows` | Snapshot pages (1,205 rows), a row budget (`maxRows: 3`, progressive) and a byte budget (`maxBytes: 300`, descending) truncating their windows; edits inside and outside a truncated window; rows entering and leaving it (`replica.needHashes`, reconcile); a resume of a truncated window; an argument filter and an exclusion through the SDK; a socket without snapshot pages (one `replica.snapshot` with inline hashes). Fixture `windows.ts`, table `win_items` | K10 |
+| `replica-reset` | A new database epoch under live subscriptions (`resetEpoch`: Rust's tenant file, the kernel's stub route): the next transaction carries the new epoch, deltas keep the cursor's, an old-epoch resume reloads, the SDK reconnects across it. Needs `epochReset` | K10 |
+| `replica-orphan-reveal` | Intended behavior IB5 (0032), kernel only (`orphanReveal`): an orphan note reaches its task's creator and leaves its author when the task appears; the delivered rows equal a fresh snapshot | K10 |
+| `replica-tenant-restart` | Kernel only (`tenantRestart`): the tenant object restarts under open gateway sockets; the next commit makes the gateway send `replica.reset` `change-feed-reset`; a raw client and the SDK resume and converge | K10 |
+| `replica-reconnect-wave` | Six SDK clients of three Members drop at once while a writer commits, then the backend restarts under them (skipped on a backend that cannot be restarted from here); every client resumes onto the rows a fresh read shows and receives the next commit | K10 |
 | `presence-edges` | Presence v2 on raw sockets: invalid states ignored, trimmed and case-insensitive states, `gone` = offline without grace, a re-auth that re-announces inside the grace (no transition), a re-auth dropping the subscription, unsubscribe and resubscribe, a socket without the `presence` capability, tenant isolation, a dropped socket offline after the 10 s grace (asserted 9.5-12.5 s on every backend). Snapshots are asserted sorted by Member id on each backend | K14 |
 | `actions` | Every Action capability through raw `action.call` frames: the ctx surface, `fetch` (status text, headers, request bodies, redirects inside and outside the declared origins, the 8 MiB cap by content-length and by body, lossy UTF-8, an invalid method), event streams read as they arrive (`fetchRead`, a cancelled stream, the cumulative 8 MiB cap), the origin allowlist as a sticky denial, an unconfigured secret, `tools.*` (Query, Reducer and internal Reducer bindings), `ctx.functions.invoke` (Query, Reducer and Action targets; stale artifact, internal, system, missing, recursive and replica targets), `scheduler` (runAfter, runAt, wakeAt coalescing, refusals), `storage` on a backend without an object store, and the errors of a failing, unknown, wrong-kind, bad-argument and internal Action. The Actions fetch `scenarios/actions-upstream.mjs`, served on 127.0.0.1:47812. Until K05/K07 serve `action.call`, the kernel runs the same steps in `cloudflare/actions/test/parity.test.ts` against the recorded Rust answers | K12 |
 | `service-principals` | `gvx_svc_` admission (unknown credential, project outside the allowlist, blank project or tenant, unknown tenant), the allowlist (internal Reducer, receipts under the principal, `api` channel) and the narrow frame set (refused and ignored frames, 1003), delegation argument checks and tenant binding, redemption (single use, wrong tenant, rotating reconnect credential) with `ctx.invocation.delegation`, revocation ending the member session at revalidation, re-auth to another tenant or a member, `/dev/manifest` for principals. Needs `servicePrincipals` (the adapter restarts the backend with `GONVEX_SERVICE_PRINCIPALS`) | K17 |
@@ -243,6 +256,23 @@ secret and Google fallback client of `CONFORMANCE_SECRETS` (`src/backends/rust.m
 (`GONVEX_TEST_AUTH_EMULATOR`, `GONVEX_ENV=test`, `FIREBASE_AUTH_EMULATOR_HOST`). The two backends share
 one emulator, so `control-external-auth` never changes a Firebase user's verification: each state has
 its own user.
+
+## Replica delivery (package K10)
+
+The `cloudflare-delivery` backend runs `cloudflare/kernel/delivery/harness` in local workerd: the K07 tenant object
+with replica delivery, behind the K05 socket path. It runs every replica scenario and the Reducer scenarios:
+
+```bash
+node src/cli.mjs --backend rust=rust --backend cf=cloudflare-delivery \
+  --scenario thin-sdk-parity --scenario reducer-second-client --scenario replica-resume --scenario visibility-masks \
+  --scenario replica-windows --scenario replica-reset --scenario replica-orphan-reveal --scenario replica-tenant-restart \
+  --scenario replica-reconnect-wave
+```
+
+With `GONVEX_CONFORMANCE_CF_URL` and `GONVEX_CONFORMANCE_CF_KEY` it runs against a harness deployed to the
+development account (`whagons-dev credentials exec full-cloudflare-access -- node
+../kernel/delivery/harness/platform.mjs deploy gonvex-cf-dev-<name>`, which prints both; `… delete <name>` afterwards).
+Tenant ids are unique per deployment, so each run needs a fresh one.
 
 ## Reference behaviours and known differences
 

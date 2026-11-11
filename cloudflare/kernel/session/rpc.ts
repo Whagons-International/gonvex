@@ -9,6 +9,7 @@ import type { ConnectionReport } from "../presence/hub";
 import type { PresenceDelivery, PresenceReceipt } from "../presence/tenant";
 import type { ServiceTenantCall, ServiceTenantOutcome } from "../principals/frames";
 import type { ServiceGrant } from "../principals/grant";
+import type { ReplicaDelivery, ReplicaReceipt } from "../delivery/protocol";
 import type {
   Impersonation, Member, ModuleInfo, Outcome, RevalidationItem, SessionIdentity, SocketView, TenantRoute, TenantSession,
 } from "./ports";
@@ -20,6 +21,7 @@ export interface GatewayRpc {
   hopToTenant(tenant: string, n: number): Promise<number[]>;
   presence(delivery: PresenceDelivery): Promise<PresenceReceipt>;
   presenceConnections(tenantId: string): Promise<ConnectionReport[]>;
+  deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt>;
 }
 
 export interface TenantRpc {
@@ -36,6 +38,8 @@ export interface TenantRpc {
   presenceLeave(connectionId: string, host: string, previous?: ConnectionReport | null): Promise<void>;
   /** K17: implemented by the K07 tenant object, reached only after a service grant. */
   serviceCall?(grant: ServiceGrant, call: ServiceTenantCall): Promise<ServiceTenantOutcome>;
+  /** K10: implemented by tenant objects; the session stand-in and the K07-only object answer with a no-op. */
+  connectionReset?(connectionId: string, epoch: number): Promise<void>;
 }
 
 export interface ControlRpc {

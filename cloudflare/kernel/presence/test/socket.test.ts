@@ -154,7 +154,8 @@ describe("socket presence", () => {
     await h.session.presenceDelivery({ v: 1, tenantId: "t1", projectId: "p1", snapshots: [{ connectionId: "conn-1", id: "s1", frame: snapshot }], patch });
     const [first, second] = h.take();
     expect(first).toEqual(JSON.parse(snapshot)); // the subscribe answer is sent bare, as Rust does
-    expect(second).toEqual({ type: "replica.batch", tenant: "t1", class: expect.stringMatching(/^[0-9a-f]{16}$/), from: 3, items: [JSON.parse(patch)] });
+    // `from` is the last watermark sent in a batch (A.4 row 1, delivery.rs `last_watermark`): none yet.
+    expect(second).toEqual({ type: "replica.batch", tenant: "t1", class: expect.stringMatching(/^[0-9a-f]{16}$/), from: 0, items: [JSON.parse(patch)] });
     await h.session.presenceDelivery({ v: 1, tenantId: "t1", projectId: "p1", resync: { serverTime: 2, members: [{ memberId: "m1", state: "idle", since: 1 }] } });
     expect(h.take()[0].items[0]).toEqual({ type: "presence.snapshot", id: "s1", serverTime: 2, members: [{ memberId: "m1", state: "idle", since: 1 }] });
     expect(h.session.presence.report()).toEqual({ connectionId: "conn-1", projectId: "p1", memberId: "m1", state: null, subscriptionId: "s1" });

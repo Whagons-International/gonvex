@@ -15,7 +15,7 @@
  */
 import { type Negotiated, NOTHING_NEGOTIATED, negotiate, sessionReadyFrame, type ReadyOptions } from "./capabilities";
 import { decodeClientFrame, type AuthFrame, type ClientCapabilities, type ClientFrame, type Json } from "./decode";
-import { replicaDirective } from "./directive";
+import { replicaDirective, type ReplicaDirective } from "./directive";
 import { AUTH_ERRORS, CLOSE, type CloseFrame, LIMITS, UNAUTHENTICATED, echoTrace, exceedsUtf8, frames } from "./protocol";
 import {
   type Connection, type Failure, type ModuleInfo, NO_CONNECTION, type Ports, type RevalidationItem,
@@ -26,6 +26,8 @@ import { type PresenceRecord, SocketPresence, type SupportRecord } from "../pres
 import { type PresenceDelivery, resyncFrame } from "../presence/tenant";
 import { handleServiceFrame, type ServiceCalls } from "../principals/frames";
 import { serviceAuthResult, type ServiceGrant } from "../principals/grant";
+import { SocketDelivery, type TrackedReplicas } from "../delivery/socket";
+import type { ReplicaDelivery, SocketWork } from "../delivery/protocol";
 
 export const SERVICE_TOKEN_PREFIX = "gvx_svc_";
 
@@ -59,6 +61,13 @@ export interface SessionRecord {
   watermark?: number;
   /** K17: set while the socket is a service-principal socket (`service_grant`); it then has no tenant session. */
   service?: ServiceGrant | null;
+  /** K10: `scope` and `visibilityScope` of the replica directive sent at auth (snapshot metadata). */
+  replica?: { scope: string; visibilityScope: string } | null;
+  /** K10: bumped whenever the socket's subscriptions are dropped; the tenant discards older state. */
+  subscriptionEpoch?: number;
+  /** K10: this socket's Replica Collections (id → path) and the tenant instance serving them. */
+  replicas?: TrackedReplicas;
+  replicaInstance?: string;
 }
 
 /** Where frames go. The host maps it onto a hibernatable WebSocket. */
@@ -90,6 +99,12 @@ export interface SessionOptions {
   modules?: ModuleCache;
   /** Presence v2 settings (K14); defaults follow `ready.presence`. */
   presence?: PresenceConfig;
+  /** K10: timers of the batch tick (defaults to `setTimeout`; the holder is awake while a batch is open). */
+  timers?: SessionTimers;
+}
+
+export interface SessionTimers {
+  later(ms: number, fn: () => void): () => void;
 }
 
 /** Per-host cache of each project's active module (one RPC per project, refreshed on reload). */
@@ -126,6 +141,9 @@ export class Session {
   lastOutboundAt: number;
   /** Presence v2 on this socket (K14). */
   readonly presence: SocketPresence;
+  /** K10: replica delivery on this socket (`replica.batch`, watermarks, instance resets). */
+  readonly delivery: SocketDelivery;
+  private readonly timers: SessionTimers;
 
   private constructor(record: SessionRecord, options: SessionOptions) {
     this.record = record;
@@ -137,6 +155,29 @@ export class Session {
     this.now = options.now ?? Date.now;
     this.modules = options.modules ?? new ModuleCache(options.ports);
     this.lastOutboundAt = record.livenessAt;
+    this.timers = options.timers ?? { later: (ms, fn) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); } };
+    this.delivery = new SocketDelivery({
+      send: (text) => this.send(text),
+      sendRaw: (text) => this.sendRaw(text),
+      end: () => this.close(CLOSE.failed),
+      envelope: () => {
+        const tenant = this.record.tenant;
+        return tenant ? { tenant: tenant.route.tenantId, class: deliveryClass(tenant) } : undefined;
+      },
+      now: () => this.now(),
+      later: (ms, fn) => this.timers.later(ms, fn),
+      batchFrames: () => this.record.negotiated.batchFrames,
+      watermark: () => this.record.watermark ?? 0,
+      setWatermark: (revision) => {
+        this.record.watermark = revision;
+        if (revision > this.record.sentRevision) this.record.sentRevision = revision;
+      },
+      tracked: () => (this.record.replicas ??= {}),
+      instance: () => this.record.replicaInstance ?? "",
+      setInstance: (instance) => { this.record.replicaInstance = instance; },
+      trackedChanged: () => this.hooks.persist?.(),
+    });
+    this.delivery.batcher.enabled = record.negotiated.batchFrames;
     const presence = options.presence ?? { ...DEFAULT_PRESENCE_CONFIG, enabled: options.ready.presence };
     this.presence = new SocketPresence({
       record: this.record,
@@ -183,6 +224,8 @@ export class Session {
       negotiated: this.record.negotiated,
       publicTransport: this.record.publicTransport,
       host: this.host,
+      replica: this.record.replica ?? null,
+      subscriptionEpoch: this.record.subscriptionEpoch ?? 0,
     };
   }
 
@@ -251,7 +294,11 @@ export class Session {
         return this.auth(frame);
       case "query.call":
         if (frame.scope === "control") return control(frame);
-        if (tenant) return toTenant(frame);
+        if (tenant) {
+          const replies = await this.forward(this.ports.tenants.dispatch(this.view(), frame));
+          this.awaitWatermark(replies);
+          return;
+        }
         return this.send(frames.queryError(frame.id, frame.path, UNAUTHENTICATED.query));
       case "query.subscribe":
         if (frame.scope === "control") return control(frame);
@@ -281,17 +328,24 @@ export class Session {
         if (tenant) return toTenant(frame);
         return this.send(frames.actionError(frame.id, frame.path, UNAUTHENTICATED.action, frame.trace));
       case "replica.open":
-        if (tenant) return toTenant(frame);
+        if (tenant) {
+          this.delivery.opening(frame.id, frame.path);
+          return toTenant(frame);
+        }
         return this.send(frames.replicaError(frame.id, frame.path, UNAUTHENTICATED.replica));
       case "replica.openMany":
         if (frame.opens.length > LIMITS.openMany) return this.send(frames.replicaError("", undefined, `replica batch cannot contain more than ${LIMITS.openMany} opens`));
-        if (tenant) return toTenant(frame);
+        if (tenant) {
+          for (const open of frame.opens) this.delivery.opening(open.id, open.path);
+          return toTenant(frame);
+        }
         for (const open of frame.opens) this.send(frames.replicaError(open.id, open.path, UNAUTHENTICATED.replica));
         return;
       case "replica.snapshotAck":
         if (tenant && this.record.negotiated.nativeRows) return toTenant(frame);
         return this.send(frames.replicaError(frame.id, undefined, "native snapshot acknowledgements were not negotiated"));
       case "replica.close":
+        this.delivery.forget(frame.id);
         if (tenant) return toTenant(frame);
         return;
       // K14: presence state is kept per socket and forwarded to the tenant object (kernel/presence).
@@ -348,6 +402,7 @@ export class Session {
       return;
     }
     const replies = await this.forward(call.scope === "control" ? this.ports.control.dispatch(this.view(), call) : this.ports.tenants.dispatch(this.view(), call));
+    if (call.scope !== "control") this.awaitWatermark(replies);
     if (!this.closed) await this.guard(this.presence.afterCall(call, replies));
   }
 
@@ -355,8 +410,46 @@ export class Session {
   private sendItem(text: string): void {
     const tenant = this.record.tenant;
     if (!this.record.negotiated.batchFrames || !tenant) return this.send(text);
-    const from = this.record.sentRevision;
-    this.send(`{"type":"replica.batch","tenant":${JSON.stringify(tenant.route.tenantId)},"class":"${deliveryClass(tenant)}","from":${from},"items":[${text}]}`);
+    // Presence rides in the open batch: sent at once unless it already holds row changes (delivery.rs push_item).
+    this.delivery.batcher.presence(text);
+  }
+
+  /**
+   * A durable call result whose watermark did not come with it waits for the
+   * feed's: the batch that carries it is sent at once (lib.rs `batcher.urgent`).
+   */
+  private awaitWatermark(replies: readonly string[]): void {
+    if (!this.record.negotiated.batchFrames || replies.some((text) => text.startsWith('{"type":"replica.watermark"'))) return;
+    for (const text of replies) {
+      let revision: number | undefined;
+      const match = /"committedRevision":(\d+)/.exec(text);
+      if (match && (text.startsWith('{"type":"reducer.result"') || text.startsWith('{"type":"action.result"'))) revision = Number(match[1]);
+      else if (text.startsWith('{"type":"query.result"') && text.includes('"found":true')) {
+        try {
+          const result = (JSON.parse(text) as { path?: string; result?: { found?: boolean; cursor?: { revision?: number } } });
+          if (result.path === "__gonvex.reducerReceipt" && result.result?.found === true) revision = result.result.cursor?.revision;
+        } catch { /* not a receipt */ }
+      }
+      if (revision !== undefined && revision > (this.record.watermark ?? 0)) this.delivery.batcher.urgent(revision);
+    }
+  }
+
+  /** K10: one replica delivery from the tenant object. Applied at once, ahead of frames still being handled. */
+  replicaDelivery(payload: ReplicaDelivery, work: SocketWork | undefined): void {
+    if (this.closed || !this.record.tenant || this.record.tenant.anonymous) return;
+    this.delivery.apply(payload, work);
+    this.record.livenessAt = this.lastOutboundAt;
+  }
+
+  /** The socket's subscriptions are gone (re-auth without preservation, discard, reload, close): tell the tenant. */
+  private resetSubscriptions(previous: TenantSession | null): void {
+    this.record.subscriptionEpoch = (this.record.subscriptionEpoch ?? 0) + 1;
+    this.delivery.forget();
+    this.record.replicaInstance = "";
+    if (!previous || previous.anonymous || !this.ports.tenants.connectionReset) return;
+    const work = this.ports.tenants.connectionReset(previous.route, this.record.connectionId, this.record.subscriptionEpoch)
+      .catch((error) => console.error("session: tenant reset notice failed", error));
+    this.hooks.waitUntil?.(work);
   }
 
   // ---- auth ----------------------------------------------------------------------
@@ -458,13 +551,17 @@ export class Session {
       delete response.result.localIdentity;
     }
     record.negotiated = negotiate(frame.capabilities, this.ready.presence);
+    this.delivery.authenticated(record.negotiated.batchFrames);
     const next = frame.controlOnly ? null : connection.tenant;
     const preserved = !frame.controlOnly && record.tenant !== null && preserveScope(record.connection, connection, frame.capabilities);
     if (preserved) {
       if (response.ok) response.result.subscriptionsPreserved = true;
     } else {
       this.hooks.subscriptionsReset?.();
+      this.resetSubscriptions(record.tenant);
     }
+    const directive = response.ok ? response.result.replica : undefined;
+    record.replica = directive && typeof directive === "object" ? { scope: String((directive as ReplicaDirective).scope), visibilityScope: String((directive as ReplicaDirective).visibilityScope) } : null;
     const previous = record.tenant;
     record.tenant = next;
     record.connection = connection;
@@ -556,6 +653,7 @@ export class Session {
     this.leavePresence();
     this.record.watermark = 0;
     this.hooks.subscriptionsReset?.();
+    this.resetSubscriptions(previous);
     this.record.tenant = null;
     this.record.revalidateAt = null;
     if (previous) this.hooks.tenantChanged?.(previous, null);
@@ -626,6 +724,7 @@ export class Session {
     return this.serial(() => {
       if (this.closed) return;
       this.hooks.subscriptionsReset?.();
+      this.resetSubscriptions(this.record.tenant);
       if (module?.clientContract != null && this.record.tenant && this.record.clientContract !== String(module.clientContract)) {
         this.send(frames.clientUpdateRequired(module.clientContract));
         return this.close(CLOSE.ended);
@@ -684,7 +783,14 @@ export class Session {
 
   // ---- outbound ------------------------------------------------------------------
 
+  /** Sends a frame after any open `replica.batch` (A.4 row 1: a batch is flushed before any other frame). */
   private send(text: string): void {
+    if (this.closed) return;
+    if (this.delivery?.batcher.hasOpen) this.delivery.batcher.flush();
+    this.sendRaw(text);
+  }
+
+  private sendRaw(text: string): void {
     if (this.closed) return;
     // 0018: the platform drops outbound frames this large without an error.
     if (exceedsUtf8(text, LIMITS.maxOutboundBytes - 1)) {
@@ -697,6 +803,8 @@ export class Session {
 
   close(frame: CloseFrame): void {
     if (this.closed) return;
+    if (this.delivery.batcher.hasOpen) this.delivery.batcher.flush();
+    this.resetSubscriptions(this.record.tenant);
     this.closed = true;
     const previous = this.record.tenant;
     this.sink.close(frame);
@@ -707,6 +815,7 @@ export class Session {
   /** The peer closed or the socket failed. Resolves once presence has been told (K14). */
   closedByPeer(): Promise<void> {
     if (this.closed) return Promise.resolve();
+    this.resetSubscriptions(this.record.tenant);
     this.closed = true;
     if (this.record.tenant) this.hooks.tenantChanged?.(this.record.tenant, null);
     return this.presence.closed(this.record.tenant);

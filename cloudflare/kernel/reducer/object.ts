@@ -56,8 +56,15 @@ export abstract class ReducerTenantObject<E extends ReducerTenantEnv = ReducerTe
       plans: this.plans(),
       onCommit: (call) => this.committed(call),
       ownMembershipChanged: (socket, revision) => this.ownMembershipChanged(socket, revision),
+      // K10 provides the floor (`kernel/delivery`); without replica delivery every socket has no subscription.
+      subscriptionFloor: (socket) => this.subscriptionFloor(socket),
     });
     ctx.blockConcurrencyWhile(async () => this.kernel.restore());
+  }
+
+  /** The socket's lowest subscription revision for the call watermark (`min(cursors).max(sent)`); K10 overrides it. */
+  protected subscriptionFloor(_socket: SocketView): number | undefined {
+    return undefined;
   }
 
   protected committed(call: CommittedCall): void {

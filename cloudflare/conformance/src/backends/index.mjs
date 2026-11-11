@@ -10,6 +10,7 @@ import { CloudflareBackend } from './cloudflare.mjs';
 import { CloudflareReducerBackend } from './cloudflare-reducer.mjs';
 import { CloudflareKernelBackend } from './cloudflare-kernel.mjs';
 import { CloudflarePrincipalsBackend } from './cloudflare-principals.mjs';
+import { CloudflareDeliveryBackend } from './cloudflare-delivery.mjs';
 
 export const BACKENDS = {
   rust: RustBackend,
@@ -23,6 +24,8 @@ export const BACKENDS = {
   'cloudflare-kernel': CloudflareKernelBackend,
   // K17: K05 sockets in front of K06's control object and K07's tenant object (service-principals scenario).
   'cloudflare-principals': CloudflarePrincipalsBackend,
+  // K10: the K07 tenant object plus replica delivery (replica scenarios, G1).
+  'cloudflare-delivery': CloudflareDeliveryBackend,
 };
 
 export async function backendClass(kind) {

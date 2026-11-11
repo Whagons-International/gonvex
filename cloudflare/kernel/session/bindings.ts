@@ -41,6 +41,8 @@ export function sessionPorts(env: SessionBindingsEnv): Ports {
       presenceLeave: (route, connectionId, host, previous) => rpc<TenantRpc>(env.TENANT_STUB, tenantObjectName(route)).presenceLeave(connectionId, host, previous ?? null),
       // K17: reached only after a service grant, which the control stand-in never gives.
       serviceCall: (grant, call) => rpc<Required<TenantRpc>>(env.TENANT_STUB, tenantObjectName(grant.route)).serviceCall(grant, call),
+      // K10: tenant objects without replica delivery answer it with a no-op (0048 §1).
+      connectionReset: (route, connectionId, epoch) => rpc<Required<TenantRpc>>(env.TENANT_STUB, tenantObjectName(route)).connectionReset(connectionId, epoch),
     },
   };
 }
