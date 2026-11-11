@@ -172,9 +172,10 @@ export class TenantStore extends DurableObject {
   }
 
   op_check({ fts = [] }) {
-    // A whole-database PRAGMA quick_check over ~9,500 schema objects runs out
-    // of memory in the object (SQLITE_NOMEM) and integrity_check is not
-    // authorized; quick_check(table) checks each table with its indexes.
+    // A whole-database PRAGMA quick_check over ~9,500 schema objects returns
+    // SQLITE_NOMEM in local workerd (an opcode cap per program; some platform
+    // hosts allow it) and integrity_check is not authorized there.
+    // quick_check(table) checks each table with its indexes and works on both.
     const quick = [];
     const tables = this.sql
       .exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'")
