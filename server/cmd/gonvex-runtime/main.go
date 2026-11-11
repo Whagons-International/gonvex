@@ -124,6 +124,7 @@ func shutdownGateway(server *http.Server, budget time.Duration) {
 }
 
 func runWorker(cfg config.Config) {
+	startProfilingListener()
 	runtime, err := gonvexruntime.NewRequired(cfg)
 	if err != nil {
 		slog.Error("gonvex runtime startup failed", "error", err)
