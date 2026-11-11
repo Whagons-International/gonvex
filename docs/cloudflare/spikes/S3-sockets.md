@@ -19,7 +19,7 @@ either placement. Each socket is accepted with the Hibernation API and carries t
 
 **One object holds 1,000 sockets easily, but it cannot fan out 30 writes/s to them.** At 1,000 sockets
 the ceiling is about 10 fan-outs per second. Gateway objects of about 125 sockets carry the 30/s burst. Liveness
-needs a small SDK change (contract-change 0015).
+needs a small SDK change (contract-change 0017).
 
 | Question | Answer (platform unless marked) |
 |---|---|
@@ -29,8 +29,8 @@ needs a small SDK change (contract-change 0015).
 | 30 writes/s for 60 s, one object | **No.** It sustains ≈10 fan-outs/s (≈10k frames/s at 1.9 KB, ≈14k/s at 440 B or with deflate). Above that the queue grows without any signal to the object (latency 9 s at 15/s, 20 s at 20/s). At 60/s the platform closed **all** 1,000 sockets with `1013 Service overloaded; retry later`. The object used under 20% CPU throughout: the limit is outbound frame throughput, not CPU. |
 | 30 writes/s for 60 s, 8 gateways × 125 | **Yes**: 1,800,000/1,800,000 frames, latency p50 89 ms, p99 342 ms, max 1.08 s. 4 × 250 holds 20/s (p99 1.2 s) but not 30/s (p90 12 s; with deflate p99 1.8 s, and one gateway still more than 30 s behind at the end). |
 | permessage-deflate | **Supported.** workerd negotiates it and echoes the client's offer (default offer: context takeover, 15-bit window; it cannot impose Rust's `no_context_takeover; max_window_bits=12`). 4.4× fewer bytes (1,885 → 424 per frame). It raises the per-object ceiling ≈1.5× (10/s: p50 121 ms instead of 1.6 s) at 2.5× the CPU. |
-| 32 MiB inbound cap | Accepted ≤ 32 MiB − 128 B. Between 32 MiB − 64 B and 32 MiB the message is lost and the socket dies with 1006. Above 32 MiB: 1009 `Message is too large`. Outbound frames ≥ 32 MiB are **silently dropped** (≤ 32 MiB − 1 KiB arrive). Contract-change 0016. |
-| Liveness without server pings | `setWebSocketAutoResponse('{"type":"ping"}' → '{"type":"pong"}')` works while hibernated, costs nothing and wakes nothing. It records a timestamp per socket. A 20 s alarm sweep closed silent sockets at the first sweep 60 s after their last ping, which gives the same 60–80 s detection as Rust, plus the 10 s grace. **Requires the SDK to send the ping frame** (0015). Old SDKs: a dead idle socket is never detected. The edge sent no pings and closed nothing in 20 minutes. |
+| 32 MiB inbound cap | Accepted ≤ 32 MiB − 128 B. Between 32 MiB − 64 B and 32 MiB the message is lost and the socket dies with 1006. Above 32 MiB: 1009 `Message is too large`. Outbound frames ≥ 32 MiB are **silently dropped** (≤ 32 MiB − 1 KiB arrive). Contract-change 0018. |
+| Liveness without server pings | `setWebSocketAutoResponse('{"type":"ping"}' → '{"type":"pong"}')` works while hibernated, costs nothing and wakes nothing. It records a timestamp per socket. A 20 s alarm sweep closed silent sockets at the first sweep 60 s after their last ping, which gives the same 60–80 s detection as Rust, plus the 10 s grace. **Requires the SDK to send the ping frame** (0017). Old SDKs: a dead idle socket is never detected. The edge sent no pings and closed nothing in 20 minutes. |
 | Deploy with sockets open | Default strategy (deferred, 300 s) on a hibernated object: **0 of 1,000 sockets dropped**, and the object woke on the new build. Active object: every socket closed **1006** at `max_delay` (30.0 s in the test) or at once with `immediate`. All 1,000 were back in 4.1–6.0 s (accept ≈0.7 ms CPU each). |
 | Hibernation, state rebuilt | Hibernates 5–10 s after the last event with sockets open. Pings don't prevent it. A wake adds ≈25–50 ms (p50) to the first round trip at 1,000 sockets, against ≈12–30 ms at 1 socket. Rebuilding every attachment eagerly (even 1,000 × 15 KB) adds nothing measurable. Attachment limit: **16,384 serialized bytes**. Sockets survive wakes. An isolate memory reset closes them all (1006). |
 | Cost of 1,000 sockets | Socket layer ≈ **$0.26/month** per 1,000-user tenant on the workload below, mostly inbound frames at 20:1. Pings 0 (auto-responses are free; they would otherwise cost ≈$0.30). Gateways add ≈ **$1.25/month** at 1 commit/s, mostly RPC requests. §9. |
@@ -141,7 +141,7 @@ tenant commit CPU p50 2 ms, p99 13 ms; gateway delivery (250 sends, deflate) CPU
 
 ## 5. Message caps
 
-`load/big.mjs`, `load/big-threshold.mjs`; contract-change 0016.
+`load/big.mjs`, `load/big-threshold.mjs`; contract-change 0018.
 
 | Direction | Size | Platform | Local workerd |
 |---|---|---|---|
@@ -171,7 +171,7 @@ Measured (`load/liveness.mjs`, `results/liveness-cf.json` for the 1,000-socket r
 Design for K14 (and the grace setting R22 waits for):
 
 1. The constructor calls `setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}','{"type":"pong"}'))`.
-2. Sockets that negotiated `presence:1` on a server advertising `capabilities.ping` send the ping frame every 20 s (0015).
+2. Sockets that negotiated `presence:1` on a server advertising `capabilities.ping` send the ping frame every 20 s (0017).
 3. Last activity = max(auto-response timestamp, last inbound frame in memory, connect time in the attachment).
    Nothing is written per ping or per frame.
 4. The tenant alarm (shared with the scheduler, R6) also runs a sweep every 20 s while presence sockets exist,
@@ -179,7 +179,7 @@ Design for K14 (and the grace setting R22 waits for):
 5. The offline grace stays 10 s after `webSocketClose`/`webSocketError`/4000. A silent client is therefore shown
    offline 70–90 s after it dies, the same as Rust. **K14 can keep Rust's 10 s grace.**
 6. Old SDKs (no ping): offline only on close or error. A dead idle socket stays present until the edge's TCP gives up,
-   which needs outbound data and was not measured (packet-loss injection needs root on arch3). 0015 proposes
+   which needs outbound data and was not measured (packet-loss injection needs root on arch3). 0017 proposes
    an optional 60 s no-op push to non-pinging sockets.
 
 ## 7. Deploys
@@ -309,11 +309,11 @@ Design:
   250 sockets at ≤15/s). Switch a tenant to gateways of ≈125 sockets when its frame rate needs it (X01). That
   covers the 1,000-user, 30 writes/s target with p99 342 ms.
 - Keep permessage-deflate on.
-- Adopt the ping frame and alarm sweep for liveness (0015). K14 keeps the 10 s grace, and R22 resolves to
+- Adopt the ping frame and alarm sweep for liveness (0017). K14 keeps the 10 s grace, and R22 resolves to
   "60–80 s detection by client ping, same as Rust; old SDKs detected on close only".
 - Keep hibernation working: no timers, alarm only, attachments ≤16 KiB, eager index rebuild. Deploys then drop
   sockets only on busy objects.
-- The kernel bounds its own send rate per object and never sends a frame ≥ 32 MiB − 1 KiB (0016). Neither failure
+- The kernel bounds its own send rate per object and never sends a frame ≥ 32 MiB − 1 KiB (0018). Neither failure
   is reported to the object.
 
 ## Reproduce
