@@ -1725,6 +1725,7 @@ new note and waits for the lead.
 | 0016 | Rulings at gate G0 from the spikes | decided except G0-11 (R25) | K01-K05, K11-K14, K19 |
 | 0017 | Presence liveness without server pings | decided in 0016 G0-6 (no SDK change in stage 1) | K14 |
 | 0018 | Platform WebSocket message caps | decided in 0016 G0-7 | K05, K10, P02 |
+| 0019 | Stage 1b (R01–R06) and gate G3b before G4; L02–L05 removed | decided (Gabriel) | R01–R06, G4 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

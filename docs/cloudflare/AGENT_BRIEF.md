@@ -12,8 +12,14 @@ All Cloudflare work collects on the `cloudflare/integration` branch, which was c
 
 0. Prove: four spikes, the contract freeze, the conformance harness, export/import, the Reducer log feed, baseline metrics.
 1. Kernel to contract parity, in three waves.
+
+   1b. Feel responsive before any customer moves (R01–R06): an outside-in probe of today's staging and
+   production sets the baseline. The kernel then gets a wake budget, a server-side schema diet, a catalog
+   cache, a lean change log and kernel timers. Gate **G3b**, in front of G4: on the same scenarios, the kernel
+   equals or beats R01's baseline on every user-facing number.
 2. Migration by tenant and by ring.
-3. Toward whagons-lite principles, one capability-flagged change at a time.
+3. Toward whagons-lite principles, one capability-flagged change at a time. The client-side items (L06
+   packed pages, L07 columnar replica) are built in parallel behind capability flags and ship after migration.
 
 A gate separates each stage. Gates are in `work-packages.json`.
 
@@ -62,7 +68,7 @@ Caches, lanes, offload threads and tuning variables in the Rust runtime are not 
 3. Every package adds conformance scenarios for what it implements. Never weaken a scenario or an assertion to make a run pass.
 4. Stay inside the paths your package owns. Shared files change through the lead.
 5. Do not change the Rust runtime or the Whagons modules. P04 and K21 are the two named exceptions, and both stay off `staging` and the app repository until cutover. Schema incompatibilities are handled by the kernel's schema transform (A01), never by editing the app's migrations.
-6. Do not touch production or live staging. Use local workerd, a local Rust runtime and the development Cloudflare account.
+6. Do not touch production or live staging. Use local workerd, a local Rust runtime and the development Cloudflare account. The one exception is R01's synthetic probe: read-only browser sessions against a designated test tenant on staging and production, with no app change and no load beyond one user's.
 7. If a platform limit blocks you, stop and report it. Do not design around it on your own.
 8. Every pull request states the numbers it moved: bundle bytes, rows read and written for the functions it touched, memory where it matters.
 9. Credentials come only through `whagons-dev credentials exec`. Never print a value.

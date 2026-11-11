@@ -118,10 +118,13 @@ Start now (every dependency is merged and every gating decision is made):
 6. **S5 Worker Loader spike** (new). It decides how `/dev/sync` swaps a generation without dropping sockets,
    and it must report before K19.
 
+7. **R01 outside-in probe** (stage 1b, 0019). It needs nothing from stage 1 and sets the G3b baseline. It needs
+   a designated test tenant on staging and production.
+
 Start once A01's transform interface is merged: **K02 migrations and provisioning** (G0-10), then **K03
 change capture** (plain-SQL capture comes from A01's T5).
 
-Wave 2 waits on wave 1 as `work-packages.json` says. K12 starts on S4's Workflow design. K14 must measure
+Wave 2 waits on wave 1 as `work-packages.json` says. Stage 1b (R02–R06) follows the kernel packages listed in 0019, and G3b now gates G4. K12 starts on S4's Workflow design. K14 must measure
 dead-peer detection under G0-6.
 
 ## Decisions Gabriel should confirm at sign-off
