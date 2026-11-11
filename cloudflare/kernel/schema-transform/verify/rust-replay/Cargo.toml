@@ -1,0 +1,25 @@
+# Reference side of the A01 replay check: runs writes against a tenant file
+# with the Rust runtime's own capture (gonvex-store `capture::install`, the
+# pre-update hook and gonvex_record_value) and `feed::finalize`, and reports
+# each write's outcome and change rows. Standalone workspace, like P03's
+# stage tool, so the Rust workspace is not edited.
+[package]
+name = "gonvex-a01-replay"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+gonvex-store = { path = "../../../../../rust/crates/store" }
+serde = { version = "1", features = ["derive"] }
+# The runtime builds serde_json with `preserve_order` (through deno_core) and the
+# vendored foldhash patch, so JSON objects keep insertion order. Same here.
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "regexp"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[patch.crates-io]
+serde_json = { path = "../../../../../rust/vendor/serde_json" }

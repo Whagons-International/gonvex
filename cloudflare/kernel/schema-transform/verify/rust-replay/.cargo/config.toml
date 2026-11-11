@@ -1,0 +1,3 @@
+# Same SQLite build as the runtime (rust/.cargo/config.toml): capture needs the pre-update hook.
+[env]
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_PREUPDATE_HOOK"

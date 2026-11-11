@@ -29,7 +29,7 @@ import {
   utf8Bytes,
   type StatementKind,
 } from "./lexer.ts";
-import { checkStatement, effectiveDdlBytes, LIMITS, unionBranchesRead, type Limits } from "./limits.ts";
+import { checkStatement, effectiveDdlBytes, LIMITS, parseCteList, unionBranchesRead, type Limits } from "./limits.ts";
 import { finalOver, parseUnionView, pieceSql, resultColumns, type UnionView } from "./union-view.ts";
 
 /** Recorded in the tenant object's migration ledger metadata with every applied migration. */
@@ -114,6 +114,8 @@ interface Context {
   rewrites: Rewrite[];
   temp: Map<string, number>; // converted TEMP table -> output index of its CREATE
   tempGroups: Array<[number, number]>;
+  /** Output index ranges a chunk boundary must not cut (T6 fill..clear wrappers). */
+  keep: Array<[number, number]>;
   out: string[];
 }
 
@@ -140,6 +142,8 @@ export class SchemaTransform {
   /** Table -> trigger -> split views that trigger's statements writing the table read. */
   private readonly writers = new Map<string, Map<string, Set<string>>>();
   private branchMemo = new Map<string, number>();
+  /** Tables with a DEFERRABLE INITIALLY DEFERRED foreign key (lower-case). */
+  private readonly deferred = new Set<string>();
 
   constructor(options: TransformOptions = {}) {
     this.limits = { ...LIMITS, ...options.limits };
@@ -190,10 +194,11 @@ export class SchemaTransform {
   }
 
   private run(name: string, source: string, statements: string[]): TransformedMigration {
-    const ctx: Context = { migration: name, rewrites: [], temp: new Map(), tempGroups: [], out: [] };
+    const ctx: Context = { migration: name, rewrites: [], temp: new Map(), tempGroups: [], keep: [], out: [] };
     for (const statement of statements) {
       const produced = this.statement(statement, ctx);
       for (const s of produced) this.validate(s, ctx);
+      if (produced.length > 1 && classify(stripLeadingComments(statement)).kind === "other") ctx.keep.push([ctx.out.length, ctx.out.length + produced.length - 1]);
       ctx.out.push(...produced);
     }
     // A TEMP table dies with the connection; its ordinary replacement must not outlive the migration.
@@ -209,12 +214,36 @@ export class SchemaTransform {
       name,
       version: TRANSFORM_VERSION,
       statements: ctx.out,
-      chunks: chunkStatements(ctx.out, this.chunkOptions, ctx.tempGroups),
+      chunks: chunkStatements(ctx.out, this.chunkOptions, mergeRanges([...ctx.tempGroups, ...ctx.keep, ...this.deferredSpans(ctx.out)])),
       directives,
       foreignKeyRebuild: directives.some((d) => /^--\s*gonvex:foreign-key-rebuild$/.test(d)),
       sourceStatements: statements.length,
       rewrites: ctx.rewrites,
     };
+  }
+
+  /**
+   * T7: rows written to a table with a deferred foreign key may violate it
+   * until a later statement of the same migration deletes them (the
+   * reference scope rows and their always-empty guard table). A chunk COMMIT
+   * inside such a span would hit the violation, and on the platform a
+   * deferred violation at commit resets the object. Each span runs from the
+   * INSERT to the next DELETE from the same table.
+   */
+  private deferredSpans(out: readonly string[]): Array<[number, number]> {
+    const spans: Array<[number, number]> = [];
+    const open = new Map<string, number>();
+    for (const [i, s] of out.entries()) {
+      const target = writeTarget(s);
+      if (!target || !this.deferred.has(target)) continue;
+      const verb = significant(s)[0]?.upper;
+      if ((verb === "INSERT" || verb === "REPLACE") && !open.has(target)) open.set(target, i);
+      else if (verb === "DELETE" && open.has(target)) {
+        spans.push([open.get(target)!, i]);
+        open.delete(target);
+      }
+    }
+    return spans;
   }
 
   private validate(statement: string, ctx: Context): void {
@@ -368,6 +397,7 @@ export class SchemaTransform {
       ctx.rewrites.push({ rule: "T4", object: kind.name });
     }
     if (!(kind.ifNotExists && this.objects.has(kind.name.toLowerCase()))) this.remember("table", kind.name, sql);
+    if (/\bDEFERRABLE\s+INITIALLY\s+DEFERRED\b/i.test(sql)) this.deferred.add(kind.name.toLowerCase());
     return [sql];
   }
 
@@ -698,20 +728,38 @@ export function starReads(sql: string, tables: ReadonlySet<string>): string | nu
   return null;
 }
 
+/** Merges overlapping or nested [first, last] ranges. */
+export function mergeRanges(ranges: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
+  const sorted = ranges.map(([a, b]): [number, number] => [a, b]).sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  const out: Array<[number, number]> = [];
+  for (const r of sorted) {
+    const last = out[out.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else out.push(r);
+  }
+  return out;
+}
+
 /** Table an INSERT / UPDATE / DELETE / REPLACE writes, lower-case, or null. */
 export function writeTarget(sql: string): string | null {
   const toks = significant(sql);
-  let i = 0;
-  if (toks[0]?.upper === "WITH") return null; // CTE-prefixed DML is not used by the app schema; treated as not writing a guarded table
-  const verb = toks[0]?.upper;
+  let start = 0;
+  if (toks[0]?.upper === "WITH") {
+    // `WITH ... INSERT/UPDATE/DELETE`: skip the CTE list.
+    const ctes = parseCteList(sql, toks, 0);
+    if (!ctes) return null;
+    start = ctes.next;
+  }
+  let i = start;
+  const verb = toks[start]?.upper;
   if (verb === "INSERT" || verb === "REPLACE") {
     while (toks[i] && toks[i]!.upper !== "INTO") i += 1;
     i += 1;
   } else if (verb === "UPDATE") {
-    i = 1;
+    i = start + 1;
     if (toks[i]?.upper === "OR") i += 2;
   } else if (verb === "DELETE") {
-    i = 2;
+    i = start + 2;
   } else return null;
   const t = toks[i];
   if (!isNameToken(t)) return null;

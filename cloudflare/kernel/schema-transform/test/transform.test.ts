@@ -115,7 +115,7 @@ describe("T6 per-branch reference statements", () => {
   const writes = [
     `INSERT INTO src VALUES (1, '{"f0":"a","f1":["b","c"],"f2":"d"}')`,
     `INSERT INTO src VALUES (2, '{"f0":"x","f3":["y"],"f4":"z","f11":["q","r"]}')`,
-    `UPDATE src SET data = '{"f0":"a2","f1":["c"],"f5":"e"}' WHERE _id = 1`,
+    `UPDATE src SET data = '{"f0":"a2","f1":["c"],"f5":["e"],"f6":"g"}' WHERE _id = 1`,
     `UPDATE src SET data = data WHERE _id = 2`,
     `INSERT INTO src VALUES (3, '{"f2":1,"f6":"n"}')`,
     `DELETE FROM src WHERE _id = 2`,
@@ -151,6 +151,7 @@ describe("T6 per-branch reference statements", () => {
       return { outcomes, bindings: dump(sql), direct, scratch };
     });
     expect(expected.bindings.length).toBeGreaterThan(5);
+    expect(expected.outcomes).toEqual([null, null, null, null, null, null, null]);
     expect(actual.outcomes).toEqual(expected.outcomes);
     expect(actual.bindings).toEqual(expected.bindings);
     expect(actual.direct).toEqual(expected.direct);
@@ -251,6 +252,36 @@ describe("loud failures, chunks, determinism", () => {
     expect(chunkStatements(statements).map((c) => c.length)).toEqual([200, 200, 50]);
     expect(chunkStatements(statements, {}, [[190, 205]]).map((c) => c.length)).toEqual([190, 200, 60]);
     expect(chunkStatements(statements, { maxBytes: 1_000 }).every((c) => c.join("").length <= 1_000)).toBe(true);
+  });
+
+  it("never ends a chunk inside a deferred-FK span or a T6 fill", async () => {
+    // Scope rows reference an always-empty guard table (deferred): they must be
+    // deleted before COMMIT, so the INSERT..DELETE span shares one chunk.
+    const setup = `${referenceSchema(3)}
+CREATE TABLE guard(id INTEGER PRIMARY KEY);
+CREATE TABLE scope(id INTEGER, g INTEGER NOT NULL DEFAULT 0 REFERENCES guard(id) DEFERRABLE INITIALLY DEFERRED);`;
+    const body = [
+      ...Array.from({ length: 195 }, (_, k) => `INSERT INTO src VALUES (${k + 1}, '{}')`),
+      "INSERT INTO scope(id) VALUES (1)",
+      ...Array.from({ length: 10 }, (_, k) => `UPDATE src SET data = '{"f0":"v${k}"}' WHERE _id = ${k + 1}`),
+      `INSERT INTO owners(sourceName, ownerId) SELECT 'src', _id FROM src`,
+      `INSERT INTO bindings SELECT e.ownerId, e.path, e."target" FROM "referenceExpected_src" e WHERE 1 ON CONFLICT DO NOTHING`,
+      "DELETE FROM owners",
+      "DELETE FROM scope",
+    ].join(";\n");
+    const t = new SchemaTransform();
+    const first = t.migration("setup", setup);
+    const out = t.migration("backfill", body);
+    const at = (needle: string) => out.chunks.findIndex((c) => c.some((s) => s.startsWith(needle)));
+    expect(out.chunks.length).toBeGreaterThan(1);
+    expect(at("INSERT INTO scope")).toBe(at("DELETE FROM scope"));
+    const fill = out.chunks.findIndex((c) => c.some((s) => s.includes("__queue")));
+    expect(out.chunks[fill]!.some((s) => s.startsWith("INSERT INTO bindings"))).toBe(true);
+    await withObject((sql, storage) => {
+      exec(sql, first.statements);
+      for (const chunk of out.chunks) storage.transactionSync(() => exec(sql, chunk));
+      expect(rows(sql, "SELECT count(*) AS n FROM scope")).toEqual([{ n: 0 }]);
+    });
   });
 
   it("is deterministic byte for byte", () => {
