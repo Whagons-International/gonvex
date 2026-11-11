@@ -40,6 +40,9 @@ export class CatalogError extends Error {
   }
 }
 
+/** SQLite's NOCASE collation: ASCII letters only. */
+const foldAscii = (text: string) => text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+
 /** host_calls.rs `valid_identifier`. */
 function validIdentifier(name: string): boolean {
   if (!name || name.length > 63) return false;
@@ -77,6 +80,14 @@ interface RecordSchema {
 export class Catalog {
   private readonly tables = new Map<string, TableCatalog>();
   private recordViews: boolean | undefined;
+  /**
+   * Every record schema, by ASCII-folded name (SQLite's NOCASE; the first row
+   * wins, as the lookup would), loaded in one statement per schema generation.
+   * `name COLLATE NOCASE` cannot use the table's BINARY primary key, so a
+   * per-table lookup scanned all of `_gonvex_record_views` once per table
+   * (about 400 rows each on Whagons; K04's bench).
+   */
+  private recordSchemas: Map<string, string> | undefined;
   private generationValue = 0;
 
   /** Bumped by every invalidation; caches derived from the schema compare it. */
@@ -87,6 +98,7 @@ export class Catalog {
   invalidate(): void {
     this.tables.clear();
     this.recordViews = undefined;
+    this.recordSchemas = undefined;
     this.generationValue++;
   }
 
@@ -108,10 +120,17 @@ export class Catalog {
     if (schema === undefined || schema.toLowerCase() === "main") {
       this.recordViews ??= Number(reader.rows("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_record_views') AS present")[0]?.present) === 1;
       if (this.recordViews) {
-        const found = reader.rows("SELECT schema FROM _gonvex_record_views WHERE name=?1 COLLATE NOCASE", name)[0];
-        if (found) {
+        if (!this.recordSchemas) {
+          this.recordSchemas = new Map();
+          for (const row of reader.rows("SELECT name, schema FROM _gonvex_record_views")) {
+            const key = foldAscii(String(row.name));
+            if (!this.recordSchemas.has(key)) this.recordSchemas.set(key, String(row.schema));
+          }
+        }
+        const found = this.recordSchemas.get(foldAscii(name));
+        if (found !== undefined) {
           try {
-            record = JSON.parse(String(found.schema)) as RecordSchema;
+            record = JSON.parse(found) as RecordSchema;
           } catch (error) {
             throw new CatalogError(String((error as Error).message));
           }

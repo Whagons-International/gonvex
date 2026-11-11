@@ -1,0 +1,11 @@
+// Test-only Worker for the kernel module host (K04). Never deployed; the name
+// keeps the gonvex-cf-dev- prefix anyway.
+{
+  "name": "gonvex-cf-dev-k04-host-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // AsyncLocalStorage carries the active invocation across awaits (globals.ts).
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": { "bindings": [{ "name": "TENANT", "class_name": "TestTenant" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestTenant"] }]
+}
