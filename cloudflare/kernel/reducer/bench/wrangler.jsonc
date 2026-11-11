@@ -1,0 +1,14 @@
+// Local-only bench Worker: the real Whagons Reducer bundle through the K07
+// Reducer path (ReducerPath → ReducerStorage → K04 host, K03 capture).
+// `node bench/run.mjs <s2 .artifact dir>` prepares .build/ and runs it with
+// `wrangler dev --local`. Never deployed; the name keeps the prefix anyway.
+{
+  "name": "gonvex-cf-dev-k07-bench",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // AsyncLocalStorage carries the active invocation across awaits (K04 globals.ts).
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": { "bindings": [{ "name": "TENANT", "class_name": "BenchReducerTenant" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BenchReducerTenant"] }],
+  "rules": [{ "type": "ESModule", "globs": [".build/app.js"] }]
+}

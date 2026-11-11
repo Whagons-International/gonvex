@@ -85,6 +85,10 @@ cd conformance && node src/cli.mjs --backend rust=rust --backend cf=cloudflare-r
   FK, permission bits, own membership, rows read and written.
 - `reference/test/`: the Rust unit and integration tests of reference integrity, on Durable Object SQLite.
 - `kernel/capture/test/capture-parity.test.ts` runs on K01's real `StorageSession` in mixed mode (0028 §2e).
+- `bench/`: **real Whagons Reducers** (S2's artifacts, whagons5-client `2457bb65f`) through this path in local workerd:
+  the same 10 of 35 calls commit as in K04's bench, each with one revision, one change row, provenance and a receipt;
+  all 10 replays return the stored result byte for byte at the clock's revision and leave all 178 tables unchanged.
+  `node bench/run.mjs <s2 .artifact dir>`.
 - The conformance backend `cloudflare-reducer` (`conformance/src/backends/cloudflare-reducer.mjs`) builds the
   fixture generations with the CLI, puts their bundles into the harness Worker (`harness/generate-bundles.mjs`) and runs
   `wrangler dev`. It restarts workerd for the crash scenario.

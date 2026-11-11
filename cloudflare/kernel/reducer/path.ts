@@ -309,7 +309,8 @@ export class ReducerPath {
         }
       },
     });
-    const report = await this.options.host.run({
+    // K04 can answer without opening storage (quarantined command, no generation): never leave the hooks armed.
+    const report = await this.runDisarming({
       function: path,
       kind: "reducer",
       args: request.args,
@@ -333,6 +334,14 @@ export class ReducerPath {
       this.options.onCommit?.({ notice, outboxWritten, membersChanged: notice?.tables.includes("members") ?? false });
     }
     return { ok: true, result: report.value ?? "null", committedRevision: notice?.revision };
+  }
+
+  private async runDisarming(call: Parameters<TenantModuleHost["run"]>[0]): ReturnType<TenantModuleHost["run"]> {
+    try {
+      return await this.options.host.run(call);
+    } finally {
+      this.options.storage.disarm();
+    }
   }
 
   /** `ensure_reducer_idempotency`, once per schema generation of the object. */

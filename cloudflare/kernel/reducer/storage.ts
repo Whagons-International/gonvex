@@ -59,6 +59,11 @@ export class ReducerStorage extends TenantStorage {
     this.report = undefined;
   }
 
+  /** Drops hooks that no invocation took (K04 refused the call before opening storage). */
+  disarm(): void {
+    this.armed = undefined;
+  }
+
   /** What the last armed invocation committed; cleared by `arm`. */
   takeReport(): CommitReport | undefined {
     const report = this.report;
