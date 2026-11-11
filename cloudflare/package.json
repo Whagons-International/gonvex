@@ -1,0 +1,25 @@
+{
+  "name": "@gonvex/cloudflare",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Gonvex backend on Cloudflare Workers and Durable Objects (one SQLite-backed object per tenant).",
+  "scripts": {
+    "typecheck": "wrangler types --include-runtime=false --check && tsc -p tsconfig.json --noEmit",
+    "types": "wrangler types --include-runtime=false",
+    "test": "vitest run && node --test scripts/deploy-preview.test.mjs",
+    "test:watch": "vitest",
+    "dev": "wrangler dev",
+    "bundle": "wrangler deploy --dry-run --outdir dist",
+    "deploy:preview": "node scripts/deploy-preview.mjs deploy",
+    "delete:preview": "node scripts/deploy-preview.mjs delete"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.10",
+    "@cloudflare/workers-types": "5.20261028.1",
+    "@types/node": "24.12.4",
+    "typescript": "7.0.2",
+    "vitest": "4.1.12",
+    "wrangler": "4.155.0"
+  }
+}

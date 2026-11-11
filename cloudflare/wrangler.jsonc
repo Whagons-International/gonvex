@@ -1,0 +1,20 @@
+// Gonvex on Cloudflare: Worker + SQLite-backed Durable Objects.
+// Deploys go through scripts/deploy-preview.mjs, which overrides `name` with
+// gonvex-cf-dev-preview-<branch-slug>. The default name keeps the
+// gonvex-cf-dev- prefix so an accidental `wrangler deploy` stays in the
+// development namespace.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-local",
+  "main": "src/index.ts",
+  // Must not be newer than the pinned workerd (wrangler 4.155.0 -> workerd 1.20261023.1).
+  "compatibility_date": "2026-10-23",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "HELLO", "class_name": "HelloObject" }]
+  },
+  // Durable Object classes must be SQLite-backed: always `new_sqlite_classes`.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HelloObject"] }]
+}

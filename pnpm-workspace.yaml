@@ -1,9 +1,11 @@
 packages:
   - "packages/*"
   - "apps/*"
+  - "cloudflare"
 overrides:
   brace-expansion: 2.1.4
 allowBuilds:
   esbuild: true
   protobufjs: true
   sharp: true
+  workerd: true
