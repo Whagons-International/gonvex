@@ -1,0 +1,19 @@
+# Standalone crate (its own workspace) so the Rust runtime workspace is not
+# edited: it links gonvex-store and gonvex-admin from rust/crates by path and
+# uses the runtime's provisioning, migration loader and reference ledger as-is.
+[package]
+name = "gonvex-tenant-stage"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+gonvex-admin = { path = "../../../../rust/crates/admin-cli" }
+gonvex-store = { path = "../../../../rust/crates/store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "regexp"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
