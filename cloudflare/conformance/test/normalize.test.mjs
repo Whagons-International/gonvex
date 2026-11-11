@@ -203,3 +203,13 @@ test('JWTs (identity-provider ID tokens) are masked; other dotted strings are ke
   assert.deepEqual(frame.args, { note: 'a.b.c', provider: 'firebase', token: '<jwt>' });
   assert.deepEqual(normalizeValue({ token: jwt }), { token: '<jwt>' });
 });
+
+test('presence Members are sorted by aliased Member id (backends assign the ids)', () => {
+  const m = (memberId, state) => ({ memberId, state, since: 1 });
+  const [snapshot, patch] = normalizeSession([
+    rec('in', { type: 'presence.snapshot', id: 'p-1', serverTime: 1, members: [m('<member:dave@a>', 'idle'), m('<member:alice@a>', 'active')] }),
+    rec('in', { type: 'presence.patch', serverTime: 2, changes: [m('<member:bob@a>', 'offline'), m('<member:alice@a>', 'idle')] }),
+  ]).map(e => e.frame);
+  assert.deepEqual(snapshot.members.map(x => x.memberId), ['<member:alice@a>', '<member:dave@a>']);
+  assert.deepEqual(patch.changes.map(x => [x.memberId, x.state]), [['<member:alice@a>', 'idle'], ['<member:bob@a>', 'offline']]);
+});

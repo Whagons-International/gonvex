@@ -21,13 +21,15 @@ import { DurableObject } from "cloudflare:workers";
 import type { ModuleInfo, Ports, TenantRoute, TenantSession } from "../ports";
 import { SocketHost } from "../host";
 import { deliveryClass } from "../session";
+import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../presence/hub";
+import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
 
 /** S3: about 125 sockets per gateway carried 30 commits/s to 1,000 sockets. */
 export const SOCKETS_PER_GATEWAY = 125;
 export const DEFAULT_GATEWAY_SHARDS = 8;
 export const PROTOCOL_VERSION = 1;
 
-export interface GatewayEnv {
+export interface GatewayEnv extends PresenceEnv {
   GONVEX_GATEWAY_SHARDS?: string;
   GONVEX_RUNTIME_VERSION?: string;
   GONVEX_PRESENCE?: string;
@@ -94,11 +96,13 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
     this.gatewayName = ctx.id.name ?? ctx.id.toString();
+    const presence = presenceConfig(env);
     this.host = new SocketHost({
+      presence,
       ctx,
       ports: this.bindings().ports(env),
       name: this.gatewayName,
-      ready: { runtimeVersion: env.GONVEX_RUNTIME_VERSION || "development", presence: env.GONVEX_PRESENCE !== "0" },
+      ready: { runtimeVersion: env.GONVEX_RUNTIME_VERSION || "development", presence: presence.enabled },
       tenantChanged: (ws, previous, next) => this.tenantChanged(ws, previous, next),
     });
     // Restored sockets: rebuild the tenant index only (the tenant already has this gateway registered).
@@ -119,11 +123,11 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   }
 
   override async webSocketClose(ws: WebSocket): Promise<void> {
-    this.host.closed(ws);
+    await this.host.closed(ws);
   }
 
   override async webSocketError(ws: WebSocket): Promise<void> {
-    this.host.closed(ws);
+    await this.host.closed(ws);
   }
 
   override async alarm(): Promise<void> {
@@ -157,6 +161,39 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     const n = await this.host.moduleReloaded(projectId, module);
     this.host.reschedule();
     return n;
+  }
+
+  /**
+   * K14: one ordered presence delivery from a tenant object: subscribe
+   * snapshots for named sockets, then one patch (encoded once by the tenant)
+   * or a resync for every subscribed socket of that tenant here.
+   */
+  async presence(delivery: PresenceDelivery): Promise<PresenceReceipt> {
+    const sockets = this.byTenant.get(delivery.tenantId);
+    let subscribers = 0;
+    if (sockets?.size) {
+      const work: Array<Promise<void>> = [];
+      for (const ws of sockets) {
+        const session = this.host.sessions.get(ws);
+        if (!session || session.record.tenant?.route.projectId !== delivery.projectId) continue;
+        if (session.record.presence?.subscription != null) subscribers++;
+        work.push(session.presenceDelivery(delivery));
+      }
+      // Enqueued in delivery order on each socket's own queue; not awaited, so one socket busy with a
+      // slow call never holds the tenant's channel (Rust drains each connection's slot on its own).
+      this.ctx.waitUntil(Promise.all(work));
+    }
+    return { v: PRESENCE_PROTOCOL_VERSION, subscribers };
+  }
+
+  /** K14: this gateway's sockets of `tenantId` with presence, from their records (the tenant rebuilds and sweeps from it). */
+  async presenceConnections(tenantId: string): Promise<ConnectionReport[]> {
+    const out: ConnectionReport[] = [];
+    for (const ws of this.byTenant.get(tenantId) ?? []) {
+      const report = this.host.sessions.get(ws)?.presence.report();
+      if (report) out.push(report);
+    }
+    return out;
   }
 
   /** Liveness of the RPC path itself; used by the hop benchmark. */

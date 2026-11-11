@@ -5,6 +5,8 @@
  */
 import type { ClientFrame, Json } from "./decode";
 import type { DeliveryBatch, DeliveryReceipt } from "./placement/gateway";
+import type { ConnectionReport } from "../presence/hub";
+import type { PresenceDelivery, PresenceReceipt } from "../presence/tenant";
 import type {
   Impersonation, Member, ModuleInfo, Outcome, RevalidationItem, SessionIdentity, SocketView, TenantRoute, TenantSession,
 } from "./ports";
@@ -14,6 +16,8 @@ export interface GatewayRpc {
   moduleReloaded(projectId: string, module: ModuleInfo | null): Promise<number>;
   ping(): Promise<number>;
   hopToTenant(tenant: string, n: number): Promise<number[]>;
+  presence(delivery: PresenceDelivery): Promise<PresenceReceipt>;
+  presenceConnections(tenantId: string): Promise<ConnectionReport[]>;
 }
 
 export interface TenantRpc {
@@ -27,6 +31,7 @@ export interface TenantRpc {
   dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]>;
   ping(): Promise<number>;
   hopToGateway(gateway: string, n: number): Promise<number[]>;
+  presenceLeave(connectionId: string, host: string, previous?: ConnectionReport | null): Promise<void>;
 }
 
 export interface ControlRpc {

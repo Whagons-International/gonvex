@@ -58,7 +58,7 @@ client ──/ws──▶ router Worker ──▶ gateway object (gw-N) ──RP
 | Sessions, tokens, tenant resolution, admission, revalidation, `control.*` frames | K06 | `stub/control.ts` (Rust's results and error texts for the paths here) |
 | Module generation: artifact hash, client contract, replica epoch, the reload fan-out | K19 (with K02) | `stub/control.ts` `deploy`, fan-out to every gateway shard |
 | Tenant frames (`query.*`, `reducer.*`, `action.*`, `replica.*`) with a tenant session | K07, K08, K10 | `stub/tenant.ts`: a fixed "not implemented" error |
-| Presence frames | K14 | advertised (`presence:1`, as Rust); frames reach the tenant port |
+| Presence frames | K14 | `kernel/presence/`: per-socket state in the session record, frames to the tenant port, deliveries through `GatewayObject.presence`, leave on auth / discard / close |
 | `error.*`, `telemetry.*` | K15 | forwarded to the tenant port, no reply |
 | Per-address 429 limits, the 30 s public admission recheck, public rate limits | K16 | not enforced |
 | `gvx_svc_` service principals | K17 | every service credential gets Rust's refusal |

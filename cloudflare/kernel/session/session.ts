@@ -16,11 +16,14 @@
 import { type Negotiated, NOTHING_NEGOTIATED, negotiate, sessionReadyFrame, type ReadyOptions } from "./capabilities";
 import { decodeClientFrame, type AuthFrame, type ClientCapabilities, type ClientFrame, type Json } from "./decode";
 import { replicaDirective } from "./directive";
-import { AUTH_ERRORS, CLOSE, type CloseFrame, LIMITS, UNAUTHENTICATED, exceedsUtf8, frames } from "./protocol";
+import { AUTH_ERRORS, CLOSE, type CloseFrame, LIMITS, UNAUTHENTICATED, echoTrace, exceedsUtf8, frames } from "./protocol";
 import {
   type Connection, type Failure, type ModuleInfo, NO_CONNECTION, type Ports, type RevalidationItem,
   type SocketView, type TenantSession, authErrorCode,
 } from "./ports";
+import { DEFAULT_PRESENCE_CONFIG, type PresenceConfig } from "../presence/hub";
+import { type PresenceRecord, SocketPresence, type SupportRecord } from "../presence/socket";
+import { type PresenceDelivery, resyncFrame } from "../presence/tenant";
 
 export const SERVICE_TOKEN_PREFIX = "gvx_svc_";
 
@@ -46,6 +49,12 @@ export interface SessionRecord {
   sentRevision: number;
   /** Last liveness frame sent (G0-6), for sockets restored after hibernation. */
   livenessAt: number;
+  /** K14: this socket's presence state and subscription (what the tenant rebuilds from). */
+  presence?: PresenceRecord | null;
+  /** K14: the support session registered by this connection (repeat heartbeats answered from memory). */
+  support?: SupportRecord | null;
+  /** K14: last replica watermark sent since auth (Rust `sent_replica_revision`; 0 or absent: none). */
+  watermark?: number;
 }
 
 /** Where frames go. The host maps it onto a hibernatable WebSocket. */
@@ -61,6 +70,8 @@ export interface SessionHooks {
   subscriptionsReset?(): void;
   /** The record changed in a way that must survive hibernation. */
   persist?(): void;
+  /** Keeps work started outside a frame (presence leave on close) alive (`ctx.waitUntil`). */
+  waitUntil?(promise: Promise<unknown>): void;
 }
 
 export interface SessionOptions {
@@ -73,6 +84,8 @@ export interface SessionOptions {
   now?: () => number;
   /** Module info cache shared by the host's sessions, invalidated on reload. */
   modules?: ModuleCache;
+  /** Presence v2 settings (K14); defaults follow `ready.presence`. */
+  presence?: PresenceConfig;
 }
 
 /** Per-host cache of each project's active module (one RPC per project, refreshed on reload). */
@@ -107,6 +120,8 @@ export class Session {
   closed = false;
   /** Last outbound frame time (memory only; `record.livenessAt` covers hibernation). */
   lastOutboundAt: number;
+  /** Presence v2 on this socket (K14). */
+  readonly presence: SocketPresence;
 
   private constructor(record: SessionRecord, options: SessionOptions) {
     this.record = record;
@@ -118,6 +133,14 @@ export class Session {
     this.now = options.now ?? Date.now;
     this.modules = options.modules ?? new ModuleCache(options.ports);
     this.lastOutboundAt = record.livenessAt;
+    const presence = options.presence ?? { ...DEFAULT_PRESENCE_CONFIG, enabled: options.ready.presence };
+    this.presence = new SocketPresence({
+      record: this.record,
+      view: () => this.view(),
+      send: (text) => this.send(text),
+      sendItem: (text) => this.sendItem(text),
+      persist: () => this.hooks.persist?.(),
+    }, this.ports, presence, echoTrace);
   }
 
   /** A new socket: sends `session.ready` before anything else (A.1.2 step 1). */
@@ -212,8 +235,8 @@ export class Session {
 
   private async dispatch(frame: ClientFrame): Promise<void> {
     const tenant = this.record.tenant;
-    const control = (f: ClientFrame) => this.forward(this.ports.control.dispatch(this.view(), f));
-    const toTenant = (f: ClientFrame) => this.forward(this.ports.tenants.dispatch(this.view(), f));
+    const control = async (f: ClientFrame) => { await this.forward(this.ports.control.dispatch(this.view(), f)); };
+    const toTenant = async (f: ClientFrame) => { await this.forward(this.ports.tenants.dispatch(this.view(), f)); };
     switch (frame.type) {
       case "auth":
         return frame.token !== undefined && !frame.public && frame.token.trim().startsWith(SERVICE_TOKEN_PREFIX)
@@ -241,17 +264,10 @@ export class Session {
         if (tenant) await toTenant(frame);
         return;
       case "reducer.call":
-        if (frame.scope === "control") return control(frame);
-        if (tenant) return toTenant(frame);
-        return this.send(frames.reducerError(frame.id, frame.path, UNAUTHENTICATED.reducer, "unauthenticated", frame.trace));
+        return this.reducerCall(frame);
       case "reducer.callMany":
         if (frame.calls.length > LIMITS.callMany) return this.send(frames.reducerError("", undefined, `reducer batch cannot contain more than ${LIMITS.callMany} calls`, "rejected"));
-        for (const call of frame.calls) {
-          const one: ClientFrame = { type: "reducer.call", ...call };
-          if (call.scope === "control") await control(one);
-          else if (tenant) await toTenant(one);
-          else this.send(frames.reducerError(call.id, call.path, UNAUTHENTICATED.reducer, "unauthenticated", call.trace));
-        }
+        for (const call of frame.calls) await this.reducerCall({ type: "reducer.call", ...call });
         return;
       case "action.call":
         if (frame.scope === "control") return control(frame);
@@ -271,13 +287,13 @@ export class Session {
       case "replica.close":
         if (tenant) return toTenant(frame);
         return;
+      // K14: presence state is kept per socket and forwarded to the tenant object (kernel/presence).
       case "presence.set":
+        return this.guard(this.presence.set(frame.state));
       case "presence.unsubscribe":
-        if (tenant && !tenant.anonymous && this.ready.presence) return toTenant(frame);
-        return;
+        return this.guard(this.presence.unsubscribe());
       case "presence.subscribe":
-        if (tenant && !tenant.anonymous && this.ready.presence) return toTenant(frame);
-        return this.send(frames.presenceError(frame.id, this.ready.presence ? UNAUTHENTICATED.presence : "presence v2 is disabled"));
+        return this.guard(this.presence.subscribe(frame.id));
       case "error.register":
       case "error.heartbeat":
       case "error.envelope":
@@ -289,21 +305,58 @@ export class Session {
     }
   }
 
-  private async forward(reply: Promise<string[]>): Promise<void> {
+  private async forward(reply: Promise<string[]>): Promise<string[]> {
     let out: string[];
     try {
       out = await reply;
     } catch (error) {
       console.error("session: port call failed", error);
-      return this.close(CLOSE.failed);
+      this.close(CLOSE.failed);
+      return [];
     }
     for (const text of out) this.send(text);
+    return out;
+  }
+
+  /** A port call made by a presence handler: a failure closes the socket, as `forward` does. */
+  private async guard(work: Promise<void>): Promise<void> {
+    try {
+      await work;
+    } catch (error) {
+      console.error("session: port call failed", error);
+      this.close(CLOSE.failed);
+    }
+  }
+
+  /** One Reducer call, with presence's in-memory answers first (`call_reducer_with_presence`, K14). */
+  private async reducerCall(call: Extract<ClientFrame, { type: "reducer.call" }>): Promise<void> {
+    const tenant = this.record.tenant;
+    if (call.scope !== "control" && !tenant) {
+      return this.send(frames.reducerError(call.id, call.path, UNAUTHENTICATED.reducer, "unauthenticated", call.trace));
+    }
+    const short = this.presence.shortCircuit(call);
+    if (short) {
+      for (const text of short.frames) this.send(text);
+      if (short.after) await this.guard(short.after());
+      return;
+    }
+    const replies = await this.forward(call.scope === "control" ? this.ports.control.dispatch(this.view(), call) : this.ports.tenants.dispatch(this.view(), call));
+    if (!this.closed) await this.guard(this.presence.afterCall(call, replies));
+  }
+
+  /** A feed item: inside a `replica.batch` envelope when the socket negotiated batch frames (A.4 row 6). */
+  private sendItem(text: string): void {
+    const tenant = this.record.tenant;
+    if (!this.record.negotiated.batchFrames || !tenant) return this.send(text);
+    const from = this.record.sentRevision;
+    this.send(`{"type":"replica.batch","tenant":${JSON.stringify(tenant.route.tenantId)},"class":"${deliveryClass(tenant)}","from":${from},"items":[${text}]}`);
   }
 
   // ---- auth ----------------------------------------------------------------------
 
   /** `gvx_svc_` tokens (K17). Until K17 lands every service credential is refused, with Rust's reset. */
   private async serviceAuth(frame: AuthFrame): Promise<void> {
+    this.leavePresence();
     this.discardScope();
     this.record.clientContract = null;
     this.record.connection = NO_CONNECTION;
@@ -325,6 +378,8 @@ export class Session {
     }
     if (this.closed) return;
     const { response, connection } = outcome;
+    // lib.rs:2826: every auth drops the connection's presence (with grace); the client re-announces.
+    this.leavePresence();
 
     const anonymous = connection.tenant?.anonymous ? connection.tenant : null;
     if (anonymous) {
@@ -360,6 +415,7 @@ export class Session {
     record.connection = connection;
     record.revalidateAt = connection.authToken ? this.now() + LIMITS.revalidateMs : null;
     if (next && !preserved) record.sentRevision = next.admissionRevision;
+    if (!preserved) record.watermark = 0;
     if (!sameRoute(previous, next) || (previous?.anonymous ?? false) !== (next?.anonymous ?? false)) this.hooks.tenantChanged?.(previous, next);
     this.hooks.persist?.();
     this.send(response.ok ? frames.authResult(response.id, response.result as Json) : frames.authError(response.id, response.error, response.code));
@@ -442,6 +498,8 @@ export class Session {
   /** Drops the tenant scope and everything subscribed under it. */
   private discardScope(): void {
     const previous = this.record.tenant;
+    this.leavePresence();
+    this.record.watermark = 0;
     this.hooks.subscriptionsReset?.();
     this.record.tenant = null;
     this.record.revalidateAt = null;
@@ -449,6 +507,12 @@ export class Session {
   }
 
   // ---- events from the host --------------------------------------------------------
+
+  /** `presence_hub.reset`: the tenant drops this connection's presence with grace (K14). */
+  private leavePresence(): void {
+    const work = this.presence.leave(this.record.tenant);
+    this.hooks.waitUntil?.(work);
+  }
 
   /** Runs `fn` after the frames already queued, in the socket's order. */
   private serial(fn: () => void | Promise<void>): Promise<void> {
@@ -521,6 +585,7 @@ export class Session {
       if (this.closed) return;
       for (const text of texts) this.send(text);
       if (revision > this.record.sentRevision) this.record.sentRevision = revision;
+      if (revision > (this.record.watermark ?? 0)) this.record.watermark = revision;
     });
   }
 
@@ -540,6 +605,16 @@ export class Session {
         : frames.replicaWatermark(revision));
       this.record.livenessAt = now;
       this.hooks.persist?.();
+    });
+  }
+
+  /** One ordered presence delivery from the tenant object (K14), in the socket's order. */
+  presenceDelivery(delivery: PresenceDelivery): Promise<void> {
+    return this.serial(() => {
+      if (this.closed) return;
+      for (const s of delivery.snapshots ?? []) if (s.connectionId === this.record.connectionId) this.presence.snapshot(s.id, s.frame);
+      if (delivery.resync) this.presence.resync(id => resyncFrame(id, delivery.resync!));
+      else if (delivery.patch !== undefined) this.presence.patch(delivery.patch);
     });
   }
 
@@ -571,13 +646,15 @@ export class Session {
     const previous = this.record.tenant;
     this.sink.close(frame);
     if (previous) this.hooks.tenantChanged?.(previous, null);
+    this.hooks.waitUntil?.(this.presence.closed(previous));
   }
 
-  /** The peer closed or the socket failed. */
-  closedByPeer(): void {
-    if (this.closed) return;
+  /** The peer closed or the socket failed. Resolves once presence has been told (K14). */
+  closedByPeer(): Promise<void> {
+    if (this.closed) return Promise.resolve();
     this.closed = true;
     if (this.record.tenant) this.hooks.tenantChanged?.(this.record.tenant, null);
+    return this.presence.closed(this.record.tenant);
   }
 }
 

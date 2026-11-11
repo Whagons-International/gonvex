@@ -17,6 +17,7 @@
  */
 import type { ClientFrame, Json } from "./decode";
 import type { Negotiated } from "./capabilities";
+import type { ConnectionReport } from "../presence/hub";
 
 export interface Account {
   id: string;
@@ -117,6 +118,8 @@ export interface SocketView {
   publicTransport: boolean;
   /** The gateway or object holding the socket, for replies outside a frame (delivery). */
   host: string;
+  /** K14: the socket's presence before a presence event (rebuild of a tenant object that lost its memory). */
+  presencePrevious?: ConnectionReport | null;
 }
 
 export interface ControlPort {
@@ -134,6 +137,8 @@ export interface ControlPort {
   revalidate(items: RevalidationItem[]): Promise<boolean[]>;
   /** Every `scope:"control"` frame (and `query.unsubscribe` of a control subscription). */
   dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]>;
+  /** K06 `connectionState` (optional): live support sessions and the close-time last-seen write (K14). */
+  connectionState?(connectionId: string, state: { projectId: string; tenantId: string; authenticated: boolean; supportSessionId?: string } | null): Promise<void>;
 }
 
 export interface ModuleInfo {
@@ -152,6 +157,8 @@ export interface ModulePort {
 export interface TenantPort {
   /** Tenant-scoped frames of a socket with a tenant session. Returns the frames to send, in order. */
   dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]>;
+  /** K14: the socket closed or changed session; the tenant removes its presence with grace. */
+  presenceLeave?(route: TenantRoute, connectionId: string, host: string, previous?: ConnectionReport | null): Promise<void>;
 }
 
 export interface Ports {

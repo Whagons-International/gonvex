@@ -101,7 +101,7 @@ const TRACE_ORDER = [
   "serverSubscriptionStartedAtMs", "serverSubscriptionSentAtMs", "serverDurationMs", "queryPerf",
 ] as const;
 /** A decoded `MessageTrace` re-serialized as serde does: struct order, absent fields skipped. */
-function echoTrace(trace: MessageTrace): Record<string, Json> {
+export function echoTrace(trace: MessageTrace): Record<string, Json> {
   const out: Record<string, Json> = {};
   for (const key of TRACE_ORDER) if (trace[key] !== undefined) out[key] = trace[key] as Json;
   return out;
