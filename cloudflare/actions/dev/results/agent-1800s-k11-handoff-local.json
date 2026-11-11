@@ -1,0 +1,62 @@
+{
+ "seconds": 1800,
+ "wallSeconds": 1810.283,
+ "enqueued": {
+  "id": "357fd332-c197-8d43-a75b-50e25f33aab9",
+  "instance": "h-357fd332-c197-8d43-a75b-50e25f33aab9-a1"
+ },
+ "workflow": {
+  "status": "complete",
+  "__LOCAL_DEV_STEP_OUTPUTS": [
+   {
+    "kind": "done",
+    "outcome": {
+     "ok": true
+    },
+    "renewals": {
+     "renewed": 18,
+     "errors": 0,
+     "gapsMs": {
+      "min": 100001,
+      "max": 100004
+     }
+    },
+    "hostCalls": 6180,
+    "fetches": 60
+   },
+   true
+  ],
+  "output": {
+   "kind": "done",
+   "outcome": {
+    "ok": true
+   },
+   "renewals": {
+    "renewed": 18,
+    "errors": 0,
+    "gapsMs": {
+     "min": 100001,
+     "max": 100004
+    }
+   },
+   "hostCalls": 6180,
+   "fetches": 60,
+   "reported": true
+  }
+ },
+ "tenant": {
+  "id": "357fd332-c197-8d43-a75b-50e25f33aab9",
+  "outbox": [],
+  "dead": [],
+  "events": [
+   {
+    "type": "action",
+    "id": "357fd332-c197-8d43-a75b-50e25f33aab9",
+    "function": "",
+    "attempt": 1,
+    "outcome": "completed"
+   }
+  ]
+ },
+ "measuredAt": "2026-11-11T22:49:48.731Z"
+}
