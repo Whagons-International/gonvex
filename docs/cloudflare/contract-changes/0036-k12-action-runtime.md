@@ -1,6 +1,6 @@
-# 0033: K12 Action runtime: interfaces, deviations and open questions
+# 0036: K12 Action runtime: interfaces, deviations and open questions
 
-Date: 2026-11-11. Status: **proposed by K12**, for the lead. Affects: K05, K06, K07, K11, K13, K19, K20, A01, M03,
+Date: 2026-11-11. Status: **proposed by K12**, for the lead. Renumbered to 0036 on rebase: 0033-0035 are K08, K11 and K13 (0032). Affects: K05, K06, K07, K11, K13, K19, K20, A01, M03,
 CONTRACT.md B.2a, B.6, E.b, E.c.1, D.1.
 
 Code: `cloudflare/actions/` (README there). Evidence: `test/parity.test.ts` (every step of the new conformance
@@ -14,7 +14,8 @@ with `dev/run-agent.mjs`.
 |---|---|---|
 | `TenantActionPort` | the tenant object (K07), composing `TenantActions` | `call` (a tool or `ctx.functions` Query/Reducer), `claim`, `renew`, `fail`, `complete`, `beginCall` |
 | `ControlPort` | the control object (K06) | `tenantSessionForAccount(project, tenant, account)`, `projectSecrets(project, names)` |
-| `SchedulerPort` | K11 | `enqueue({ id: "job_<uuid>", function, args, runAtUnixMs, coalesce, session, provenance })` |
+| `SchedulerPort` | K11 | `enqueue({ id: "job_<uuid>", function, args, runAtUnixMs, coalesce, session, provenance })` (an Action's `ctx.scheduler`) |
+| `ActionHandoff` (K11's port) | K12 `WorkflowHandoff` | `startAction(run)` → `{ accepted: true }`; the tenant exposes `renewRun` / `completeRun` over K11's `Scheduler.renew` / `complete` |
 | `StoragePort` | K13 | `call(operation, payload, session)`, Rust's `storage.call` |
 | `SandboxPort` | K20 | `call(operation, payload, session, duckdb)` |
 | `ActionWorker.call` | K05/K07 route `action.call` here | inline for standard and public Actions; `{ pending, id }` for agent Actions |
@@ -31,7 +32,7 @@ in the control object yet. **Needed before G2** for `ctx.functions` and secrets 
 
 | # | Rust | Kernel | Why |
 |---|---|---|---|
-| a | Lease state lives only in `_gonvex_action_outbox` | Kernel state (owner, hand-offs, receipts, dead rows, direct-call runs) lives in **`_gonvex_st_action_runs`**. A01's `addedObjects()` must list it, so that P03 export and M02 leave it out (the precedent is K02's stash table, 0028 §3.4). | Rust's table has a CHECK with only `pending`/`processing`, and must stay byte-compatible for export |
+| a | Lease state lives only in `_gonvex_action_outbox` | Kernel state (owner, hand-offs, receipts, dead rows, direct-call runs) lives in **`_gonvex_st_action_runs`** (after §4's ruling: direct-call runs only). A01's `addedObjects()` must list it, so that P03 export and M02 leave it out (the precedent is K02's stash table, 0028 §3.4). | Rust's table has a CHECK with only `pending`/`processing`, and must stay byte-compatible for export |
 | b | `renew_action` writes `locked_at` every 30 s | `locked_at` is written only when less than half of the 5-minute lease is left: 40 SQLite rows per running hour against Rust's 240 (rows plus index entries). An exported in-flight row's `locked_at` can be up to 150 s older than its last renewal. | S4 G0-8. M03 drains in-flight Actions before cutover, so nothing reads a stale `locked_at` |
 | c | Success deletes the row unfenced | Success deletes the row **fenced on the attempt**, in one transaction, and leaves a receipt for 7 days | Exactly once (S4) |
 | d | A failing outbox Action retries forever | Dead after 8 attempts (IB2). A chain past 32 hops is dead too (Rust deletes it). Dead rows leave Rust's table and keep everything an operator needs to requeue. Export back to Rust drops them. | IB2, E.c.1 |
@@ -62,12 +63,27 @@ refuses it.
    One over 512 KiB is applied from inside the run step, because a step result holds at most 1 MiB. Proposed: accept.
    Whagons agent turns return ids, not documents.
 
-## 4. Scheduled Actions (for K11)
+## 4. Relationship with K11 (0034, approved in 0032)
 
-Rust runs a scheduled Action once, at least once by lease, never retried (E.b.3). The kernel keeps that.
-`ActionOutbox.beginCall` plus `onFinished` already give "one run, one report, survives deploys", so K11 can hand a
-scheduled Action over that way and finish its job row from `onFinished`, with a failure ending `dead` (IB2). A
-separate origin `job` is not needed. K11 decides.
+K12 was briefed to persist leases and renew them from the tenant object. K11's approved design also claims outbox rows
+in the tenant object (one in flight per tenant, attempt-guarded, dead rows in `_gonvex_action_dead`). That makes two
+tenant-side implementations of the same protocol on `_gonvex_action_outbox`. K11's PR (#357) is not merged, so K12
+ships both sides, and the boundary is this:
+
+- **K11's hand-off is supported now.** `src/handoff.ts` implements K11's `ActionHandoff` port (`WorkflowHandoff`):
+  every Action K11's scheduler claims (an outbox Action or a scheduled Action) is accepted and runs in
+  `ActionWorkflow`. The run's claim is renewed through the tenant's `renewRun` (K11 `Scheduler.renew`), and the
+  outcome is reported once through `completeRun` (K11 `Scheduler.complete`). K11 keeps the row, its attempts,
+  retries and dead state. Tested in `test/handoff.test.ts` against a stand-in of those two methods.
+- **Proposed ruling: K11 owns outbox rows.** When K11 merges, the tenant object drains `_gonvex_action_outbox`
+  with K11's scheduler and K12's `WorkflowHandoff`. K12's `ActionOutbox` then keeps only its run of origin `call`:
+  direct agent `action.call`s, which K11 does not handle. Its outbox-origin path, which S4's scenarios exercise
+  here, is removed in a follow-up K12 PR. Its dead rows would otherwise duplicate `_gonvex_action_dead`.
+- **Difference to settle between the two.** K11 holds one outbox Action in flight per tenant. A 30-minute agent
+  Action queued from a Reducer would then hold every other outbox Action of that tenant for 30 minutes. Rust has
+  the same per-turn behavior (E.c.1), but runs Actions inline, so a long one blocks only its own drain lane. S4
+  measured exactly this head-of-line blocking on Queues. **Proposed:** agent-profile outbox Actions do not count
+  against K11's one-in-flight rule.
 
 ## 5. Platform follow-ups (blocked by the vault outage on 2026-11-11)
 

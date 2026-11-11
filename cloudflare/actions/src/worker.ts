@@ -17,6 +17,7 @@ import { WorkflowEntrypoint, WorkerEntrypoint, type WorkflowEvent, type Workflow
 import type { ModuleRegistry } from "../../kernel/host/src/index.js";
 import type { Fetcher } from "./fetch.js";
 import type { ActionJob } from "./outbox.js";
+import { runHandoff, type HandoffJob, type HandoffTenantPort } from "./handoff.js";
 import type { Completion, ControlPort, SandboxPort, SchedulerPort, StoragePort, TenantActionPort } from "./ports.js";
 import type { Provenance } from "./provenance.js";
 import { tenantRpc } from "./rpc.js";
@@ -52,7 +53,7 @@ export function configureActions<Env extends ActionEnv>(value: ActionWorkerConfi
   config = value as unknown as ActionWorkerConfig<never>;
 }
 
-type TenantStub = TenantActionPort & { beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }): Promise<string> };
+type TenantStub = TenantActionPort & HandoffTenantPort & { beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }): Promise<string> };
 
 function tenantStub(env: ActionEnv, tenantId: string): TenantStub {
   return (env.TENANT as unknown as { getByName(name: string): TenantStub }).getByName(tenantId);
@@ -84,9 +85,10 @@ type StepOutcome =
   | { kind: "skipped"; reason: string }
   | { kind: "lost"; attempt: number; renewals: number };
 
-export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, ActionJob> {
-  override async run(event: Readonly<WorkflowEvent<ActionJob>>, step: WorkflowStep) {
-    const job = event.payload;
+export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, ActionJob | HandoffJob> {
+  override async run(event: Readonly<WorkflowEvent<ActionJob | HandoffJob>>, step: WorkflowStep) {
+    if ("kind" in event.payload && event.payload.kind === "handoff") return this.handoff(event.payload, step);
+    const job = event.payload as ActionJob;
     // The engine retries a step within the same instance, so the same owner takes its own lease over at once.
     const owner = `workflow:${event.instanceId}`;
     const timeout = (this.env.ACTION_STEP_TIMEOUT ?? "24 hours") as "24 hours";
@@ -123,6 +125,27 @@ export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, ActionJob> {
     const completion = await step.do("apply result", { retries: { limit: 20, delay: "2 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () =>
       tenantRpc("complete", () => tenantStub(this.env, job.tenantId).complete({ v: 1, id: job.id, attempt: outcome.attempt, value: outcome.value, error: outcome.error })));
     return { ...outcome, value: undefined, completion };
+  }
+
+  /**
+   * A run K11's scheduler claimed and handed over (note 0034): run it with
+   * its claim renewed, then report the outcome once. K11 decides retry, dead
+   * or done. A crash retries the step; K11's claim is still ours until its
+   * lease runs out, after which a renewal is refused and the run stops.
+   */
+  private async handoff(job: HandoffJob, step: WorkflowStep) {
+    const timeout = (this.env.ACTION_STEP_TIMEOUT ?? "24 hours") as "24 hours";
+    const delay = (this.env.ACTION_STEP_RETRY_DELAY ?? "5 seconds") as "5 seconds";
+    const result = await step.do("run action", { retries: { limit: 10, delay, backoff: "exponential" }, timeout }, async () => {
+      const { runtime, tenant, control } = runtimeFor(this.env, job.tenantId);
+      const c = config as unknown as ActionWorkerConfig<ActionEnv>;
+      const outcome = await runHandoff({ runtime, tenant, control, renewMs: c.renewMs }, job);
+      return outcome.kind === "done" && !outcome.outcome.ok ? { ...outcome, outcome: { ok: false as const, error: outcome.outcome.error.slice(0, 8_000) } } : outcome;
+    });
+    if (result.kind === "lost") return result;
+    const reported = await step.do("report outcome", { retries: { limit: 20, delay: "2 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () =>
+      tenantRpc("completeRun", () => tenantStub(this.env, job.tenantId).completeRun({ v: 1, claim: job.run.claim, outcome: result.outcome })));
+    return { ...result, reported };
   }
 }
 

@@ -21,6 +21,7 @@ The reference is the Rust runtime at `0bf3ad13`: `rust/crates/runtime/src/action
 | `src/outbox.ts` | The tenant object's side: claim, renew, fail, complete, cancel, the sweep, dead rows, requeue, direct agent calls | `store/src/lib.rs:1214-1383`, S4 `tenant.ts` |
 | `src/runner.ts` | One hand-off on the Action side: claim, run with a renewal every 30 s, report | `execution.rs:1237-1344` |
 | `src/worker.ts` | `ActionWorkflow` (the Workflow), `ActionWorker.call` (direct `action.call`), `configureActions` | S4 `runner.ts` |
+| `src/handoff.ts` | K11's `ActionHandoff` port on a Workflow: runs a run K11 claimed, renews K11's claim, reports once (note 0036 §4) | K11 `ports.ts` |
 | `src/tenant.ts` | `TenantActions` (what the tenant object composes), `WorkflowDispatcher` | |
 | `src/ports.ts` | The interfaces to the tenant object, K06 (sessions, secrets), K11 (scheduler), K13 (storage), K20 (sandbox) | |
 | `src/rpc.ts` | Deploy skew: tenant RPC failures that are retried | 0016 G0-8 |
@@ -29,6 +30,10 @@ The reference is the Rust runtime at `0bf3ad13`: `rust/crates/runtime/src/action
 | `scripts/record-golden.mjs` | Records Rust's answers to the conformance scenario `actions` for `test/parity.test.ts` | |
 
 ## How an Action runs
+
+K11's scheduler (0034) also claims outbox rows in the tenant object. Until the lead rules on note 0036 §4, both paths
+exist. K11's drain hands its claimed runs to `WorkflowHandoff` (`src/handoff.ts`). K12's own `ActionOutbox`, below,
+serves direct agent calls, and the outbox protocol S4 proved.
 
 ```
 direct action.call (K05/K07) ──► ActionWorker.call ─┬─ standard / public: ActionRuntime.execute inline (15 min / 60 s)
@@ -129,7 +134,7 @@ pauses, over the real local network to the conformance upstream, renewing every 
 |---|---|
 | Routing `action.call` frames to `ActionWorker.call`, and delivering a direct agent call's result | K05, K07 |
 | The tenant object class that hosts `TenantActions`, calls `afterCommit` after a Reducer commit, and exposes the methods by RPC | K07 |
-| The alarm that calls `sweep()`; scheduled Actions handed to `ActionWorkflow` (note 0033 §4); the scheduler port | K11 |
+| The outbox drain and the alarm (0034); calling `WorkflowHandoff.startAction`; exposing `Scheduler.renew` / `complete` as the tenant's `renewRun` / `completeRun`; the scheduler port | K11 |
 | `_gonvex_files` and R2 behind `StoragePort` | K13 |
 | Sessions and `gonvex_project_env` behind `ControlPort` | K06 |
 | The sandbox behind `SandboxPort` | K20 |

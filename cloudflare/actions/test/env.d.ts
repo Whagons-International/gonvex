@@ -2,7 +2,7 @@
 declare namespace Cloudflare {
   interface Env {
     TENANT: DurableObjectNamespace<import("./worker.js").TestTenant>;
-    ACTION_WORKFLOW: Workflow<import("../src/outbox.js").ActionJob>;
+    ACTION_WORKFLOW: Workflow<import("../src/outbox.js").ActionJob | import("../src/handoff.js").HandoffJob>;
     ACTION_STEP_TIMEOUT: string;
     ACTION_STEP_RETRY_DELAY: string;
   }

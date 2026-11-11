@@ -16,6 +16,7 @@ import { ActionOutbox, type ActionJob, type CallFinished, type Dispatcher } from
 import type { ClaimRequest, CompleteRequest, ControlPort, FailRequest, RenewRequest, SchedulerPort, StoragePort, TenantCallRequest } from "../src/ports.js";
 import type { ActionSession } from "../src/session.js";
 import { TenantActions, WorkflowDispatcher } from "../src/tenant.js";
+import type { HandoffClaim, HandoffRunOutcome } from "../src/handoff.js";
 import { configureActions, type ActionEnv } from "../src/worker.js";
 import { BOARD_SQL, fixtureArtifact, PROJECT } from "./fixture.js";
 
@@ -99,6 +100,9 @@ export class TestTenant extends DurableObject<Env> {
   host!: TenantModuleHost;
   readonly recorded: ActionJob[] = [];
   readonly finished: CallFinished[] = [];
+  /** K11 stand-in for handed-off runs: live claims, and the outcomes reported. */
+  readonly claims = new Map<string, boolean>();
+  readonly reported: Array<{ claim: HandoffClaim; outcome: HandoffRunOutcome }> = [];
   readonly instance = crypto.randomUUID();
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -158,6 +162,19 @@ export class TestTenant extends DurableObject<Env> {
   fail(request: FailRequest) { return this.actions.fail(request); }
   complete(request: CompleteRequest) { return this.actions.complete(request); }
   beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }) { return this.actions.beginCall(request); }
+
+  // ---- K11 stand-in: Scheduler.renew / Scheduler.complete for handed-off runs ----
+  private claimKey(claim: HandoffClaim) { return claim.source === "outbox" ? `${claim.id}#${claim.attempt}` : `${claim.id}#${claim.token}`; }
+  grantClaim(claim: HandoffClaim) { this.claims.set(this.claimKey(claim), true); }
+  revokeClaim(claim: HandoffClaim) { this.claims.set(this.claimKey(claim), false); }
+  async renewRun(request: { v: 1; claim: HandoffClaim }) { return this.claims.get(this.claimKey(request.claim)) === true; }
+  async completeRun(request: { v: 1; claim: HandoffClaim; outcome: HandoffRunOutcome }) {
+    if (this.claims.get(this.claimKey(request.claim)) !== true) return false;
+    this.claims.set(this.claimKey(request.claim), false);
+    this.reported.push({ claim: request.claim, outcome: request.outcome });
+    return true;
+  }
+  reportedRuns() { return this.reported; }
 
   /** K07 stand-in: a Reducer queues the Action in its transaction; the hand-off follows the commit. */
   async enqueue(path: string, args: unknown, options: { accountId?: string; row?: string; skipHandoff?: boolean } = {}): Promise<string> {
