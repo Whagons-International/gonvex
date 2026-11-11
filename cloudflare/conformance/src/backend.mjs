@@ -86,4 +86,12 @@ export class Backend {
    * @returns {Promise<Array<Record<string, unknown>>>}
    */
   async readTable(project, tenantId, table) { throw new Error('readTable() not implemented'); }
+
+  /**
+   * Optional (`capabilities.changeLog`). The tenant's `_gonvex_sync_clock` row and
+   * every `_gonvex_sync_changes` and `_gonvex_sync_transactions` row, as plain
+   * objects with SQLite's column names. Used by the `change-capture` scenario.
+   * @returns {Promise<{ clock: { epoch: string, revision: number, retained_revision: number }, changes: object[], transactions: object[] }>}
+   */
+  async readChangeLog(project, tenantId) { throw new Error(`readChangeLog() not supported by ${this.name}`); }
 }
