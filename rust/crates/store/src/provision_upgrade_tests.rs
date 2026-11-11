@@ -1039,29 +1039,7 @@ async fn members_rebuild_keeps_the_membership_outbox_triggers() {
         .execute(&writer)
         .await
         .unwrap();
-    let rebuild = SqlMigration::new(
-        "0001_rebuild_members.sql".to_owned(),
-        MigrationScope::Tenant,
-        false,
-        "-- gonvex:foreign-key-rebuild
-         CREATE TABLE members_hold AS SELECT * FROM members;
-         DROP TABLE members;
-         CREATE TABLE members (
-           id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active',
-           display_name TEXT NOT NULL DEFAULT '', avatar_url TEXT NOT NULL DEFAULT '',
-           role TEXT NOT NULL DEFAULT 'member', permissions JSON NOT NULL DEFAULT '{}',
-           membership_revision INTEGER NOT NULL DEFAULT 1,
-           created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
-           nickname TEXT);
-         INSERT INTO members(id,account_id,status,display_name,avatar_url,role,permissions,
-           membership_revision,created_at,updated_at)
-         SELECT id,account_id,status,display_name,avatar_url,role,permissions,
-           membership_revision,created_at,updated_at FROM members_hold;
-         DROP TABLE members_hold;
-         CREATE INDEX members_by_role ON members(role);
-         CREATE INDEX members_by_status ON members(status,id);"
-            .to_owned(),
-    );
+    let rebuild = members_rebuild();
     control
         .clone()
         .provision_tenant_database(route.clone(), vec![rebuild])
@@ -1093,6 +1071,71 @@ async fn members_rebuild_keeps_the_membership_outbox_triggers() {
     .await
     .unwrap();
     assert_eq!(outbox, ("suspended".to_owned(), 2));
+    pools.close().await;
+}
+
+fn members_rebuild() -> SqlMigration {
+    SqlMigration::new(
+        "0001_rebuild_members.sql".to_owned(),
+        MigrationScope::Tenant,
+        false,
+        "-- gonvex:foreign-key-rebuild
+     CREATE TABLE members_hold AS SELECT * FROM members;
+     DROP TABLE members;
+     CREATE TABLE members (
+       id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active',
+       display_name TEXT NOT NULL DEFAULT '', avatar_url TEXT NOT NULL DEFAULT '',
+       role TEXT NOT NULL DEFAULT 'member', permissions JSON NOT NULL DEFAULT '{}',
+       membership_revision INTEGER NOT NULL DEFAULT 1,
+       created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
+       nickname TEXT);
+     INSERT INTO members(id,account_id,status,display_name,avatar_url,role,permissions,
+       membership_revision,created_at,updated_at)
+     SELECT id,account_id,status,display_name,avatar_url,role,permissions,
+       membership_revision,created_at,updated_at FROM members_hold;
+     DROP TABLE members_hold;
+     CREATE INDEX members_by_role ON members(role);
+     CREATE INDEX members_by_status ON members(status,id);"
+            .to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn a_failing_batch_after_a_members_rebuild_still_restores_the_membership_triggers() {
+    let dir = TestDir::new("gonvex-members-rebuild-failed-batch");
+    let data = crate::DataDir::new(&dir.0);
+    let pools = PoolRegistry::new(PoolLimits::default());
+    let control = ControlPlane::connect(&data.control_url(), pools.clone(), Default::default())
+        .await
+        .unwrap();
+    let route = TenantRoute {
+        project_id: "project".to_owned(),
+        tenant_id: "tenant".to_owned(),
+        database_url: data.tenant_url("project", "tenant").unwrap(),
+    };
+    let failing = SqlMigration::new(
+        "0002_failing.sql".to_owned(),
+        MigrationScope::Tenant,
+        false,
+        "SELECT * FROM missing_table;".to_owned(),
+    );
+    // The rebuild commits, then the batch fails: the tenant keeps the
+    // rebuilt `members` and must keep its membership triggers too.
+    control
+        .clone()
+        .provision_tenant_database(route.clone(), vec![members_rebuild(), failing])
+        .await
+        .unwrap_err();
+    let writer = pools.pool(&route.database_url).await.unwrap();
+    let (rebuilt, triggers): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM gonvex_migrations WHERE name='0001_rebuild_members.sql'),
+                (SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='members'
+                   AND name LIKE 'gonvex_queue_control_plane_membership_%')",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    assert_eq!((rebuilt, triggers), (1, 3));
     pools.close().await;
 }
 
