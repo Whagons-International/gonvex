@@ -87,7 +87,7 @@ scheduler.listDead({ limit, cursor }); await scheduler.requeueDead(id);         
 
 ## Differences from Rust
 
-Intended (IB2) and recorded in note 0030: the dead state, the attempt cap, the dead-actions table, the lease-lost
+Intended (IB2) and recorded in note 0034: the dead state, the attempt cap, the dead-actions table, the lease-lost
 cap on jobs, one outbox Action in flight per tenant instead of one drainer per process, attempt-guarded completion,
 alarm-driven wakes instead of 30 s polling, retention timing. Also:
 

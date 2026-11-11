@@ -110,12 +110,22 @@ export interface RawResult {
  * How writes reach the deferred foreign key check: "statements" closes each
  * writing statement's table over the schema's triggers and FK actions and
  * checks per table; "rows" relies only on `noteRows` reports (change
- * capture, K03), which name the rows, trigger writes included.
+ * capture, K03), which name the rows, trigger writes included; "mixed"
+ * (0028 §2d) tracks statements, but keeps the tables `rowReported` names
+ * row-level, because capture reports their rows before the check. Every
+ * other table written (derived, metadata, record storage, `_gonvex_*`)
+ * stays table-level.
  */
-export type WriteTracking = "statements" | "rows";
+export type WriteTracking = "statements" | "rows" | "mixed";
 
 export interface TenantStorageOptions {
   readonly writeTracking?: WriteTracking;
+  /**
+   * Mixed mode: whether capture reports the written rows of a table (a
+   * captured entity table with rowids; K03 `finalize` with `reportRows`).
+   * Called with the lowercase table name.
+   */
+  readonly rowReported?: (table: string) => boolean;
   /** Clock for the foreign key check's duration; performance.now() by default. */
   readonly now?: () => number;
 }
@@ -130,9 +140,11 @@ export class TenantStorage {
   private active = false;
   readonly now: () => number;
   writeTracking: WriteTracking;
+  rowReported: ((table: string) => boolean) | undefined;
 
   constructor(readonly storage: StorageHandle, options: TenantStorageOptions = {}) {
     this.writeTracking = options.writeTracking ?? "statements";
+    this.rowReported = options.rowReported;
     this.now = options.now ?? (() => performance.now());
   }
 
@@ -515,7 +527,9 @@ export class StorageSession {
   }
 
   private noteStatement(tokens: readonly Token[]): void {
-    if (this.tenant.writeTracking === "statements") this.written.noteStatement(tokens, this.foreignKeyModel());
+    const mode = this.tenant.writeTracking;
+    if (mode === "statements") this.written.noteStatement(tokens, this.foreignKeyModel());
+    else if (mode === "mixed") this.written.noteStatement(tokens, this.foreignKeyModel(), this.tenant.rowReported ?? (() => false));
   }
 
   /** Change capture (K03) or a writer reports the exact rows it wrote, for a row-level FK check. */

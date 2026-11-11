@@ -65,10 +65,10 @@ await pruneChangeLog(ctx.storage, { maxPages: 50 });
 
 ## K01 integration
 
-K01 (PR #339) was not merged when this was written. Capture is typed against its interface structurally
-(`CapturedSession`: `run`, `noteRows`, `kind`, `aborted`, `discarded`), and the tests use a stand-in with K01's
-transaction rules (`test/helpers.ts`). Once K01 lands, `invokeCaptured(tenantStorage, …)` takes its `TenantStorage`
-unchanged.
+Capture is typed against K01 structurally (`CapturedSession`: `run`, `noteRows`, `kind`, `aborted`, `discarded`).
+`test/capture-parity.test.ts` runs on K01's real `TenantStorage` in mixed write tracking (0028 §2e, wired by K07); the
+other tests still use the stand-in in `test/helpers.ts`. The Reducer path (K07) finalizes through `invokeCaptured`
+inside its storage transaction (`kernel/reducer/storage.ts`).
 
 **Row reports (0022 §2c).** With `reportRows: true`, finalize reports to `noteRows` the rowids its revision inserted
 or updated in captured entity tables, and deletes as table-level entries. It cannot report writes it does not see:

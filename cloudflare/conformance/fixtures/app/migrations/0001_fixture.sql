@@ -91,3 +91,9 @@ INSERT INTO _gonvex_record_views (name, storage_table, key_column, schema) VALUE
 INSERT INTO _gonvex_table_options (name, capture, owner_table, owner_column, owner_direction) VALUES ('capture_doc_tags', 'owned', 'capture_doc_storage', 'doc_id', 'outbound') ON CONFLICT (name) DO NOTHING;
 INSERT INTO _gonvex_record_dependencies (source_table, source_column, owner_storage, owner_column, owner_direction, watch_columns)
   VALUES ('capture_labels', 'id', 'capture_doc_storage', 'label_id', 'inbound', '["text"]') ON CONFLICT DO NOTHING;
+-- Visibility masks v2 (K09): permission tables, a grant source, data and inheriting children.
+CREATE TABLE IF NOT EXISTS mask_teams (id TEXT PRIMARY KEY NOT NULL, member_id TEXT NOT NULL, team_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mask_workspace_teams (id TEXT PRIMARY KEY NOT NULL, team_id TEXT NOT NULL, workspace_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mask_tasks (id TEXT PRIMARY KEY NOT NULL, workspace_id TEXT NOT NULL, creator_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mask_task_users (id TEXT PRIMARY KEY NOT NULL, task_id TEXT NOT NULL, member_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mask_notes (id TEXT PRIMARY KEY NOT NULL, task_id TEXT NOT NULL, author_id TEXT NOT NULL);

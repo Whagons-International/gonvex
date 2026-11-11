@@ -10,7 +10,7 @@
 // `_gonvex_action_outbox` stays byte for byte Rust's (K03 installs it and its
 // receipt digest covers the DDL). Its CHECK allows only `pending` and
 // `processing`, so an outbox Action that dies moves to `_gonvex_action_dead`
-// in the same transaction (IB2; note 0030).
+// in the same transaction (IB2; note 0034).
 //
 // Every statement binds the scheduler's clock instead of `unixepoch()`, so a
 // simulated clock drives the same SQL (test/whagons-day.test.ts).

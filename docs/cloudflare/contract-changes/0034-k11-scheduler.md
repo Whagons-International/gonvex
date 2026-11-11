@@ -1,4 +1,4 @@
-# 0030: K11 scheduler: how IB2 is stored, deviations, and findings for other packages
+# 0034: K11 scheduler: how IB2 is stored, deviations, and findings for other packages
 
 Date: 2026-11-11. Status: **proposed by K11**, waiting for the lead. Affects: K11, K03, K04, K07, K12, K19, A01,
 P03, M03, R02, R06. Implementation: `cloudflare/kernel/scheduler/` (README "Differences from Rust").

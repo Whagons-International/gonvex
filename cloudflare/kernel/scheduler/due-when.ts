@@ -10,7 +10,7 @@ import type { DueWhenEvaluator } from "./ports.ts";
 /**
  * Truthiness by storage class: NULL, 0, 0.0, '' and '0' are false, a BLOB is
  * true. Rust reads the type name sqlx reports, which follows a column's
- * declared type when the first column is a plain table column (note 0030 §5).
+ * declared type when the first column is a plain table column (note 0034 §5).
  */
 export function dueValueIsTruthy(value: SqlStorageValue | undefined): boolean {
   if (value === null || value === undefined) return false;
