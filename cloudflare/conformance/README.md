@@ -53,7 +53,7 @@ node --test test/mutation.check.mjs          # self-test: injected drift must be
 
 The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
 
-The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 16 scenarios on two debug-build backends takes about 2.5 minutes.
+The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 22 scenarios on two debug-build backends takes a few minutes.
 
 The `cloudflare` backend runs `wrangler dev` from `cloudflare/` (install its dependencies first) with the session layer's stub routes enabled; see `src/backends/cloudflare.mjs`.
 
@@ -82,7 +82,8 @@ The rules live in `RULES` in `src/normalize.mjs`, and each is unit-tested in `te
 | Server-minted race tokens (`snapshotId`, `windowRevision`, `stream`) become `<snapshotId>` and similar, unnumbered. | Two Live Query windows changing in one commit may be answered in either order. |
 | Opaque scopes and epochs become `<scope#n>` and `<epoch#n>`. | They are hashes or random values. |
 | Revisions become ranks `r1, r2, …`. Live Query `sequence` values get their own ranks, `s1, …`. In observations they become `<revision>`. Ranks are built from exactly-compared frames only; a watermark keeps the rank of an equal compared revision, else shows `<barrier>`. | Order is contract. Absolute numbers depend on provisioning. Watermarks are compared only as sent or not, and Rust sends or coalesces quiet-tenant watermarks on a timer, so their values must not renumber the session (0022 §6). |
-| Clocks (`*At`, `*Ms`, `since`, `serverTime`) become `<time>`. `trace` and `device` are dropped. Durations inside error text (`1999 ms`) become `<n> ms`. | They vary from run to run. |
+| Clocks (`*At`, `*Ms`, `since`, `serverTime`) become `<time>`, as numbers and as RFC 3339 strings (Control Plane timestamps such as `expiresAt`). `trace` and `device` are dropped. Durations inside error text (`1999 ms`) become `<n> ms`. | They vary from run to run. |
+| JWTs (`eyJ….eyJ….sig`) become `<jwt>`. | They are ID tokens an identity provider (the Firebase emulator) mints per run with clocks inside; a scenario sends them as `exchangeExternalToken` arguments. |
 | In error text, JavaScript stack frame lines (`\n    at …`) are stripped. | The message, which is the first line and includes the host wording such as `host call failed:`, is contract and compared exactly. Stack positions are not contract (ruling 0015). |
 | Digests and row hashes become `<digest>`. | They cover values that differ between runs. The digest self-check verifies each one on its own backend instead. |
 | `session.ready` loses `replicaNativeRows`, `replicaSetDigest` and `replicaFieldPatches`. | Rust advertises them to every socket, but the shipped SDK never uses them and the kernel does not advertise them (contract-changes 0012 R20). |
@@ -107,6 +108,12 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `presence` | Snapshot, active / idle / offline patches, a socket drop, two sockets for one Member, control-only refusal; SDK and thin client | |
 | `live-query-window` | Window initial result, a row entering and pushing one out, updates outside and inside the window, a delete inside, moving the window, the limit cap, unsubscribe | |
 | `control-auth` | Public settings, login failures, login, `accounts.me`, tenant auth in two tenants, refresh rotation and reuse of a rotated token, logout, invalid and unknown tokens, tenants and projects | |
+| `control-sessions` | The `auth` frame's branches (control-only, default tenant, project mismatch, non-member), login replay before the password check, key reuse across paths, refresh reuse after the 5 s grace revoking the family, logout of every session, password change | C.0, C.3.6-C.3.9 |
+| `control-tenants` | Live `tenants.mine` refreshed before the Reducer result, `tenants.create` domain rules, replay and conflicts, `getByDomain`, profile and timezone, member login provisioning, tenant-admin and project-admin refusals, seat limits and exceptions, soft delete | C.1 rows 4, 13-20, 58 |
+| `control-invitations` | Validation, a live list refreshed from another socket, lookup and the legacy lookup, update, revoke, provider policy, wrong account, acceptance with replay and a stale key, a payload without an acceptance Reducer, member providers, member password reset revoking sessions | C.1 rows 3, 12, 21-26, 59-60 |
+| `control-support` | Support sessions and commands, the tenant overview, support impersonation (single use, rotating reconnect credential), developer mode, self-provisioned developer membership, agent claim tokens, assistant and voice settings, project developers, demo accounts | C.1 rows 27-57 |
+| `control-external-auth` | Realm configuration and validation, `exchangeExternalToken` with the Firebase Auth Emulator (new account, returning identity, verified-email linking, invite-only signup, `previousRefreshToken`), token and provider failures, a Firebase-only project refusing passwords. Needs `GONVEX_CONFORMANCE_FIREBASE_EMULATOR`; skipped otherwise | C.1 rows 6, 9-11; C.3.4 |
+| `control-native-auth` | The native OAuth HTTP routes: `/auth/config`, authorize with PKCE and redirect registration, the callback's state handling, `/auth/token` with both grants, `/auth/logout`, CORS | C.3.5 |
 | `receipt-lost-reply` | A keyed call whose reply is lost; replay returns the stored result once; receipt query (found, unknown key, other path, missing args); same key with other args; a replayed rejection | `backend-receipts` lost_reply |
 | `receipt-crash` | A client process killed with SIGKILL after sending a keyed call; the backend killed after a commit (receipt, rows and SDK recovery intact) and right after a keyed send (exactly-once replay) | `sdk_process_crash`, `check_restart` |
 | `receipt-upgrade` | `/dev/sync` of generation 2 while connected: migration default for old rows, the new Reducer, a call pinned to the old artifact (`update_required`), generation 1 receipts still answering, SDKs on the v1 and v2 definitions | `sdk_module_upgrade`, `check_module_upgrade` |
@@ -166,6 +173,7 @@ Two receipt checks stay in `verification/backend-receipts/`, because they inject
 | `ctx.deploy(n)` | Deploys generation `n` of the fixture (2: upgrade, 3: client contract). |
 | `ctx.restart({ crash })` | Restarts the backend. `crash: true` kills it without shutdown. |
 | `ctx.api` and `ctx.fixtures[n].api` | Generated function references. |
+| `ctx.alias(value, name)` | Registers a server-minted id (a created tenant, invitation, account, grant) as `<name>`, as seeded ids are, so it compares across backends. |
 | `ctx.members.alice.memberIds.a` | The id of Member alice in tenant a. |
 | `ctx.tenants.a` | The tenant id. |
 | `ctx.project` | The project id. |
@@ -191,11 +199,40 @@ To extend the fixture, edit `fixtures/app`, and `fixtures/app-v2` for the upgrad
    - `createMember(projectId, tenantId, { email, password, name })`. It creates or reuses an account with a password login and makes it an active Member. It returns `{ accountId, memberId }`.
    - `readTable(projectId, tenantId, table)`, which returns every row as a plain object.
    - Optional: `restart({ crash })`, with `capabilities` returning `{ restart: true, crash: true }`. `wsUrl` must stay the same across a restart, because connected clients reconnect to it.
+   - Optional, for the control-plane scenarios: `createAccount(projectId, { email, password, name })` (a password login with no membership), `addProjectMember(projectId, { email, name, role })` (a project developer), `configureGoogleAuth(projectId, { redirectUri })` (native Google OAuth with a registered app redirect).
    - Optional: `readChangeLog(projectId, tenantId)`, with `capabilities.changeLog`, returning the tenant's `_gonvex_sync_clock` row and every `_gonvex_sync_changes` and `_gonvex_sync_transactions` row (`change-capture`). Rust reads the tenant file directly: its `/dev/data` routes refuse `_gonvex_*` tables.
 2. Register it in `src/backends/index.mjs`, or pass a module path: `--backend cf=path/to/backend.mjs`, where the default export is the class.
 3. Run `node src/cli.mjs --backend rust=rust --backend cf=cloudflare`. Rust is the reference. A diff is printed per step and per session, and the report is written to `--json`.
 
 Seeding goes through the adapter, because the routes that create test projects and password Members are not part of the contract. The session token always comes from `control.auth.passwordLogin` over the socket, because that is contract. `src/backends/mutant.mjs` is a worked example: Rust behind a proxy that rewrites frames, used by `test/mutation.check.mjs` to prove the differ catches drift.
+
+## Control plane (package K06)
+
+The `cloudflare-control` backend runs `cloudflare/control` in local workerd (`wrangler dev`): the
+control object, a stub tenant object and a minimal control socket owner. It serves `auth` and
+`scope:"control"` frames and the native OAuth routes; tenant-scope frames are refused, so run only the
+control scenarios against it. Admin work in the scenarios runs on control-only sockets with
+`capabilities.tenantControl=1`, as the dashboard does, so no tenant change feed is involved.
+
+```bash
+# Firebase Auth Emulator (Java 11+), for control-external-auth
+npx -y firebase-tools@15.35.0 emulators:start --only auth --project demo-gonvex-k06
+# Rust with the emulator decoder (docs/firebase-auth-emulator.md)
+(cd rust && cargo build --locked -p gonvex-runtime --features test-firebase-auth-emulator)
+
+export GONVEX_CONFORMANCE_FIREBASE_EMULATOR=127.0.0.1:9099
+node src/cli.mjs --backend rust=rust --backend cf=cloudflare-control \
+  --scenario control-auth --scenario control-sessions --scenario control-tenants \
+  --scenario control-invitations --scenario control-support --scenario control-external-auth \
+  --scenario control-native-auth
+```
+
+Both adapters give their backend `GONVEX_AUTH_URL` (its own base URL) and the fixed provider
+secret and Google fallback client of `CONFORMANCE_SECRETS` (`src/backends/rust.mjs`). With
+`GONVEX_CONFORMANCE_FIREBASE_EMULATOR` set they also enable the emulator decoder
+(`GONVEX_TEST_AUTH_EMULATOR`, `GONVEX_ENV=test`, `FIREBASE_AUTH_EMULATOR_HOST`). The two backends share
+one emulator, so `control-external-auth` never changes a Firebase user's verification: each state has
+its own user.
 
 ## Reference behaviours and known differences
 
@@ -205,6 +242,7 @@ The lead has accepted the following as Rust contract, as observed against Rust a
 2. **Stale `clientContract: 0`.** A Reducer call with a lower contract is accepted (`reducer-errors`, step 7). Only a stale `artifactHash` gives `update_required`.
 3. **Tenant ids are unique per runtime, not per project.** `gonvex_runtime_tenants.relationship_id` is the primary key, so the harness names tenants `<scenario>-<name>`.
 4. **Rust nondeterminism.** Quiet-tenant watermarks, no-op `needHashes` episodes and Live Query arrival order are absorbed by the normalization rules above.
+5. **`ControlChanged` echo.** Rust sends every `ControlChanged` locally and again through its database listener, so a live Control Query can refresh a second time shortly after a write. That only shows state that changed without a notification, such as the claim a failed `invitations.accept` leaves. The control object notifies once per write (contract-changes 0025). `control-invitations` reads the list on demand around failed acceptances instead of racing the echo.
 
 Other notes:
 

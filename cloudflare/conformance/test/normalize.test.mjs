@@ -189,3 +189,17 @@ test('ruling 0015: error messages stay exact, JavaScript stack lines are strippe
   // Observations get the same rule.
   assert.equal(normalizeValue({ error: rust }).error, error(rust));
 });
+
+test('RFC 3339 clock strings under clock keys are masked; other strings and keys are kept', () => {
+  const [{ frame }] = normalizeSession([{ dir: 'in', socket: 1, frame: { type: 'query.result', id: 'q1', result: [{ expiresAt: '2026-11-18T00:00:00.123+00:00', createdAt: '2026-11-11T09:30:00Z', name: '2026-11-11T09:30:00Z', state: 'pending' }] } }]);
+  assert.deepEqual(frame.result, [{ createdAt: '<time>', expiresAt: '<time>', name: '2026-11-11T09:30:00Z', state: 'pending' }]);
+  assert.deepEqual(normalizeValue({ lastSeenAt: '2026-11-11T09:30:00+00:00', label: 'x' }), { label: 'x', lastSeenAt: '<time>' });
+  assert.deepEqual(normalizeValue({ expiresAt: 'not a date' }), { expiresAt: 'not a date' });
+});
+
+test('JWTs (identity-provider ID tokens) are masked; other dotted strings are kept', () => {
+  const jwt = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.';
+  const [{ frame }] = normalizeSession([{ dir: 'out', socket: 1, frame: { type: 'action.call', id: 'a1', path: 'control.auth.exchangeExternalToken', scope: 'control', args: { provider: 'firebase', token: jwt, note: 'a.b.c' } } }]);
+  assert.deepEqual(frame.args, { note: 'a.b.c', provider: 'firebase', token: '<jwt>' });
+  assert.deepEqual(normalizeValue({ token: jwt }), { token: '<jwt>' });
+});
