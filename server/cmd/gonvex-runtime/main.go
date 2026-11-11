@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/server/internal/config"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 	gonvexruntime "github.com/gonvex/gonvex/server/internal/server"
 	"github.com/gonvex/gonvex/server/internal/supervisor"
 )
@@ -166,6 +167,11 @@ func runWorker(cfg config.Config) {
 		select {
 		case <-drainSignals:
 			drainSignals = nil
+			// The replacement worker (or container) is already serving and has
+			// its own connection budget against the same PostgreSQL: give back
+			// idle connections and keep none before draining sockets.
+			released := dbpool.BeginDrain()
+			slog.Info("worker draining: released idle database connections", "idleClosed", released.IdleClosed, "inUse", released.InUse)
 			go runtime.DrainWebSockets(0)
 			continue
 		case <-ctx.Done():

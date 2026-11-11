@@ -54,6 +54,7 @@ func Open(databaseURL string) (*sql.DB, error) {
 		budget:    runtimeBudget,
 	})
 	configureBudgeted(db)
+	runtimePools.add(db)
 	return db, nil
 }
 
