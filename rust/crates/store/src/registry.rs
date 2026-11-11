@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,7 +84,10 @@ impl Default for PoolLimits {
                 .min(u64::from(u32::MAX)) as u32,
             reader_opens: env_u64("GONVEX_DB_READER_OPENS", DEFAULT_READER_OPENS)
                 .min(u64::from(u32::MAX)) as u32,
-            acquire_timeout: Duration::from_secs(30),
+            // `GONVEX_DB_ACQUIRE_TIMEOUT_MS`, default 30 s.
+            acquire_timeout: Duration::from_millis(
+                env_u64("GONVEX_DB_ACQUIRE_TIMEOUT_MS", 30_000).max(1),
+            ),
         }
     }
 }
@@ -244,6 +247,33 @@ pub fn sqlite_connection_heap() -> i64 {
     sqlite_memory_used().saturating_sub(cache)
 }
 
+/// Schema heap of one connection (`SQLITE_DBSTATUS_SCHEMA_USED`), in bytes.
+async fn connection_schema_heap(
+    connection: &mut sqlx::SqliteConnection,
+) -> Result<i64, sqlx::Error> {
+    let mut handle = connection.lock_handle().await?;
+    let db = handle.as_raw_handle().as_ptr();
+    let (mut used, mut high) = (0i32, 0i32);
+    unsafe {
+        libsqlite3_sys::sqlite3_db_status(
+            db,
+            libsqlite3_sys::SQLITE_DBSTATUS_SCHEMA_USED,
+            &mut used,
+            &mut high,
+            0,
+        );
+    }
+    Ok(i64::from(used))
+}
+
+/// Parsed-schema heap held by the open writer connections, which the reader
+/// sweep cannot close (every open database keeps its writer).
+pub fn sqlite_writer_schema_heap() -> i64 {
+    WRITER_SCHEMA_HEAP.load(Ordering::Relaxed)
+}
+
+static WRITER_SCHEMA_HEAP: AtomicI64 = AtomicI64::new(0);
+
 /// Closes idle readers of `pool` until at most `keep` connections remain.
 async fn close_idle_readers(pool: &SqlitePool, keep: usize) {
     while pool.num_idle() > 0 && pool.size() as usize > keep {
@@ -262,10 +292,16 @@ async fn close_idle_readers(pool: &SqlitePool, keep: usize) {
 /// * otherwise: none.
 ///
 /// Warm readers count against the SQLite budget: while connection heap
-/// (schemas and statements) exceeds three quarters of
-/// `GONVEX_SQLITE_CACHE_BUDGET_MB`, the least recently read databases lose
-/// their warm reader first, then busy databases their idle extra readers.
-/// The remaining quarter is left to page caches.
+/// (schemas and statements) beyond the writers' schemas exceeds three
+/// quarters of `GONVEX_SQLITE_CACHE_BUDGET_MB`, the least recently read
+/// databases lose their warm reader first, then busy databases their idle
+/// extra readers. The remaining quarter is left to page caches.
+///
+/// Writers are excluded because closing readers cannot free them: once the
+/// writers' schemas alone exceeded the budget (15 tenants x 57 MB on staging,
+/// 2026-11-10), every sweep closed every warm reader and every page load
+/// reopened one, parsing the whole schema again, without ever reaching the
+/// budget.
 async fn sweep_readers(databases: &[Database], limits: &PoolLimits) {
     let now = now_ms();
     let busy_ms = u64::try_from(limits.idle_timeout.as_millis()).unwrap_or(u64::MAX);
@@ -273,6 +309,13 @@ async fn sweep_readers(databases: &[Database], limits: &PoolLimits) {
     let mut warm = Vec::new();
     let mut busy = Vec::new();
     for database in databases {
+        // Migrations grow a writer's schema after it opened; re-measure an
+        // idle writer (never waits for a busy one).
+        if let Some(mut writer) = database.writer.try_acquire() {
+            if let Ok(bytes) = connection_schema_heap(&mut writer).await {
+                database.writer_schema.set(bytes);
+            }
+        }
         let used = database.reader_used.load(Ordering::Relaxed);
         let idle_for = now.saturating_sub(used);
         let keep = if idle_for < busy_ms {
@@ -295,7 +338,9 @@ async fn sweep_readers(databases: &[Database], limits: &PoolLimits) {
     if budget == 0 || (warm.is_empty() && busy.is_empty()) {
         return;
     }
-    let allowance = i64::try_from(budget / 4 * 3).unwrap_or(i64::MAX);
+    let allowance = i64::try_from(budget / 4 * 3)
+        .unwrap_or(i64::MAX)
+        .saturating_add(sqlite_writer_schema_heap());
     if sqlite_connection_heap() <= allowance {
         return;
     }
@@ -321,6 +366,25 @@ async fn sweep_readers(databases: &[Database], limits: &PoolLimits) {
         if sqlite_connection_heap() <= allowance {
             return;
         }
+    }
+}
+
+/// One database's writer schema heap, kept in [`WRITER_SCHEMA_HEAP`] while
+/// the database is open. A reopened writer (a retired schema connection)
+/// replaces the previous measurement.
+#[derive(Default)]
+struct WriterSchema(AtomicI64);
+
+impl WriterSchema {
+    fn set(&self, bytes: i64) {
+        let previous = self.0.swap(bytes, Ordering::Relaxed);
+        WRITER_SCHEMA_HEAP.fetch_add(bytes - previous, Ordering::Relaxed);
+    }
+}
+
+impl Drop for WriterSchema {
+    fn drop(&mut self) {
+        WRITER_SCHEMA_HEAP.fetch_sub(*self.0.get_mut(), Ordering::Relaxed);
     }
 }
 
@@ -496,6 +560,8 @@ pub(crate) struct Database {
     /// When the budget sweep last closed this busy database's extra readers
     /// (`now_ms`; 0 = never). See [`busy_budget_close_interval_ms`].
     budget_closed: Arc<AtomicU64>,
+    /// This database's share of [`sqlite_writer_schema_heap`].
+    writer_schema: Arc<WriterSchema>,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Batched WAL syncs for `Durability::Full` (see `sync_barrier`).
@@ -647,6 +713,8 @@ impl PoolRegistry {
         let wal = crate::checkpoint::background_enabled()
             .then(|| crate::checkpoint::WalState::new(&path));
         let writer_wal = wal.clone();
+        let writer_schema = Arc::new(WriterSchema::default());
+        let measured = writer_schema.clone();
         // The writer creates the file and switches it to WAL before any reader
         // opens it; a read-only connection cannot change the journal mode.
         let writer_options = self.options(&path, false)?;
@@ -664,6 +732,7 @@ impl PoolRegistry {
             // installed on the writer only (readers never write).
             .after_connect(move |connection, _| {
                 let wal = writer_wal.clone();
+                let measured = measured.clone();
                 Box::pin(async move {
                     // Planner statistics: ANALYZE the tables whose size
                     // changed a lot since their last statistics (stale
@@ -678,6 +747,7 @@ impl PoolRegistry {
                             .await
                             .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
                     }
+                    measured.set(connection_schema_heap(connection).await?);
                     Ok(())
                 })
             })
@@ -716,6 +786,7 @@ impl PoolRegistry {
             reader_used,
             reader_open: Arc::new(Semaphore::new(1)),
             budget_closed: Arc::default(),
+            writer_schema,
             notify,
             locks: Arc::default(),
             sync: crate::sync_barrier::SyncBarrier::new(&path),

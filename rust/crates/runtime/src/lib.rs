@@ -156,12 +156,22 @@ const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
 // tenant-pool and visibility work. Bound fan-out below both the runtime's
 // normal module concurrency and the default per-database pool size.
 const REPLICA_OPEN_CONCURRENCY: usize = 8;
-// Tenant databases are independent shards. Provisioning them serially makes
-// rolling startup time grow linearly with the tenant count and can keep the
-// readiness endpoint unavailable long enough for the deployer to roll back a
-// healthy candidate. Keep the work bounded, but provision independent shards
-// concurrently so startup remains proportional to the slowest batch.
-const STARTUP_TENANT_PROVISION_CONCURRENCY: usize = 8;
+// Tenant databases provisioned at once during startup
+// (`GONVEX_STARTUP_PROVISION_CONCURRENCY`, default 1). Each provision opens the
+// tenant's writer, which parses the whole schema (57 MB of SQLite heap and
+// ~0.35 s of CPU for the Whagons tenant schema of 2026-11-10). Concurrent
+// parses contend on SQLite's global memory mutex, so batches are slower than
+// one at a time: 15 staging tenants took 23 s 8 at a time (11-13 s each,
+// 57-63 s on one vCPU, past the 30 s pool timeout) and 12 s one at a time.
+const DEFAULT_STARTUP_TENANT_PROVISION_CONCURRENCY: usize = 1;
+
+fn startup_tenant_provision_concurrency() -> usize {
+    std::env::var("GONVEX_STARTUP_PROVISION_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_STARTUP_TENANT_PROVISION_CONCURRENCY)
+}
 
 #[derive(Clone, Debug)]
 enum RuntimeEvent {
@@ -524,9 +534,10 @@ impl Runtime {
                     .clone()
                     .apply_control_migrations(module.migrations.clone())
                     .await?;
+                let routes = control.tenant_routes(&project).await?;
                 let provisioned = collect_bounded_ordered(
-                    control.tenant_routes(&project).await?,
-                    STARTUP_TENANT_PROVISION_CONCURRENCY,
+                    routes.clone(),
+                    startup_tenant_provision_concurrency(),
                     |route| {
                         let control = control.clone();
                         let migrations = module.migrations.clone();
@@ -534,8 +545,22 @@ impl Runtime {
                     },
                 )
                 .await;
-                for result in provisioned {
-                    result?;
+                // A tenant that failed alongside the others (typically a pool
+                // timeout while the batch parsed its schemas) is retried alone
+                // before the start is abandoned: an abandoned start restarts
+                // the container and repeats the whole batch.
+                for (route, result) in routes.into_iter().zip(provisioned) {
+                    if let Err(error) = result {
+                        tracing::warn!(
+                            tenant = %route.tenant_id,
+                            %error,
+                            "tenant provisioning failed during startup; retrying alone"
+                        );
+                        control
+                            .clone()
+                            .provision_tenant_database(route, module.migrations.clone())
+                            .await?;
+                    }
                 }
             }
             *self.inner.control_plane.write().await = Some(control);
