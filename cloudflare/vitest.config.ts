@@ -13,5 +13,6 @@ export default defineConfig({
     alias: { "@gonvex/module-sdk": fileURLToPath(new URL("../packages/module-sdk/src/index.ts", import.meta.url)) },
   },
   // scripts/*.test.mjs are Node tests (node --test), not workerd tests.
-  test: { include: ["test/**/*.test.ts", "kernel/**/*.test.ts"] },
+  // kernel/host (K04) runs with its own config: `vitest run --root kernel/host`.
+  test: { include: ["test/**/*.test.ts", "kernel/**/*.test.ts"], exclude: ["kernel/host/**", "**/node_modules/**"] },
 });

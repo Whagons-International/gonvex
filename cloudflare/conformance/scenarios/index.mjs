@@ -14,6 +14,7 @@ import receiptOwnerSwitch from './receipt-owner-switch.mjs';
 import receiptUpgrade from './receipt-upgrade.mjs';
 import receiptCrash from './receipt-crash.mjs';
 import storageSql from './storage-sql.mjs';
+import moduleHost from './module-host.mjs';
 import sessionHandshake from './session-handshake.mjs';
 import sessionFrames from './session-frames.mjs';
 import changeCapture from './change-capture.mjs';
@@ -30,6 +31,7 @@ export const SCENARIOS = [
   receiptOwnerSwitch,
   receiptUpgrade,
   storageSql,
+  moduleHost,
   sessionHandshake,
   sessionFrames,
   changeCapture,
