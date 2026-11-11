@@ -1,0 +1,1110 @@
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/.env.example b/compatibility/legacy-convex-v5.1.29-bridge/.env.example
+index f1adc9203f..a299b6b341 100644
+--- a/compatibility/legacy-convex-v5.1.29-bridge/.env.example
++++ b/compatibility/legacy-convex-v5.1.29-bridge/.env.example
+@@ -8,12 +8,10 @@ LEGACY_BRIDGE_GONVEX_WS_URL=ws://127.0.0.1:18080/ws
+ LEGACY_BRIDGE_PROJECT_ID=whagons-5
+ LEGACY_BRIDGE_DEFAULT_TENANT=testing
+ 
+-# Use a local PostgreSQL login with SELECT access plus INSERT on boardMessages
+-# in the isolated tenant DB. The bridge uses that write only when the immutable
+-# v5.1.29 app posts to a legacy board whose modern Boards powerup is disabled.
+-# The URL's database path is replaced with LEGACY_BRIDGE_TENANT_DATABASE.
+-LEGACY_BRIDGE_DATABASE_URL=postgres://bridge_reader:change-me@127.0.0.1:5432/postgres
+-LEGACY_BRIDGE_TENANT_DATABASE=testing_whagons_5
++# Optional gvx_svc_ credential of the runtime's "whagons-legacy-bridge" service
++# principal (README "Service principal"). Used only when a released app posts
++# to a board whose Boards powerup is disabled; without it that post fails.
++LEGACY_BRIDGE_SERVICE_TOKEN=
+ 
+ # Local compatibility state. It can contain share tokens and draft text.
+ LEGACY_BRIDGE_STATE_PATH=.local/v5.1.29-compat-state.json
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/README.md b/compatibility/legacy-convex-v5.1.29-bridge/README.md
+index af09403ce5..54a9afb244 100644
+--- a/compatibility/legacy-convex-v5.1.29-bridge/README.md
++++ b/compatibility/legacy-convex-v5.1.29-bridge/README.md
+@@ -253,9 +253,10 @@ npx gonvex dev --once \
+ The local project key must be available through the standard Gonvex local
+ configuration. Never place it in the mobile app or this bridge's committed files.
+ 
+-Prepare and run the bridge. The local database role needs read access plus
+-`INSERT` on `boardMessages`; that insert is used only for the scoped v5.1.29
+-legacy-board fallback when the modern Boards powerup is disabled:
++Prepare and run the bridge. The bridge never opens a database. The one write
++no member session may make, a released app's post to a board whose Boards
++powerup is disabled, goes through a Gonvex service principal (see "Service
++principal" below); without one, that post fails with the runtime's error:
+ 
+ ```bash
+ cd compatibility/legacy-convex-v5.1.29-bridge
+@@ -301,8 +302,7 @@ LEGACY_BRIDGE_GONVEX_HTTP_URL=http://<unified-runtime-container>:8080
+ LEGACY_BRIDGE_GONVEX_WS_URL=ws://<unified-runtime-container>:8080/ws
+ LEGACY_BRIDGE_PROJECT_ID=<development Gonvex project UUID>
+ LEGACY_BRIDGE_DEFAULT_TENANT=whagons
+-LEGACY_BRIDGE_DATABASE_URL=<internal PostgreSQL connection URL>
+-LEGACY_BRIDGE_TENANT_DATABASE=<development project database>
++LEGACY_BRIDGE_SERVICE_TOKEN=<gvx_svc_ credential, see "Service principal">
+ LEGACY_BRIDGE_STATE_PATH=/var/lib/legacy-convex-bridge/state.json
+ LEGACY_BRIDGE_DEBUG_ENABLED=false
+ # Optional; see "Project and tenant aliases" and "Forced updates".
+@@ -313,7 +313,7 @@ LEGACY_BRIDGE_BLOCKED_APP_VERSIONS=
+ LEGACY_BRIDGE_FORCED_UPDATE_DISABLE_ACCESS=
+ ```
+ 
+-Do not place any of these values in a mobile build. Keep the database URL in
++Do not place any of these values in a mobile build. Keep the service token in
+ Coolify's encrypted application environment. The application must use a persistent
+ volume for `/var/lib/legacy-convex-bridge`. A Docker application can use:
+ 
+@@ -325,6 +325,39 @@ volume for `/var/lib/legacy-convex-bridge`. A Docker application can use:
+ --security-opt no-new-privileges:true
+ ```
+ 
++## Service principal
++
++The runtime keeps each tenant in its own SQLite file (Rust) or Durable Object
++(Cloudflare), so the bridge has no database to write. A released app's post to
++a board whose Boards powerup is disabled (`boards.createMessage` fails with
++`Boards powerup is disabled for this tenant`) is written by the internal
++Reducer `legacyBridge.createBoardMessage` instead, called on a service socket
++(Gonvex `docs/service-principals.md`). The bridge first checks, through the
++member's own session, that the board exists and that the member may publish
++to it; the Reducer checks both again in its transaction. The message id and
++the runtime idempotency key derive from the phone's write intent, so a retry
++or a bridge restart after commit creates one post.
++
++Create a credential and configure the runtime with its digest:
++
++```bash
++token="gvx_svc_$(openssl rand -hex 32)"
++printf %s "$token" | sha256sum
++```
++
++```json
++[{"id":"whagons-legacy-bridge","tokenSha256":"<hex>","projects":["<project>"],
++  "functions":["legacyBridge.createBoardMessage"]}]
++```
++
++Add that entry to the runtime's `GONVEX_SERVICE_PRINCIPALS` and set
++`LEGACY_BRIDGE_SERVICE_TOKEN=$token` on the bridge. The id must be
++`whagons-legacy-bridge`: the Reducer refuses every other caller. Without the
++token the fallback fails closed with
++`legacy board message service principal is not configured`.
++`LEGACY_BRIDGE_DATABASE_URL` and `LEGACY_BRIDGE_TENANT_DATABASE` are no longer
++read; a set `LEGACY_BRIDGE_DATABASE_URL` only logs that it is ignored.
++
+ ## Project and tenant aliases
+ 
+ Phones send the project id compiled into their build. Released 5.1.31+
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/bridge.go b/compatibility/legacy-convex-v5.1.29-bridge/bridge.go
+index 7956c68741..7630524dd9 100644
+--- a/compatibility/legacy-convex-v5.1.29-bridge/bridge.go
++++ b/compatibility/legacy-convex-v5.1.29-bridge/bridge.go
+@@ -3,7 +3,6 @@ package main
+ import (
+ 	"context"
+ 	"crypto/sha256"
+-	"database/sql"
+ 	"encoding/base64"
+ 	"encoding/binary"
+ 	"encoding/json"
+@@ -21,10 +20,8 @@ import (
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+-	"unicode/utf16"
+ 
+ 	"github.com/gorilla/websocket"
+-	_ "github.com/jackc/pgx/v5/stdlib"
+ )
+ 
+ const (
+@@ -46,9 +43,12 @@ type Config struct {
+ 	DefaultTenantID    string
+ 	DebugEnabled       bool
+ 	VoiceFallbackText  string
+-	DatabaseURL        string
+-	TenantDatabaseName string
+-	OperationTimeout   time.Duration
++	// ServicePrincipalToken is the bridge's `gvx_svc_` credential. It is used
++	// only for writes that no member session may make, such as the legacy board
++	// post fallback (service_principal_writes.go). The runtime binds it to the
++	// project and an allowlist of internal functions.
++	ServicePrincipalToken string
++	OperationTimeout      time.Duration
+ 
+ 	// Upstream lifecycle. Zero values select the production defaults; a
+ 	// negative UpstreamPingInterval disables keepalive (tests only).
+@@ -83,7 +83,6 @@ type Server struct {
+ 
+ 	gonvexHTTP               *url.URL
+ 	publicBase               *url.URL
+-	compatDB                 *sql.DB
+ 	compatBoardMessageWriter func(context.Context, map[string]any) (any, error)
+ 
+ 	dedupe *dedupeCache
+@@ -181,6 +180,10 @@ func NewServer(config Config) (*Server, error) {
+ 	if config.OperationTimeout <= 0 {
+ 		config.OperationTimeout = defaultOperationTimeout
+ 	}
++	config.ServicePrincipalToken = strings.TrimSpace(config.ServicePrincipalToken)
++	if config.ServicePrincipalToken != "" && !strings.HasPrefix(config.ServicePrincipalToken, servicePrincipalTokenPrefix) {
++		return nil, fmt.Errorf("ServicePrincipalToken must start with %s", servicePrincipalTokenPrefix)
++	}
+ 	if config.UpstreamPingInterval == 0 {
+ 		config.UpstreamPingInterval = defaultUpstreamPingInterval
+ 	}
+@@ -216,23 +219,7 @@ func NewServer(config Config) (*Server, error) {
+ 		gonvexHTTP:   gonvexHTTP,
+ 		publicBase:   publicBase,
+ 	}
+-	if strings.TrimSpace(config.DatabaseURL) != "" {
+-		databaseURL, err := tenantDatabaseURL(config.DatabaseURL, config.TenantDatabaseName)
+-		if err != nil {
+-			return nil, err
+-		}
+-		server.compatDB, err = sql.Open("pgx", databaseURL)
+-		if err != nil {
+-			return nil, fmt.Errorf("open compatibility tenant database: %w", err)
+-		}
+-		pingCtx, cancel := context.WithTimeout(context.Background(), config.OperationTimeout)
+-		defer cancel()
+-		if err := server.compatDB.PingContext(pingCtx); err != nil {
+-			_ = server.compatDB.Close()
+-			return nil, fmt.Errorf("connect compatibility tenant database: %w", err)
+-		}
+-	}
+-	server.compatBoardMessageWriter = server.insertLegacyBoardMessage
++	server.compatBoardMessageWriter = server.writeLegacyBoardMessage
+ 	if err := server.loadPublicShares(); err != nil {
+ 		return nil, err
+ 	}
+@@ -251,20 +238,6 @@ func NewServer(config Config) (*Server, error) {
+ 	return server, nil
+ }
+ 
+-func tenantDatabaseURL(raw, databaseName string) (string, error) {
+-	parsed, err := url.Parse(strings.TrimSpace(raw))
+-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+-		return "", fmt.Errorf("parse DatabaseURL %q: %w", raw, err)
+-	}
+-	databaseName = strings.TrimSpace(databaseName)
+-	if databaseName == "" {
+-		return "", errors.New("TenantDatabaseName is required when DatabaseURL is set")
+-	}
+-	parsed.Path = "/" + databaseName
+-	parsed.RawPath = ""
+-	return parsed.String(), nil
+-}
+-
+ // sourceCommit is set by the image build, never by runtime environment.
+ var sourceCommit = "unknown"
+ 
+@@ -1308,79 +1281,6 @@ func unixMillis(value any) (float64, bool) {
+ 	}
+ }
+ 
+-// legacyBoardMessageInsertSQL writes the compatibility projection row. Tenant
+-// tables carry no tenantId column (migrations/0001_drop_tenant_id.sql dropped
+-// it; the compat DB is already the tenant's own database), so the column must
+-// not appear here or the insert fails with SQLSTATE 42703 on every migrated
+-// tenant. tenantID is still validated by the caller for the legacy contract.
+-const legacyBoardMessageInsertSQL = `
+-		INSERT INTO "boardMessages" (
+-			"_id", "_creationTime", "boardId", "createdBy",
+-			"title", "content", "isPinned", "startsAt", "endsAt"
+-		)
+-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+-	`
+-
+-func (s *Server) insertLegacyBoardMessage(ctx context.Context, values map[string]any) (any, error) {
+-	if s.compatDB == nil {
+-		return nil, errors.New("legacy board message database projection is not configured")
+-	}
+-	tenantID := strings.TrimSpace(fmt.Sprint(values["tenantId"]))
+-	boardID := strings.TrimSpace(fmt.Sprint(values["boardId"]))
+-	createdBy := strings.TrimSpace(fmt.Sprint(values["createdBy"]))
+-	title := strings.TrimSpace(fmt.Sprint(values["title"]))
+-	content := strings.TrimSpace(fmt.Sprint(values["content"]))
+-	if title == "<nil>" {
+-		title = ""
+-	}
+-	if content == "<nil>" {
+-		content = ""
+-	}
+-	if tenantID == "" || boardID == "" || createdBy == "" {
+-		return nil, errors.New("legacy board message tenant, board, and author are required")
+-	}
+-	if title == "" && content == "" {
+-		return nil, errors.New("Post content is required")
+-	}
+-	if len(utf16.Encode([]rune(title))) > 200 {
+-		return nil, errors.New("Post title cannot exceed 200 characters")
+-	}
+-	if len(utf16.Encode([]rune(content))) > 20000 {
+-		return nil, errors.New("Post content cannot exceed 20000 characters")
+-	}
+-
+-	var startsAt any
+-	if value, ok := unixMillis(values["startsAt"]); ok {
+-		startsAt = int64(value)
+-	}
+-	var endsAt any
+-	if value, ok := unixMillis(values["endsAt"]); ok {
+-		endsAt = int64(value)
+-	}
+-	if startsAt != nil && endsAt != nil && endsAt.(int64) <= startsAt.(int64) {
+-		return nil, errors.New("Post end time must be after its start time")
+-	}
+-	isPinned := false
+-	if value, ok := values["isPinned"].(bool); ok {
+-		isPinned = value
+-	}
+-
+-	now := time.Now().UTC().UnixMilli()
+-	messageID := fmt.Sprintf("legacy-board-message-%d-%d", now, s.compatSerial.Add(1))
+-	result, err := s.compatDB.ExecContext(ctx, legacyBoardMessageInsertSQL,
+-		messageID, now, boardID, createdBy, nilIfEmpty(title), nilIfEmpty(content), isPinned, startsAt, endsAt)
+-	if err != nil {
+-		return nil, fmt.Errorf("insert legacy board message: %w", err)
+-	}
+-	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+-		if err != nil {
+-			return nil, fmt.Errorf("confirm legacy board message insert: %w", err)
+-		}
+-		return nil, fmt.Errorf("insert legacy board message affected %d rows", affected)
+-	}
+-	return messageID, nil
+-}
+-
+ func legacyUserAliases(user any) []string {
+ 	object, _ := user.(map[string]any)
+ 	seen := map[string]bool{}
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/bridge_test.go b/compatibility/legacy-convex-v5.1.29-bridge/bridge_test.go
+index 6986d4489d..6f12c957c2 100644
+--- a/compatibility/legacy-convex-v5.1.29-bridge/bridge_test.go
++++ b/compatibility/legacy-convex-v5.1.29-bridge/bridge_test.go
+@@ -2123,19 +2123,6 @@ func TestLegacyProtocolKindAdaptersAreExplicit(t *testing.T) {
+ 	}
+ }
+ 
+-func TestCompatibilityDatabaseURLTargetsOnlyTheConfiguredTenantDatabase(t *testing.T) {
+-	result, err := tenantDatabaseURL(
+-		"postgres://local-user:local-password@127.0.0.1:5432/gonvex_control?sslmode=disable",
+-		"testing_whagons_5",
+-	)
+-	if err != nil {
+-		t.Fatalf("translate tenant database URL: %v", err)
+-	}
+-	if result != "postgres://local-user:local-password@127.0.0.1:5432/testing_whagons_5?sslmode=disable" {
+-		t.Fatalf("tenant database URL = %q", result)
+-	}
+-}
+-
+ func TestLegacyUserAliasesCoverCanonicalAndConvexEraIDs(t *testing.T) {
+ 	aliases := legacyUserAliases(map[string]any{
+ 		"_id":         "canonical-user-a",
+@@ -3610,17 +3597,6 @@ func TestLegacyBoardByIDToleratesTenantIDFreeRows(t *testing.T) {
+ 	}
+ }
+ 
+-// The compat projection insert runs against the tenant database, whose tables
+-// no longer have a tenantId column. Referencing it fails with SQLSTATE 42703.
+-func TestLegacyBoardMessageInsertDoesNotWriteTenantIDColumn(t *testing.T) {
+-	if strings.Contains(legacyBoardMessageInsertSQL, "tenantId") {
+-		t.Fatalf("legacy board message insert still references the dropped tenantId column:\n%s", legacyBoardMessageInsertSQL)
+-	}
+-	if !strings.Contains(legacyBoardMessageInsertSQL, `"boardId"`) || !strings.Contains(legacyBoardMessageInsertSQL, "$9") {
+-		t.Fatalf("legacy board message insert lost expected columns:\n%s", legacyBoardMessageInsertSQL)
+-	}
+-}
+-
+ func TestDisabledBoardsPowerupFallbackResolvesTenantIDFreeBoards(t *testing.T) {
+ 	upstream := newTestUpstream(t)
+ 	// Released board writes are rebuilt with the authenticated member id.
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/go.mod b/compatibility/legacy-convex-v5.1.29-bridge/go.mod
+index fd0576ac87..094ed14f2a 100644
+--- a/compatibility/legacy-convex-v5.1.29-bridge/go.mod
++++ b/compatibility/legacy-convex-v5.1.29-bridge/go.mod
+@@ -4,13 +4,5 @@ go 1.25.0
+ 
+ require (
+ 	github.com/gorilla/websocket v1.5.3
+-	github.com/jackc/pgx/v5 v5.9.2
+ 	golang.org/x/text v0.41.0
+ )
+-
+-require (
+-	github.com/jackc/pgpassfile v1.0.0 // indirect
+-	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+-	github.com/jackc/puddle/v2 v2.2.2 // indirect
+-	golang.org/x/sync v0.22.0 // indirect
+-)
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/go.sum b/compatibility/legacy-convex-v5.1.29-bridge/go.sum
+index 163dacfd22..5be25b1ba5 100644
+--- a/compatibility/legacy-convex-v5.1.29-bridge/go.sum
++++ b/compatibility/legacy-convex-v5.1.29-bridge/go.sum
+@@ -1,28 +1,4 @@
+-github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+-github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+-github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+ github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
+-github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsIM=
+-github.com/jackc/pgpassfile v1.0.0/go.mod h1:CEx0iS5ambNFdcRtxPj5JhEz+xB6uRky5eyVu/W2HEg=
+-github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 h1:iCEnooe7UlwOQYpKFhBabPMi4aNAfoODPEFNiAnClxo=
+-github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761/go.mod h1:5TJZWKEWniPve33vlWYSoGYefn3gLQRzjfDlhSJ9ZKM=
+-github.com/jackc/pgx/v5 v5.9.2 h1:3ZhOzMWnR4yJ+RW1XImIPsD1aNSz4T4fyP7zlQb56hw=
+-github.com/jackc/pgx/v5 v5.9.2/go.mod h1:mal1tBGAFfLHvZzaYh77YS/eC6IX9OWbRV1QIIM0Jn4=
+-github.com/jackc/puddle/v2 v2.2.2 h1:PR8nw+E/1w0GLuRFSmiioY6UooMp6KJv0/61nB7icHo=
+-github.com/jackc/puddle/v2 v2.2.2/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
+-github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+-github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+-github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
+-github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UVUgZn+9EI=
+-github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
+-github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+-github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+-golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=
+-golang.org/x/sync v0.22.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+ golang.org/x/text v0.41.0 h1:vz/seA0lnX87Othu2f/0L24RcgrXD9/YFTSuGjj3rH8=
+ golang.org/x/text v0.41.0/go.mod h1:jvf1O8ajNzZqhSrQBPbutR/EB83Cc0CFrezNQIwbb5M=
+-gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+-gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+-gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+-gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/main.go b/compatibility/legacy-convex-v5.1.29-bridge/main.go
+index 73cb3500eb..5bb7ab493e 100644
+--- a/compatibility/legacy-convex-v5.1.29-bridge/main.go
++++ b/compatibility/legacy-convex-v5.1.29-bridge/main.go
+@@ -50,21 +50,27 @@ func main() {
+ 	if err != nil {
+ 		log.Fatal(err)
+ 	}
++	if strings.TrimSpace(os.Getenv("LEGACY_BRIDGE_DATABASE_URL")) != "" {
++		// The bridge no longer opens a tenant database: the runtime keeps each
++		// tenant in its own SQLite file or Durable Object. Board posts that need
++		// the compatibility write use LEGACY_BRIDGE_SERVICE_TOKEN instead.
++		log.Printf("LEGACY_BRIDGE_DATABASE_URL is ignored; set LEGACY_BRIDGE_SERVICE_TOKEN for the legacy board post fallback")
++	}
+ 	config := Config{
+-		GonvexWebSocketURL:  env("LEGACY_BRIDGE_GONVEX_WS_URL", "ws://127.0.0.1:18080/ws"),
+-		GonvexHTTPURL:       env("LEGACY_BRIDGE_GONVEX_HTTP_URL", "http://127.0.0.1:18080"),
+-		PublicBaseURL:       env("LEGACY_BRIDGE_PUBLIC_BASE_URL", "http://127.0.0.1:18081"),
+-		ProjectID:           env("LEGACY_BRIDGE_PROJECT_ID", "whagons-5"),
+-		StatePath:           env("LEGACY_BRIDGE_STATE_PATH", ".local/v5.1.29-public-shares.json"),
+-		DefaultTenantID:     env("LEGACY_BRIDGE_DEFAULT_TENANT", "testing"),
+-		DebugEnabled:        envBool("LEGACY_BRIDGE_DEBUG_ENABLED"),
+-		VoiceFallbackText:   strings.TrimSpace(os.Getenv("LEGACY_BRIDGE_VOICE_FALLBACK_TEXT")),
+-		DatabaseURL:         strings.TrimSpace(os.Getenv("LEGACY_BRIDGE_DATABASE_URL")),
+-		TenantDatabaseName:  env("LEGACY_BRIDGE_TENANT_DATABASE", "testing_whagons_5"),
+-		ForcedUpdate:        forcedUpdate,
+-		ConvexSDKMaxVersion: convexSDKMaxVersion,
+-		ProjectAliases:      projectAliases,
+-		TenantAliases:       tenantAliases,
++		GonvexWebSocketURL: env("LEGACY_BRIDGE_GONVEX_WS_URL", "ws://127.0.0.1:18080/ws"),
++		GonvexHTTPURL:      env("LEGACY_BRIDGE_GONVEX_HTTP_URL", "http://127.0.0.1:18080"),
++		PublicBaseURL:      env("LEGACY_BRIDGE_PUBLIC_BASE_URL", "http://127.0.0.1:18081"),
++		ProjectID:          env("LEGACY_BRIDGE_PROJECT_ID", "whagons-5"),
++		StatePath:          env("LEGACY_BRIDGE_STATE_PATH", ".local/v5.1.29-public-shares.json"),
++		DefaultTenantID:    env("LEGACY_BRIDGE_DEFAULT_TENANT", "testing"),
++		DebugEnabled:       envBool("LEGACY_BRIDGE_DEBUG_ENABLED"),
++		VoiceFallbackText:  strings.TrimSpace(os.Getenv("LEGACY_BRIDGE_VOICE_FALLBACK_TEXT")),
++		// Never logged. See service_principal_writes.go.
++		ServicePrincipalToken: os.Getenv("LEGACY_BRIDGE_SERVICE_TOKEN"),
++		ForcedUpdate:          forcedUpdate,
++		ConvexSDKMaxVersion:   convexSDKMaxVersion,
++		ProjectAliases:        projectAliases,
++		TenantAliases:         tenantAliases,
+ 	}
+ 	server, err := NewServer(config)
+ 	if err != nil {
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/scripts/run-local.sh b/compatibility/legacy-convex-v5.1.29-bridge/scripts/run-local.sh
+index 4de4ba1a7d..bece627814 100755
+--- a/compatibility/legacy-convex-v5.1.29-bridge/scripts/run-local.sh
++++ b/compatibility/legacy-convex-v5.1.29-bridge/scripts/run-local.sh
+@@ -16,10 +16,5 @@ set -a
+ . "$env_file"
+ set +a
+ 
+-if [ -z "${LEGACY_BRIDGE_DATABASE_URL:-}" ]; then
+-  echo "LEGACY_BRIDGE_DATABASE_URL is required for v5.1.29 notification compatibility." >&2
+-  exit 1
+-fi
+-
+ cd "$bridge_dir"
+ exec go run .
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/service_principal_writes.go b/compatibility/legacy-convex-v5.1.29-bridge/service_principal_writes.go
+new file mode 100644
+index 0000000000..89a80fe1da
+--- /dev/null
++++ b/compatibility/legacy-convex-v5.1.29-bridge/service_principal_writes.go
+@@ -0,0 +1,126 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strings"
++	"time"
++	"unicode/utf16"
++)
++
++// The bridge's writes that no member session may make go through a Gonvex
++// service principal, never through the tenant database: the runtime keeps each
++// tenant in its own SQLite file (Rust) or Durable Object (Cloudflare), so there
++// is no database for the bridge to open.
++//
++// The runtime is configured with one principal for the bridge, for example:
++//
++//	{"id":"whagons-legacy-bridge","tokenSha256":"<hex>","projects":["<project>"],
++//	 "functions":["legacyBridge.createBoardMessage"]}
++//
++// A service socket is bound to one project and tenant at `auth`, may call only
++// the allowlisted functions, and runs them as the system identity
++// `_gonvex_service:whagons-legacy-bridge` on the `api` channel
++// (gonvex docs/service-principals.md). The function re-checks everything the
++// write depends on in its own transaction.
++const (
++	servicePrincipalTokenPrefix   = "gvx_svc_"
++	legacyBoardMessageServicePath = "legacyBridge.createBoardMessage"
++)
++
++// writeLegacyBoardMessage is the fallback for a released app posting to a
++// board whose Boards powerup is disabled (recoverCompatibilityWrite). The
++// message id and the runtime idempotency key derive from the write's intent
++// key, so a phone retry or a bridge restart after commit creates one post.
++func (s *Server) writeLegacyBoardMessage(ctx context.Context, values map[string]any) (any, error) {
++	if s.config.ServicePrincipalToken == "" {
++		return nil, errors.New("legacy board message service principal is not configured")
++	}
++	tenantID := strings.TrimSpace(fmt.Sprint(values["tenantId"]))
++	boardID := strings.TrimSpace(fmt.Sprint(values["boardId"]))
++	createdBy := strings.TrimSpace(fmt.Sprint(values["createdBy"]))
++	title := strings.TrimSpace(fmt.Sprint(values["title"]))
++	content := strings.TrimSpace(fmt.Sprint(values["content"]))
++	if title == "<nil>" {
++		title = ""
++	}
++	if content == "<nil>" {
++		content = ""
++	}
++	if tenantID == "" || tenantID == "<nil>" || boardID == "" || boardID == "<nil>" || createdBy == "" || createdBy == "<nil>" {
++		return nil, errors.New("legacy board message tenant, board, and author are required")
++	}
++	if title == "" && content == "" {
++		return nil, errors.New("Post content is required")
++	}
++	if len(utf16.Encode([]rune(title))) > 200 {
++		return nil, errors.New("Post title cannot exceed 200 characters")
++	}
++	if len(utf16.Encode([]rune(content))) > 20000 {
++		return nil, errors.New("Post content cannot exceed 20000 characters")
++	}
++	entity := map[string]any{"boardId": boardID, "createdBy": createdBy}
++	if title != "" {
++		entity["title"] = title
++	}
++	if content != "" {
++		entity["content"] = content
++	}
++	var startsAt, endsAt int64
++	if value, ok := unixMillis(values["startsAt"]); ok {
++		startsAt = int64(value)
++		entity["startsAt"] = startsAt
++	}
++	if value, ok := unixMillis(values["endsAt"]); ok {
++		endsAt = int64(value)
++		entity["endsAt"] = endsAt
++	}
++	if entity["startsAt"] != nil && entity["endsAt"] != nil && endsAt <= startsAt {
++		return nil, errors.New("Post end time must be after its start time")
++	}
++	if value, ok := values["isPinned"].(bool); ok {
++		entity["isPinned"] = value
++	}
++
++	intent := releaseRequestKey(ctx)
++	if intent == "" {
++		// Every phone write carries a request key; this only guards direct callers.
++		intent = fmt.Sprintf("unkeyed-%d-%d", time.Now().UTC().UnixNano(), s.compatSerial.Add(1))
++	}
++	entity["_id"] = "legacy-board-message-" + deterministicEntityID("legacy-board-message:"+intent)
++	result, err := s.callAsServicePrincipal(ctx, tenantID, legacyBoardMessageServicePath,
++		map[string]any{"entity": entity}, "legacy-board-message:"+intent)
++	if err != nil {
++		return nil, fmt.Errorf("legacy board message: %w", err)
++	}
++	return result, nil
++}
++
++// callAsServicePrincipal opens a short-lived service socket bound to the
++// tenant, calls one Reducer with an idempotency key, and closes the socket.
++// The calls it serves are rare, so it holds no connection open.
++func (s *Server) callAsServicePrincipal(ctx context.Context, tenant, path string, args map[string]any, idempotencyKey string) (any, error) {
++	runtimeTenant := s.runtimeTenant(tenant)
++	client := newUpstreamClient(s.config.GonvexWebSocketURL, s.config.ProjectID, runtimeTenant, s.config.OperationTimeout)
++	if err := client.connect(ctx); err != nil {
++		return nil, err
++	}
++	defer client.close()
++	authID := client.nextID("service-auth")
++	response, err := client.request(ctx, map[string]any{
++		"type":    "auth",
++		"id":      authID,
++		"token":   s.config.ServicePrincipalToken,
++		"project": s.config.ProjectID,
++		"tenant":  runtimeTenant,
++	}, authID)
++	if err != nil {
++		return nil, fmt.Errorf("authenticate service principal: %w", err)
++	}
++	if response.err != "" {
++		return nil, fmt.Errorf("authenticate service principal: %s", response.err)
++	}
++	result, err, _ := client.callOnce(ctx, "mutation", client.nextID("service-call"), path, args, idempotencyKey)
++	return result, err
++}
+diff --git a/compatibility/legacy-convex-v5.1.29-bridge/service_principal_writes_test.go b/compatibility/legacy-convex-v5.1.29-bridge/service_principal_writes_test.go
+new file mode 100644
+index 0000000000..226a16f632
+--- /dev/null
++++ b/compatibility/legacy-convex-v5.1.29-bridge/service_principal_writes_test.go
+@@ -0,0 +1,296 @@
++package main
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/gorilla/websocket"
++)
++
++// serviceRuntime is a minimal runtime that speaks the service-principal
++// protocol (gonvex docs/service-principals.md): `auth` with a `gvx_svc_`
++// token binds the socket to a project and tenant; only allowlisted
++// Reducers may be called; a repeated idempotency key replays the result.
++type serviceRuntime struct {
++	t        *testing.T
++	server   *httptest.Server
++	token    string
++	allowed  string
++	mu       sync.Mutex
++	dials    []string // tenant query parameter per socket
++	frames   []map[string]any
++	receipts map[string]any
++	rejectAs string // reducer.error text for every call, when set
++}
++
++func newServiceRuntime(t *testing.T, token, allowed string) *serviceRuntime {
++	runtime := &serviceRuntime{t: t, token: token, allowed: allowed, receipts: map[string]any{}}
++	runtime.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		runtime.mu.Lock()
++		runtime.dials = append(runtime.dials, r.URL.Query().Get("tenant"))
++		runtime.mu.Unlock()
++		_ = conn.WriteJSON(map[string]any{"type": "session.ready", "capabilities": map[string]any{}})
++		authenticated := false
++		for {
++			var frame map[string]any
++			if err := conn.ReadJSON(&frame); err != nil {
++				return
++			}
++			runtime.mu.Lock()
++			runtime.frames = append(runtime.frames, frame)
++			runtime.mu.Unlock()
++			id, _ := frame["id"].(string)
++			switch frame["type"] {
++			case "auth":
++				if frame["token"] != runtime.token {
++					_ = conn.WriteJSON(map[string]any{"type": "auth.error", "id": id, "error": "invalid service principal credential"})
++					continue
++				}
++				authenticated = true
++				_ = conn.WriteJSON(map[string]any{"type": "auth.result", "id": id, "result": map[string]any{"principalId": "whagons-legacy-bridge"}})
++			case "reducer.call":
++				path, _ := frame["path"].(string)
++				runtime.mu.Lock()
++				allowed, rejectAs := runtime.allowed, runtime.rejectAs
++				runtime.mu.Unlock()
++				switch {
++				case !authenticated:
++					_ = conn.WriteJSON(map[string]any{"type": "reducer.error", "id": id, "error": "authenticate with an active tenant before calling a Reducer"})
++				case path != allowed:
++					_ = conn.WriteJSON(map[string]any{"type": "reducer.error", "id": id, "error": `function "` + path + `" is not allowed for this service principal`})
++				case rejectAs != "":
++					_ = conn.WriteJSON(map[string]any{"type": "reducer.error", "id": id, "error": rejectAs})
++				default:
++					key, _ := frame["idempotencyKey"].(string)
++					runtime.mu.Lock()
++					result, replay := runtime.receipts[key]
++					if !replay {
++						entity, _ := frame["args"].(map[string]any)["entity"].(map[string]any)
++						result = entity["_id"]
++						runtime.receipts[key] = result
++					}
++					runtime.mu.Unlock()
++					_ = conn.WriteJSON(map[string]any{"type": "reducer.result", "id": id, "result": result})
++				}
++			}
++		}
++	}))
++	t.Cleanup(runtime.server.Close)
++	return runtime
++}
++
++func (r *serviceRuntime) url() string { return "ws" + strings.TrimPrefix(r.server.URL, "http") + "/ws" }
++
++func (r *serviceRuntime) framesOfType(kind string) []map[string]any {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	var out []map[string]any
++	for _, frame := range r.frames {
++		if frame["type"] == kind {
++			out = append(out, frame)
++		}
++	}
++	return out
++}
++
++const testServiceToken = "gvx_svc_test-token-0123456789abcdef"
++
++func newServiceBridge(t *testing.T, runtime *serviceRuntime, token string) *Server {
++	t.Helper()
++	bridge, err := NewServer(Config{
++		GonvexWebSocketURL:    runtime.url(),
++		ProjectID:             "whagons-5",
++		ServicePrincipalToken: token,
++		TenantAliases:         map[string]string{"released-slug": "runtime-tenant"},
++	})
++	if err != nil {
++		t.Fatalf("create bridge: %v", err)
++	}
++	return bridge
++}
++
++func TestLegacyBoardMessageUsesTheServicePrincipal(t *testing.T) {
++	runtime := newServiceRuntime(t, testServiceToken, legacyBoardMessageServicePath)
++	bridge := newServiceBridge(t, runtime, testServiceToken)
++	ctx := withReleaseRequestKey(context.Background(), "intent-board-post-1")
++	values := map[string]any{
++		"tenantId": "released-slug", "boardId": "board-a", "createdBy": "member-a",
++		"title": "  Weekly  ", "content": "Shift change at 6", "isPinned": true,
++		"startsAt": float64(1000), "endsAt": float64(2000),
++	}
++	first, err := bridge.writeLegacyBoardMessage(ctx, values)
++	if err != nil {
++		t.Fatalf("service write: %v", err)
++	}
++	// A phone retry (or a bridge restart) reuses the intent key: same id, same key.
++	second, err := bridge.writeLegacyBoardMessage(ctx, values)
++	if err != nil {
++		t.Fatalf("service write replay: %v", err)
++	}
++	if first != second || !strings.HasPrefix(first.(string), "legacy-board-message-") {
++		t.Fatalf("message ids = %v, %v", first, second)
++	}
++
++	runtime.mu.Lock()
++	dials := append([]string(nil), runtime.dials...)
++	runtime.mu.Unlock()
++	if len(dials) != 2 || dials[0] != "runtime-tenant" {
++		t.Fatalf("service sockets dialed tenants %v, want the runtime tenant alias", dials)
++	}
++	auths := runtime.framesOfType("auth")
++	if len(auths) != 2 {
++		t.Fatalf("auth frames = %d", len(auths))
++	}
++	auth := auths[0]
++	if auth["token"] != testServiceToken || auth["project"] != "whagons-5" || auth["tenant"] != "runtime-tenant" || auth["controlOnly"] != nil {
++		t.Fatalf("service auth frame = %#v", auth)
++	}
++	calls := runtime.framesOfType("reducer.call")
++	if len(calls) != 2 {
++		t.Fatalf("reducer calls = %d", len(calls))
++	}
++	call := calls[0]
++	if call["path"] != legacyBoardMessageServicePath || call["scope"] != nil {
++		t.Fatalf("service call = %#v", call)
++	}
++	if call["idempotencyKey"] != "legacy-board-message:intent-board-post-1" || calls[1]["idempotencyKey"] != call["idempotencyKey"] {
++		t.Fatalf("idempotency keys = %v, %v", call["idempotencyKey"], calls[1]["idempotencyKey"])
++	}
++	entity := call["args"].(map[string]any)["entity"].(map[string]any)
++	want := map[string]any{
++		"_id": first, "boardId": "board-a", "createdBy": "member-a", "title": "Weekly",
++		"content": "Shift change at 6", "isPinned": true, "startsAt": float64(1000), "endsAt": float64(2000),
++	}
++	if len(entity) != len(want) {
++		t.Fatalf("entity = %#v, want %#v", entity, want)
++	}
++	for key, value := range want {
++		if entity[key] != value {
++			t.Fatalf("entity[%s] = %#v, want %#v (entity %#v)", key, entity[key], value, entity)
++		}
++	}
++	if _, ok := call["args"].(map[string]any)["tenantId"]; ok {
++		t.Fatal("tenant routing argument leaked into the service call")
++	}
++}
++
++func TestLegacyBoardMessageFailsClosedWithoutAServicePrincipal(t *testing.T) {
++	runtime := newServiceRuntime(t, testServiceToken, legacyBoardMessageServicePath)
++	bridge := newServiceBridge(t, runtime, "")
++	_, err := bridge.writeLegacyBoardMessage(context.Background(), map[string]any{
++		"tenantId": "t", "boardId": "b", "createdBy": "m", "content": "x",
++	})
++	if err == nil || !strings.Contains(err.Error(), "service principal is not configured") {
++		t.Fatalf("unconfigured write error = %v", err)
++	}
++	if len(runtime.dials) != 0 {
++		t.Fatal("an unconfigured bridge dialed the runtime")
++	}
++	if _, err := NewServer(Config{GonvexWebSocketURL: runtime.url(), ProjectID: "p", ServicePrincipalToken: "gvx_imp_wrong"}); err == nil {
++		t.Fatal("a non-service credential was accepted")
++	}
++}
++
++func TestLegacyBoardMessageValidatesBeforeDialing(t *testing.T) {
++	runtime := newServiceRuntime(t, testServiceToken, legacyBoardMessageServicePath)
++	bridge := newServiceBridge(t, runtime, testServiceToken)
++	cases := map[string]map[string]any{
++		"Post content is required":                   {"tenantId": "t", "boardId": "b", "createdBy": "m"},
++		"Post title cannot exceed 200 characters":    {"tenantId": "t", "boardId": "b", "createdBy": "m", "title": strings.Repeat("a", 201)},
++		"Post end time must be after its start time": {"tenantId": "t", "boardId": "b", "createdBy": "m", "content": "x", "startsAt": float64(5), "endsAt": float64(5)},
++		"tenant, board, and author are required":     {"boardId": "b", "createdBy": "m", "content": "x"},
++	}
++	for want, values := range cases {
++		if _, err := bridge.writeLegacyBoardMessage(context.Background(), values); err == nil || !strings.Contains(err.Error(), want) {
++			t.Fatalf("%s: error = %v", want, err)
++		}
++	}
++	if len(runtime.dials) != 0 {
++		t.Fatal("an invalid post dialed the runtime")
++	}
++}
++
++func TestLegacyBoardMessageSurfacesRuntimeRefusals(t *testing.T) {
++	runtime := newServiceRuntime(t, testServiceToken, "someOther.function")
++	bridge := newServiceBridge(t, runtime, testServiceToken)
++	values := map[string]any{"tenantId": "t", "boardId": "b", "createdBy": "m", "content": "x"}
++	if _, err := bridge.writeLegacyBoardMessage(context.Background(), values); err == nil || !strings.Contains(err.Error(), "is not allowed for this service principal") {
++		t.Fatalf("allowlist refusal = %v", err)
++	}
++	wrongToken := newServiceBridge(t, runtime, "gvx_svc_not-the-configured-one")
++	if _, err := wrongToken.writeLegacyBoardMessage(context.Background(), values); err == nil || !strings.Contains(err.Error(), "authenticate service principal") {
++		t.Fatalf("credential refusal = %v", err)
++	}
++	runtime.mu.Lock()
++	runtime.allowed = legacyBoardMessageServicePath
++	runtime.rejectAs = "TypeScript module host returned 500: Not authorized to publish to this board"
++	runtime.mu.Unlock()
++	if _, err := bridge.writeLegacyBoardMessage(context.Background(), values); err == nil || !strings.Contains(err.Error(), "Not authorized to publish to this board") {
++		t.Fatalf("reducer refusal = %v", err)
++	}
++}
++
++// TestServicePrincipalE2E runs the real writer against a live runtime that has
++// the bridge's service principal configured. It skips unless every variable is
++// set; gonvex `cloudflare/bridge-support/verify/service-principal.mjs` starts a
++// runtime and runs it. The runtime must allowlist
++// legacyBridge.createBoardMessage and not legacyBridge.notAllowed.
++func TestServicePrincipalE2E(t *testing.T) {
++	names := []string{"BRIDGE_SERVICE_E2E_WS_URL", "BRIDGE_SERVICE_E2E_PROJECT", "BRIDGE_SERVICE_E2E_TENANT", "BRIDGE_SERVICE_E2E_TOKEN"}
++	values := map[string]string{}
++	for _, name := range names {
++		values[name] = os.Getenv(name)
++	}
++	set := 0
++	for _, value := range values {
++		if value != "" {
++			set++
++		}
++	}
++	if set == 0 {
++		t.Skip("set BRIDGE_SERVICE_E2E_* to run against a live runtime")
++	}
++	if set != len(names) {
++		t.Fatalf("partial live configuration: need all of %v", names)
++	}
++	bridge, err := NewServer(Config{
++		GonvexWebSocketURL:    values["BRIDGE_SERVICE_E2E_WS_URL"],
++		ProjectID:             values["BRIDGE_SERVICE_E2E_PROJECT"],
++		ServicePrincipalToken: values["BRIDGE_SERVICE_E2E_TOKEN"],
++	})
++	if err != nil {
++		t.Fatalf("create bridge: %v", err)
++	}
++	tenant := values["BRIDGE_SERVICE_E2E_TENANT"]
++	ctx := withReleaseRequestKey(context.Background(), "e2e-intent-1")
++	post := map[string]any{"tenantId": tenant, "boardId": "board-e2e", "createdBy": "member-e2e", "title": "E2E", "content": "through the service principal", "isPinned": true}
++	first, err := bridge.writeLegacyBoardMessage(ctx, post)
++	if err != nil {
++		t.Fatalf("service write: %v", err)
++	}
++	replay, err := bridge.writeLegacyBoardMessage(ctx, post)
++	if err != nil || replay != first {
++		t.Fatalf("replay = %v, %v; want %v", replay, err, first)
++	}
++	if _, err := bridge.callAsServicePrincipal(context.Background(), tenant, "legacyBridge.notAllowed", map[string]any{}, "e2e-not-allowed"); err == nil || !strings.Contains(err.Error(), "is not allowed for this service principal") {
++		t.Fatalf("allowlist refusal = %v", err)
++	}
++	wrong, err := NewServer(Config{GonvexWebSocketURL: values["BRIDGE_SERVICE_E2E_WS_URL"], ProjectID: values["BRIDGE_SERVICE_E2E_PROJECT"], ServicePrincipalToken: "gvx_svc_wrong"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := wrong.writeLegacyBoardMessage(ctx, post); err == nil || !strings.Contains(err.Error(), "authenticate service principal") {
++		t.Fatalf("wrong credential = %v", err)
++	}
++	t.Logf("E2E message id %v", first)
++}
+diff --git a/gonvex/legacyBridge.ts b/gonvex/legacyBridge.ts
+new file mode 100644
+index 0000000000..920841aed9
+--- /dev/null
++++ b/gonvex/legacyBridge.ts
+@@ -0,0 +1,129 @@
++import { selectRows as readDataRows, dataValue as readDataValue } from "@gonvex/module-sdk";
++import { internalReducer, schema } from "@gonvex/module-sdk";
++import type { JsonObject, ReducerContext } from "@gonvex/module-sdk";
++import { isTenantAdministrator } from "../shared/memberAuthorization";
++import { text } from "../shared/values.js";
++import { boardColumns, boardMemberColumns, utf16Length } from "./boards/common";
++
++/**
++ * Writes for the legacy mobile compatibility bridge
++ * (`compatibility/legacy-convex-v5.1.29-bridge/`) that no member session may
++ * make. They replace the bridge's direct database writes: the runtime keeps
++ * each tenant in its own SQLite file or Durable Object, so there is no
++ * database for the bridge to open.
++ *
++ * Only the bridge's service principal reaches them: they are internal (no
++ * client may call them), the runtime allowlists them for that principal, and
++ * each checks the caller below. A service principal runs as the system
++ * identity `_gonvex_service:<id>` on the `api` channel.
++ */
++export const LEGACY_BRIDGE_SERVICE_PRINCIPAL = "whagons-legacy-bridge";
++
++type Row = JsonObject;
++
++const requireLegacyBridge = (ctx: ReducerContext): void => {
++  if (ctx.invocation?.channel !== "api" || ctx.member?.id !== `_gonvex_service:${LEGACY_BRIDGE_SERVICE_PRINCIPAL}`) {
++    throw new Error("Only the legacy mobile bridge may call this function");
++  }
++};
++
++/** The author's tenant Member, active, with the role the publish check needs. */
++const activeAuthor = async (ctx: ReducerContext, memberId: string): Promise<Row> => {
++  const [member] = await readDataRows<Row>(ctx.db, {
++    key: "id",
++    table: "members",
++    columns: ["id", "status", "role"],
++    where: { column: "id", op: "eq", value: readDataValue(memberId) },
++    limit: 1,
++  });
++  if (!member || text(member.status) !== "active") throw new Error("Not authenticated");
++  return member;
++};
++
++/** `boardManageableByMember` for a Member other than the caller. */
++const authorCanPublish = async (ctx: ReducerContext, board: Row, author: Row): Promise<boolean> => {
++  const memberId = text(author.id);
++  if (isTenantAdministrator(author as { role?: string }) || text(board.createdBy) === memberId) return true;
++  const admins = (await readDataRows<Row>(ctx.db, {
++    table: "boardMembers",
++    columns: boardMemberColumns,
++    where: { column: "boardId", op: "eq", value: readDataValue(text(board._id)) },
++    limit: 100000,
++  })).filter((member) => String(member.role ?? "member") === "admin");
++  if (admins.some((member) => member.memberType === "user" && text(member.memberId) === memberId)) return true;
++  const adminTeams = new Set(admins.filter((member) => member.memberType === "team").map((member) => text(member.memberId)));
++  if (adminTeams.size === 0) return false;
++  const teams = await readDataRows<Row>(ctx.db, {
++    table: "memberTeams",
++    columns: ["teamId"],
++    where: { and: [{ column: "memberId", op: "eq", value: readDataValue(memberId) }, { column: "deletedAt", op: "isNull" }] },
++    limit: 100000,
++  });
++  return teams.some((team) => adminTeams.has(text(team.teamId)));
++};
++
++/**
++ * A released app's post to a board whose Boards powerup is disabled. The
++ * bridge has already resolved the board and the author from the member's own
++ * session; this re-checks both in the write's transaction. The bridge derives
++ * `_id` and the idempotency key from the phone's write intent, so a retry
++ * returns the first result. Like the direct insert it replaces, it writes no
++ * notifications: the powerup that delivers them is off.
++ */
++export const createBoardMessage = internalReducer({
++  args: schema.object({
++    entity: schema.object({
++      _id: schema.string(),
++      boardId: schema.string(),
++      createdBy: schema.string(),
++      title: schema.optional(schema.string()),
++      content: schema.optional(schema.string()),
++      isPinned: schema.optional(schema.boolean()),
++      startsAt: schema.optional(schema.number()),
++      endsAt: schema.optional(schema.number()),
++    }),
++  }),
++  result: schema.string(),
++  offline: { mode: "onlineOnly", reason: "Called only by the legacy mobile bridge's service principal." },
++  run: async (ctx: ReducerContext, args: {
++    entity: {
++      _id: string;
++      boardId: string;
++      createdBy: string;
++      title?: string;
++      content?: string;
++      isPinned?: boolean;
++      startsAt?: number;
++      endsAt?: number;
++    };
++  }): Promise<string> => {
++    requireLegacyBridge(ctx);
++    const entity = args.entity;
++    const id = entity._id.trim();
++    if (!id.startsWith("legacy-board-message-")) throw new Error("Invalid legacy board message id");
++    const author = await activeAuthor(ctx, entity.createdBy);
++    const [board] = await readDataRows<Row>(ctx.db, {
++      table: "boards",
++      columns: boardColumns,
++      where: { column: "_id", op: "eq", value: readDataValue(entity.boardId) },
++      limit: 1,
++    });
++    if (!board || board.deletedAt != null) throw new Error("Not found");
++    if (!await authorCanPublish(ctx, board, author)) throw new Error("Not authorized to publish to this board");
++    const title = entity.title?.trim() ?? "";
++    const content = entity.content?.trim() ?? "";
++    if (!title && !content) throw new Error("Post content is required");
++    if (utf16Length(title) > 200) throw new Error("Post title cannot exceed 200 characters");
++    if (utf16Length(content) > 20000) throw new Error("Post content cannot exceed 20000 characters");
++    if (entity.startsAt !== undefined && entity.endsAt !== undefined && entity.endsAt <= entity.startsAt) {
++      throw new Error("Post end time must be after its start time");
++    }
++    const values: Row = { _id: id, _creationTime: ctx.now, boardId: text(board._id), createdBy: text(author.id), isPinned: entity.isPinned === true };
++    if (title) values.title = title;
++    if (content) values.content = content;
++    if (entity.startsAt !== undefined) values.startsAt = entity.startsAt;
++    if (entity.endsAt !== undefined) values.endsAt = entity.endsAt;
++    await ctx.db.insert<Row>("boardMessages", values);
++    return id;
++  },
++});
+diff --git a/gonvex/module/legacyBridge.test.ts b/gonvex/module/legacyBridge.test.ts
+new file mode 100644
+index 0000000000..e1db33ea43
+--- /dev/null
++++ b/gonvex/module/legacyBridge.test.ts
+@@ -0,0 +1,99 @@
++import { describe, expect, it, vi } from "vitest";
++
++import { createBoardMessage, LEGACY_BRIDGE_SERVICE_PRINCIPAL } from "../legacyBridge";
++
++type Tables = {
++  members?: Record<string, unknown>[];
++  boards?: Record<string, unknown>[];
++  boardMembers?: Record<string, unknown>[];
++  memberTeams?: Record<string, unknown>[];
++};
++
++const service = { id: `_gonvex_service:${LEGACY_BRIDGE_SERVICE_PRINCIPAL}`, status: "system", role: "system", permissions: {} };
++
++const harness = (tables: Tables, overrides: Record<string, unknown> = {}) => {
++  const query = vi.fn(async (sql: string) => {
++    for (const table of ["boardMembers", "memberTeams", "members", "boards"] as const) {
++      if (sql.includes(`FROM "${table}"`)) return tables[table] ?? [];
++    }
++    return [];
++  });
++  const insert = vi.fn(async (_table: string, row: Record<string, unknown>) => row);
++  const ctx = {
++    tenant: { id: "tenant-1" },
++    member: service,
++    invocation: { channel: "api", rootChannel: "api" },
++    now: 5_000,
++    db: { query, insert },
++    ...overrides,
++  };
++  return { ctx, query, insert };
++};
++
++const run = (ctx: unknown, entity: Record<string, unknown>) => (createBoardMessage as any).handler(ctx, { entity });
++
++const post = { _id: "legacy-board-message-1", boardId: "board-1", createdBy: "member-1", content: " Shift change at 6 " };
++const board = { _id: "board-1", createdBy: "member-9", visibility: "private", deletedAt: null };
++
++describe("legacy bridge board posts", () => {
++  it("inserts the post for an author who may publish, stamped by the runtime clock", async () => {
++    const { ctx, insert } = harness({ members: [{ id: "member-1", status: "active", role: "admin" }], boards: [board] });
++    await expect(run(ctx, { ...post, title: "Weekly", isPinned: true, startsAt: 6_000, endsAt: 7_000 })).resolves.toBe("legacy-board-message-1");
++    expect(insert).toHaveBeenCalledTimes(1);
++    expect(insert).toHaveBeenCalledWith("boardMessages", {
++      _id: "legacy-board-message-1", _creationTime: 5_000, boardId: "board-1", createdBy: "member-1",
++      title: "Weekly", content: "Shift change at 6", isPinned: true, startsAt: 6_000, endsAt: 7_000,
++    });
++  });
++
++  it("accepts a board admin through a team", async () => {
++    const { ctx, insert } = harness({
++      members: [{ id: "member-1", status: "active", role: "member" }],
++      boards: [board],
++      boardMembers: [{ boardId: "board-1", memberType: "team", memberId: "team-1", role: "admin" }],
++      memberTeams: [{ teamId: "team-1" }],
++    });
++    await expect(run(ctx, post)).resolves.toBe("legacy-board-message-1");
++    expect(insert).toHaveBeenCalledOnce();
++  });
++
++  it("refuses an author who cannot publish to the board", async () => {
++    const { ctx, insert } = harness({
++      members: [{ id: "member-1", status: "active", role: "member" }],
++      boards: [board],
++      boardMembers: [{ boardId: "board-1", memberType: "user", memberId: "member-1", role: "member" }],
++    });
++    await expect(run(ctx, post)).rejects.toThrow("Not authorized to publish to this board");
++    expect(insert).not.toHaveBeenCalled();
++  });
++
++  it("refuses every caller but the bridge's service principal", async () => {
++    const tables = { members: [{ id: "member-1", status: "active", role: "admin" }], boards: [board] };
++    const member = harness(tables, { member: { id: "member-1", status: "active", role: "admin", permissions: {} }, invocation: { channel: "ui", rootChannel: "ui" } });
++    await expect(run(member.ctx, post)).rejects.toThrow("Only the legacy mobile bridge may call this function");
++    const otherService = harness(tables, { member: { ...service, id: "_gonvex_service:whagons-api-gateway" } });
++    await expect(run(otherService.ctx, post)).rejects.toThrow("Only the legacy mobile bridge may call this function");
++    const nested = harness(tables, { invocation: { channel: "agent", rootChannel: "api" } });
++    await expect(run(nested.ctx, post)).rejects.toThrow("Only the legacy mobile bridge may call this function");
++    expect(member.insert).not.toHaveBeenCalled();
++    expect(otherService.insert).not.toHaveBeenCalled();
++    expect(nested.insert).not.toHaveBeenCalled();
++  });
++
++  it("refuses an inactive author, a deleted board and a foreign id", async () => {
++    const inactive = harness({ members: [{ id: "member-1", status: "inactive", role: "admin" }], boards: [board] });
++    await expect(run(inactive.ctx, post)).rejects.toThrow("Not authenticated");
++    const deleted = harness({ members: [{ id: "member-1", status: "active", role: "admin" }], boards: [{ ...board, deletedAt: 1 }] });
++    await expect(run(deleted.ctx, post)).rejects.toThrow("Not found");
++    const foreign = harness({ members: [{ id: "member-1", status: "active", role: "admin" }], boards: [board] });
++    await expect(run(foreign.ctx, { ...post, _id: "message-1" })).rejects.toThrow("Invalid legacy board message id");
++    for (const h of [inactive, deleted, foreign]) expect(h.insert).not.toHaveBeenCalled();
++  });
++
++  it("keeps the released post limits", async () => {
++    const tables = { members: [{ id: "member-1", status: "active", role: "admin" }], boards: [board] };
++    await expect(run(harness(tables).ctx, { ...post, content: "  " })).rejects.toThrow("Post content is required");
++    await expect(run(harness(tables).ctx, { ...post, title: "a".repeat(201) })).rejects.toThrow("Post title cannot exceed 200 characters");
++    await expect(run(harness(tables).ctx, { ...post, startsAt: 5, endsAt: 5 })).rejects.toThrow("Post end time must be after its start time");
++  });
++});

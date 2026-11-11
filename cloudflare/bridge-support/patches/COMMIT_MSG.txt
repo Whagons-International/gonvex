@@ -1,0 +1,22 @@
+fix(bridge): write legacy board posts through a service principal
+
+The bridge's only database access was the INSERT into "boardMessages" for a
+released app's post to a board whose Boards powerup is disabled. The runtime
+keeps each tenant in its own SQLite file (Rust) or Durable Object
+(Cloudflare), so there is no Postgres database to open: against today's
+runtime that path is already dead.
+
+- The bridge calls the new internal Reducer legacyBridge.createBoardMessage
+  on a short-lived gvx_svc_ service socket bound to the tenant, with an
+  idempotency key and message id derived from the phone's write intent.
+- The Reducer accepts only the whagons-legacy-bridge principal on the api
+  channel and re-checks the author and their right to publish in its
+  transaction.
+- LEGACY_BRIDGE_SERVICE_TOKEN replaces LEGACY_BRIDGE_DATABASE_URL and
+  LEGACY_BRIDGE_TENANT_DATABASE; the pgx dependency is gone.
+
+Prepared by Gonvex package K21 (cloudflare/bridge-support/). Lands at the
+Cloudflare cutover, or earlier against the Rust runtime.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
