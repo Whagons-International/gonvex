@@ -17,6 +17,7 @@ import { CLOSE } from "./protocol";
 import { ModuleCache, Session, type SessionHooks, type SessionRecord } from "./session";
 import type { ModuleInfo, Ports, TenantSession } from "./ports";
 import type { PresenceConfig } from "../presence/hub";
+import { type TelemetryHostState, telemetryHostState } from "../telemetry/socket";
 
 /** Liveness and revalidation due within this window run in the same alarm (deadlines never run early). */
 const ALARM_SLACK_MS = 2_000;
@@ -31,6 +32,8 @@ export interface HostOptions {
   tenantChanged?(socket: WebSocket, previous: TenantSession | null, next: TenantSession | null): void;
   /** Presence v2 settings (K14); default: on when `ready.presence`. */
   presence?: PresenceConfig;
+  /** K15: telemetry state shared by this object's sockets (rate limits per owning object, 0012 R11). */
+  telemetry?: TelemetryHostState;
 }
 
 interface Attachment { session: SessionRecord }
@@ -38,10 +41,13 @@ interface Attachment { session: SessionRecord }
 export class SocketHost {
   readonly sessions = new Map<WebSocket, Session>();
   readonly modules: ModuleCache;
+  /** K15: one set of telemetry rate-limit windows for every socket of this object. */
+  readonly telemetry: TelemetryHostState;
   private scheduled: number | null | undefined;
 
   constructor(private readonly options: HostOptions) {
     this.modules = new ModuleCache(options.ports);
+    this.telemetry = options.telemetry ?? telemetryHostState({ presenceEnabled: options.presence?.enabled ?? options.ready.presence });
     options.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
     // Rebuild the in-memory index from attachments on every wake (S3 §8: eager rebuild costs nothing measurable).
     for (const ws of options.ctx.getWebSockets()) {
@@ -149,6 +155,7 @@ export class SocketHost {
       modules: this.modules,
       hooks,
       ...(this.options.presence ? { presence: this.options.presence } : {}),
+      telemetry: this.telemetry,
       sink: {
         send: (text: string) => ws.send(text),
         close: (frame: { code: number; reason: string }) => {

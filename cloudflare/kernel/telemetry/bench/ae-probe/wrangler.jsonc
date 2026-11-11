@@ -1,0 +1,12 @@
+// K15 platform probe (bench/ae-probe/run.mjs): a Worker that writes performance
+// rows through `analyticsEngineSink`. Deployed only as gonvex-cf-dev-k15-ae-probe
+// and deleted by the probe when it is done.
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-k15-ae-probe",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "workers_dev": true,
+  "preview_urls": false,
+  "analytics_engine_datasets": [{ "binding": "TELEMETRY_EVENTS", "dataset": "gonvex-cf-dev-k15-telemetry" }]
+}

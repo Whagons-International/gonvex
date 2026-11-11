@@ -32,6 +32,7 @@ import operatorRoutes from './operator-routes.mjs';
 import presenceEdges from './presence-edges.mjs';
 import actions from './actions.mjs';
 import servicePrincipals from './service-principals.mjs';
+import errorTelemetry from './error-telemetry.mjs';
 
 export const SCENARIOS = [
   thinSdkParity,
@@ -65,6 +66,8 @@ export const SCENARIOS = [
   actions,
   // K17: restarts the backend once, with its principals configured.
   servicePrincipals,
+  // K15: error.* acks, envelope limits, rate limits, performance events and the error-triage routes.
+  errorTelemetry,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
 ];

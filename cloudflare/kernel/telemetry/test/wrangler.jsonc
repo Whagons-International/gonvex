@@ -1,0 +1,21 @@
+// K15 test Worker (vitest only; never deployed): the control object with the
+// operator surface (K06 + K19), a stub tenant object, and `/dev/*` straight to
+// the control object.
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-k15-test",
+  "main": "worker.ts",
+  // Must not be newer than the pinned workerd (wrangler 4.155.0 -> workerd 1.20261023.1).
+  "compatibility_date": "2026-10-23",
+  // node:crypto (K06, K19).
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONTROL", "class_name": "OperatorControlObject" },
+      { "name": "TENANT", "class_name": "StubTenantObject" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OperatorControlObject", "StubTenantObject"] }],
+  "vars": { "GONVEX_RUNTIME_VERSION": "development" }
+}

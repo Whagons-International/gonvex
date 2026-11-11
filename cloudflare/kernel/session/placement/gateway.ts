@@ -22,6 +22,7 @@ import type { ModuleInfo, Ports, TenantRoute, TenantSession } from "../ports";
 import { SocketHost } from "../host";
 import { deliveryClass } from "../session";
 import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../presence/hub";
+import { type TelemetryEnv, telemetryHostFromEnv } from "../../telemetry/env";
 import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
 
 /** S3: about 125 sockets per gateway carried 30 commits/s to 1,000 sockets. */
@@ -29,7 +30,7 @@ export const SOCKETS_PER_GATEWAY = 125;
 export const DEFAULT_GATEWAY_SHARDS = 8;
 export const PROTOCOL_VERSION = 1;
 
-export interface GatewayEnv extends PresenceEnv {
+export interface GatewayEnv extends PresenceEnv, TelemetryEnv {
   GONVEX_GATEWAY_SHARDS?: string;
   GONVEX_RUNTIME_VERSION?: string;
   GONVEX_PRESENCE?: string;
@@ -99,6 +100,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     const presence = presenceConfig(env);
     this.host = new SocketHost({
       presence,
+      telemetry: telemetryHostFromEnv(env, presence.enabled),
       ctx,
       ports: this.bindings().ports(env),
       name: this.gatewayName,
