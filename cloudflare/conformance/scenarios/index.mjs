@@ -56,8 +56,8 @@ export const SCENARIOS = [
   receiptExpiry,
   scheduler,
   liveQueryTaskGrid,
-  // Restarts the backend: keep last so a failure cannot disturb the others.
-  receiptCrash,
   // K19: deploy and operator routes over HTTP (no seeded tenants).
   operatorRoutes,
+  // Restarts the backend: keep last so a failure cannot disturb the others.
+  receiptCrash,
 ];
