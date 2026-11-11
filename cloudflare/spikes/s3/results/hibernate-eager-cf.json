@@ -1,0 +1,178 @@
+{
+  "count": 1000,
+  "rebuild": "eager",
+  "idles": [
+    {
+      "idle": 5,
+      "big": {
+        "hibernated": false,
+        "rtt": 92,
+        "rebuilt": 998
+      },
+      "small": {
+        "hibernated": false,
+        "rtt": 53
+      }
+    },
+    {
+      "idle": 10,
+      "big": {
+        "hibernated": true,
+        "rtt": 134,
+        "rebuilt": 1001
+      },
+      "small": {
+        "hibernated": true,
+        "rtt": 81
+      }
+    },
+    {
+      "idle": 15,
+      "big": {
+        "hibernated": true,
+        "rtt": 126,
+        "rebuilt": 1001
+      },
+      "small": {
+        "hibernated": true,
+        "rtt": 83
+      }
+    },
+    {
+      "idle": 20,
+      "big": {
+        "hibernated": true,
+        "rtt": 141,
+        "rebuilt": 1001
+      },
+      "small": {
+        "hibernated": true,
+        "rtt": 83
+      }
+    },
+    {
+      "idle": 30,
+      "big": {
+        "hibernated": true,
+        "rtt": 133,
+        "rebuilt": 1001
+      },
+      "small": {
+        "hibernated": true,
+        "rtt": 80
+      }
+    },
+    {
+      "idle": 60,
+      "big": {
+        "hibernated": true,
+        "rtt": 154,
+        "rebuilt": 1001
+      },
+      "small": {
+        "hibernated": true,
+        "rtt": 85
+      }
+    }
+  ],
+  "cycles": [
+    {
+      "big": {
+        "wakeRtt": 131,
+        "warmRtt": 89,
+        "rebuilt": 1001,
+        "wakes": 8,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 80,
+        "warmRtt": 55,
+        "wakes": 7
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 159,
+        "warmRtt": 86,
+        "rebuilt": 1001,
+        "wakes": 9,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 87,
+        "warmRtt": 52,
+        "wakes": 8
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 137,
+        "warmRtt": 87,
+        "rebuilt": 1001,
+        "wakes": 10,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 82,
+        "warmRtt": 51,
+        "wakes": 9
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 138,
+        "warmRtt": 95,
+        "rebuilt": 1000,
+        "wakes": 12,
+        "sockets": 1000
+      },
+      "small": {
+        "wakeRtt": 84,
+        "warmRtt": 60,
+        "wakes": 10
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 166,
+        "warmRtt": 95,
+        "rebuilt": 1000,
+        "wakes": 13,
+        "sockets": 1000
+      },
+      "small": {
+        "wakeRtt": 83,
+        "warmRtt": 51,
+        "wakes": 11
+      }
+    }
+  ],
+  "open": {
+    "wallMs": 33134,
+    "ok": 1000,
+    "failed": [],
+    "retried": 2,
+    "retryErrors": [
+      "Opening handshake has timed out"
+    ],
+    "connectP50": 426,
+    "connectP99": 785,
+    "extensions": [
+      ""
+    ]
+  },
+  "warm": {
+    "big": {
+      "p50": 87,
+      "min": 83,
+      "max": 91
+    },
+    "small": {
+      "p50": 53,
+      "min": 51,
+      "max": 54
+    }
+  },
+  "fleetOpenAtEnd": 999,
+  "fleetCloses": 3
+}

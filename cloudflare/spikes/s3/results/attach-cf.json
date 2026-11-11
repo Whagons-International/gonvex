@@ -1,0 +1,112 @@
+{
+  "tenant": "att-mwbkt61s",
+  "limit": [
+    {
+      "ok": 1000,
+      "err": null,
+      "bytes": 2048
+    },
+    {
+      "ok": 1000,
+      "err": null,
+      "bytes": 16000
+    },
+    {
+      "ok": 1000,
+      "err": null,
+      "bytes": 16250
+    },
+    {
+      "ok": 1000,
+      "err": null,
+      "bytes": 16300
+    },
+    {
+      "ok": 1000,
+      "err": null,
+      "bytes": 16310
+    },
+    {
+      "ok": 1000,
+      "err": null,
+      "bytes": 16320
+    },
+    {
+      "ok": 0,
+      "err": "Error: A WebSocket 'attachment' cannot be larger than 16384 bytes.'attachment' was 16385 bytes.",
+      "bytes": 16330
+    },
+    {
+      "ok": 0,
+      "err": "Error: A WebSocket 'attachment' cannot be larger than 16384 bytes.'attachment' was 16440 bytes.",
+      "bytes": 16384
+    }
+  ],
+  "wake": [
+    {
+      "padBytes": 0,
+      "hibernated": true,
+      "wakeRtt": 86,
+      "warmRtt": 39,
+      "rebuilt": 1001,
+      "wakes": 2
+    },
+    {
+      "padBytes": 0,
+      "hibernated": true,
+      "wakeRtt": 74,
+      "warmRtt": 35,
+      "rebuilt": 1001,
+      "wakes": 3
+    },
+    {
+      "padBytes": 0,
+      "hibernated": true,
+      "wakeRtt": 220,
+      "warmRtt": 31,
+      "rebuilt": 1001,
+      "wakes": 4
+    },
+    {
+      "padBytes": 0,
+      "hibernated": true,
+      "wakeRtt": 116,
+      "warmRtt": 26,
+      "rebuilt": 1001,
+      "wakes": 5
+    },
+    {
+      "padBytes": 15000,
+      "hibernated": true,
+      "wakeRtt": 77,
+      "warmRtt": 29,
+      "rebuilt": 999,
+      "wakes": 6
+    },
+    {
+      "padBytes": 15000,
+      "hibernated": true,
+      "wakeRtt": 82,
+      "warmRtt": 28,
+      "rebuilt": 999,
+      "wakes": 7
+    },
+    {
+      "padBytes": 15000,
+      "hibernated": true,
+      "wakeRtt": 104,
+      "warmRtt": 24,
+      "rebuilt": 999,
+      "wakes": 8
+    },
+    {
+      "padBytes": 15000,
+      "hibernated": true,
+      "wakeRtt": 92,
+      "warmRtt": 29,
+      "rebuilt": 998,
+      "wakes": 9
+    }
+  ],
+  "fleetOpen": 997
+}

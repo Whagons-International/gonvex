@@ -1,0 +1,48 @@
+{
+  "note": "Ballast probes on the platform (load/memory.mjs --probe, 4 MB heap steps). Runs 2-4 detect the reset by a new instance id; run 1 stopped at the first failed request (HTTP 500, error page). Transcribed from the run logs because each run overwrote memory-cf.json.",
+  "runs": [
+    {
+      "run": 1,
+      "at": "2026-11-11T03:18:51Z",
+      "sockets": 1000,
+      "resetAtMB": 80,
+      "lastOkMB": 76,
+      "how": "request failed (HTTP 500)"
+    },
+    {
+      "run": 2,
+      "at": "2026-11-11T03:19:40Z",
+      "sockets": 1000,
+      "resetAtMB": 136,
+      "lastOkMB": 132,
+      "how": "new instance",
+      "socketsAfterReset": {
+        "open": 0,
+        "closed": 1000,
+        "code": 1006
+      }
+    },
+    {
+      "run": 2,
+      "at": "2026-11-11T03:19:51Z",
+      "sockets": 0,
+      "resetAtMB": 104,
+      "how": "new instance"
+    },
+    {
+      "run": 3,
+      "at": "2026-11-11T03:19:58Z",
+      "sockets": 0,
+      "resetAtMB": 112,
+      "lastOkMB": 108,
+      "how": "new instance"
+    },
+    {
+      "run": 3,
+      "at": "2026-11-11T03:20:10Z",
+      "sockets": 0,
+      "resetAtMB": 128,
+      "how": "new instance"
+    }
+  ]
+}

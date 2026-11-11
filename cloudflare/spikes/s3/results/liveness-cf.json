@@ -1,0 +1,122 @@
+{
+  "tenant": "live-mwbk73p3",
+  "count": 1000,
+  "silent": 10,
+  "open": {
+    "wallMs": 10677,
+    "ok": 1000,
+    "failed": [],
+    "retried": 0,
+    "retryErrors": [],
+    "connectP50": 115,
+    "connectP99": 599,
+    "extensions": [
+      ""
+    ]
+  },
+  "start": {
+    "inst": "a8a6ec4e",
+    "wakes": 1
+  },
+  "phase1": {
+    "inst": "4144ff8c",
+    "wakes": 2,
+    "hibernatedDuringPings": true,
+    "auto": {
+      "count": 1000,
+      "missing": 0,
+      "minAge": 24,
+      "medianAge": 10104,
+      "maxAge": 20142
+    },
+    "pongs": 3007,
+    "protoPings": 0,
+    "closes": 0
+  },
+  "phase2": {
+    "silencedAfterOpenMs": 60457,
+    "closes": [
+      {
+        "i": 9,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 40090,
+        "openFor": 110544
+      },
+      {
+        "i": 8,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 40092,
+        "openFor": 110531
+      },
+      {
+        "i": 6,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 60074,
+        "openFor": 130524
+      },
+      {
+        "i": 7,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 60075,
+        "openFor": 130517
+      },
+      {
+        "i": 5,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 60075,
+        "openFor": 130515
+      },
+      {
+        "i": 0,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 60076,
+        "openFor": 130512
+      },
+      {
+        "i": 2,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 60077,
+        "openFor": 130515
+      },
+      {
+        "i": 3,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 60077,
+        "openFor": 130522
+      },
+      {
+        "i": 4,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 60078,
+        "openFor": 130526
+      },
+      {
+        "i": 1,
+        "code": 4000,
+        "reason": "presence liveness timeout",
+        "msAfterSilence": 60079,
+        "openFor": 130532
+      }
+    ],
+    "open": 990,
+    "wakesDuringPhase2": 9,
+    "inst": "b6b32c18",
+    "auto": {
+      "count": 990,
+      "missing": 0,
+      "minAge": 3,
+      "medianAge": 10010,
+      "maxAge": 20211
+    },
+    "lastSweep": "{\"checked\":990,\"closed\":0,\"withTs\":990,\"oldestAge\":20225,\"now\":1794367947669}"
+  }
+}

@@ -1,0 +1,335 @@
+{
+  "label": "shake",
+  "tenant": "fan-mwbhavv3",
+  "count": 1000,
+  "deflate": false,
+  "gateways": 0,
+  "startedAt": "2026-11-11T02:07:14.127Z",
+  "localBefore": {
+    "cpuMs": 6050,
+    "rssMB": 936.4
+  },
+  "open": {
+    "wallMs": 2183,
+    "ok": 1000,
+    "failed": [],
+    "connectP50": 181,
+    "connectP99": 476,
+    "extensions": [
+      ""
+    ]
+  },
+  "localAfterOpen": {
+    "cpuMs": 8720,
+    "rssMB": 1382.7
+  },
+  "stats": {
+    "inst": "5ac384c5",
+    "build": "a",
+    "wakes": 1,
+    "bootAt": 1794362834410,
+    "now": 1794362837382,
+    "sockets": 1001,
+    "rebuiltSockets": 0,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 125,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125,
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1001,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  },
+  "singles": {
+    "perCommit": [
+      {
+        "seq": 1,
+        "ackMs": 55,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2297,
+        "delivered": 1000,
+        "firstMs": 29,
+        "lastMs": 54
+      },
+      {
+        "seq": 2,
+        "ackMs": 134,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2313,
+        "delivered": 1000,
+        "firstMs": 25,
+        "lastMs": 134
+      },
+      {
+        "seq": 3,
+        "ackMs": 124,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 34,
+        "lastMs": 181
+      },
+      {
+        "seq": 4,
+        "ackMs": 44,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2300,
+        "delivered": 1000,
+        "firstMs": 19,
+        "lastMs": 44
+      },
+      {
+        "seq": 5,
+        "ackMs": 56,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 28,
+        "lastMs": 56
+      }
+    ],
+    "latency": {
+      "n": 5000,
+      "p50": 42,
+      "p90": 111,
+      "p99": 175,
+      "max": 181
+    },
+    "ackMs": 56,
+    "lastDeliveryP50": 56,
+    "lastDeliveryMax": 181,
+    "hopMsAll": []
+  },
+  "echoRtt": {
+    "p50": 24,
+    "min": 2,
+    "max": 103
+  },
+  "probes": [
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 342,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 370
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 309,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 370
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 276,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 280
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 332,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 300
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 351,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 390
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 346,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 370
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 373,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 400
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 305,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 320
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 328,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 300
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 65,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 10
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 82,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 20
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 46,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "5ac384c5",
+      "localCpuMs": 20
+    },
+    {
+      "op": "touch",
+      "reps": 1,
+      "ms": 51,
+      "touched": 1001,
+      "localCpuMs": 10
+    },
+    {
+      "op": "rebuild",
+      "reps": 10,
+      "ms": 56,
+      "rebuilt": 1001,
+      "localCpuMs": 20
+    },
+    {
+      "op": "touch",
+      "reps": 10,
+      "ms": 59,
+      "touched": 10010,
+      "localCpuMs": 20
+    },
+    {
+      "op": "rebuild",
+      "reps": 100,
+      "ms": 121,
+      "rebuilt": 1001,
+      "localCpuMs": 90
+    }
+  ],
+  "burst": {
+    "rate": 30,
+    "seconds": 5,
+    "writesSent": 150,
+    "sendMs": 4966,
+    "acks": 150,
+    "ackP50": 2133,
+    "ackP99": 3487,
+    "ackMax": 3559,
+    "hopP50": null,
+    "hopP99": null,
+    "framesReceived": 150000,
+    "framesExpected": 150000,
+    "latency": {
+      "n": 150000,
+      "p50": 2102,
+      "p90": 3200,
+      "p99": 3472,
+      "max": 3559
+    },
+    "bytesReadDelta": 282462750,
+    "bytesPerFrame": 1883,
+    "closes": 0,
+    "localCpuMs": 7950,
+    "localRssMB": 1514.1
+  },
+  "final": {
+    "inst": "5ac384c5",
+    "build": "a",
+    "wakes": 1,
+    "bootAt": 1794362834410,
+    "now": 1794362880367,
+    "sockets": 1001,
+    "rebuiltSockets": 0,
+    "rebuildCount": 111,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 125,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125,
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1001,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  }
+}

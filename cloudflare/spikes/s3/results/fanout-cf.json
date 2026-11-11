@@ -1,0 +1,492 @@
+{
+  "label": "fanout",
+  "tenant": "fan-mwbhvexq",
+  "count": 1000,
+  "deflate": false,
+  "gateways": 0,
+  "startedAt": "2026-11-11T02:23:11.967Z",
+  "localBefore": null,
+  "open": {
+    "wallMs": 4160,
+    "ok": 1000,
+    "failed": [],
+    "connectP50": 363,
+    "connectP99": 625,
+    "extensions": [
+      ""
+    ]
+  },
+  "localAfterOpen": null,
+  "stats": {
+    "inst": "77e03d8f",
+    "build": "a",
+    "wakes": 1,
+    "bootAt": 1794363792567,
+    "now": 1794363797283,
+    "sockets": 1001,
+    "rebuiltSockets": 0,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 125,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125,
+      "-1": 1
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1001,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  },
+  "singles": {
+    "perCommit": [
+      {
+        "seq": 1,
+        "ackMs": 430,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2297,
+        "delivered": 1000,
+        "firstMs": 166,
+        "lastMs": 777
+      },
+      {
+        "seq": 2,
+        "ackMs": 125,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2313,
+        "delivered": 1000,
+        "firstMs": 103,
+        "lastMs": 743
+      },
+      {
+        "seq": 3,
+        "ackMs": 129,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 108,
+        "lastMs": 148
+      },
+      {
+        "seq": 4,
+        "ackMs": 138,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2300,
+        "delivered": 1000,
+        "firstMs": 113,
+        "lastMs": 393
+      },
+      {
+        "seq": 5,
+        "ackMs": 127,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2295,
+        "delivered": 1000,
+        "firstMs": 102,
+        "lastMs": 151
+      },
+      {
+        "seq": 6,
+        "ackMs": 127,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2300,
+        "delivered": 1000,
+        "firstMs": 99,
+        "lastMs": 165
+      },
+      {
+        "seq": 7,
+        "ackMs": 122,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2330,
+        "delivered": 1000,
+        "firstMs": 104,
+        "lastMs": 142
+      },
+      {
+        "seq": 8,
+        "ackMs": 124,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2321,
+        "delivered": 1000,
+        "firstMs": 107,
+        "lastMs": 334
+      },
+      {
+        "seq": 9,
+        "ackMs": 124,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2273,
+        "delivered": 1000,
+        "firstMs": 108,
+        "lastMs": 171
+      },
+      {
+        "seq": 10,
+        "ackMs": 129,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2304,
+        "delivered": 1000,
+        "firstMs": 109,
+        "lastMs": 254
+      },
+      {
+        "seq": 11,
+        "ackMs": 114,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2311,
+        "delivered": 1000,
+        "firstMs": 96,
+        "lastMs": 216
+      },
+      {
+        "seq": 12,
+        "ackMs": 138,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2310,
+        "delivered": 1000,
+        "firstMs": 103,
+        "lastMs": 900
+      },
+      {
+        "seq": 13,
+        "ackMs": 164,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2310,
+        "delivered": 1000,
+        "firstMs": 142,
+        "lastMs": 391
+      },
+      {
+        "seq": 14,
+        "ackMs": 124,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2325,
+        "delivered": 1000,
+        "firstMs": 107,
+        "lastMs": 185
+      },
+      {
+        "seq": 15,
+        "ackMs": 162,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2306,
+        "delivered": 1000,
+        "firstMs": 132,
+        "lastMs": 202
+      },
+      {
+        "seq": 16,
+        "ackMs": 128,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2306,
+        "delivered": 1000,
+        "firstMs": 108,
+        "lastMs": 353
+      },
+      {
+        "seq": 17,
+        "ackMs": 141,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2289,
+        "delivered": 1000,
+        "firstMs": 124,
+        "lastMs": 224
+      },
+      {
+        "seq": 18,
+        "ackMs": 127,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2252,
+        "delivered": 1000,
+        "firstMs": 108,
+        "lastMs": 393
+      },
+      {
+        "seq": 19,
+        "ackMs": 132,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2280,
+        "delivered": 1000,
+        "firstMs": 111,
+        "lastMs": 154
+      },
+      {
+        "seq": 20,
+        "ackMs": 140,
+        "sent": 1000,
+        "gwSent": 0,
+        "hop": [],
+        "bytes": 2311,
+        "delivered": 1000,
+        "firstMs": 120,
+        "lastMs": 203
+      }
+    ],
+    "latency": {
+      "n": 20000,
+      "p50": 123,
+      "p90": 158,
+      "p99": 692,
+      "max": 900
+    },
+    "ackMs": 129,
+    "lastDeliveryP50": 224,
+    "lastDeliveryMax": 900,
+    "hopMsAll": []
+  },
+  "echoRtt": {
+    "p50": 31,
+    "min": 23,
+    "max": 36
+  },
+  "probes": [
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 309,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 422,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 0,
+      "ms": 219,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 253,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 256,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "tags",
+      "encodeOnly": 0,
+      "ms": 219,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 308,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 234,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "attach",
+      "encodeOnly": 0,
+      "ms": 437,
+      "n": 10,
+      "sent": 10000,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 55,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 60,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "mode": "cache",
+      "encodeOnly": 1,
+      "ms": 51,
+      "n": 10,
+      "sent": 0,
+      "avgFrameBytes": 1870,
+      "inst": "77e03d8f",
+      "localCpuMs": null
+    },
+    {
+      "op": "touch",
+      "reps": 1,
+      "ms": 54,
+      "touched": 1001,
+      "localCpuMs": null
+    },
+    {
+      "op": "rebuild",
+      "reps": 10,
+      "ms": 132,
+      "rebuilt": 1001,
+      "localCpuMs": null
+    },
+    {
+      "op": "touch",
+      "reps": 10,
+      "ms": 77,
+      "touched": 10010,
+      "localCpuMs": null
+    },
+    {
+      "op": "rebuild",
+      "reps": 100,
+      "ms": 172,
+      "rebuilt": 1001,
+      "localCpuMs": null
+    }
+  ],
+  "burst": {
+    "rate": 30,
+    "seconds": 60,
+    "writesSent": 1800,
+    "sendMs": 59967,
+    "acks": 166,
+    "ackP50": 14589,
+    "ackP99": 19756,
+    "ackMax": 19763,
+    "hopP50": null,
+    "hopP99": null,
+    "framesReceived": 773000,
+    "framesExpected": 1800000,
+    "latency": {
+      "n": 773000,
+      "p50": 24888,
+      "p90": 29986,
+      "p99": 30000,
+      "max": 30000
+    },
+    "bytesReadDelta": 1456754750,
+    "bytesPerFrame": 1885,
+    "closes": 0,
+    "localCpuMs": null
+  },
+  "final": {
+    "inst": "a4dcb272",
+    "build": "a",
+    "wakes": 2,
+    "bootAt": 1794363912327,
+    "now": 1794363912327,
+    "sockets": 1000,
+    "rebuiltSockets": 1000,
+    "rebuildCount": 1,
+    "ballastMB": 0,
+    "classes": {
+      "0": 125,
+      "1": 125,
+      "2": 125,
+      "3": 125,
+      "4": 125,
+      "5": 125,
+      "6": 125,
+      "7": 125
+    },
+    "auto": {
+      "count": 0,
+      "missing": 1000,
+      "minAge": null,
+      "medianAge": null,
+      "maxAge": null
+    }
+  }
+}

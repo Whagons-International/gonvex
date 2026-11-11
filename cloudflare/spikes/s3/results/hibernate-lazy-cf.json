@@ -1,0 +1,103 @@
+{
+  "count": 1000,
+  "rebuild": "lazy",
+  "idles": [
+    {
+      "idle": 15,
+      "big": {
+        "hibernated": true,
+        "rtt": 48,
+        "rebuilt": -1
+      },
+      "small": {
+        "hibernated": true,
+        "rtt": 28
+      }
+    }
+  ],
+  "cycles": [
+    {
+      "big": {
+        "wakeRtt": 45,
+        "warmRtt": 24,
+        "rebuilt": -1,
+        "wakes": 3,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 27,
+        "warmRtt": 17,
+        "wakes": 3
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 54,
+        "warmRtt": 17,
+        "rebuilt": -1,
+        "wakes": 4,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 29,
+        "warmRtt": 15,
+        "wakes": 4
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 49,
+        "warmRtt": 16,
+        "rebuilt": -1,
+        "wakes": 5,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 27,
+        "warmRtt": 16,
+        "wakes": 5
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 64,
+        "warmRtt": 18,
+        "rebuilt": -1,
+        "wakes": 6,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 26,
+        "warmRtt": 13,
+        "wakes": 6
+      }
+    }
+  ],
+  "open": {
+    "wallMs": 4733,
+    "ok": 1000,
+    "failed": [],
+    "retried": 0,
+    "retryErrors": [],
+    "connectP50": 426,
+    "connectP99": 731,
+    "extensions": [
+      ""
+    ]
+  },
+  "warm": {
+    "big": {
+      "p50": 21,
+      "min": 16,
+      "max": 24
+    },
+    "small": {
+      "p50": 15,
+      "min": 11,
+      "max": 20
+    }
+  },
+  "fleetOpenAtEnd": 1000,
+  "fleetCloses": 0,
+  "fleetCloseCodes": []
+}

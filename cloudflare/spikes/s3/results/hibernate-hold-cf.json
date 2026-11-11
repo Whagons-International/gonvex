@@ -1,0 +1,147 @@
+{
+  "count": 1000,
+  "rebuild": "eager",
+  "idles": [
+    {
+      "idle": 30,
+      "big": {
+        "hibernated": true,
+        "rtt": 77,
+        "rebuilt": 1001
+      },
+      "small": {
+        "hibernated": true,
+        "rtt": 53
+      }
+    }
+  ],
+  "cycles": [
+    {
+      "big": {
+        "wakeRtt": 110,
+        "warmRtt": 35,
+        "rebuilt": 1001,
+        "wakes": 3,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 47,
+        "warmRtt": 28,
+        "wakes": 3
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 78,
+        "warmRtt": 28,
+        "rebuilt": 1001,
+        "wakes": 4,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 54,
+        "warmRtt": 31,
+        "wakes": 4
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 95,
+        "warmRtt": 21,
+        "rebuilt": 1001,
+        "wakes": 5,
+        "sockets": 1001
+      },
+      "small": {
+        "wakeRtt": 56,
+        "warmRtt": 26,
+        "wakes": 5
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 82,
+        "warmRtt": 33,
+        "rebuilt": 1000,
+        "wakes": 6,
+        "sockets": 1000
+      },
+      "small": {
+        "wakeRtt": 56,
+        "warmRtt": 25,
+        "wakes": 6
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 72,
+        "warmRtt": 24,
+        "rebuilt": 1000,
+        "wakes": 7,
+        "sockets": 1000
+      },
+      "small": {
+        "wakeRtt": 41,
+        "warmRtt": 23,
+        "wakes": 7
+      }
+    },
+    {
+      "big": {
+        "wakeRtt": 82,
+        "warmRtt": 31,
+        "rebuilt": 998,
+        "wakes": 9,
+        "sockets": 998
+      },
+      "small": {
+        "wakeRtt": 67,
+        "warmRtt": 26,
+        "wakes": 8
+      }
+    }
+  ],
+  "open": {
+    "wallMs": 4133,
+    "ok": 1000,
+    "failed": [],
+    "retried": 0,
+    "retryErrors": [],
+    "connectP50": 367,
+    "connectP99": 561,
+    "extensions": [
+      ""
+    ]
+  },
+  "warm": {
+    "big": {
+      "p50": 20,
+      "min": 15,
+      "max": 24
+    },
+    "small": {
+      "p50": 28,
+      "min": 22,
+      "max": 36
+    }
+  },
+  "fleetOpenAtEnd": 997,
+  "fleetCloses": 3,
+  "fleetCloseCodes": [
+    {
+      "code": 1006,
+      "reason": "",
+      "openFor": 375764
+    },
+    {
+      "code": 1006,
+      "reason": "",
+      "openFor": 217652
+    },
+    {
+      "code": 1006,
+      "reason": "",
+      "openFor": 376360
+    }
+  ]
+}
