@@ -85,6 +85,20 @@ database keeps its writer, so closing readers cannot free them. Size the budget 
 readers to keep: one per busy tenant is one parsed schema each (57 MB for the Whagons tenant
 schema of 2026-11-10).
 
+Writer-only schema (`writer_schema`): SQLite parses every view and trigger of a file on every
+connection. A module can declare triggers, and views that only triggers read, writer-only:
+`INSERT INTO _gonvex_writer_schema_rules(type, pattern) VALUES ('trigger','%'), ('view','x\_%')`
+(capability `writer-only-schema-v1`). After tenant migrations, matching objects move into
+`_gonvex_writer_schema` and the writer recreates them as TEMP objects on its own connection, where
+they run for every write. Readers parse only tables, indexes, read views and framework triggers
+(Whagons staging, 2026-11-11: 55 MB → 7.8 MB per reader). Framework objects (`_gonvex*`,
+`gonvex_*`) and capture triggers never move, nor a view that a remaining object names. Before a
+batch with pending migrations the objects are restored to the file, so migrations see them; they
+move again afterwards. Provisioning defers the TEMP copies; a writer creates them before its first
+use and drops them after `GONVEX_DB_WRITER_SCHEMA_IDLE_MS` (default 5 minutes; 0 keeps them) without
+use. Writes made by other processes on the file do not run the moved triggers;
+`gonvex-admin export-sqlite` restores them for its copy (`restore_writer_only_schema`).
+
 Startup provisions tenants `GONVEX_STARTUP_PROVISION_CONCURRENCY` at a time (default 1:
 concurrent schema parses contend on SQLite's memory mutex and are slower than serial ones)
 and retries a failed tenant once alone. Pool waits give up after

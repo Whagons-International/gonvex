@@ -63,6 +63,11 @@ pub struct PoolLimits {
     /// race, the previous behaviour).
     pub reader_opens: u32,
     pub acquire_timeout: Duration,
+    /// A writer unused for this long drops its writer-only schema objects
+    /// (`writer_schema`) until its next use
+    /// (`GONVEX_DB_WRITER_SCHEMA_IDLE_MS`, default 5 minutes; zero keeps
+    /// them).
+    pub writer_schema_idle: Duration,
 }
 
 impl Default for PoolLimits {
@@ -88,6 +93,10 @@ impl Default for PoolLimits {
             acquire_timeout: Duration::from_millis(
                 env_u64("GONVEX_DB_ACQUIRE_TIMEOUT_MS", 30_000).max(1),
             ),
+            writer_schema_idle: Duration::from_millis(env_u64(
+                "GONVEX_DB_WRITER_SCHEMA_IDLE_MS",
+                300_000,
+            )),
         }
     }
 }
@@ -310,8 +319,22 @@ async fn sweep_readers(databases: &[Database], limits: &PoolLimits) {
     let mut busy = Vec::new();
     for database in databases {
         // Migrations grow a writer's schema after it opened; re-measure an
-        // idle writer (never waits for a busy one).
+        // idle writer (never waits for a busy one). `try_acquire` skips the
+        // `before_acquire` install, so a released writer stays released.
         if let Some(mut writer) = database.writer.try_acquire() {
+            let objects = &database.writer_objects;
+            let idle = u64::try_from(limits.writer_schema_idle.as_millis()).unwrap_or(u64::MAX);
+            if idle > 0
+                && objects.installed.load(Ordering::Relaxed)
+                && now.saturating_sub(objects.used.load(Ordering::Relaxed)) >= idle
+            {
+                match crate::writer_schema::release(&mut writer).await {
+                    Ok(()) => objects.installed.store(false, Ordering::Relaxed),
+                    Err(error) => {
+                        eprintln!("gonvex-store: writer-only schema release failed: {error}")
+                    }
+                }
+            }
             if let Ok(bytes) = connection_schema_heap(&mut writer).await {
                 database.writer_schema.set(bytes);
             }
@@ -386,6 +409,14 @@ impl Drop for WriterSchema {
     fn drop(&mut self) {
         WRITER_SCHEMA_HEAP.fetch_sub(*self.0.get_mut(), Ordering::Relaxed);
     }
+}
+
+/// Whether the writer connection holds its writer-only schema
+/// (`writer_schema`), and when it was last acquired for use.
+#[derive(Default)]
+pub(crate) struct WriterObjects {
+    pub(crate) installed: std::sync::atomic::AtomicBool,
+    used: AtomicU64,
 }
 
 /// A notification published on one database's in-process channel.
@@ -562,6 +593,8 @@ pub(crate) struct Database {
     budget_closed: Arc<AtomicU64>,
     /// This database's share of [`sqlite_writer_schema_heap`].
     writer_schema: Arc<WriterSchema>,
+    /// Writer-only schema state of the writer connection.
+    pub(crate) writer_objects: Arc<WriterObjects>,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Batched WAL syncs for `Durability::Full` (see `sync_barrier`).
@@ -715,6 +748,12 @@ impl PoolRegistry {
         let writer_wal = wal.clone();
         let writer_schema = Arc::new(WriterSchema::default());
         let measured = writer_schema.clone();
+        let statements = crate::direct::WriterStatements::new();
+        let writer_objects = Arc::new(WriterObjects::default());
+        let (connected, acquiring) = (
+            writer_objects.clone(),
+            (writer_objects.clone(), statements.clone()),
+        );
         // The writer creates the file and switches it to WAL before any reader
         // opens it; a read-only connection cannot change the journal mode.
         let writer_options = self.options(&path, false)?;
@@ -733,6 +772,7 @@ impl PoolRegistry {
             .after_connect(move |connection, _| {
                 let wal = writer_wal.clone();
                 let measured = measured.clone();
+                let connected = connected.clone();
                 Box::pin(async move {
                     // Planner statistics: ANALYZE the tables whose size
                     // changed a lot since their last statistics (stale
@@ -747,8 +787,42 @@ impl PoolRegistry {
                             .await
                             .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
                     }
+                    // Writes run the module's triggers: a new writer
+                    // connection recreates its writer-only schema before
+                    // any use (a failure fails the connect, not the write's
+                    // integrity).
+                    let install = !crate::writer_schema::deferred();
+                    if install {
+                        crate::writer_schema::install(connection)
+                            .await
+                            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+                    }
+                    connected.installed.store(install, Ordering::Relaxed);
+                    connected.used.store(now_ms(), Ordering::Relaxed);
                     measured.set(connection_schema_heap(connection).await?);
                     Ok(())
+                })
+            })
+            .before_acquire(move |connection, _| {
+                let (objects, statements) = acquiring.clone();
+                Box::pin(async move {
+                    // Every use but the sweep's `try_acquire` passes here.
+                    objects.used.store(now_ms(), Ordering::Relaxed);
+                    if !objects.installed.load(Ordering::Relaxed)
+                        && !crate::writer_schema::deferred()
+                    {
+                        if let Err(error) = crate::writer_schema::install(connection).await {
+                            // Never write without the module's triggers:
+                            // reject this connection (its statements are
+                            // finalized first); the pool opens a new one,
+                            // whose connect installs them or fails.
+                            eprintln!("gonvex-store: writer-only schema install failed; reopening the writer: {error}");
+                            statements.retire();
+                            return Ok(false);
+                        }
+                        objects.installed.store(true, Ordering::Relaxed);
+                    }
+                    Ok(true)
                 })
             })
             .connect_with(writer_options);
@@ -779,7 +853,7 @@ impl PoolRegistry {
         self.start_sweeper();
         let (notify, _) = broadcast::channel(NOTIFY_CAPACITY);
         let database = Database {
-            statements: crate::direct::WriterStatements::new(),
+            statements,
             writer,
             writer_stats: Arc::default(),
             reader,
@@ -787,6 +861,7 @@ impl PoolRegistry {
             reader_open: Arc::new(Semaphore::new(1)),
             budget_closed: Arc::default(),
             writer_schema,
+            writer_objects,
             notify,
             locks: Arc::default(),
             sync: crate::sync_barrier::SyncBarrier::new(&path),
