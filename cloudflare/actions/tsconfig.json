@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"],
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src", "test", "dev", "../kernel/host/src/shims.d.ts"],
+  // The root config excludes actions/ (it is checked here, like kernel/host).
+  "exclude": ["../kernel/storage/test/sdk"]
+}

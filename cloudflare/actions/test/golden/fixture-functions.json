@@ -1,0 +1,659 @@
+{
+ "note": "Manifest entries of the P02 conformance fixture (cloudflare/conformance/fixtures/app, generation 1) built with gonvex codegen; the K12 tests turn them into FunctionContracts as the Worker build does.",
+ "functions": {
+  "actions.boardCount": {
+   "kind": "query",
+   "handler": "boardCount",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "object",
+    "fields": {
+     "n": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "delivery": "oneShot",
+   "public": true,
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "actions.boardRows": {
+   "kind": "query",
+   "handler": "boardRows",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "array",
+    "items": {
+     "kind": "object",
+     "fields": {
+      "id": {
+       "kind": "id",
+       "entity": "board"
+      },
+      "title": {
+       "kind": "string"
+      }
+     }
+    }
+   },
+   "internal": true,
+   "delivery": "oneShot",
+   "dependencies": {
+    "liveQueryPlan": {
+     "table": "board",
+     "key": "id",
+     "columns": [
+      "id",
+      "title"
+     ]
+    }
+   },
+   "classification": "internal"
+  },
+  "actions.childAction": {
+   "kind": "action",
+   "handler": "childAction",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "n": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "agent",
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "actions.fails": {
+   "kind": "action",
+   "handler": "fails",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "classification": "system"
+  },
+  "actions.fetchProbe": {
+   "kind": "action",
+   "handler": "fetchProbe",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "actionCapabilities": {
+    "networkOrigins": [
+     "http://127.0.0.1:47812"
+    ]
+   },
+   "classification": "system"
+  },
+  "actions.fetchRelative": {
+   "kind": "action",
+   "handler": "fetchRelative",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "actionCapabilities": {
+    "networkOrigins": [
+     "http://127.0.0.1:47812"
+    ]
+   },
+   "classification": "system"
+  },
+  "actions.fetchUndeclared": {
+   "kind": "action",
+   "handler": "fetchUndeclared",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "actionCapabilities": {
+    "networkOrigins": [
+     "http://127.0.0.1:47812"
+    ]
+   },
+   "classification": "system"
+  },
+  "actions.functionsProbe": {
+   "kind": "action",
+   "handler": "functionsProbe",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "string"
+     }
+    }
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "agent",
+   "actionCapabilities": {
+    "functions": true
+   },
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "actions.internalAdd": {
+   "kind": "reducer",
+   "handler": "internalAdd",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "string"
+     }
+    }
+   },
+   "result": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "id",
+      "entity": "board"
+     },
+     "title": {
+      "kind": "string"
+     },
+     "position": {
+      "kind": "number",
+      "integer": true
+     },
+     "bumps": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "internal": true,
+   "offline": {
+    "mode": "forbidden"
+   },
+   "classification": "internal"
+  },
+  "actions.publicEcho": {
+   "kind": "action",
+   "handler": "publicEcho",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "text": {
+      "kind": "string"
+     }
+    }
+   },
+   "result": {
+    "kind": "object",
+    "fields": {
+     "text": {
+      "kind": "string"
+     },
+     "account": {
+      "kind": "any"
+     }
+    }
+   },
+   "actionProfile": "standard",
+   "public": true,
+   "classification": "system"
+  },
+  "actions.schedulerProbe": {
+   "kind": "action",
+   "handler": "schedulerProbe",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "actionCapabilities": {
+    "scheduler": true
+   },
+   "classification": "system"
+  },
+  "actions.secretMissing": {
+   "kind": "action",
+   "handler": "secretMissing",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "actionCapabilities": {
+    "secrets": [
+     "K12_NOT_CONFIGURED"
+    ]
+   },
+   "classification": "system"
+  },
+  "actions.storageProbe": {
+   "kind": "action",
+   "handler": "storageProbe",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "actionCapabilities": {
+    "storage": true
+   },
+   "classification": "system"
+  },
+  "actions.streamProbe": {
+   "kind": "action",
+   "handler": "streamProbe",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "actionCapabilities": {
+    "networkOrigins": [
+     "http://127.0.0.1:47812"
+    ]
+   },
+   "classification": "system"
+  },
+  "actions.surface": {
+   "kind": "action",
+   "handler": "surface",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "standard",
+   "classification": "system"
+  },
+  "actions.toolsProbe": {
+   "kind": "action",
+   "handler": "toolsProbe",
+   "file": "gonvex/actions.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "string"
+     }
+    }
+   },
+   "result": {
+    "kind": "any"
+   },
+   "actionProfile": "agent",
+   "actionCapabilities": {
+    "tools": {
+     "rows": {
+      "kind": "query",
+      "function": "actions.boardRows"
+     },
+     "add": {
+      "kind": "reducer",
+      "function": "board.add"
+     },
+     "hidden": {
+      "kind": "internalReducer",
+      "function": "actions.internalAdd"
+     }
+    }
+   },
+   "classification": "system"
+  },
+  "board.add": {
+   "kind": "reducer",
+   "handler": "add",
+   "file": "gonvex/board.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "string"
+     },
+     "title": {
+      "kind": "string"
+     },
+     "position": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "result": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "id",
+      "entity": "board"
+     },
+     "title": {
+      "kind": "string"
+     },
+     "position": {
+      "kind": "number",
+      "integer": true
+     },
+     "bumps": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "dependencies": {
+    "nonOptimisticReason": "conformance fixture checks server results"
+   },
+   "offline": {
+    "mode": "onlineOnly",
+    "reason": "conformance fixture"
+   },
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "board.all": {
+   "kind": "query",
+   "handler": "all",
+   "file": "gonvex/board.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "array",
+    "items": {
+     "kind": "object",
+     "fields": {
+      "id": {
+       "kind": "id",
+       "entity": "board"
+      },
+      "title": {
+       "kind": "string"
+      },
+      "position": {
+       "kind": "number",
+       "integer": true
+      },
+      "bumps": {
+       "kind": "number",
+       "integer": true
+      }
+     }
+    }
+   },
+   "delivery": "replica",
+   "replica": {
+    "table": "board",
+    "key": "id",
+    "columns": [
+     "id",
+     "title",
+     "position",
+     "bumps"
+    ],
+    "orderBy": "position",
+    "orderDirection": "asc",
+    "mode": "eager",
+    "maxRows": 1000
+   },
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "board.bump": {
+   "kind": "reducer",
+   "handler": "bump",
+   "file": "gonvex/board.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "string"
+     }
+    }
+   },
+   "result": {
+    "kind": "object",
+    "fields": {
+     "bumps": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "dependencies": {
+    "nonOptimisticReason": "conformance fixture checks server results"
+   },
+   "offline": {
+    "mode": "onlineOnly",
+    "reason": "conformance fixture"
+   },
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "board.generation": {
+   "kind": "reducer",
+   "handler": "generation",
+   "file": "gonvex/board.ts",
+   "args": {
+    "kind": "object",
+    "fields": {}
+   },
+   "result": {
+    "kind": "object",
+    "fields": {
+     "generation": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "dependencies": {
+    "nonOptimisticReason": "conformance fixture checks server results"
+   },
+   "offline": {
+    "mode": "onlineOnly",
+    "reason": "conformance fixture"
+   },
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "board.page": {
+   "kind": "query",
+   "handler": "page",
+   "file": "gonvex/board.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "offset": {
+      "kind": "number",
+      "integer": true
+     },
+     "limit": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "result": {
+    "kind": "array",
+    "items": {
+     "kind": "object",
+     "fields": {
+      "id": {
+       "kind": "id",
+       "entity": "board"
+      },
+      "title": {
+       "kind": "string"
+      },
+      "position": {
+       "kind": "number",
+       "integer": true
+      },
+      "bumps": {
+       "kind": "number",
+       "integer": true
+      }
+     }
+    }
+   },
+   "delivery": "live",
+   "dependencies": {
+    "liveQueryPlan": {
+     "table": "board",
+     "key": "id",
+     "columns": [
+      "id",
+      "title",
+      "position",
+      "bumps"
+     ],
+     "sort": {
+      "columnArgument": "sortColumn",
+      "directionArgument": "sortDirection",
+      "defaultColumn": "position",
+      "defaultDirection": "asc",
+      "allowedColumns": [
+       "position"
+      ]
+     },
+     "window": {
+      "offsetArgument": "offset",
+      "limitArgument": "limit",
+      "defaultLimit": 3,
+      "maxLimit": 50
+     }
+    }
+   },
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "board.remove": {
+   "kind": "reducer",
+   "handler": "remove",
+   "file": "gonvex/board.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "string"
+     }
+    }
+   },
+   "result": {
+    "kind": "null"
+   },
+   "dependencies": {
+    "nonOptimisticReason": "conformance fixture checks server results"
+   },
+   "offline": {
+    "mode": "onlineOnly",
+    "reason": "conformance fixture"
+   },
+   "interactive": true,
+   "classification": "interactive"
+  },
+  "board.rename": {
+   "kind": "reducer",
+   "handler": "rename",
+   "file": "gonvex/board.ts",
+   "args": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "string"
+     },
+     "title": {
+      "kind": "string"
+     }
+    }
+   },
+   "result": {
+    "kind": "object",
+    "fields": {
+     "id": {
+      "kind": "id",
+      "entity": "board"
+     },
+     "title": {
+      "kind": "string"
+     },
+     "position": {
+      "kind": "number",
+      "integer": true
+     },
+     "bumps": {
+      "kind": "number",
+      "integer": true
+     }
+    }
+   },
+   "dependencies": {
+    "nonOptimisticReason": "conformance fixture checks server results"
+   },
+   "offline": {
+    "mode": "onlineOnly",
+    "reason": "conformance fixture"
+   },
+   "interactive": true,
+   "classification": "interactive"
+  }
+ }
+}
