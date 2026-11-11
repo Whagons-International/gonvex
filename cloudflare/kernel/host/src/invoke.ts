@@ -53,12 +53,49 @@ export interface CallReport {
   stats: DatabaseHostStats & { commitCheckRowsRead: number };
 }
 
+/** Commands whose earlier run overran the platform CPU limit (R25). */
+export interface Quarantine {
+  has(commandId: string): boolean;
+  add(commandId: string): void;
+}
+
+/** In-memory quarantine; the caller re-records a command after an object reset (probes/r25/FINDINGS.md). */
+export class MemoryQuarantine implements Quarantine {
+  private readonly ids = new Set<string>();
+  has(commandId: string) { return this.ids.has(commandId); }
+  add(commandId: string) { this.ids.add(commandId); }
+}
+
+/**
+ * The texts a caller (gateway or Worker) sees on the tenant stub when an
+ * invocation overran the CPU limit or queued behind one (probes/r25).
+ * `durableObjectReset` / `overloaded` are set on the error as well.
+ */
+export function isPlatformOverrun(error: unknown): boolean {
+  const e = error as { message?: unknown; durableObjectReset?: unknown; overloaded?: unknown } | null;
+  const message = String(e?.message ?? error);
+  return e?.durableObjectReset === true || e?.overloaded === true
+    || /exceeded its CPU time limit and was reset|reset because its code was updated|is overloaded\. Requests queued for too long/.test(message);
+}
+
+/**
+ * The error a CPU-overrun command gets, for the culprit and for every
+ * quarantined retry: Rust's deadline overrun (BudgetExceeded, transient), so
+ * clients see the same text as on Rust.
+ */
+export function deadlineOverrunError(moduleId: string, functionPath: string, timeoutMs = 10_000): CallError {
+  const wire = new ModuleError("BudgetExceeded", `module exceeded its ${timeoutMs} ms execution deadline`).wire(moduleId, functionPath);
+  return moduleHostError(wire.code, wire.message, wire.retryable);
+}
+
 export interface TenantModuleHostOptions {
   storage: TenantStorage;
   registry: ModuleRegistry;
   cache?: CatalogCache;
   permissions?: PermissionIndex;
   files?: FileMetadataSource;
+  /** Overrun commands refused without running (defaults to an in-memory set). */
+  quarantine?: Quarantine;
   /** Object clock; never the module's pinned clock. */
   clock?: () => number;
 }
@@ -79,11 +116,13 @@ function hostCallError(message: string, transient: boolean): CallError {
 /** One per tenant object. */
 export class TenantModuleHost {
   readonly cache: CatalogCache;
+  readonly quarantine: Quarantine;
   private readonly clock: () => number;
 
   constructor(private readonly options: TenantModuleHostOptions) {
     this.cache = options.cache ?? new CatalogCache();
     this.clock = options.clock ?? (() => Date.now());
+    this.quarantine = options.quarantine ?? new MemoryQuarantine();
     // A new generation may come with new migrations: drop every catalog.
     options.registry.onReload(() => this.cache.invalidate());
   }
@@ -93,6 +132,12 @@ export class TenantModuleHost {
 
   async run(call: TenantCall): Promise<CallReport> {
     const registry = this.options.registry;
+    const commandId = call.invocation.commandId;
+    if (typeof commandId === "string" && this.quarantine.has(commandId)) {
+      // A retry of a command that reset this object: answer as Rust's deadline overrun, without running it.
+      const timeoutMs = registry.activeGeneration?.engine.config.executionTimeoutMs;
+      return { ok: false, error: deadlineOverrunError(registry.moduleId, call.function, timeoutMs), committed: false, generation: registry.activeGeneration?.generation, stats: emptyStats() };
+    }
     let lease;
     try {
       lease = registry.lease(call.generation);

@@ -54,7 +54,7 @@ Runs a project's Queries and Reducers inside the tenant Durable Object with the 
 - **Caps and budgets (B.6).** 8 MiB result: a UTF-16 pre-check in the dispatcher, then an exact byte
   check. The Q/R wall budget is 10 s, the scheduled slice 3 s with Rust's message, the Action budget
   15 min, and an agent Action has none. Depth 8. The wall budget is enforced at host-call boundaries and
-  by a timer race. workerd cannot interrupt running JS: see R25 below.
+  by a timer race, plus a host-call counter. workerd cannot interrupt running JS: see R25 below.
 - **Transactions (B.7).** One storage transaction per invocation (through K01). After a caught SQL error,
   later SQL fails with `current transaction is aborted…` until `ROLLBACK TO`, and the commit is refused.
   The deferred-FK check runs before the commit (G0-5): the object is not reset. A Query never commits.
@@ -124,7 +124,47 @@ Query vectors and `test/host.test.ts`.
 
 ## Runaway Reducer (0012 R25, 0016 G0-11)
 
-See `probes/r25/FINDINGS.md`.
+Measured on the platform (development account, probe deleted afterwards): `probes/r25/FINDINGS.md`.
+
+### What happens
+
+- **The runaway call** fails with `Durable Object exceeded its CPU time limit and was reset.`
+  (`durableObjectReset`, `overloaded`). It takes 33.6–36.4 s at the default limit, 14.2 s at
+  `limits.cpu_ms` 10000 and 5.3 s at 2000. `cpu_ms` applies to Durable Objects. The object resets: the
+  constructor runs again, committed rows are intact and the runaway's writes are rolled back.
+- **Every other call on the tenant waits for the whole overrun, then fails.** At the default limit the
+  text is the misleading `Durable Object reset because its code was updated.` From about 6.5–7 s on, new
+  calls are shed in under 105 ms with `Durable Object is overloaded. Requests queued for too long.`
+- **Sockets held by the tenant object** are all dropped: 1013 `Service overloaded; retry later.` at
+  about 7 s, or 1006 at the reset if that comes sooner. No socket can open during the overrun. Clients
+  are back in 90–207 ms once it ends.
+- **Sockets held by gateway objects (G0-1)** never dropped: 0 of 10 in every run. Only their calls in
+  flight to the tenant failed. No other object was affected (colocation was not observed).
+- **The platform clock** (`Date.now`, `performance.now`) does not advance during synchronous work, not
+  even across 2,001 `sql.exec` calls. A wall-clock check at a host-call boundary never fires on the
+  platform; it only works locally.
+
+### Mitigation
+
+Implemented here:
+
+1. `EngineConfig.maxHostCalls` (default 100,000). A runaway that keeps calling the host is stopped in the
+   object with Rust's `module exceeded its 10000 ms execution deadline` (budget_exceeded, transient), and
+   rolled back. A pure `for(;;){}` never calls the host, so it still reaches the platform limit.
+2. `TenantModuleHost.quarantine`: a command id recorded after an overrun is answered with the same Rust
+   deadline error without running. `isPlatformOverrun()` and `deadlineOverrunError()` let the caller map
+   the three platform texts. Measured with the probe: 1 reset instead of one per retry, and retries
+   refused in 76–104 ms.
+
+Proposed for the lead (note 0020 §5):
+
+3. The caller (K05 gateway, K07) records the command id on a fresh stub when it sees an overrun.
+4. Set `limits.cpu_ms` as the backstop, ideally under about 4 s so that an overrun ends before the 7 s shed
+   point. This conflicts with S1's 45 s-CPU migration transaction, so K02's chunk size must fit first.
+5. Keep sockets in gateways.
+6. The Worker Loader with `limits.cpuMs` is the only true per-call guard: no reset, about +1–2 ms p50.
+   But host calls back into a tenant that holds its transaction deadlocked (0 completed), so it is an
+   open question for S5.
 
 ## Run
 

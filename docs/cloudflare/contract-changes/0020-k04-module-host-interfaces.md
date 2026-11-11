@@ -1,4 +1,4 @@
-# 0020: K04 module host: the storage interface it needs from K01, and three findings
+# 0020: K04 module host: the storage interface it needs from K01, three findings and the R25 proposal
 
 Date: 2026-11-11. Status: **proposed by K04**, for the lead. Affects: K01, K04, K05, K19, the K04 entry in
 `work-packages.json`.
@@ -82,3 +82,30 @@ Two consequences:
 Rust checks schemas and duplicates when it loads a generation. If an export has no handler, Rust fails
 that call at dispatch, not the load (`V8/lib.rs:261-296`, `BS:766-772`). K04 does the same. Without
 this, the Whagons artifact would not load at all, because of the 859 plan Queries above.
+
+## 5. 0012 R25 / 0016 G0-11: a runaway Reducer (measured; proposal)
+
+Measured on the platform. Details and raw numbers are in `cloudflare/kernel/host/probes/r25/FINDINGS.md`;
+the summary is in `cloudflare/kernel/host/README.md`.
+
+A CPU overrun resets the tenant object. Committed data is intact and the runaway's writes roll back.
+
+- Every call to the tenant is blocked for the whole overrun: about 34–36 s at the default limit.
+- From about 7 s, new calls are shed and tenant-held sockets are closed with 1013.
+- Gateway-held sockets were never dropped.
+- The platform clock does not advance during synchronous work. A wall-clock budget cannot fire inside a
+  Reducer that never awaits a real timer.
+
+K04 implements a host-call counter (`maxHostCalls`, default 100,000) and a per-object command quarantine.
+Both answer with Rust's `module exceeded its 10000 ms execution deadline` (budget_exceeded, transient).
+The counter is a deviation in mechanism, not in text: it fires on call count, not on elapsed time.
+
+**Proposed rulings:**
+
+| # | Proposal | Why |
+|---|---|---|
+| a | Callers (K05 gateway, K07, the Action Worker for tool calls) map `Durable Object exceeded its CPU time limit and was reset.` to Rust's deadline error for the command that caused it, then record the command id on a fresh stub (`quarantine.add`). They map `… reset because its code was updated.` and `… is overloaded. Requests queued for too long.` to transient for every other call. | Without the mark, every client retry of a transient error resets the tenant again (measured: 2 retries → 2 resets; with the mark, 1). |
+| b | Set `limits.cpu_ms` for the tenant-object script to the lowest value that the heaviest legitimate event allows, ideally under about 4 s. | That bounds the outage below the 7 s shed point. **Conflict:** S1's migration 0003 used 45 s of CPU in one transaction. K02 must chunk migrations under the limit, or migrations must run in a different script. |
+| c | Accept that a pure `for(;;){}` is not stopped per call in stage 1. Keep sockets in gateways (G0-1), which makes the blast radius "in-flight calls of one tenant for up to the CPU limit". | No per-call CPU guard works with one transaction per Reducer. |
+| d | S5 also answers this: can module code in a Worker Loader isolate (with `limits.cpuMs`) make host calls into a tenant that holds its transaction? | The probe measured that such a runaway is stopped with no reset at about +1–2 ms p50, but 0 host calls completed while the tenant held its input gate. |
+| e | The conformance step `reducer-errors` / "transient: invocation deadline" (`errors.spin`, a pure loop) cannot match Rust on the kernel until (b): the error arrives after the CPU limit instead of 10 s, and the harness waits 15 s. | Platform-forced, like 0012 R21 and R26. |

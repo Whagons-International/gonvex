@@ -37,6 +37,14 @@ export interface EngineConfig {
   scheduledSliceMs: number;
   /** Result cap, contract 8 MiB. */
   maxResultBytes: number;
+  /**
+   * Host calls per invocation (R25). The platform clock does not advance
+   * during synchronous work, so on Cloudflare the wall budget cannot fire at a
+   * host-call boundary; a counter can. Sized well above any real Reducer
+   * (Whagons: at most 37 statements) and below what 10 s of host calls reach.
+   * 0 disables it.
+   */
+  maxHostCalls: number;
   /** Kernel clock for budgets (never the module's pinned clock). */
   clock: () => number;
 }
@@ -46,6 +54,7 @@ export const defaultEngineConfig: EngineConfig = Object.freeze({
   actionTimeoutMs: 15 * 60_000,
   scheduledSliceMs: 3_000,
   maxResultBytes: 8 * 1024 * 1024,
+  maxHostCalls: 100_000,
   clock: () => Date.now(),
 });
 
@@ -97,6 +106,7 @@ export type ModuleExports = Readonly<Record<string, unknown>>;
 
 interface ActiveSlot {
   open: boolean;
+  calls: number;
   violation: string | undefined;
   overrun: boolean;
   serial: Promise<unknown>;
@@ -177,7 +187,7 @@ export class ModuleEngine {
     const declared = contract.metadata?.["actionCapabilities"] as { networkOrigins?: unknown } | undefined;
     const networkOrigins = declared === undefined || declared === null ? undefined
       : Array.isArray(declared.networkOrigins) ? declared.networkOrigins.filter((origin): origin is string => typeof origin === "string") : [];
-    const slot: ActiveSlot = { open: true, violation: undefined, overrun: false, serial: Promise.resolve() };
+    const slot: ActiveSlot = { open: true, calls: 0, violation: undefined, overrun: false, serial: Promise.resolve() };
     const overrunMessage = budget.sliced
       ? scheduledSliceMessage(contract, budget.timeoutMs ?? 0)
       : `module exceeded its ${budget.timeoutMs ?? 0} ms execution deadline`;
@@ -204,8 +214,15 @@ export class ModuleEngine {
         slot.violation ??= message;
         return Promise.reject(new GonvexHostError(message, "denied"));
       }
-      // Wall-clock budget at the host-call boundary. workerd cannot interrupt
-      // running JavaScript; a module that keeps calling the host stops here.
+      // Budgets at the host-call boundary. workerd cannot interrupt running
+      // JavaScript; a module that keeps calling the host stops here. The
+      // clock check works only where time advances (local workerd, after real
+      // awaits); on the platform the call counter is what fires (R25).
+      slot.calls++;
+      if (this.config.maxHostCalls > 0 && slot.calls > this.config.maxHostCalls) {
+        slot.overrun = true;
+        return Promise.reject(new GonvexHostError(hostErrors.failed(overrunMessage), "failed"));
+      }
       if (budget.deadline !== undefined && this.config.clock() > budget.deadline) {
         slot.overrun = true;
         return Promise.reject(new GonvexHostError(hostErrors.failed(overrunMessage), "failed"));

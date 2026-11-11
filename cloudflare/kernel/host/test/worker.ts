@@ -17,7 +17,7 @@ const table: [string, "query" | "reducer" | "action"][] = [
   ["notes.scheduleUnknown", "reducer"], ["notes.caughtSqlError", "reducer"], ["notes.abortedThenQuery", "reducer"],
   ["notes.savepointRecover", "reducer"], ["notes.throwAfterWrite", "reducer"], ["notes.orphanChild", "reducer"],
   ["notes.ddl", "reducer"], ["notes.insertInto", "reducer"], ["notes.recordAdd", "reducer"], ["notes.slow", "reducer"],
-  ["notes.spin", "reducer"], ["notes.permission", "reducer"], ["notes.metadata", "reducer"],
+  ["notes.spin", "reducer"], ["notes.permission", "reducer"], ["notes.metadata", "reducer"], ["notes.manyCalls", "reducer"],
   ["mail.send", "action"], ["net.swallowDenied", "action"],
 ];
 

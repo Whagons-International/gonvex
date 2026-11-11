@@ -229,6 +229,35 @@ describe("budgets and caps", () => {
     expect(report.error?.message).toContain("scheduled reducer notes.slow exceeded its 30 ms time slice for scheduled work");
   });
 
+  it("stops a host-call runaway with a counter, even if it swallows the errors (R25)", async () => {
+    const t = tenant({ engine: { maxHostCalls: 50 } });
+    expect((await t.call("notes.manyCalls", "reducer", { calls: 50 })).ok).toBe(true);
+    const report = await t.call("notes.manyCalls", "reducer", { calls: 10_000 });
+    expect(report.error).toMatchObject({ code: "budget_exceeded", class: "transient", retryable: false });
+    expect(report.error?.message).toBe("TypeScript module host returned budget_exceeded: module fixture function notes.manyCalls: module exceeded its 10000 ms execution deadline");
+    expect(report.stats.calls).toBe(50);
+  });
+
+  it("refuses a quarantined command without running it (R25)", async () => {
+    const t = tenant();
+    await t.within((instance) => instance.host.quarantine.add("poisoned-1"));
+    const report = await t.call("notes.add", "reducer", { id: "never", body: "x" }, { invocation: { commandId: "poisoned-1" } });
+    expect(report.error?.message).toBe("TypeScript module host returned budget_exceeded: module fixture function notes.add: module exceeded its 10000 ms execution deadline");
+    expect(report.error?.class).toBe("transient");
+    expect(await t.rows("SELECT * FROM notes")).toEqual([]);
+    expect((await t.call("notes.add", "reducer", { id: "ok", body: "x" }, { invocation: { commandId: "fine-1" } })).ok).toBe(true);
+  });
+
+  it("recognizes the platform's overrun texts", async () => {
+    const { isPlatformOverrun, classifyPlatformError } = await import("../src/index.js");
+    for (const message of ["Durable Object exceeded its CPU time limit and was reset.", "Durable Object reset because its code was updated.", "Durable Object is overloaded. Requests queued for too long."]) {
+      expect(isPlatformOverrun(new Error(message))).toBe(true);
+      expect(classifyPlatformError(new Error(message)).class).toBe("transient");
+    }
+    expect(classifyPlatformError(new Error("Durable Object exceeded its CPU time limit and was reset.")).code).toBe("budget_exceeded");
+    expect(isPlatformOverrun(new Error("no such table: x"))).toBe(false);
+  });
+
   it("fails a denied capability even when the module catches it", async () => {
     const { ModuleEngine, ModuleError } = await import("../src/index.js");
     const { fixtureFunctions } = await import("./worker.js");

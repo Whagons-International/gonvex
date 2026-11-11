@@ -108,3 +108,10 @@ export const net_swallowDenied = async (ctx) => {
   try { await ctx.fetch("https://blocked.invalid/x"); } catch { /* swallowed */ }
   return "swallowed";
 };
+
+export const notes_manyCalls = async (ctx, args) => {
+  for (let i = 0; i < args.calls; i++) {
+    try { await ctx.db.query("SELECT 1 AS one"); } catch { /* a runaway that swallows errors */ }
+  }
+  return "done";
+};
