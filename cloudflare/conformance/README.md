@@ -254,3 +254,20 @@ Other notes:
 - **Node 22 WebSocket.** Node 22.23 fires `error` but no `close` on a refused connection and leaves `readyState` at CONNECTING. Node 26 and browsers follow the spec. Both SDKs reconnect from `close`, so `src/sessions.mjs` completes the spec's failure steps. Without this, any client retrying while a backend restarts stalls for 30 s.
 - **Stream bindings outlive a re-auth.** When one socket re-authenticates without `subscriptionsPreserved`, for example on a tenant switch, Rust drops every subscription. But the delivery v2 stream token can be the same in the new auth, and `expandReplicaBatch` (used by the SDK, the thin client and this harness) keeps a socket's bindings across auths. So Rust's next `replica.delta` and `replica.ready` for that stream also expand to the dropped subscription id (`receipt-owner-switch`, step "tenant switch A -> B"). The SDK ignores the unknown id, and the digest self-check skips subscriptions dropped by a re-auth. Those phantom frames are still in the normalized trace, so a kernel that unbinds or renames its streams at auth shows a diff there. It needs a ruling: either the client clears its bindings at `auth.result`, or the server must unbind.
 - **The SDK alone reacts to a wrong digest.** It reopens the collection again and again (about 80,000 frames in one scenario) and the run eventually fails on timeouts. The digest self-check fails it at the first mismatch and names it. It also covers the thin and raw clients, which never verify digests.
+
+## Deploy and operator routes (K19)
+
+`operator-routes` drives the operator HTTP surface (CONTRACT D.1-D.3) and `/dev/sync` refusals over HTTP and
+compares status and body. It seeds no tenant or Member (`tenants: {}`) and creates its own tenant, so it runs on
+the K19 local kernel too (backend `cloudflare-kernel`: `cloudflare/router/dev/local` under `wrangler dev`, with
+the release builder):
+
+```bash
+node src/cli.mjs --backend rust=rust --backend kernel=cloudflare-kernel --scenario operator-routes
+```
+
+Values each backend mints (tokens, ids, times, project keys, session revisions, database aliases) are scrubbed by
+the named rules at the top of the scenario; everything else is compared exactly. The kernel backend waits for the
+new Worker version after each sync, because the local builder swaps it just after the sync answers and
+`wrangler dev` restarts workerd (0036 §4). Other scenarios need seeded Members and the wave-2 tenant object.
+

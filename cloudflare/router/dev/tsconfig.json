@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types", "@types/node"]
+  },
+  "include": ["routes.ts", "rollout.ts", "local/*.ts", "test/**/*.ts", "../../control/operator/**/*.ts", "../../control/src/modules.d.ts"]
+}
