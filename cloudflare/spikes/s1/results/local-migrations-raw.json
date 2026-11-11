@@ -1,0 +1,1588 @@
+{
+ "mode": "migrations",
+ "object": "mig-raw",
+ "workarounds": false,
+ "steps": [
+  {
+   "step": "runtime prelude",
+   "statements": 44,
+   "requests": 1,
+   "ms": 80,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0000_sqlite_baseline.sql",
+   "statements": 879,
+   "requestBytes": 200910,
+   "ms": 333,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0001_sqlite_projections.sql",
+   "statements": 79,
+   "requestBytes": 51941,
+   "ms": 73,
+   "ok": false,
+   "foreignKeyRebuild": false,
+   "failed": 4,
+   "errorKinds": {
+    "Expression tree is too large (maximum depth _): SQLITE_ERROR": 4
+   },
+   "firstErrors": [
+    {
+     "index": 1,
+     "bytes": 5583,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskGridProjection\" AS SELECT g.\"taskId\", g.\"id\", g.\"workspaceId\", g.\"name\", g.\"description\", g.\"statusId"
+    },
+    {
+     "index": 30,
+     "bytes": 4042,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskTagSearchDocuments\" AS SELECT 'taskTags' AS \"source\", link.\"_id\" AS \"sourceId\", link.\"taskId\", link.\""
+    },
+    {
+     "index": 32,
+     "bytes": 12270,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskCustomFieldSearchDocuments\" AS SELECT 'taskCustomFieldValues' AS \"source\", c.\"sourceId\", c.\"taskId\", "
+    }
+   ],
+   "errors": [
+    {
+     "index": 1,
+     "bytes": 5583,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskGridProjection\" AS SELECT g.\"taskId\", g.\"id\", g.\"workspaceId\", g.\"name\", g.\"description\", g.\"statusId"
+    },
+    {
+     "index": 30,
+     "bytes": 4042,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskTagSearchDocuments\" AS SELECT 'taskTags' AS \"source\", link.\"_id\" AS \"sourceId\", link.\"taskId\", link.\""
+    },
+    {
+     "index": 32,
+     "bytes": 12270,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskCustomFieldSearchDocuments\" AS SELECT 'taskCustomFieldValues' AS \"source\", c.\"sourceId\", c.\"taskId\", "
+    },
+    {
+     "index": 60,
+     "bytes": 4593,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE UNIQUE INDEX \"roles_live_name_key_unique\" ON \"roles\" ( coalesce(nullif(replace(replace(replace(replace(replace(re"
+    }
+   ]
+  },
+  {
+   "step": "migration 0002_agents_and_subtask_references.sql",
+   "statements": 15,
+   "requestBytes": 3232,
+   "ms": 131,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0003_sql_relationship_integrity.sql",
+   "statements": 2954,
+   "requestBytes": 895501,
+   "ms": 6423,
+   "ok": false,
+   "foreignKeyRebuild": true,
+   "failed": 50,
+   "errorKinds": {
+    "no such table: main.whTaskGridProjection: SQLITE_ERROR": 6,
+    "too many terms in compound SELECT: SQLITE_ERROR": 1,
+    "not authorized: SQLITE_AUTH": 12,
+    "no such table: schemaCapabilityGuard: SQLITE_ERROR": 2,
+    "no such table: memberTeams_aliases_agree: SQLITE_ERROR": 2,
+    "no such table: memberSpots_aliases_agree: SQLITE_ERROR": 2,
+    "no such table: workspace_preferences_owner_agrees: SQLITE_ERROR": 2,
+    "no such table: assignment_workspace_agrees: SQLITE_ERROR": 2,
+    "no such table: ack_receipt_task_agrees: SQLITE_ERROR": 2,
+    "no such table: approval_scope_is_global: SQLITE_ERROR": 2,
+    "no such table: unused_schedule_fields_are_empty: SQLITE_ERROR": 2,
+    "no such table: form_schema_alias_agrees: SQLITE_ERROR": 2,
+    "no such table: workspace_teams_alias_agrees: SQLITE_ERROR": 2,
+    "no such table: category_creation_mode_agrees: SQLITE_ERROR": 2,
+    "no such table: approvalSourceGuard: SQLITE_ERROR": 2,
+    "no such view: whTaskCustomFieldSearchDocuments: SQLITE_ERROR": 1,
+    "no such view: whTaskGridProjection: SQLITE_ERROR": 1,
+    "no such view: whTaskTagSearchDocuments: SQLITE_ERROR": 1,
+    "Expression tree is too large (maximum depth _): SQLITE_ERROR": 4
+   },
+   "firstErrors": [
+    {
+     "index": 32,
+     "bytes": 520,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R31 -- rule: 0003:FOREIGN KEY tasks.categoryId->categories._id (ON DELETE SET NULL, nullable) -- effect: null-out"
+    },
+    {
+     "index": 34,
+     "bytes": 520,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R33 -- rule: 0003:FOREIGN KEY tasks.priorityId->priorities._id (ON DELETE SET NULL, nullable) -- effect: null-out"
+    },
+    {
+     "index": 35,
+     "bytes": 590,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R34 -- rule: 0003:FOREIGN KEY tasks.spotId->spots._id (ON DELETE SET NULL, nullable) -- effect: null-out -- owner"
+    }
+   ],
+   "errors": [
+    {
+     "index": 32,
+     "bytes": 520,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R31 -- rule: 0003:FOREIGN KEY tasks.categoryId->categories._id (ON DELETE SET NULL, nullable) -- effect: null-out"
+    },
+    {
+     "index": 34,
+     "bytes": 520,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R33 -- rule: 0003:FOREIGN KEY tasks.priorityId->priorities._id (ON DELETE SET NULL, nullable) -- effect: null-out"
+    },
+    {
+     "index": 35,
+     "bytes": 590,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R34 -- rule: 0003:FOREIGN KEY tasks.spotId->spots._id (ON DELETE SET NULL, nullable) -- effect: null-out -- owner"
+    },
+    {
+     "index": 36,
+     "bytes": 506,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R35 -- rule: 0003:FOREIGN KEY tasks.statusId->statuses._id (ON DELETE SET NULL, nullable) -- effect: null-out -- "
+    },
+    {
+     "index": 37,
+     "bytes": 500,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R36 -- rule: 0003:FOREIGN KEY tasks.createdBy->members.id (ON DELETE NO ACTION, nullable) -- effect: null-out -- "
+    },
+    {
+     "index": 107,
+     "bytes": 9913,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "-- id: R107 -- rule: 0004:referenceBindings_workflowVersions exactly-one target (nodes[*].config[.trigger_filters].<enti"
+    },
+    {
+     "index": 110,
+     "bytes": 1186,
+     "error": "no such table: main.whTaskGridProjection: SQLITE_ERROR",
+     "head": "-- id: R111 -- rule: 0003:UNIQUE integrity_tasks_id ON tasks(id) -- effect: other -- owner-decision: yes -- reason: OWNE"
+    },
+    {
+     "index": 116,
+     "bytes": 72,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE schemaCapabilityGuard(ok INTEGER NOT NULL CHECK(ok=1))"
+    },
+    {
+     "index": 117,
+     "bytes": 133,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "INSERT INTO schemaCapabilityGuard SELECT EXISTS(SELECT 1 FROM _gonvex_schema_capabilities WHERE name='atomic-foreign-key"
+    },
+    {
+     "index": 118,
+     "bytes": 32,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "DROP TABLE schemaCapabilityGuard"
+    },
+    {
+     "index": 119,
+     "bytes": 110,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE memberTeams_aliases_agree(valid INTEGER CONSTRAINT memberTeams_aliases_agree CHECK(valid=1))"
+    },
+    {
+     "index": 120,
+     "bytes": 175,
+     "error": "no such table: memberTeams_aliases_agree: SQLITE_ERROR",
+     "head": "INSERT INTO memberTeams_aliases_agree SELECT NOT EXISTS(SELECT 1 FROM memberTeams WHERE nullif(memberId,'') IS NOT NULL "
+    },
+    {
+     "index": 121,
+     "bytes": 36,
+     "error": "no such table: memberTeams_aliases_agree: SQLITE_ERROR",
+     "head": "DROP TABLE memberTeams_aliases_agree"
+    },
+    {
+     "index": 122,
+     "bytes": 110,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE memberSpots_aliases_agree(valid INTEGER CONSTRAINT memberSpots_aliases_agree CHECK(valid=1))"
+    },
+    {
+     "index": 123,
+     "bytes": 175,
+     "error": "no such table: memberSpots_aliases_agree: SQLITE_ERROR",
+     "head": "INSERT INTO memberSpots_aliases_agree SELECT NOT EXISTS(SELECT 1 FROM memberSpots WHERE nullif(memberId,'') IS NOT NULL "
+    },
+    {
+     "index": 124,
+     "bytes": 36,
+     "error": "no such table: memberSpots_aliases_agree: SQLITE_ERROR",
+     "head": "DROP TABLE memberSpots_aliases_agree"
+    },
+    {
+     "index": 125,
+     "bytes": 128,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE workspace_preferences_owner_agrees(valid INTEGER CONSTRAINT workspace_preferences_owner_agrees CHECK(v"
+    },
+    {
+     "index": 126,
+     "bytes": 193,
+     "error": "no such table: workspace_preferences_owner_agrees: SQLITE_ERROR",
+     "head": "INSERT INTO workspace_preferences_owner_agrees SELECT NOT EXISTS(SELECT 1 FROM workspacePreferences WHERE nullif(memberI"
+    },
+    {
+     "index": 127,
+     "bytes": 45,
+     "error": "no such table: workspace_preferences_owner_agrees: SQLITE_ERROR",
+     "head": "DROP TABLE workspace_preferences_owner_agrees"
+    },
+    {
+     "index": 128,
+     "bytes": 114,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE assignment_workspace_agrees(valid INTEGER CONSTRAINT assignment_workspace_agrees CHECK(valid=1))"
+    },
+    {
+     "index": 129,
+     "bytes": 197,
+     "error": "no such table: assignment_workspace_agrees: SQLITE_ERROR",
+     "head": "INSERT INTO assignment_workspace_agrees SELECT NOT EXISTS(SELECT 1 FROM taskUsers a JOIN tasks t ON t._id=a.taskId WHERE"
+    },
+    {
+     "index": 130,
+     "bytes": 38,
+     "error": "no such table: assignment_workspace_agrees: SQLITE_ERROR",
+     "head": "DROP TABLE assignment_workspace_agrees"
+    },
+    {
+     "index": 131,
+     "bytes": 106,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE ack_receipt_task_agrees(valid INTEGER CONSTRAINT ack_receipt_task_agrees CHECK(valid=1))"
+    },
+    {
+     "index": 132,
+     "bytes": 183,
+     "error": "no such table: ack_receipt_task_agrees: SQLITE_ERROR",
+     "head": "INSERT INTO ack_receipt_task_agrees SELECT NOT EXISTS(SELECT 1 FROM taskAckReads r JOIN taskAcks a ON a._id=r.ackId WHER"
+    },
+    {
+     "index": 133,
+     "bytes": 34,
+     "error": "no such table: ack_receipt_task_agrees: SQLITE_ERROR",
+     "head": "DROP TABLE ack_receipt_task_agrees"
+    },
+    {
+     "index": 134,
+     "bytes": 108,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE approval_scope_is_global(valid INTEGER CONSTRAINT approval_scope_is_global CHECK(valid=1))"
+    },
+    {
+     "index": 135,
+     "bytes": 173,
+     "error": "no such table: approval_scope_is_global: SQLITE_ERROR",
+     "head": "INSERT INTO approval_scope_is_global SELECT NOT EXISTS(SELECT 1 FROM approvalApprovers WHERE coalesce(nullif(scope,''),'"
+    },
+    {
+     "index": 136,
+     "bytes": 35,
+     "error": "no such table: approval_scope_is_global: SQLITE_ERROR",
+     "head": "DROP TABLE approval_scope_is_global"
+    },
+    {
+     "index": 137,
+     "bytes": 124,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE unused_schedule_fields_are_empty(valid INTEGER CONSTRAINT unused_schedule_fields_are_empty CHECK(valid"
+    },
+    {
+     "index": 138,
+     "bytes": 224,
+     "error": "no such table: unused_schedule_fields_are_empty: SQLITE_ERROR",
+     "head": "INSERT INTO unused_schedule_fields_are_empty SELECT NOT EXISTS(SELECT 1 FROM workingSchedules WHERE nullif(countryConfig"
+    },
+    {
+     "index": 139,
+     "bytes": 43,
+     "error": "no such table: unused_schedule_fields_are_empty: SQLITE_ERROR",
+     "head": "DROP TABLE unused_schedule_fields_are_empty"
+    },
+    {
+     "index": 140,
+     "bytes": 108,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE form_schema_alias_agrees(valid INTEGER CONSTRAINT form_schema_alias_agrees CHECK(valid=1))"
+    },
+    {
+     "index": 141,
+     "bytes": 375,
+     "error": "no such table: form_schema_alias_agrees: SQLITE_ERROR",
+     "head": "INSERT INTO form_schema_alias_agrees SELECT NOT EXISTS(SELECT 1 FROM formVersions f WHERE f.fields IS NOT NULL AND f.sch"
+    },
+    {
+     "index": 142,
+     "bytes": 35,
+     "error": "no such table: form_schema_alias_agrees: SQLITE_ERROR",
+     "head": "DROP TABLE form_schema_alias_agrees"
+    },
+    {
+     "index": 143,
+     "bytes": 116,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE workspace_teams_alias_agrees(valid INTEGER CONSTRAINT workspace_teams_alias_agrees CHECK(valid=1))"
+    },
+    {
+     "index": 144,
+     "bytes": 538,
+     "error": "no such table: workspace_teams_alias_agrees: SQLITE_ERROR",
+     "head": "INSERT INTO workspace_teams_alias_agrees SELECT NOT EXISTS(SELECT 1 FROM workspaces w WHERE w.teams IS NOT NULL AND (jso"
+    },
+    {
+     "index": 145,
+     "bytes": 39,
+     "error": "no such table: workspace_teams_alias_agrees: SQLITE_ERROR",
+     "head": "DROP TABLE workspace_teams_alias_agrees"
+    },
+    {
+     "index": 146,
+     "bytes": 118,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE category_creation_mode_agrees(valid INTEGER CONSTRAINT category_creation_mode_agrees CHECK(valid=1))"
+    },
+    {
+     "index": 147,
+     "bytes": 218,
+     "error": "no such table: category_creation_mode_agrees: SQLITE_ERROR",
+     "head": "INSERT INTO category_creation_mode_agrees SELECT NOT EXISTS(SELECT 1 FROM categories WHERE taskCreationMode IS NOT NULL "
+    },
+    {
+     "index": 148,
+     "bytes": 40,
+     "error": "no such table: category_creation_mode_agrees: SQLITE_ERROR",
+     "head": "DROP TABLE category_creation_mode_agrees"
+    },
+    {
+     "truncated": 10
+    }
+   ]
+  },
+  {
+   "step": "migration 0004_sql_document_relationships.sql",
+   "statements": 1779,
+   "requestBytes": 2303924,
+   "ms": 654,
+   "ok": false,
+   "foreignKeyRebuild": false,
+   "failed": 47,
+   "errorKinds": {
+    "not authorized: SQLITE_AUTH": 1,
+    "no such table: schemaCapabilityGuard: SQLITE_ERROR": 2,
+    "too many terms in compound SELECT: SQLITE_ERROR": 19,
+    "no such table: referenceExpected_approvals: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_audiencePresets: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_gamificationPointTransactions: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_journeySyncLinks: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_kpiCards: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_marketRecords: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_nfcTags: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_notifications: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_reportDeliveries: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_reportDocuments: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_reports: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_researchRuns: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_talentApplications: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_taskRecurrences: SQLITE_ERROR": 1,
+    "statement too long: SQLITE_TOOBIG": 3,
+    "no such table: referenceExpected_tasks: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_templates: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_voiceTaskDrafts: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_workflowVersions: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_workplanItems: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_workspacePreferences: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_workspaces: SQLITE_ERROR": 1,
+    "no such table: referenceExpected_workspaceViews: SQLITE_ERROR": 1
+   },
+   "firstErrors": [
+    {
+     "index": 0,
+     "bytes": 320,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "-- gonvex:scope tenant -- Generated by scripts/schema/generate-reference-integrity.mjs. -- Documents remain the sole edi"
+    },
+    {
+     "index": 1,
+     "bytes": 128,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "INSERT INTO schemaCapabilityGuard SELECT EXISTS(SELECT 1 FROM _gonvex_schema_capabilities WHERE name='derived-table-capt"
+    },
+    {
+     "index": 2,
+     "bytes": 32,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "DROP TABLE schemaCapabilityGuard"
+    }
+   ],
+   "errors": [
+    {
+     "index": 0,
+     "bytes": 320,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "-- gonvex:scope tenant -- Generated by scripts/schema/generate-reference-integrity.mjs. -- Documents remain the sole edi"
+    },
+    {
+     "index": 1,
+     "bytes": 128,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "INSERT INTO schemaCapabilityGuard SELECT EXISTS(SELECT 1 FROM _gonvex_schema_capabilities WHERE name='derived-table-capt"
+    },
+    {
+     "index": 2,
+     "bytes": 32,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "DROP TABLE schemaCapabilityGuard"
+    },
+    {
+     "index": 25,
+     "bytes": 43541,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_approvals\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id'"
+    },
+    {
+     "index": 34,
+     "bytes": 268,
+     "error": "no such table: referenceExpected_approvals: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_approvals\"(\"sourceId\",\"path\",\"target_statuses\",\"target_members\",\"target_tags\",\"target_tea"
+    },
+    {
+     "index": 48,
+     "bytes": 45447,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_audiencePresets\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    },
+    {
+     "index": 57,
+     "bytes": 265,
+     "error": "no such table: referenceExpected_audiencePresets: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_audiencePresets\"(\"sourceId\",\"path\",\"target_members\",\"target_teams\",\"target_roles\",\"target"
+    },
+    {
+     "index": 391,
+     "bytes": 16736,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_gamificationPointTransactions\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" owner"
+    },
+    {
+     "index": 400,
+     "bytes": 368,
+     "error": "no such table: referenceExpected_gamificationPointTransactions: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_gamificationPointTransactions\"(\"sourceId\",\"path\",\"target_tasks\",\"target_workspaces\",\"targ"
+    },
+    {
+     "index": 510,
+     "bytes": 10463,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_journeySyncLinks\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_objec"
+    },
+    {
+     "index": 519,
+     "bytes": 182,
+     "error": "no such table: referenceExpected_journeySyncLinks: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_journeySyncLinks\"(\"sourceId\",\"path\",\"target_statuses\") SELECT * FROM \"referenceExpected_j"
+    },
+    {
+     "index": 531,
+     "bytes": 32525,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_kpiCards\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id',"
+    },
+    {
+     "index": 540,
+     "bytes": 274,
+     "error": "no such table: referenceExpected_kpiCards: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_kpiCards\"(\"sourceId\",\"path\",\"target_statuses\",\"target_priorities\",\"target_members\",\"targe"
+    },
+    {
+     "index": 585,
+     "bytes": 16986,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_marketRecords\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('"
+    },
+    {
+     "index": 594,
+     "bytes": 282,
+     "error": "no such table: referenceExpected_marketRecords: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_marketRecords\"(\"sourceId\",\"path\",\"target_marketProjects\",\"target_members\",\"target_marketR"
+    },
+    {
+     "index": 654,
+     "bytes": 30501,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_nfcTags\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id',s"
+    },
+    {
+     "index": 663,
+     "bytes": 304,
+     "error": "no such table: referenceExpected_nfcTags: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_nfcTags\"(\"sourceId\",\"path\",\"target_tasks\",\"target_templates\",\"target_workspaces\",\"target_"
+    },
+    {
+     "index": 678,
+     "bytes": 31083,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_notifications\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('"
+    },
+    {
+     "index": 687,
+     "bytes": 460,
+     "error": "no such table: referenceExpected_notifications: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_notifications\"(\"sourceId\",\"path\",\"target_tasks\",\"target_workspaces\",\"target_taskWorkspace"
+    },
+    {
+     "index": 985,
+     "bytes": 22842,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_reportDeliveries\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_objec"
+    },
+    {
+     "index": 994,
+     "bytes": 294,
+     "error": "no such table: referenceExpected_reportDeliveries: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_reportDeliveries\"(\"sourceId\",\"path\",\"target_workspaces\",\"target_categories\",\"target_prior"
+    },
+    {
+     "index": 1007,
+     "bytes": 20581,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_reportDocuments\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    },
+    {
+     "index": 1016,
+     "bytes": 292,
+     "error": "no such table: referenceExpected_reportDocuments: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_reportDocuments\"(\"sourceId\",\"path\",\"target_workspaces\",\"target_categories\",\"target_priori"
+    },
+    {
+     "index": 1028,
+     "bytes": 20123,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_reports\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id',s"
+    },
+    {
+     "index": 1037,
+     "bytes": 276,
+     "error": "no such table: referenceExpected_reports: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_reports\"(\"sourceId\",\"path\",\"target_workspaces\",\"target_categories\",\"target_priorities\",\"t"
+    },
+    {
+     "index": 1111,
+     "bytes": 9451,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_researchRuns\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_"
+    },
+    {
+     "index": 1120,
+     "bytes": 200,
+     "error": "no such table: referenceExpected_researchRuns: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_researchRuns\"(\"sourceId\",\"path\",\"target_researchCompanies\",\"target_members\") SELECT * FRO"
+    },
+    {
+     "index": 1280,
+     "bytes": 9617,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_talentApplications\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_obj"
+    },
+    {
+     "index": 1289,
+     "bytes": 268,
+     "error": "no such table: referenceExpected_talentApplications: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_talentApplications\"(\"sourceId\",\"path\",\"target_talentJobs\",\"target_talentCandidates\",\"targ"
+    },
+    {
+     "index": 1420,
+     "bytes": 89137,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_taskRecurrences\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    },
+    {
+     "index": 1430,
+     "bytes": 467,
+     "error": "no such table: referenceExpected_taskRecurrences: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_taskRecurrences\"(\"sourceId\",\"path\",\"target_customFields\",\"target_spots\",\"target_tasks\",\"t"
+    },
+    {
+     "index": 1455,
+     "bytes": 163146,
+     "error": "statement too long: SQLITE_TOOBIG",
+     "head": "CREATE VIEW \"referenceExpected_tasks\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id',s.\""
+    },
+    {
+     "index": 1464,
+     "bytes": 288,
+     "error": "no such table: referenceExpected_tasks: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_tasks\"(\"sourceId\",\"path\",\"target_audiencePresets\",\"target_statuses\",\"target_members\",\"tar"
+    },
+    {
+     "index": 1526,
+     "bytes": 175500,
+     "error": "statement too long: SQLITE_TOOBIG",
+     "head": "CREATE VIEW \"referenceExpected_templates\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id'"
+    },
+    {
+     "index": 1535,
+     "bytes": 310,
+     "error": "no such table: referenceExpected_templates: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_templates\"(\"sourceId\",\"path\",\"target_audiencePresets\",\"target_statuses\",\"target_members\","
+    },
+    {
+     "index": 1569,
+     "bytes": 9295,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_voiceTaskDrafts\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    },
+    {
+     "index": 1578,
+     "bytes": 273,
+     "error": "no such table: referenceExpected_voiceTaskDrafts: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_voiceTaskDrafts\"(\"sourceId\",\"path\",\"target_templates\",\"target_categories\",\"target_spots\","
+    },
+    {
+     "index": 1620,
+     "bytes": 97688,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_workflowVersions\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_objec"
+    },
+    {
+     "index": 1629,
+     "bytes": 394,
+     "error": "no such table: referenceExpected_workflowVersions: SQLITE_ERROR",
+     "head": "INSERT INTO \"referenceBindings_workflowVersions\"(\"sourceId\",\"path\",\"target_statuses\",\"target_members\",\"target_priorities"
+    },
+    {
+     "index": 1662,
+     "bytes": 239554,
+     "error": "statement too long: SQLITE_TOOBIG",
+     "head": "CREATE VIEW \"referenceExpected_workplanItems\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('"
+    },
+    {
+     "truncated": 7
+    }
+   ]
+  },
+  {
+   "step": "migration 0005_compact_record_storage.sql",
+   "statements": 11739,
+   "requestBytes": 6554022,
+   "ms": 6908,
+   "ok": false,
+   "foreignKeyRebuild": true,
+   "failed": 110,
+   "errorKinds": {
+    "not authorized: SQLITE_AUTH": 4,
+    "no such table: schemaCapabilityGuard: SQLITE_ERROR": 2,
+    "no such view: referenceExpected_approvals: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_audiencePresets: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_gamificationPointTransactions: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_journeySyncLinks: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_kpiCards: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_marketRecords: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_nfcTags: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_notifications: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_reportDeliveries: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_reportDocuments: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_reports: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_researchRuns: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_talentApplications: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_taskRecurrences: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_tasks: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_templates: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_voiceTaskDrafts: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_workflowVersions: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_workplanItems: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_workspacePreferences: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_workspaceViews: SQLITE_ERROR": 1,
+    "no such view: referenceExpected_workspaces: SQLITE_ERROR": 1,
+    "no such view: whTaskCustomFieldSearchDocuments: SQLITE_ERROR": 1,
+    "no such view: whTaskGridProjection: SQLITE_ERROR": 1,
+    "no such view: whTaskTagSearchDocuments: SQLITE_ERROR": 1,
+    "no such table: instanceMembershipGuard: SQLITE_ERROR": 4,
+    "no such table: taskGuestShapeGuard: SQLITE_ERROR": 2,
+    "no such table: scheduleMigrationGuard: SQLITE_ERROR": 3,
+    "Expression tree is too large (maximum depth _): SQLITE_ERROR": 4,
+    "too many terms in compound SELECT: SQLITE_ERROR": 19,
+    "no such table: referenceExpected_approvals: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_audiencePresets: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_gamificationPointTransactions: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_journeySyncLinks: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_kpiCards: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_marketRecords: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_nfcTags: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_notifications: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_reportDeliveries: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_reportDocuments: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_reports: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_researchRuns: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_talentApplications: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_taskRecurrences: SQLITE_ERROR": 2,
+    "statement too long: SQLITE_TOOBIG": 3,
+    "no such table: referenceExpected_tasks: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_templates: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_voiceTaskDrafts: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_workflowVersions: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_workplanItems: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_workspacePreferences: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_workspaces: SQLITE_ERROR": 2,
+    "no such table: referenceExpected_workspaceViews: SQLITE_ERROR": 2
+   },
+   "firstErrors": [
+    {
+     "index": 0,
+     "bytes": 335,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "-- gonvex:scope tenant -- gonvex:foreign-key-rebuild -- Generated by scripts/schema/generate-compact-storage.mjs. -- Pub"
+    },
+    {
+     "index": 1,
+     "bytes": 129,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "INSERT INTO schemaCapabilityGuard SELECT EXISTS(SELECT 1 FROM _gonvex_schema_capabilities WHERE name='logical-record-sto"
+    },
+    {
+     "index": 2,
+     "bytes": 32,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "DROP TABLE schemaCapabilityGuard"
+    }
+   ],
+   "errors": [
+    {
+     "index": 0,
+     "bytes": 335,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "-- gonvex:scope tenant -- gonvex:foreign-key-rebuild -- Generated by scripts/schema/generate-compact-storage.mjs. -- Pub"
+    },
+    {
+     "index": 1,
+     "bytes": 129,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "INSERT INTO schemaCapabilityGuard SELECT EXISTS(SELECT 1 FROM _gonvex_schema_capabilities WHERE name='logical-record-sto"
+    },
+    {
+     "index": 2,
+     "bytes": 32,
+     "error": "no such table: schemaCapabilityGuard: SQLITE_ERROR",
+     "head": "DROP TABLE schemaCapabilityGuard"
+    },
+    {
+     "index": 724,
+     "bytes": 39,
+     "error": "no such view: referenceExpected_approvals: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_approvals\""
+    },
+    {
+     "index": 725,
+     "bytes": 45,
+     "error": "no such view: referenceExpected_audiencePresets: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_audiencePresets\""
+    },
+    {
+     "index": 745,
+     "bytes": 59,
+     "error": "no such view: referenceExpected_gamificationPointTransactions: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_gamificationPointTransactions\""
+    },
+    {
+     "index": 752,
+     "bytes": 46,
+     "error": "no such view: referenceExpected_journeySyncLinks: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_journeySyncLinks\""
+    },
+    {
+     "index": 753,
+     "bytes": 38,
+     "error": "no such view: referenceExpected_kpiCards: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_kpiCards\""
+    },
+    {
+     "index": 756,
+     "bytes": 43,
+     "error": "no such view: referenceExpected_marketRecords: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_marketRecords\""
+    },
+    {
+     "index": 760,
+     "bytes": 37,
+     "error": "no such view: referenceExpected_nfcTags: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_nfcTags\""
+    },
+    {
+     "index": 762,
+     "bytes": 43,
+     "error": "no such view: referenceExpected_notifications: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_notifications\""
+    },
+    {
+     "index": 779,
+     "bytes": 46,
+     "error": "no such view: referenceExpected_reportDeliveries: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_reportDeliveries\""
+    },
+    {
+     "index": 780,
+     "bytes": 45,
+     "error": "no such view: referenceExpected_reportDocuments: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_reportDocuments\""
+    },
+    {
+     "index": 782,
+     "bytes": 37,
+     "error": "no such view: referenceExpected_reports: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_reports\""
+    },
+    {
+     "index": 786,
+     "bytes": 42,
+     "error": "no such view: referenceExpected_researchRuns: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_researchRuns\""
+    },
+    {
+     "index": 795,
+     "bytes": 48,
+     "error": "no such view: referenceExpected_talentApplications: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_talentApplications\""
+    },
+    {
+     "index": 803,
+     "bytes": 45,
+     "error": "no such view: referenceExpected_taskRecurrences: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_taskRecurrences\""
+    },
+    {
+     "index": 806,
+     "bytes": 35,
+     "error": "no such view: referenceExpected_tasks: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_tasks\""
+    },
+    {
+     "index": 808,
+     "bytes": 39,
+     "error": "no such view: referenceExpected_templates: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_templates\""
+    },
+    {
+     "index": 810,
+     "bytes": 45,
+     "error": "no such view: referenceExpected_voiceTaskDrafts: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_voiceTaskDrafts\""
+    },
+    {
+     "index": 813,
+     "bytes": 46,
+     "error": "no such view: referenceExpected_workflowVersions: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_workflowVersions\""
+    },
+    {
+     "index": 815,
+     "bytes": 43,
+     "error": "no such view: referenceExpected_workplanItems: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_workplanItems\""
+    },
+    {
+     "index": 817,
+     "bytes": 50,
+     "error": "no such view: referenceExpected_workspacePreferences: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_workspacePreferences\""
+    },
+    {
+     "index": 818,
+     "bytes": 44,
+     "error": "no such view: referenceExpected_workspaceViews: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_workspaceViews\""
+    },
+    {
+     "index": 819,
+     "bytes": 40,
+     "error": "no such view: referenceExpected_workspaces: SQLITE_ERROR",
+     "head": "DROP VIEW \"referenceExpected_workspaces\""
+    },
+    {
+     "index": 820,
+     "bytes": 44,
+     "error": "no such view: whTaskCustomFieldSearchDocuments: SQLITE_ERROR",
+     "head": "DROP VIEW \"whTaskCustomFieldSearchDocuments\""
+    },
+    {
+     "index": 821,
+     "bytes": 32,
+     "error": "no such view: whTaskGridProjection: SQLITE_ERROR",
+     "head": "DROP VIEW \"whTaskGridProjection\""
+    },
+    {
+     "index": 822,
+     "bytes": 36,
+     "error": "no such view: whTaskTagSearchDocuments: SQLITE_ERROR",
+     "head": "DROP VIEW \"whTaskTagSearchDocuments\""
+    },
+    {
+     "index": 1812,
+     "bytes": 65,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE instanceMembershipGuard(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 1813,
+     "bytes": 217,
+     "error": "no such table: instanceMembershipGuard: SQLITE_ERROR",
+     "head": "INSERT INTO instanceMembershipGuard SELECT NOT EXISTS(SELECT 1 FROM workplanInstances i JOIN json_each(i.generatedTaskId"
+    },
+    {
+     "index": 1814,
+     "bytes": 162,
+     "error": "no such table: instanceMembershipGuard: SQLITE_ERROR",
+     "head": "INSERT INTO instanceMembershipGuard SELECT NOT EXISTS(SELECT 1 FROM workplanInstances WHERE generatedTaskIds IS NOT NULL"
+    },
+    {
+     "index": 1815,
+     "bytes": 187,
+     "error": "no such table: instanceMembershipGuard: SQLITE_ERROR",
+     "head": "INSERT INTO instanceMembershipGuard SELECT NOT EXISTS(SELECT i._id,e.value,count(*) FROM workplanInstances i JOIN json_e"
+    },
+    {
+     "index": 1816,
+     "bytes": 34,
+     "error": "no such table: instanceMembershipGuard: SQLITE_ERROR",
+     "head": "DROP TABLE instanceMembershipGuard"
+    },
+    {
+     "index": 1817,
+     "bytes": 61,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE taskGuestShapeGuard(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 1818,
+     "bytes": 193,
+     "error": "no such table: taskGuestShapeGuard: SQLITE_ERROR",
+     "head": "INSERT INTO taskGuestShapeGuard SELECT NOT EXISTS(SELECT 1 FROM tasks WHERE coalesce(reportedByGuest,0)<>1 AND (guestId "
+    },
+    {
+     "index": 1819,
+     "bytes": 30,
+     "error": "no such table: taskGuestShapeGuard: SQLITE_ERROR",
+     "head": "DROP TABLE taskGuestShapeGuard"
+    },
+    {
+     "index": 1837,
+     "bytes": 64,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE scheduleMigrationGuard(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 1838,
+     "bytes": 190,
+     "error": "no such table: scheduleMigrationGuard: SQLITE_ERROR",
+     "head": "INSERT INTO scheduleMigrationGuard SELECT NOT EXISTS(SELECT legacyRecurrenceId,count(*) FROM workplanItems WHERE legacyR"
+    },
+    {
+     "index": 1839,
+     "bytes": 215,
+     "error": "no such table: scheduleMigrationGuard: SQLITE_ERROR",
+     "head": "INSERT INTO scheduleMigrationGuard SELECT NOT EXISTS(SELECT 1 FROM workplanItems w JOIN taskRecurrences r ON r._id=w.leg"
+    },
+    {
+     "index": 1841,
+     "bytes": 33,
+     "error": "no such table: scheduleMigrationGuard: SQLITE_ERROR",
+     "head": "DROP TABLE scheduleMigrationGuard"
+    },
+    {
+     "truncated": 70
+    }
+   ]
+  },
+  {
+   "step": "migration 0006_scoped_form_and_poll_relationships.sql",
+   "statements": 185,
+   "requestBytes": 65090,
+   "ms": 360,
+   "ok": false,
+   "foreignKeyRebuild": false,
+   "failed": 30,
+   "errorKinds": {
+    "not authorized: SQLITE_AUTH": 10,
+    "no such table: formDefinitionKeys_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: formFieldUsages_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: formVersionOwners_forms_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: formVersionOwners_formPublicLinks_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: formVersionOwners_formReviews_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: formVersionOwners_formSubmissions_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: formVersionOwners_formTaskLinks_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: formSubmissionUsages_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: pollOptionKeys_duplicate_guard: SQLITE_ERROR": 2,
+    "no such table: pollSelections_duplicate_guard: SQLITE_ERROR": 2
+   },
+   "firstErrors": [
+    {
+     "index": 10,
+     "bytes": 78,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formDefinitionKeys_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 11,
+     "bytes": 191,
+     "error": "no such table: formDefinitionKeys_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formDefinitionKeys_duplicate_guard\" SELECT NOT EXISTS(SELECT \"versionId\",\"fieldKey\",count(*) FROM \"expected"
+    },
+    {
+     "index": 12,
+     "bytes": 47,
+     "error": "no such table: formDefinitionKeys_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formDefinitionKeys_duplicate_guard\""
+    }
+   ],
+   "errors": [
+    {
+     "index": 10,
+     "bytes": 78,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formDefinitionKeys_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 11,
+     "bytes": 191,
+     "error": "no such table: formDefinitionKeys_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formDefinitionKeys_duplicate_guard\" SELECT NOT EXISTS(SELECT \"versionId\",\"fieldKey\",count(*) FROM \"expected"
+    },
+    {
+     "index": 12,
+     "bytes": 47,
+     "error": "no such table: formDefinitionKeys_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formDefinitionKeys_duplicate_guard\""
+    },
+    {
+     "index": 26,
+     "bytes": 75,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formFieldUsages_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 27,
+     "bytes": 207,
+     "error": "no such table: formFieldUsages_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formFieldUsages_duplicate_guard\" SELECT NOT EXISTS(SELECT \"sourceId\",\"versionId\",\"fieldKey\",count(*) FROM \""
+    },
+    {
+     "index": 28,
+     "bytes": 44,
+     "error": "no such table: formFieldUsages_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formFieldUsages_duplicate_guard\""
+    },
+    {
+     "index": 43,
+     "bytes": 83,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formVersionOwners_forms_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 44,
+     "bytes": 219,
+     "error": "no such table: formVersionOwners_forms_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formVersionOwners_forms_duplicate_guard\" SELECT NOT EXISTS(SELECT \"sourceId\",\"versionId\",\"formId\",count(*) "
+    },
+    {
+     "index": 45,
+     "bytes": 52,
+     "error": "no such table: formVersionOwners_forms_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formVersionOwners_forms_duplicate_guard\""
+    },
+    {
+     "index": 59,
+     "bytes": 93,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formVersionOwners_formPublicLinks_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 60,
+     "bytes": 239,
+     "error": "no such table: formVersionOwners_formPublicLinks_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formVersionOwners_formPublicLinks_duplicate_guard\" SELECT NOT EXISTS(SELECT \"sourceId\",\"versionId\",\"formId\""
+    },
+    {
+     "index": 61,
+     "bytes": 62,
+     "error": "no such table: formVersionOwners_formPublicLinks_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formVersionOwners_formPublicLinks_duplicate_guard\""
+    },
+    {
+     "index": 75,
+     "bytes": 89,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formVersionOwners_formReviews_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 76,
+     "bytes": 231,
+     "error": "no such table: formVersionOwners_formReviews_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formVersionOwners_formReviews_duplicate_guard\" SELECT NOT EXISTS(SELECT \"sourceId\",\"versionId\",\"formId\",cou"
+    },
+    {
+     "index": 77,
+     "bytes": 58,
+     "error": "no such table: formVersionOwners_formReviews_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formVersionOwners_formReviews_duplicate_guard\""
+    },
+    {
+     "index": 91,
+     "bytes": 93,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formVersionOwners_formSubmissions_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 92,
+     "bytes": 239,
+     "error": "no such table: formVersionOwners_formSubmissions_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formVersionOwners_formSubmissions_duplicate_guard\" SELECT NOT EXISTS(SELECT \"sourceId\",\"versionId\",\"formId\""
+    },
+    {
+     "index": 93,
+     "bytes": 62,
+     "error": "no such table: formVersionOwners_formSubmissions_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formVersionOwners_formSubmissions_duplicate_guard\""
+    },
+    {
+     "index": 107,
+     "bytes": 91,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formVersionOwners_formTaskLinks_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 108,
+     "bytes": 235,
+     "error": "no such table: formVersionOwners_formTaskLinks_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formVersionOwners_formTaskLinks_duplicate_guard\" SELECT NOT EXISTS(SELECT \"sourceId\",\"versionId\",\"formId\",c"
+    },
+    {
+     "index": 109,
+     "bytes": 60,
+     "error": "no such table: formVersionOwners_formTaskLinks_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formVersionOwners_formTaskLinks_duplicate_guard\""
+    },
+    {
+     "index": 126,
+     "bytes": 80,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"formSubmissionUsages_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 127,
+     "bytes": 279,
+     "error": "no such table: formSubmissionUsages_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"formSubmissionUsages_duplicate_guard\" SELECT NOT EXISTS(SELECT \"sourceId\",\"versionId\",\"targetTaskForm\",\"tar"
+    },
+    {
+     "index": 128,
+     "bytes": 49,
+     "error": "no such table: formSubmissionUsages_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"formSubmissionUsages_duplicate_guard\""
+    },
+    {
+     "index": 144,
+     "bytes": 74,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"pollOptionKeys_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 145,
+     "bytes": 179,
+     "error": "no such table: pollOptionKeys_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"pollOptionKeys_duplicate_guard\" SELECT NOT EXISTS(SELECT \"postId\",\"optionKey\",count(*) FROM \"expected_pollO"
+    },
+    {
+     "index": 146,
+     "bytes": 43,
+     "error": "no such table: pollOptionKeys_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"pollOptionKeys_duplicate_guard\""
+    },
+    {
+     "index": 162,
+     "bytes": 74,
+     "error": "not authorized: SQLITE_AUTH",
+     "head": "CREATE TEMP TABLE \"pollSelections_duplicate_guard\"(ok INTEGER CHECK(ok=1))"
+    },
+    {
+     "index": 163,
+     "bytes": 201,
+     "error": "no such table: pollSelections_duplicate_guard: SQLITE_ERROR",
+     "head": "INSERT INTO \"pollSelections_duplicate_guard\" SELECT NOT EXISTS(SELECT \"sourceId\",\"postId\",\"optionKey\",count(*) FROM \"exp"
+    },
+    {
+     "index": 164,
+     "bytes": 43,
+     "error": "no such table: pollSelections_duplicate_guard: SQLITE_ERROR",
+     "head": "DROP TABLE \"pollSelections_duplicate_guard\""
+    }
+   ]
+  },
+  {
+   "step": "migration 0007_bounded_identity_projections.sql",
+   "statements": 5106,
+   "requestBytes": 2182547,
+   "ms": 22604,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0008_scoped_json_key_types.sql",
+   "statements": 6,
+   "requestBytes": 931,
+   "ms": 321,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0009_indexed_public_relationship_filters.sql",
+   "statements": 3691,
+   "requestBytes": 1620928,
+   "ms": 18178,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0010_remove_duplicate_indexes.sql",
+   "statements": 21,
+   "requestBytes": 2018,
+   "ms": 387,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0011_unique_workplan_generation_keys.sql",
+   "statements": 1,
+   "requestBytes": 357,
+   "ms": 98,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "runtime-generated tables",
+   "statements": 7,
+   "requests": 1,
+   "ms": 135,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "runtime-generated indexs",
+   "statements": 12,
+   "requests": 1,
+   "ms": 144,
+   "failed": 1,
+   "errorKinds": {
+    "Expression tree is too large (maximum depth _): SQLITE_ERROR": 1
+   },
+   "firstErrors": [
+    {
+     "index": 11,
+     "bytes": 4606,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE UNIQUE INDEX \"roles_live_name_key_unique\" ON \"recordStorage_roles\"( coalesce(nullif(replace(replace(replace(repla"
+    }
+   ],
+   "errors": [
+    {
+     "index": 11,
+     "bytes": 4606,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE UNIQUE INDEX \"roles_live_name_key_unique\" ON \"recordStorage_roles\"( coalesce(nullif(replace(replace(replace(repla"
+    }
+   ]
+  },
+  {
+   "step": "runtime-generated views",
+   "statements": 25,
+   "requests": 1,
+   "ms": 178,
+   "failed": 25,
+   "errorKinds": {
+    "Expression tree is too large (maximum depth _): SQLITE_ERROR": 3,
+    "too many terms in compound SELECT: SQLITE_ERROR": 19,
+    "statement too long: SQLITE_TOOBIG": 3
+   },
+   "firstErrors": [
+    {
+     "index": 0,
+     "bytes": 12270,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskCustomFieldSearchDocuments\" AS SELECT 'taskCustomFieldValues' AS \"source\", c.\"sourceId\", c.\"taskId\", "
+    },
+    {
+     "index": 1,
+     "bytes": 5583,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskGridProjection\" AS SELECT g.\"taskId\", g.\"id\", g.\"workspaceId\", g.\"name\", g.\"description\", g.\"statusId"
+    },
+    {
+     "index": 2,
+     "bytes": 4042,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskTagSearchDocuments\" AS SELECT 'taskTags' AS \"source\", link.\"_id\" AS \"sourceId\", link.\"taskId\", link.\""
+    },
+    {
+     "index": 3,
+     "bytes": 43709,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_approvals\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id'"
+    },
+    {
+     "index": 4,
+     "bytes": 45615,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_audiencePresets\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    }
+   ],
+   "errors": [
+    {
+     "index": 0,
+     "bytes": 12270,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskCustomFieldSearchDocuments\" AS SELECT 'taskCustomFieldValues' AS \"source\", c.\"sourceId\", c.\"taskId\", "
+    },
+    {
+     "index": 1,
+     "bytes": 5583,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskGridProjection\" AS SELECT g.\"taskId\", g.\"id\", g.\"workspaceId\", g.\"name\", g.\"description\", g.\"statusId"
+    },
+    {
+     "index": 2,
+     "bytes": 4042,
+     "error": "Expression tree is too large (maximum depth 100): SQLITE_ERROR",
+     "head": "CREATE VIEW \"whTaskTagSearchDocuments\" AS SELECT 'taskTags' AS \"source\", link.\"_id\" AS \"sourceId\", link.\"taskId\", link.\""
+    },
+    {
+     "index": 3,
+     "bytes": 43709,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_approvals\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id'"
+    },
+    {
+     "index": 4,
+     "bytes": 45615,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_audiencePresets\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    },
+    {
+     "index": 5,
+     "bytes": 16906,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_gamificationPointTransactions\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" owner"
+    },
+    {
+     "index": 6,
+     "bytes": 10633,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_journeySyncLinks\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_objec"
+    },
+    {
+     "index": 7,
+     "bytes": 32695,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_kpiCards\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id',"
+    },
+    {
+     "index": 8,
+     "bytes": 17156,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_marketRecords\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('"
+    },
+    {
+     "index": 9,
+     "bytes": 30671,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_nfcTags\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id',s"
+    },
+    {
+     "index": 10,
+     "bytes": 31253,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_notifications\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('"
+    },
+    {
+     "index": 11,
+     "bytes": 23012,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_reportDeliveries\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_objec"
+    },
+    {
+     "index": 12,
+     "bytes": 20751,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_reportDocuments\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    },
+    {
+     "index": 13,
+     "bytes": 20293,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_reports\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id',s"
+    },
+    {
+     "index": 14,
+     "bytes": 9621,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_researchRuns\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_"
+    },
+    {
+     "index": 15,
+     "bytes": 9787,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_talentApplications\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_obj"
+    },
+    {
+     "index": 16,
+     "bytes": 89307,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_taskRecurrences\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    },
+    {
+     "index": 17,
+     "bytes": 163316,
+     "error": "statement too long: SQLITE_TOOBIG",
+     "head": "CREATE VIEW \"referenceExpected_tasks\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id',s.\""
+    },
+    {
+     "index": 18,
+     "bytes": 175670,
+     "error": "statement too long: SQLITE_TOOBIG",
+     "head": "CREATE VIEW \"referenceExpected_templates\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id'"
+    },
+    {
+     "index": 19,
+     "bytes": 9465,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_voiceTaskDrafts\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object"
+    },
+    {
+     "index": 20,
+     "bytes": 97858,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_workflowVersions\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_objec"
+    },
+    {
+     "index": 21,
+     "bytes": 239724,
+     "error": "statement too long: SQLITE_TOOBIG",
+     "head": "CREATE VIEW \"referenceExpected_workplanItems\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('"
+    },
+    {
+     "index": 22,
+     "bytes": 63913,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_workspacePreferences\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_o"
+    },
+    {
+     "index": 23,
+     "bytes": 75664,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_workspaces\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object('_id"
+    },
+    {
+     "index": 24,
+     "bytes": 43665,
+     "error": "too many terms in compound SELECT: SQLITE_ERROR",
+     "head": "CREATE VIEW \"referenceExpected_workspaceViews\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,json_object("
+    }
+   ]
+  },
+  {
+   "step": "runtime-generated triggers",
+   "statements": 1143,
+   "requests": 1,
+   "ms": 3542,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "schema diff vs tenant file",
+   "missingCreated": {
+    "table": 7,
+    "index": 12,
+    "view": 25,
+    "trigger": 1143
+   },
+   "differingSql": 0,
+   "differingNames": []
+  },
+  {
+   "step": "final",
+   "databaseSize": 13475840,
+   "schema": [
+    {
+     "type": "index",
+     "n": 940
+    },
+    {
+     "type": "table",
+     "n": 534
+    },
+    {
+     "type": "trigger",
+     "n": 7596
+    },
+    {
+     "type": "view",
+     "n": 449
+    }
+   ]
+  }
+ ],
+ "migrationsMs": 56469,
+ "totalMs": 60549
+}

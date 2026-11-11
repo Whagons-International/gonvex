@@ -1,0 +1,1304 @@
+{
+ "sqliteNative": "3.53.4",
+ "limits": {
+  "statementBytes": 100000,
+  "columns": 100,
+  "functionArguments": 127,
+  "compoundTerms": 5,
+  "likePatternBytes": 50,
+  "rowBytes": 2000000
+ },
+ "migrations": {
+  "prelude": {
+   "fileBytes": 11000,
+   "statements": 44,
+   "maxStatementBytes": 791,
+   "nativeMs": 75,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "CREATE TABLE": 24,
+    "CREATE INDEX": 6,
+    "DROP TRIGGER": 3,
+    "CREATE TRIGGER": 8,
+    "INSERT INTO": 2,
+    "CREATE VIEW": 1
+   },
+   "slowest": [
+    {
+     "index": 0,
+     "ms": 0.3,
+     "kind": "CREATE TABLE",
+     "head": "CREATE TABLE IF NOT EXISTS members ( id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE,"
+    },
+    {
+     "index": 1,
+     "ms": 0.1,
+     "kind": "CREATE INDEX",
+     "head": "CREATE INDEX IF NOT EXISTS members_by_role ON members(role)"
+    },
+    {
+     "index": 3,
+     "ms": 0.1,
+     "kind": "CREATE TABLE",
+     "head": "CREATE TABLE IF NOT EXISTS _gonvex_control_plane_membership_outbox ( account_id TEXT PRIMA"
+    },
+    {
+     "index": 7,
+     "ms": 0.1,
+     "kind": "CREATE TRIGGER",
+     "head": "CREATE TRIGGER gonvex_queue_control_plane_membership_insert AFTER INSERT ON members BEGIN "
+    },
+    {
+     "index": 16,
+     "ms": 0.1,
+     "kind": "CREATE TABLE",
+     "head": "-- `enforced_*` equals the target for every edge the native deferred FK -- protects. Edges"
+    }
+   ]
+  },
+  "0000_sqlite_baseline.sql": {
+   "fileBytes": 203033,
+   "statements": 879,
+   "maxStatementBytes": 2692,
+   "nativeMs": 212,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "CREATE TABLE": 363,
+    "ALTER TABLE": 15,
+    "CREATE INDEX": 460,
+    "CREATE UNIQUE": 37,
+    "INSERT INTO": 4
+   },
+   "slowest": [
+    {
+     "index": 209,
+     "ms": 53.4,
+     "kind": "CREATE TABLE",
+     "head": "CREATE TABLE IF NOT EXISTS \"priorities\" ( \"_id\" TEXT NOT NULL, \"categoryId\" TEXT, \"color\" "
+    },
+    {
+     "index": 153,
+     "ms": 1.9,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"members\" ADD COLUMN \"email\" TEXT"
+    },
+    {
+     "index": 154,
+     "ms": 1.7,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"members\" ADD COLUMN \"start_date\" TEXT"
+    },
+    {
+     "index": 155,
+     "ms": 1.6,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"members\" ADD COLUMN \"employment_status\" TEXT"
+    },
+    {
+     "index": 156,
+     "ms": 1.6,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"members\" ADD COLUMN \"work_location\" TEXT"
+    }
+   ]
+  },
+  "0001_sqlite_projections.sql": {
+   "fileBytes": 53692,
+   "statements": 79,
+   "maxStatementBytes": 12665,
+   "nativeMs": 84,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "DROP VIEW": 3,
+    "CREATE VIEW": 3,
+    "DROP TRIGGER": 32,
+    "CREATE TRIGGER": 32,
+    "CREATE INDEX": 1,
+    "DROP INDEX": 1,
+    "CREATE UNIQUE": 1,
+    "DROP TABLE": 2,
+    "CREATE VIRTUAL": 2,
+    "INSERT INTO": 2
+   },
+   "slowest": [
+    {
+     "index": 60,
+     "ms": 1.4,
+     "kind": "CREATE UNIQUE",
+     "head": "CREATE UNIQUE INDEX \"roles_live_name_key_unique\" ON \"roles\" ( coalesce(nullif(replace(repl"
+    },
+    {
+     "index": 32,
+     "ms": 1.1,
+     "kind": "CREATE VIEW",
+     "head": "CREATE VIEW \"whTaskCustomFieldSearchDocuments\" AS SELECT 'taskCustomFieldValues' AS \"sourc"
+    },
+    {
+     "index": 1,
+     "ms": 0.8,
+     "kind": "CREATE VIEW",
+     "head": "CREATE VIEW \"whTaskGridProjection\" AS SELECT g.\"taskId\", g.\"id\", g.\"workspaceId\", g.\"name\""
+    },
+    {
+     "index": 62,
+     "ms": 0.6,
+     "kind": "CREATE VIRTUAL",
+     "head": "CREATE VIRTUAL TABLE \"taskGridRows_fts\" USING fts5( \"name\", \"description\", \"searchText\", c"
+    },
+    {
+     "index": 30,
+     "ms": 0.5,
+     "kind": "CREATE VIEW",
+     "head": "CREATE VIEW \"whTaskTagSearchDocuments\" AS SELECT 'taskTags' AS \"source\", link.\"_id\" AS \"so"
+    }
+   ]
+  },
+  "0002_agents_and_subtask_references.sql": {
+   "fileBytes": 3269,
+   "statements": 15,
+   "maxStatementBytes": 449,
+   "nativeMs": 103,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "ALTER TABLE": 7,
+    "UPDATE \"TASKRELATIONS\"": 1,
+    "UPDATE \"TASKS\"": 1,
+    "CREATE TABLE": 4,
+    "CREATE UNIQUE": 1,
+    "CREATE INDEX": 1
+   },
+   "slowest": [
+    {
+     "index": 0,
+     "ms": 5.7,
+     "kind": "ALTER TABLE",
+     "head": "-- gonvex:scope tenant -- SQLite port of the Postgres migrations staging added after the S"
+    },
+    {
+     "index": 1,
+     "ms": 4.5,
+     "kind": "ALTER TABLE",
+     "head": "-- 0136_subtask_references: the safe origin label travels with a child without -- granting"
+    },
+    {
+     "index": 5,
+     "ms": 4.3,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"tasks\" ADD COLUMN \"parentTeamId\" TEXT"
+    },
+    {
+     "index": 2,
+     "ms": 4.2,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"taskRelations\" ADD COLUMN \"values\" JSON"
+    },
+    {
+     "index": 3,
+     "ms": 4.2,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"taskRelations\" ADD COLUMN \"deletedAt\" BIGINT"
+    }
+   ]
+  },
+  "0003_sql_relationship_integrity.sql": {
+   "fileBytes": 903181,
+   "statements": 2954,
+   "maxStatementBytes": 22429,
+   "nativeMs": 5746,
+   "foreignKeyRebuild": true,
+   "kinds": {
+    "UPDATE CATEGORIES": 6,
+    "UPDATE WORKSPACES": 1,
+    "UPDATE TASKUSERS": 1,
+    "UPDATE STATUSES": 2,
+    "UPDATE AIUSAGERECEIPTS": 1,
+    "UPDATE DOCUMENTASSOCIATIONS": 1,
+    "UPDATE FORMVERSIONS": 2,
+    "UPDATE KPICARDS": 1,
+    "DELETE FROM": 11,
+    "INSERT INTO": 396,
+    "UPDATE \"CATEGORIES\"": 8,
+    "UPDATE \"FORMVERSIONS\"": 2,
+    "UPDATE \"ROLEPERMISSIONS\"": 3,
+    "UPDATE \"TEMPLATES\"": 10,
+    "UPDATE \"TASKS\"": 36,
+    "UPDATE \"TASKGRIDROWS\"": 15,
+    "UPDATE TASKRECURRENCES": 2,
+    "UPDATE \"TASKRECURRENCES\"": 10,
+    "UPDATE \"USERTEAMS\"": 4,
+    "UPDATE \"MEMBERS\"": 3,
+    "UPDATE \"ADVANCEDVOICEUSAGEEVENTS\"": 2,
+    "UPDATE \"ASSISTANTMESSAGES\"": 3,
+    "UPDATE \"ASSISTANTTHREADS\"": 2,
+    "UPDATE \"BOARDMESSAGES\"": 3,
+    "UPDATE \"BOARDS\"": 2,
+    "UPDATE \"FORMS\"": 3,
+    "UPDATE \"CONVERSATIONPARTICIPANTS\"": 3,
+    "UPDATE \"FORMPUBLICLINKS\"": 6,
+    "UPDATE \"LINKPREVIEWS\"": 3,
+    "UPDATE \"FINDINGNOTES\"": 3,
+    "UPDATE \"NFCTAGS\"": 4,
+    "UPDATE \"NOTIFICATIONS\"": 3,
+    "UPDATE \"STATUSTRANSITIONS\"": 6,
+    "UPDATE \"STATUSTRANSITIONLOGS\"": 13,
+    "UPDATE \"TASKLOGS\"": 3,
+    "UPDATE \"TASKACKS\"": 9,
+    "UPDATE \"TASKAPPROVALINSTANCES\"": 5,
+    "UPDATE \"TASKFINDINGS\"": 13,
+    "UPDATE \"TASKSHAREACKNOWLEDGMENTS\"": 6,
+    "UPDATE \"TASKWORKSPACECONTEXTS\"": 13,
+    "UPDATE \"WORKFLOWRUNS\"": 3,
+    "UPDATE \"WORKFLOWVERSIONS\"": 3,
+    "UPDATE \"WORKFLOWS\"": 6,
+    "UPDATE \"WORKPLANINSTANCES\"": 4,
+    "UPDATE \"WORKPLANITEMS\"": 17,
+    "UPDATE \"WORKPLANS\"": 5,
+    "UPDATE \"WORKSPACEGROUPS\"": 2,
+    "UPDATE \"AUDIENCEPRESETS\"": 2,
+    "UPDATE \"GAMIFICATIONPOINTTRANSACTIONS\"": 2,
+    "UPDATE TEMPLATES": 1,
+    "UPDATE \"WORKSPACEPREFERENCES\"": 5,
+    "UPDATE WORKFLOWS": 1,
+    "UPDATE WORKFLOWVERSIONS": 1,
+    "UPDATE TASKFINDINGS": 1,
+    "WITH BASE(N)": 1,
+    "UPDATE \"WORKSPACEVIEWWORKSPACES\"": 3,
+    "UPDATE \"WORKSPACEVIEWS\"": 4,
+    "UPDATE WORKSPACEVIEWS": 1,
+    "UPDATE WORKPLANINSTANCES": 1,
+    "CREATE TEMP": 12,
+    "DROP TABLE": 380,
+    "UPDATE PEOPLEFLOWS": 1,
+    "UPDATE WORKSPACEPREFERENCES": 2,
+    "ALTER TABLE": 372,
+    "UPDATE TASKWORKSPACECONTEXTS": 1,
+    "UPDATE TIMEOFFAPPROVALINSTANCES": 1,
+    "DROP TRIGGER": 37,
+    "DROP VIEW": 3,
+    "UPDATE \"CLEANINGREPORTDELIVERIES\"": 2,
+    "UPDATE \"GUESTPROFILES\"": 2,
+    "UPDATE \"ADVANCEDVOICEAUDITEVENTS\"": 2,
+    "UPDATE \"ADVANCEDVOICECONTEXTSUMMARIES\"": 1,
+    "UPDATE \"ADVANCEDVOICESESSIONS\"": 1,
+    "UPDATE \"ADVANCEDVOICETURNS\"": 1,
+    "UPDATE \"AGENTRUNS\"": 4,
+    "UPDATE \"AIUSAGERECEIPTS\"": 1,
+    "UPDATE \"APPROVALAPPROVERS\"": 2,
+    "UPDATE \"APPROVALS\"": 1,
+    "UPDATE \"ASSETCUSTOMFIELDS\"": 1,
+    "UPDATE \"ASSETCUSTOMFIELDVALUES\"": 2,
+    "UPDATE \"ASSETHISTORYEVENTS\"": 5,
+    "UPDATE \"ASSETITEMS\"": 5,
+    "UPDATE \"ASSETMAINTENANCELOGS\"": 4,
+    "UPDATE \"ASSETMAINTENANCEOCCURRENCES\"": 3,
+    "UPDATE \"ASSETMAINTENANCESCHEDULES\"": 7,
+    "UPDATE \"ASSETMETERREADINGS\"": 2,
+    "UPDATE \"ASSISTANTAPIPERMISSIONGRANTS\"": 1,
+    "UPDATE \"ASSISTANTDATAFILES\"": 1,
+    "UPDATE \"ASSISTANTEXCELFILES\"": 1,
+    "UPDATE \"ASSISTANTEXCELROWCHUNKS\"": 1,
+    "UPDATE \"ASSISTANTEXCELSHEETS\"": 1,
+    "UPDATE \"ASSISTANTIMPORTPREVIEWS\"": 2,
+    "UPDATE \"ASSISTANTPENDINGACTIONS\"": 1,
+    "UPDATE \"AUDITFORMSUBMISSIONS\"": 4,
+    "UPDATE \"BOARDATTACHMENTS\"": 2,
+    "UPDATE \"BOARDBIRTHDAYIMAGES\"": 2,
+    "UPDATE \"BOARDCOMMENTS\"": 3,
+    "UPDATE \"BOARDMEMBERS\"": 1,
+    "UPDATE \"BREAKROOMMESSAGES\"": 3,
+    "UPDATE \"BREAKROOMPRESENCE\"": 3,
+    "UPDATE \"BROADCASTACKNOWLEDGMENTS\"": 2,
+    "UPDATE \"BROADCASTS\"": 3,
+    "UPDATE \"BUGREPORTS\"": 3,
+    "UPDATE \"CALLSIGNALS\"": 3,
+    "UPDATE \"CATEGORYCUSTOMFIELDS\"": 2,
+    "UPDATE \"CATEGORYPRIORITIES\"": 2,
+    "UPDATE \"CENTERS\"": 1,
+    "UPDATE \"CHATTYPING\"": 3,
+    "UPDATE \"CLEANINGHISTORY\"": 4,
+    "UPDATE \"CLEANINGRESETRULES\"": 3,
+    "UPDATE \"CLOCKINCODES\"": 2,
+    "UPDATE \"CLOCKINEVENTS\"": 3,
+    "UPDATE \"CLOCKINSESSIONS\"": 4,
+    "UPDATE \"COMPLIANCEAUDITACTIONS\"": 4,
+    "UPDATE \"COMPLIANCEAUDITEVENTS\"": 2,
+    "UPDATE \"COMPLIANCEAUDITFINDINGS\"": 2,
+    "UPDATE \"COMPLIANCEAUDITITEMS\"": 1,
+    "UPDATE \"COMPLIANCEAUDITS\"": 18,
+    "UPDATE \"COMPLIANCEMAPPINGS\"": 3,
+    "UPDATE \"COMPLIANCEREQUIREMENTS\"": 2,
+    "UPDATE \"COMPLIANCESTANDARDS\"": 2,
+    "UPDATE \"CONFIGLOGS\"": 1,
+    "UPDATE \"CONVERSATIONS\"": 1,
+    "UPDATE \"COSTBUDGETS\"": 2,
+    "UPDATE \"COSTCATEGORIES\"": 2,
+    "UPDATE \"COSTITEMS\"": 5,
+    "UPDATE \"CRMDEALS\"": 2,
+    "UPDATE \"DEEPRESEARCHASSIGNMENTS\"": 1,
+    "UPDATE \"DEEPRESEARCHCHARGES\"": 2,
+    "UPDATE \"DEEPRESEARCHEVENTS\"": 2,
+    "UPDATE \"DEEPRESEARCHFINDINGS\"": 2,
+    "UPDATE \"DEEPRESEARCHWORK\"": 2,
+    "UPDATE \"DIRECTMESSAGES\"": 2,
+    "UPDATE \"DOCUMENTACKNOWLEDGMENTS\"": 2,
+    "UPDATE \"DOCUMENTASSOCIATIONS\"": 1,
+    "UPDATE \"DOCUMENTCATEGORIES\"": 3,
+    "UPDATE \"DOCUMENTS\"": 3,
+    "UPDATE \"EMAILDELIVERIES\"": 2,
+    "UPDATE \"EMAILTEMPLATES\"": 3,
+    "UPDATE \"EXCEPTIONS\"": 3,
+    "UPDATE \"FIELDOPTIONS\"": 1,
+    "UPDATE \"FIELDUPDATEPERMISSIONS\"": 2,
+    "UPDATE \"FORMFIELDFEEDBACK\"": 3,
+    "UPDATE \"FORMREVIEWS\"": 5,
+    "UPDATE \"FORMSUBMISSIONS\"": 4,
+    "UPDATE \"GAMIFICATIONPOINTACTIONSETTINGS\"": 1,
+    "UPDATE \"GAMIFICATIONUSERACTIONSTATS\"": 1,
+    "UPDATE \"GAMIFICATIONUSERBADGES\"": 2,
+    "UPDATE \"GAMIFICATIONUSERPOINTS\"": 1,
+    "UPDATE \"GITHUBCONNECTIONS\"": 1,
+    "UPDATE \"GOALMILESTONES\"": 1,
+    "UPDATE \"GOALS\"": 5,
+    "UPDATE \"GOALUPDATES\"": 1,
+    "UPDATE \"GOODSRECEIPTITEMS\"": 4,
+    "UPDATE \"GOODSRECEIPTS\"": 3,
+    "UPDATE \"HOTELCENTERPREFERENCES\"": 3,
+    "UPDATE \"INVENTORYLOCATIONS\"": 1,
+    "UPDATE \"INVENTORYMOVEMENTS\"": 2,
+    "UPDATE \"JOURNEYSYNCCONFIGURATIONS\"": 1,
+    "UPDATE \"KPICARDS\"": 1,
+    "UPDATE \"LOCATIONS\"": 1,
+    "UPDATE \"MARKETMEMBERS\"": 2,
+    "UPDATE \"MARKETPROJECTS\"": 1,
+    "UPDATE \"MARKETRECORDS\"": 2,
+    "UPDATE \"MARKETTEMPLATES\"": 1,
+    "UPDATE \"MEMBERAUTHSTATES\"": 1,
+    "UPDATE \"MEMBERSPOTS\"": 3,
+    "UPDATE \"MEMBERTEAMS\"": 4,
+    "UPDATE \"MESSAGEREACTIONS\"": 1,
+    "UPDATE \"MESSAGES\"": 4,
+    "UPDATE \"MICROSOFT365CONNECTIONS\"": 2,
+    "UPDATE \"NCAMICROSOFTCONNECTIONS\"": 2,
+    "UPDATE \"NFCTAPLOGS\"": 4,
+    "UPDATE \"OPSMANAGERACTIONS\"": 1,
+    "UPDATE \"OPSMANAGERINSIGHTS\"": 1,
+    "UPDATE \"PHONECALLEVENTS\"": 3,
+    "UPDATE \"PHONECALLJOBS\"": 1,
+    "UPDATE \"PHONECALLS\"": 5,
+    "UPDATE \"PHONECONTACTS\"": 2,
+    "UPDATE \"PHONESCRIPTS\"": 1,
+    "UPDATE \"PLUGINROUTES\"": 3,
+    "UPDATE \"PRIORITIES\"": 2,
+    "UPDATE \"PROPERTIES\"": 1,
+    "UPDATE \"PURCHASEAPPROVALINSTANCES\"": 3,
+    "UPDATE \"PURCHASEORDERITEMS\"": 6,
+    "UPDATE \"PURCHASEORDERS\"": 9,
+    "UPDATE \"PURCHASEREQUESTITEMS\"": 3,
+    "UPDATE \"PURCHASEREQUESTS\"": 8,
+    "UPDATE \"RELAYACTIONPROPOSALS\"": 1,
+    "UPDATE \"RELAYAIANALYSES\"": 1,
+    "UPDATE \"RELAYCALLEVENTS\"": 1,
+    "UPDATE \"RELAYCALLS\"": 4,
+    "UPDATE \"RELAYPHONENUMBERS\"": 1,
+    "UPDATE \"RELAYPOLICYDECISIONS\"": 1,
+    "UPDATE \"RELAYTRANSCRIPTS\"": 1,
+    "UPDATE \"RELAYWEBHOOKEVENTS\"": 1,
+    "UPDATE \"REMINDERRULES\"": 2,
+    "UPDATE \"REPORTDELIVERIES\"": 3,
+    "UPDATE \"REPORTSCHEDULES\"": 1,
+    "UPDATE \"REPORTSCHEDULESETTINGS\"": 2,
+    "UPDATE \"REPORTSNAPSHOTS\"": 2,
+    "UPDATE \"RESEARCHLOCATIONS\"": 1,
+    "UPDATE \"RESEARCHREQUESTS\"": 1,
+    "UPDATE \"RESEARCHRUNS\"": 1,
+    "UPDATE \"SCHEDULEASSIGNMENTS\"": 1,
+    "UPDATE \"SCHEDULEAVAILABILITYITEMS\"": 1,
+    "UPDATE \"SCHEDULEAVAILABILITYSUBMISSIONS\"": 5,
+    "UPDATE \"SCHEDULEBOARDS\"": 3,
+    "UPDATE \"SCHEDULEROSTERENTRIES\"": 4,
+    "UPDATE \"SCHEDULESHIFTTEMPLATES\"": 1,
+    "UPDATE \"SCHEDULEWEEKS\"": 2,
+    "UPDATE \"SESSIONLOGS\"": 1,
+    "UPDATE \"SLAALERTS\"": 1,
+    "UPDATE \"SLAESCALATIONLEVELS\"": 4,
+    "UPDATE \"SLAPOLICIES\"": 2,
+    "UPDATE \"SLAS\"": 1,
+    "UPDATE \"SOPAPPROVALDECISIONS\"": 4,
+    "UPDATE \"SOPAPPROVALINSTANCES\"": 3,
+    "UPDATE \"SOPASSOCIATIONS\"": 2,
+    "UPDATE \"SOPEXECUTIONS\"": 3,
+    "UPDATE \"SOPS\"": 6,
+    "UPDATE \"SOPSTEPS\"": 2,
+    "UPDATE \"SOPVERSIONS\"": 2,
+    "UPDATE \"SPOTCUSTOMFIELDS\"": 2,
+    "UPDATE \"SPOTCUSTOMFIELDVALUES\"": 2,
+    "UPDATE \"SPOTS\"": 6,
+    "UPDATE \"STATUSES\"": 1,
+    "UPDATE \"SUPPORTCONVEXLOGS\"": 1,
+    "UPDATE \"TAGS\"": 1,
+    "UPDATE \"TASKACKREADS\"": 3,
+    "UPDATE \"TASKBULKCREATEBATCHES\"": 1,
+    "UPDATE \"TASKCUSTOMFIELDVALUES\"": 2,
+    "UPDATE \"TASKFORMS\"": 5,
+    "UPDATE \"TASKNOTES\"": 2,
+    "UPDATE \"TASKPUBLICSHARES\"": 1,
+    "UPDATE \"TASKPULLREQUESTS\"": 1,
+    "UPDATE \"TASKRELATIONS\"": 4,
+    "UPDATE \"TASKSHARES\"": 6,
+    "UPDATE \"TASKSIGNATURES\"": 2,
+    "UPDATE \"TASKSUPPLIES\"": 2,
+    "UPDATE \"TASKTAGS\"": 3,
+    "UPDATE \"TASKUSERS\"": 3,
+    "UPDATE \"TASKVIDEOJOBS\"": 2,
+    "UPDATE \"TASKVIEWS\"": 2,
+    "UPDATE \"TASKVOICEMEMOLISTENS\"": 3,
+    "UPDATE \"TEAMS\"": 7,
+    "UPDATE \"TEMPLATECUSTOMFIELDS\"": 2,
+    "UPDATE \"TENANTBILLING\"": 1,
+    "UPDATE \"TENANTBRANDING\"": 1,
+    "UPDATE \"TIMEOFFAPPROVALDECISIONS\"": 4,
+    "UPDATE \"TIMEOFFAPPROVALINSTANCES\"": 5,
+    "UPDATE \"TIMEOFFREQUESTS\"": 5,
+    "UPDATE \"TIMEOFFTYPES\"": 1,
+    "UPDATE \"TOOLCHECKOUTS\"": 5,
+    "UPDATE \"TOOLITEMS\"": 6,
+    "UPDATE \"TRAININGASSIGNMENTS\"": 2,
+    "UPDATE \"TRAININGCOURSES\"": 2,
+    "UPDATE \"TRAININGENROLLMENTS\"": 2,
+    "UPDATE \"TRAININGLESSONPROGRESS\"": 3,
+    "UPDATE \"TRAININGLESSONS\"": 2,
+    "UPDATE \"TRAININGMODULES\"": 1,
+    "UPDATE \"TRAININGQUIZATTEMPTS\"": 3,
+    "UPDATE \"TRAININGQUIZQUESTIONS\"": 1,
+    "UPDATE \"TRAININGQUIZZES\"": 2,
+    "UPDATE \"USERLIVELOCATIONS\"": 1,
+    "UPDATE \"USERPLANTGROWTH\"": 1,
+    "UPDATE \"VOICETASKDRAFTS\"": 3,
+    "UPDATE \"WORKBENCHCOMMENTS\"": 2,
+    "UPDATE \"WORKBENCHFILES\"": 3,
+    "UPDATE \"WORKBENCHFOLDERS\"": 2,
+    "UPDATE \"WORKBENCHREVISIONS\"": 2,
+    "UPDATE \"WORKFLOWRUNLOGS\"": 1,
+    "UPDATE \"WORKINGSCHEDULES\"": 1,
+    "UPDATE \"WORKPLANOCCURRENCES\"": 4,
+    "UPDATE \"WORKSPACECHAT\"": 2,
+    "UPDATE \"WORKSPACERESOURCES\"": 2,
+    "UPDATE \"WORKSPACES\"": 5,
+    "UPDATE \"WORKSPACETEAMS\"": 2,
+    "UPDATE \"WORKSPACEVIEWPUBLICSHARES\"": 3,
+    "UPDATE \"WORKSPACEVIEWSHARES\"": 6,
+    "UPDATE \"WORKSPACEWHITEBOARDPRESENCE\"": 2,
+    "UPDATE \"WORKSPACEWHITEBOARDS\"": 2,
+    "UPDATE \"TALENTEMAILTEMPLATES\"": 1,
+    "UPDATE \"TALENTEMAILS\"": 3,
+    "UPDATE \"CONFIDENTIALFILES\"": 1,
+    "UPDATE \"TIMEOFFADJUSTMENTS\"": 1,
+    "UPDATE \"TIMEOFFPOLICYASSIGNMENTS\"": 1,
+    "CREATE TABLE": 368,
+    "CREATE INDEX": 464,
+    "CREATE UNIQUE": 55,
+    "CREATE VIEW": 3,
+    "CREATE TRIGGER": 37
+   },
+   "slowest": [
+    {
+     "index": 1890,
+     "ms": 55.8,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"_schema_scheduleBoards\" RENAME TO \"scheduleBoards\""
+    },
+    {
+     "index": 2335,
+     "ms": 31.2,
+     "kind": "CREATE TABLE",
+     "head": "CREATE TABLE \"_schema_workplanItems\" ( \"_creationTime\" BIGINT, \"_id\" TEXT NOT NULL, \"appro"
+    },
+    {
+     "index": 2370,
+     "ms": 31,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"_schema_workspaceTeams\" RENAME TO \"workspaceTeams\""
+    },
+    {
+     "index": 2366,
+     "ms": 28.3,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"_schema_workspaces\" RENAME TO \"workspaces\""
+    },
+    {
+     "index": 1946,
+     "ms": 27.3,
+     "kind": "ALTER TABLE",
+     "head": "ALTER TABLE \"_schema_sopSteps\" RENAME TO \"sopSteps\""
+    }
+   ]
+  },
+  "0004_sql_document_relationships.sql": {
+   "fileBytes": 2307579,
+   "statements": 1779,
+   "maxStatementBytes": 239554,
+   "nativeMs": 1032,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "CREATE TEMP": 1,
+    "INSERT INTO": 437,
+    "DROP TABLE": 1,
+    "CREATE TABLE": 100,
+    "CREATE TRIGGER": 688,
+    "CREATE VIEW": 97,
+    "DELETE FROM": 97,
+    "CREATE INDEX": 358
+   },
+   "slowest": [
+    {
+     "index": 896,
+     "ms": 142.6,
+     "kind": "CREATE INDEX",
+     "head": "CREATE INDEX \"referenceBindings_qrCodes_target_spots\" ON \"referenceBindings_qrCodes\"(\"targ"
+    },
+    {
+     "index": 1672,
+     "ms": 73.9,
+     "kind": "INSERT INTO",
+     "head": "INSERT INTO \"referenceBindings_workplanItems\"(\"sourceId\",\"path\",\"target_audiencePresets\",\""
+    },
+    {
+     "index": 1464,
+     "ms": 59.7,
+     "kind": "INSERT INTO",
+     "head": "INSERT INTO \"referenceBindings_tasks\"(\"sourceId\",\"path\",\"target_audiencePresets\",\"target_s"
+    },
+    {
+     "index": 1535,
+     "ms": 57.4,
+     "kind": "INSERT INTO",
+     "head": "INSERT INTO \"referenceBindings_templates\"(\"sourceId\",\"path\",\"target_audiencePresets\",\"targ"
+    },
+    {
+     "index": 1526,
+     "ms": 24.8,
+     "kind": "CREATE VIEW",
+     "head": "CREATE VIEW \"referenceExpected_templates\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\""
+    }
+   ]
+  },
+  "0005_compact_record_storage.sql": {
+   "fileBytes": 6579085,
+   "statements": 11739,
+   "maxStatementBytes": 239724,
+   "nativeMs": 10839,
+   "foreignKeyRebuild": true,
+   "kinds": {
+    "CREATE TEMP": 4,
+    "INSERT INTO": 2041,
+    "DROP TABLE": 468,
+    "DROP TRIGGER": 720,
+    "DROP VIEW": 100,
+    "DELETE FROM": 194,
+    "CREATE TABLE": 478,
+    "CREATE TRIGGER": 6378,
+    "CREATE INDEX": 824,
+    "UPDATE TASKRECURRENCES": 1,
+    "ALTER TABLE": 3,
+    "CREATE UNIQUE": 56,
+    "CREATE VIEW": 463,
+    "UPDATE _GONVEX_RECORD_DEPENDENCIES": 9
+   },
+   "slowest": [
+    {
+     "index": 913,
+     "ms": 110.2,
+     "kind": "DROP TABLE",
+     "head": "DROP TABLE \"referenceBindings_peopleFlowTemplates\""
+    },
+    {
+     "index": 11618,
+     "ms": 107.1,
+     "kind": "INSERT INTO",
+     "head": "INSERT INTO _gonvex_identity_keys(domain,value) SELECT candidate.value ->> '$[0]',candidat"
+    },
+    {
+     "index": 2696,
+     "ms": 79.4,
+     "kind": "DROP TABLE",
+     "head": "DROP TABLE \"forms\""
+    },
+    {
+     "index": 11415,
+     "ms": 70.9,
+     "kind": "INSERT INTO",
+     "head": "INSERT INTO _gonvex_identity_keys(domain,value) SELECT candidate.value ->> '$[0]',candidat"
+    },
+    {
+     "index": 11490,
+     "ms": 54.5,
+     "kind": "INSERT INTO",
+     "head": "INSERT INTO _gonvex_identity_keys(domain,value) SELECT candidate.value ->> '$[0]',candidat"
+    }
+   ]
+  },
+  "0006_scoped_form_and_poll_relationships.sql": {
+   "fileBytes": 65460,
+   "statements": 185,
+   "maxStatementBytes": 1579,
+   "nativeMs": 601,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "CREATE VIEW": 11,
+    "CREATE TABLE": 10,
+    "INSERT INTO": 41,
+    "CREATE TRIGGER": 81,
+    "CREATE TEMP": 10,
+    "DROP TABLE": 10,
+    "DELETE FROM": 10,
+    "CREATE UNIQUE": 6,
+    "CREATE INDEX": 3,
+    "UPDATE \"RECORDSTORAGE_PEOPLEPOSTS\"": 1,
+    "DROP VIEW": 1,
+    "UPDATE _GONVEX_RECORD_DEPENDENCIES": 1
+   },
+   "slowest": [
+    {
+     "index": 170,
+     "ms": 46.5,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW peoplePosts"
+    },
+    {
+     "index": 159,
+     "ms": 7.2,
+     "kind": "CREATE TRIGGER",
+     "head": "CREATE TRIGGER \"pollSelections_source_update\" AFTER UPDATE OF \"postId\",\"optionIds\" ON \"rec"
+    },
+    {
+     "index": 158,
+     "ms": 7.1,
+     "kind": "CREATE TRIGGER",
+     "head": "CREATE TRIGGER \"pollSelections_source_insert\" AFTER INSERT ON \"recordStorage_peoplePollVot"
+    },
+    {
+     "index": 117,
+     "ms": 6.4,
+     "kind": "CREATE TABLE",
+     "head": "CREATE TABLE \"formSubmissionUsages\"(sourceId INTEGER PRIMARY KEY REFERENCES \"recordStorage"
+    },
+    {
+     "index": 161,
+     "ms": 6.3,
+     "kind": "CREATE TRIGGER",
+     "head": "CREATE TRIGGER \"pollSelections_source_after_delete\" AFTER DELETE ON \"recordStorage_peopleP"
+    }
+   ]
+  },
+  "0007_bounded_identity_projections.sql": {
+   "fileBytes": 2192759,
+   "statements": 5106,
+   "maxStatementBytes": 11344,
+   "nativeMs": 29123,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "DROP VIEW": 322,
+    "CREATE VIEW": 322,
+    "CREATE TRIGGER": 4462
+   },
+   "slowest": [
+    {
+     "index": 1040,
+     "ms": 143.1,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"complianceAudits\""
+    },
+    {
+     "index": 4093,
+     "ms": 131.5,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"tasks\""
+    },
+    {
+     "index": 79,
+     "ms": 120.6,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"advancedVoiceUsageEvents\""
+    },
+    {
+     "index": 2441,
+     "ms": 117.5,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"phoneCalls\""
+    },
+    {
+     "index": 2786,
+     "ms": 115.7,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"relayCalls\""
+    }
+   ]
+  },
+  "0008_scoped_json_key_types.sql": {
+   "fileBytes": 943,
+   "statements": 6,
+   "maxStatementBytes": 288,
+   "nativeMs": 110,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "DROP VIEW": 3,
+    "CREATE VIEW": 3
+   },
+   "slowest": [
+    {
+     "index": 0,
+     "ms": 3.2,
+     "kind": "DROP VIEW",
+     "head": "-- gonvex:scope tenant -- JSON form and poll identifiers accept numeric source keys. Their"
+    },
+    {
+     "index": 2,
+     "ms": 3.2,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW expected_pollOptionKeys"
+    },
+    {
+     "index": 1,
+     "ms": 3,
+     "kind": "CREATE VIEW",
+     "head": "CREATE VIEW expected_formDefinitionKeys AS SELECT s._id versionId,CAST(coalesce(e.value ->"
+    },
+    {
+     "index": 3,
+     "ms": 2.5,
+     "kind": "CREATE VIEW",
+     "head": "CREATE VIEW expected_pollOptionKeys AS SELECT s._id postId,CAST(e.value ->> '$.id' AS TEXT"
+    },
+    {
+     "index": 4,
+     "ms": 2.5,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW expected_pollSelections"
+    }
+   ]
+  },
+  "0009_indexed_public_relationship_filters.sql": {
+   "fileBytes": 1628310,
+   "statements": 3691,
+   "maxStatementBytes": 11344,
+   "nativeMs": 21120,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "DROP VIEW": 236,
+    "CREATE VIEW": 236,
+    "CREATE TRIGGER": 3219
+   },
+   "slowest": [
+    {
+     "index": 1895,
+     "ms": 200.3,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"purchaseOrders\""
+    },
+    {
+     "index": 1753,
+     "ms": 185.4,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"phoneCalls\""
+    },
+    {
+     "index": 3483,
+     "ms": 169.1,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"workplanItems\""
+    },
+    {
+     "index": 2897,
+     "ms": 157.1,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"tasks\""
+    },
+    {
+     "index": 1874,
+     "ms": 125.2,
+     "kind": "DROP VIEW",
+     "head": "DROP VIEW \"purchaseOrderItems\""
+    }
+   ]
+  },
+  "0010_remove_duplicate_indexes.sql": {
+   "fileBytes": 2060,
+   "statements": 21,
+   "maxStatementBytes": 344,
+   "nativeMs": 230,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "DROP INDEX": 21
+   },
+   "slowest": [
+    {
+     "index": 0,
+     "ms": 5.8,
+     "kind": "DROP INDEX",
+     "head": "-- gonvex:scope tenant -- Generated by scripts/schema/generate-index-cleanup.mjs. -- Remov"
+    },
+    {
+     "index": 1,
+     "ms": 5.4,
+     "kind": "DROP INDEX",
+     "head": "-- clockInCodes: retained clockInCodes_by_uuid. DROP INDEX \"clockInCodes_by_tenant_uuid\""
+    },
+    {
+     "index": 7,
+     "ms": 4.6,
+     "kind": "DROP INDEX",
+     "head": "-- plugins: retained integrity_plugins_slug. DROP INDEX \"plugins_by_slug\""
+    },
+    {
+     "index": 4,
+     "ms": 4.5,
+     "kind": "DROP INDEX",
+     "head": "DROP INDEX \"integrity_memberSpots_live_pair\""
+    },
+    {
+     "index": 2,
+     "ms": 4.2,
+     "kind": "DROP INDEX",
+     "head": "-- goalPeriods: retained sqlite_autoindex_recordStorage_goalPeriods_1. DROP INDEX \"goal_pe"
+    }
+   ]
+  },
+  "0011_unique_workplan_generation_keys.sql": {
+   "fileBytes": 359,
+   "statements": 1,
+   "maxStatementBytes": 357,
+   "nativeMs": 116,
+   "foreignKeyRebuild": false,
+   "kinds": {
+    "CREATE UNIQUE": 1
+   },
+   "slowest": [
+    {
+     "index": 0,
+     "ms": 3.6,
+     "kind": "CREATE UNIQUE",
+     "head": "-- gonvex:scope tenant -- One active generation per intent key. NULL/blank legacy correlat"
+    }
+   ]
+  }
+ },
+ "schema": {
+  "counts": {
+   "table": 535,
+   "index": 884,
+   "view": 474,
+   "trigger": 7596
+  },
+  "ddlBytes": 6308839,
+  "virtualTables": [
+   {
+    "name": "taskGridRows_fts",
+    "sql": "CREATE VIRTUAL TABLE \"taskGridRows_fts\" USING fts5(\n  \"name\", \"description\", \"searchText\", content='taskGridRows', content_rowid='rowid', tokenize='trigram')"
+   },
+   {
+    "name": "taskRelatedSearchDocuments_fts",
+    "sql": "CREATE VIRTUAL TABLE \"taskRelatedSearchDocuments_fts\" USING fts5(\n  \"searchText\", content='taskRelatedSearchDocuments', content_rowid='rowid', tokenize='trigram')"
+   }
+  ],
+  "shadowTables": 8,
+  "internalTables": [
+   "sqlite_sequence",
+   "sqlite_stat1",
+   "sqlite_stat4"
+  ],
+  "statementsOver100KB": [
+   {
+    "type": "view",
+    "name": "referenceExpected_tasks",
+    "bytes": 163316,
+    "compoundTerms": 94
+   },
+   {
+    "type": "view",
+    "name": "referenceExpected_templates",
+    "bytes": 175670,
+    "compoundTerms": 97
+   },
+   {
+    "type": "view",
+    "name": "referenceExpected_workplanItems",
+    "bytes": 239724,
+    "compoundTerms": 114
+   }
+  ],
+  "ddlOverLimitAfterQuoteDoubling": [
+   {
+    "type": "view",
+    "name": "referenceExpected_tasks",
+    "bytes": 163316,
+    "effectiveBytes": 170974
+   },
+   {
+    "type": "view",
+    "name": "referenceExpected_templates",
+    "bytes": 175670,
+    "effectiveBytes": 183818
+   },
+   {
+    "type": "view",
+    "name": "referenceExpected_workflowVersions",
+    "bytes": 97858,
+    "effectiveBytes": 102256
+   },
+   {
+    "type": "view",
+    "name": "referenceExpected_workplanItems",
+    "bytes": 239724,
+    "effectiveBytes": 250400
+   }
+  ],
+  "compoundOverLimit": {
+   "count": 22,
+   "byType": {
+    "view": 22
+   },
+   "maxTerms": 114,
+   "objects": [
+    {
+     "type": "view",
+     "name": "referenceExpected_approvals",
+     "maxTerms": 24,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_audiencePresets",
+     "maxTerms": 28,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_gamificationPointTransactions",
+     "maxTerms": 10,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_journeySyncLinks",
+     "maxTerms": 7,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_kpiCards",
+     "maxTerms": 18,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_marketRecords",
+     "maxTerms": 9,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_nfcTags",
+     "maxTerms": 19,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_notifications",
+     "maxTerms": 14,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_reportDeliveries",
+     "maxTerms": 15,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_reportDocuments",
+     "maxTerms": 14,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_reports",
+     "maxTerms": 14,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_researchRuns",
+     "maxTerms": 6,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_talentApplications",
+     "maxTerms": 6,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_taskRecurrences",
+     "maxTerms": 35,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_tasks",
+     "maxTerms": 94,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_templates",
+     "maxTerms": 97,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_voiceTaskDrafts",
+     "maxTerms": 6,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_workflowVersions",
+     "maxTerms": 54,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_workplanItems",
+     "maxTerms": 114,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_workspacePreferences",
+     "maxTerms": 29,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_workspaces",
+     "maxTerms": 32,
+     "chainsOverLimit": 1
+    },
+    {
+     "type": "view",
+     "name": "referenceExpected_workspaceViews",
+     "maxTerms": 20,
+     "chainsOverLimit": 1
+    }
+   ]
+  },
+  "functionArgsOverLimit": {
+   "count": 0,
+   "objects": []
+  },
+  "likeLiteralsOverLimit": {
+   "count": 0,
+   "objects": []
+  },
+  "regexpUses": [],
+  "columnsOverLimit": [],
+  "columnHistogram": {
+   "table:1-25": 513,
+   "view:1-25": 459,
+   "table:26-50": 14,
+   "view:26-50": 13,
+   "view:51-100": 2
+  },
+  "maxColumns": 43
+ },
+ "data": {
+  "tables": 522,
+  "nonEmptyTables": 156,
+  "rows": 225854,
+  "valueBytes": 59221744,
+  "fileBytes": 125648896,
+  "rowsOver2MB": [],
+  "widestRow": {
+   "name": "recordStorage_tenantBranding",
+   "columns": 7,
+   "rows": 1,
+   "bytes": 205082,
+   "maxRowBytes": 205082,
+   "maxCellBytes": 203538
+  },
+  "largestTables": [
+   {
+    "name": "_gonvex_sync_changes",
+    "columns": 12,
+    "rows": 35000,
+    "bytes": 33429998,
+    "maxRowBytes": 13506,
+    "maxCellBytes": 6676
+   },
+   {
+    "name": "recordStorage_notifications",
+    "columns": 11,
+    "rows": 17000,
+    "bytes": 6363852,
+    "maxRowBytes": 825,
+    "maxCellBytes": 673
+   },
+   {
+    "name": "_gonvex_identity_keys",
+    "columns": 3,
+    "rows": 52130,
+    "bytes": 2402320,
+    "maxRowBytes": 100,
+    "maxCellBytes": 92
+   },
+   {
+    "name": "recordStorage_taskLogs",
+    "columns": 9,
+    "rows": 10246,
+    "bytes": 1656636,
+    "maxRowBytes": 5324,
+    "maxCellBytes": 2642
+   },
+   {
+    "name": "recordStorage_gamificationPointTransactions",
+    "columns": 10,
+    "rows": 3840,
+    "bytes": 1464654,
+    "maxRowBytes": 571,
+    "maxCellBytes": 374
+   },
+   {
+    "name": "taskGridRows",
+    "columns": 31,
+    "rows": 1950,
+    "bytes": 1380564,
+    "maxRowBytes": 6061,
+    "maxCellBytes": 2858
+   },
+   {
+    "name": "referenceBindings_notifications",
+    "columns": 16,
+    "rows": 36466,
+    "bytes": 1099574,
+    "maxRowBytes": 39,
+    "maxCellBytes": 29
+   },
+   {
+    "name": "_gonvex_reducer_idempotency",
+    "columns": 5,
+    "rows": 4740,
+    "bytes": 1059646,
+    "maxRowBytes": 35237,
+    "maxCellBytes": 35139
+   },
+   {
+    "name": "recordStorage_assistantMessages",
+    "columns": 10,
+    "rows": 859,
+    "bytes": 1053395,
+    "maxRowBytes": 16801,
+    "maxCellBytes": 16727
+   },
+   {
+    "name": "recordStorage_workflowRuns",
+    "columns": 9,
+    "rows": 210,
+    "bytes": 944205,
+    "maxRowBytes": 6463,
+    "maxCellBytes": 6390
+   },
+   {
+    "name": "recordStorage_taskWorkspaceContexts",
+    "columns": 18,
+    "rows": 2979,
+    "bytes": 923061,
+    "maxRowBytes": 1675,
+    "maxCellBytes": 1479
+   },
+   {
+    "name": "_gonvex_action_outbox",
+    "columns": 12,
+    "rows": 354,
+    "bytes": 797153,
+    "maxRowBytes": 4514,
+    "maxCellBytes": 3617
+   },
+   {
+    "name": "_gonvex_sync_transactions",
+    "columns": 11,
+    "rows": 4021,
+    "bytes": 734464,
+    "maxRowBytes": 344,
+    "maxCellBytes": 123
+   },
+   {
+    "name": "recordStorage_tasks",
+    "columns": 43,
+    "rows": 1950,
+    "bytes": 618645,
+    "maxRowBytes": 3196,
+    "maxCellBytes": 2776
+   },
+   {
+    "name": "recordStorage_assistantPendingActions",
+    "columns": 11,
+    "rows": 233,
+    "bytes": 590633,
+    "maxRowBytes": 17169,
+    "maxCellBytes": 14698
+   }
+  ]
+ },
+ "migrationTotals": {
+  "statements": 26499,
+  "nativeMs": 69391,
+  "schema": {
+   "index": 926,
+   "table": 525,
+   "trigger": 6453,
+   "view": 474
+  },
+  "ddlOverLimitAfterQuoteDoubling": 8,
+  "overStatementLimit": [
+   {
+    "file": "0004_sql_document_relationships.sql",
+    "index": 1455,
+    "bytes": 163146,
+    "head": "CREATE VIEW \"referenceExpected_tasks\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,j"
+   },
+   {
+    "file": "0004_sql_document_relationships.sql",
+    "index": 1526,
+    "bytes": 175500,
+    "head": "CREATE VIEW \"referenceExpected_templates\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" owner"
+   },
+   {
+    "file": "0004_sql_document_relationships.sql",
+    "index": 1662,
+    "bytes": 239554,
+    "head": "CREATE VIEW \"referenceExpected_workplanItems\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" o"
+   },
+   {
+    "file": "0005_compact_record_storage.sql",
+    "index": 11406,
+    "bytes": 163316,
+    "head": "CREATE VIEW \"referenceExpected_tasks\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" ownerId,j"
+   },
+   {
+    "file": "0005_compact_record_storage.sql",
+    "index": 11481,
+    "bytes": 175670,
+    "head": "CREATE VIEW \"referenceExpected_templates\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" owner"
+   },
+   {
+    "file": "0005_compact_record_storage.sql",
+    "index": 11608,
+    "bytes": 239724,
+    "head": "CREATE VIEW \"referenceExpected_workplanItems\" AS WITH RECURSIVE r0 AS MATERIALIZED (SELECT s.\"_id\" o"
+   }
+  ],
+  "overCompoundLimit": 45,
+  "overFunctionArgs": 0
+ }
+}

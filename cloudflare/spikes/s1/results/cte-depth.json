@@ -1,0 +1,66 @@
+{
+ "views": 96,
+ "over99": [],
+ "top": [
+  {
+   "view": "referenceExpected_taskFindings",
+   "ctes": 22,
+   "longestChain": 18
+  },
+  {
+   "view": "referenceExpected_taskRecurrences",
+   "ctes": 140,
+   "longestChain": 16
+  },
+  {
+   "view": "referenceExpected_workplanItems",
+   "ctes": 404,
+   "longestChain": 16
+  },
+  {
+   "view": "referenceExpected_categoryCustomFields",
+   "ctes": 18,
+   "longestChain": 13
+  },
+  {
+   "view": "referenceExpected_spotCustomFieldValues",
+   "ctes": 30,
+   "longestChain": 13
+  },
+  {
+   "view": "referenceExpected_taskCustomFieldValues",
+   "ctes": 30,
+   "longestChain": 13
+  },
+  {
+   "view": "referenceExpected_templateCustomFields",
+   "ctes": 18,
+   "longestChain": 13
+  },
+  {
+   "view": "referenceExpected_workspaces",
+   "ctes": 139,
+   "longestChain": 13
+  },
+  {
+   "view": "referenceExpected_tasks",
+   "ctes": 298,
+   "longestChain": 11
+  },
+  {
+   "view": "referenceExpected_templates",
+   "ctes": 309,
+   "longestChain": 11
+  },
+  {
+   "view": "referenceExpected_workspacePreferences",
+   "ctes": 124,
+   "longestChain": 11
+  },
+  {
+   "view": "referenceExpected_approvals",
+   "ctes": 91,
+   "longestChain": 10
+  }
+ ]
+}

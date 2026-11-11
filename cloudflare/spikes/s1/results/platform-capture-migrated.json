@@ -1,0 +1,55 @@
+{
+ "object": "mig-full",
+ "rewrite": {
+  "records": 367,
+  "triggers": 0,
+  "unresolvedCalls": 0,
+  "ok": true,
+  "ms": 97,
+  "maxTriggerBytes": null,
+  "errors": []
+ },
+ "writePaths": {
+  "tables": 522,
+  "statements": 1566,
+  "failing": 0,
+  "byError": {}
+ },
+ "writes": [
+  {
+   "record": "tasks",
+   "ok": true,
+   "ms": 199,
+   "rowsWritten": 0,
+   "changes": []
+  },
+  {
+   "record": "statuses",
+   "ok": true,
+   "ms": 34,
+   "rowsWritten": 0,
+   "changes": []
+  },
+  {
+   "record": "members",
+   "ok": true,
+   "ms": 43,
+   "rowsWritten": 0,
+   "changes": []
+  },
+  {
+   "record": "notifications",
+   "ok": true,
+   "ms": 38,
+   "rowsWritten": 0,
+   "changes": []
+  },
+  {
+   "record": "workplanItems",
+   "ok": true,
+   "ms": 33,
+   "rowsWritten": 0,
+   "changes": []
+  }
+ ]
+}

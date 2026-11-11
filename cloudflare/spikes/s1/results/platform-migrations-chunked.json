@@ -1,0 +1,261 @@
+{
+ "mode": "migrations",
+ "object": "mig-full",
+ "workarounds": true,
+ "steps": [
+  {
+   "step": "runtime prelude",
+   "statements": 44,
+   "requests": 1,
+   "ms": 151,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0000_sqlite_baseline.sql",
+   "statements": 879,
+   "requestBytes": 200910,
+   "ms": 759,
+   "requests": 5,
+   "maxRequestMs": 253,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0001_sqlite_projections.sql",
+   "statements": 81,
+   "requestBytes": 53506,
+   "ms": 161,
+   "requests": 1,
+   "maxRequestMs": 161,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0002_agents_and_subtask_references.sql",
+   "statements": 15,
+   "requestBytes": 3232,
+   "ms": 163,
+   "requests": 1,
+   "maxRequestMs": 163,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0003_sql_relationship_integrity.sql",
+   "statements": 2956,
+   "requestBytes": 897022,
+   "ms": 13342,
+   "requests": 15,
+   "maxRequestMs": 2154,
+   "ok": true,
+   "foreignKeyRebuild": true,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0004_sql_document_relationships.sql",
+   "statements": 1788,
+   "requestBytes": 2321083,
+   "ms": 2636,
+   "requests": 9,
+   "maxRequestMs": 772,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0005_compact_record_storage.sql",
+   "statements": 11759,
+   "requestBytes": 6573796,
+   "ms": 23279,
+   "requests": 59,
+   "maxRequestMs": 1182,
+   "ok": true,
+   "foreignKeyRebuild": true,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0006_scoped_form_and_poll_relationships.sql",
+   "statements": 185,
+   "requestBytes": 65040,
+   "ms": 863,
+   "requests": 1,
+   "maxRequestMs": 863,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0007_bounded_identity_projections.sql",
+   "statements": 5106,
+   "requestBytes": 2182547,
+   "ms": 49052,
+   "requests": 26,
+   "maxRequestMs": 2374,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0008_scoped_json_key_types.sql",
+   "statements": 6,
+   "requestBytes": 931,
+   "ms": 163,
+   "requests": 1,
+   "maxRequestMs": 163,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0009_indexed_public_relationship_filters.sql",
+   "statements": 3691,
+   "requestBytes": 1620928,
+   "ms": 37508,
+   "requests": 19,
+   "maxRequestMs": 2264,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0010_remove_duplicate_indexes.sql",
+   "statements": 21,
+   "requestBytes": 2018,
+   "ms": 289,
+   "requests": 1,
+   "maxRequestMs": 289,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "migration 0011_unique_workplan_generation_keys.sql",
+   "statements": 1,
+   "requestBytes": 357,
+   "ms": 94,
+   "requests": 1,
+   "maxRequestMs": 94,
+   "ok": true,
+   "foreignKeyRebuild": false,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "runtime-generated tables",
+   "statements": 7,
+   "requests": 1,
+   "ms": 102,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "runtime-generated indexs",
+   "statements": 11,
+   "requests": 1,
+   "ms": 116,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "runtime-generated triggers",
+   "statements": 1143,
+   "requests": 1,
+   "ms": 6409,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "schema diff vs tenant file",
+   "missingCreated": {
+    "table": 7,
+    "index": 11,
+    "view": 0,
+    "trigger": 1143
+   },
+   "differingSql": 26,
+   "differingNames": [
+    "index:roles_live_name_key_unique",
+    "view:whTaskCustomFieldSearchDocuments",
+    "view:whTaskGridProjection",
+    "view:whTaskTagSearchDocuments",
+    "view:referenceExpected_approvals",
+    "view:referenceExpected_audiencePresets",
+    "view:referenceExpected_gamificationPointTransactions",
+    "view:referenceExpected_journeySyncLinks",
+    "view:referenceExpected_kpiCards",
+    "view:referenceExpected_marketRecords"
+   ]
+  },
+  {
+   "step": "final",
+   "databaseSize": 14848000,
+   "schema": [
+    {
+     "type": "index",
+     "n": 941
+    },
+    {
+     "type": "table",
+     "n": 533
+    },
+    {
+     "type": "trigger",
+     "n": 7596
+    },
+    {
+     "type": "view",
+     "n": 483
+    }
+   ]
+  }
+ ],
+ "migrationsMs": 128308,
+ "totalMs": 135087
+}

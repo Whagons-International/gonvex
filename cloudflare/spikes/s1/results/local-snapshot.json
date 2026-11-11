@@ -1,0 +1,130 @@
+{
+ "mode": "snapshot",
+ "object": "tenant-a937",
+ "workarounds": true,
+ "steps": [
+  {
+   "step": "create tables",
+   "statements": 524,
+   "requests": 1,
+   "ms": 153,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "import rows",
+   "rows": 225854,
+   "requests": 163,
+   "requestMs": 13114,
+   "wallMs": 14787,
+   "unsafeIntegers": 0,
+   "failed": 0,
+   "failures": []
+  },
+  {
+   "step": "fts rebuild",
+   "statements": 2,
+   "requests": 1,
+   "ms": 94,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "sqlite_sequence",
+   "statements": 1,
+   "requests": 1,
+   "ms": 33,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "create indexes",
+   "statements": 886,
+   "requests": 1,
+   "ms": 777,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "create views",
+   "statements": 483,
+   "requests": 1,
+   "ms": 429,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "create triggers",
+   "statements": 7596,
+   "requests": 1,
+   "ms": 7875,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "analyze",
+   "statements": 1,
+   "requests": 1,
+   "ms": 19,
+   "failed": 1,
+   "errorKinds": {
+    "out of memory: SQLITE_NOMEM": 1
+   },
+   "firstErrors": [
+    {
+     "index": 0,
+     "bytes": 7,
+     "error": "out of memory: SQLITE_NOMEM",
+     "head": "ANALYZE"
+    }
+   ],
+   "errors": [
+    {
+     "index": 0,
+     "bytes": 7,
+     "error": "out of memory: SQLITE_NOMEM",
+     "head": "ANALYZE"
+    }
+   ]
+  },
+  {
+   "step": "verify",
+   "error": "out of memory: SQLITE_NOMEM"
+  },
+  {
+   "step": "final",
+   "databaseSize": 99840000,
+   "schema": [
+    {
+     "type": "index",
+     "n": 941
+    },
+    {
+     "type": "table",
+     "n": 533
+    },
+    {
+     "type": "trigger",
+     "n": 7596
+    },
+    {
+     "type": "view",
+     "n": 483
+    }
+   ]
+  }
+ ],
+ "totalMs": 22494
+}

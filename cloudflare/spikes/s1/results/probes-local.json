@@ -1,0 +1,145 @@
+{
+ "object": "probe-1794364304751",
+ "limits": {
+  "statementBytes": 100000,
+  "boundParameters": 100,
+  "tableColumns": 100,
+  "resultColumns": 100,
+  "functionArguments": 127,
+  "compoundSelectTerms": 5,
+  "expressionDepth": 99,
+  "valuesRowsBeforeNomem": 10745,
+  "tempTables": "not authorized: SQLITE_AUTH",
+  "likePatternBytes": 50,
+  "valueBytes": 8388642,
+  "rowBytes": 8388632
+ },
+ "functions": {
+  "json_extract": "ok",
+  "json_type": "ok",
+  "json_quote": "ok",
+  "json_array": "ok",
+  "json_object": "ok",
+  "json_each": "ok",
+  "json_tree": "ok",
+  "json": "ok",
+  "json_valid": "ok",
+  "json_array_length": "ok",
+  "json_remove": "ok",
+  "json_set": "ok",
+  "json_patch": "ok",
+  "json_insert": "ok",
+  "jsonb": "ok",
+  "json_group_array": "ok",
+  "json_group_object": "ok",
+  "arrow": "ok",
+  "typeof": "ok",
+  "cast": "ok",
+  "replace": "ok",
+  "count": "ok",
+  "min": "ok",
+  "max": "ok",
+  "coalesce": "ok",
+  "hex": "ok",
+  "randomblob": "ok",
+  "substr": "ok",
+  "instr": "ok",
+  "lower": "ok",
+  "upper": "ok",
+  "length": "ok",
+  "unixepoch": "ok",
+  "abs": "ok",
+  "random": "ok",
+  "char": "ok",
+  "group_concat": "ok",
+  "trim": "ok",
+  "rtrim": "ok",
+  "nullif": "ok",
+  "printf": "ok",
+  "format": "ok",
+  "strftime": "ok",
+  "concat_ws": "ok",
+  "concat": "ok",
+  "iif": "ok",
+  "round": "ok",
+  "ifnull": "ok",
+  "quote": "ok",
+  "unhex": "ok",
+  "likelihood": "ok",
+  "datetime": "ok",
+  "julianday": "ok",
+  "total_changes": "ok",
+  "changes": "ok",
+  "last_insert_rowid": "ok",
+  "sqlite_version": "not authorized to use function: sqlite_version at offset 7: SQLITE_ERROR",
+  "sqlite_source_id": "not authorized to use function: sqlite_source_id at offset 7: SQLITE_ERROR",
+  "regexp_function": "no such function: regexp at offset 7: SQLITE_ERROR",
+  "regexp_operator": "no such function: REGEXP at offset 11: SQLITE_ERROR",
+  "glob": "ok",
+  "like": "ok",
+  "row_number_window": "ok",
+  "pragma_table_info": "ok",
+  "pragma_foreign_key_list": "ok",
+  "pragma_index_list": "ok",
+  "pragma_foreign_key_check": "ok",
+  "sqlite_schema": "ok",
+  "PRAGMA foreign_keys": "ok",
+  "PRAGMA foreign_keys=ON": "ok",
+  "PRAGMA defer_foreign_keys=ON": "ok",
+  "PRAGMA quick_check": "ok",
+  "PRAGMA integrity_check": "not authorized: SQLITE_AUTH",
+  "PRAGMA foreign_key_check": "ok",
+  "PRAGMA table_info('rowsize')": "ok",
+  "PRAGMA optimize": "ok",
+  "PRAGMA journal_mode": "not authorized: SQLITE_AUTH",
+  "PRAGMA cache_size": "not authorized: SQLITE_AUTH",
+  "PRAGMA recursive_triggers": "ok",
+  "PRAGMA legacy_alter_table=ON": "ok",
+  "ANALYZE": "ok",
+  "SELECT count(*) FROM sqlite_stat1": "ok",
+  "VACUUM": "cannot VACUUM from within a transaction: SQLITE_ERROR",
+  "SAVEPOINT s": "To execute a transaction, please use the state.storage.transaction() or state.storage.transactionSync() APIs instead of the SQL BEGIN TRANSACTION or SAVEPOINT statements. The JavaScript API is safer because it will automatically roll back on exceptions, and because it interacts correctly with Durable Objects' automatic atomic write coalescing.",
+  "BEGIN": "To execute a transaction, please use the state.storage.transaction() or state.storage.transactionSync() APIs instead of the SQL BEGIN TRANSACTION or SAVEPOINT statements. The JavaScript API is safer because it will automatically roll back on exceptions, and because it interacts correctly with Durable Objects' automatic atomic write coalescing.",
+  "ATTACH ':memory:' AS x": "not authorized: SQLITE_AUTH"
+ },
+ "features": {
+  "fts5Trigram": {
+   "create": "ok",
+   "match": [
+    {
+     "title": "Fix the boiler in room 204"
+    }
+   ],
+   "likeOnTrigram": [
+    {
+     "title": "Fix the boiler in room 204"
+    }
+   ],
+   "caseInsensitiveRemoveDiacritics": "ok",
+   "externalContentWithRebuild": [
+    {
+     "rowid": 1
+    }
+   ]
+  },
+  "jsonObjectCapture": {
+   "flat140Arguments": "too many arguments on function json_object at offset 109: SQLITE_ERROR",
+   "chunkedJsonPatch": "ok",
+   "insertThroughTrigger": "ok",
+   "captured": [
+    {
+     "op": "insert",
+     "c69": "sixty-nine",
+     "id": "r1"
+    }
+   ],
+   "narrowTrigger": [
+    {
+     "doc": "{\"id\":\"n1\",\"name\":\"b\",\"done\":true,\"meta\":{\"k\":1}}"
+    }
+   ],
+   "revisionStamp": 2
+  },
+  "regexp": "no such function: REGEXP at offset 13: SQLITE_ERROR"
+ }
+}

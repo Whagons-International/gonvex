@@ -1,0 +1,445 @@
+{
+ "views": 25,
+ "indexes": [
+  {
+   "index": "roles_live_name_key_unique",
+   "generatedColumns": 2,
+   "rows": 7,
+   "differ": 0,
+   "same": true
+  }
+ ],
+ "allSame": true,
+ "results": [
+  {
+   "view": "referenceExpected_approvals",
+   "originalBytes": 43709,
+   "statements": 1,
+   "maxStatementBytes": 43793,
+   "owners": 3,
+   "rows": 9,
+   "same": true,
+   "allOwnersMs": {
+    "original": 13.6,
+    "rewritten": 11.3
+   },
+   "oneOwner": {
+    "originalMs": 7.3,
+    "rewrittenMs": 5.67,
+    "rows": 3,
+    "same": true
+   },
+   "createMs": 12.6
+  },
+  {
+   "view": "referenceExpected_audiencePresets",
+   "originalBytes": 45615,
+   "statements": 1,
+   "maxStatementBytes": 45715,
+   "owners": 6,
+   "rows": 32,
+   "same": true,
+   "allOwnersMs": {
+    "original": 13.6,
+    "rewritten": 11.4
+   },
+   "oneOwner": {
+    "originalMs": 10.83,
+    "rewrittenMs": 11.46,
+    "rows": 2,
+    "same": true
+   },
+   "createMs": 9.5
+  },
+  {
+   "view": "referenceExpected_gamificationPointTransactions",
+   "originalBytes": 16906,
+   "statements": 1,
+   "maxStatementBytes": 16942,
+   "owners": 3327,
+   "rows": 16428,
+   "same": true,
+   "allOwnersMs": {
+    "original": 311.5,
+    "rewritten": 260.5
+   },
+   "oneOwner": {
+    "originalMs": 2.11,
+    "rewrittenMs": 1.42,
+    "rows": 4,
+    "same": true
+   },
+   "createMs": 4.4
+  },
+  {
+   "view": "referenceExpected_journeySyncLinks",
+   "originalBytes": 10633,
+   "statements": 1,
+   "maxStatementBytes": 10653,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 1.8,
+    "rewritten": 1.6
+   },
+   "oneOwner": null,
+   "createMs": 5.6
+  },
+  {
+   "view": "referenceExpected_kpiCards",
+   "originalBytes": 32695,
+   "statements": 1,
+   "maxStatementBytes": 32763,
+   "owners": 17,
+   "rows": 50,
+   "same": true,
+   "allOwnersMs": {
+    "original": 5.9,
+    "rewritten": 8.9
+   },
+   "oneOwner": {
+    "originalMs": 3.1,
+    "rewrittenMs": 2.44,
+    "rows": 4,
+    "same": true
+   },
+   "createMs": 10.2
+  },
+  {
+   "view": "referenceExpected_marketRecords",
+   "originalBytes": 17156,
+   "statements": 1,
+   "maxStatementBytes": 17176,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 4.2,
+    "rewritten": 2.8
+   },
+   "oneOwner": null,
+   "createMs": 5
+  },
+  {
+   "view": "referenceExpected_nfcTags",
+   "originalBytes": 30671,
+   "statements": 1,
+   "maxStatementBytes": 30739,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 5.4,
+    "rewritten": 5.3
+   },
+   "oneOwner": null,
+   "createMs": 7.6
+  },
+  {
+   "view": "referenceExpected_notifications",
+   "originalBytes": 31253,
+   "statements": 1,
+   "maxStatementBytes": 31305,
+   "owners": 17000,
+   "rows": 36466,
+   "same": true,
+   "allOwnersMs": {
+    "original": 1025.4,
+    "rewritten": 801.8
+   },
+   "oneOwner": {
+    "originalMs": 4.21,
+    "rewrittenMs": 3.06,
+    "rows": 2,
+    "same": true
+   },
+   "createMs": 9
+  },
+  {
+   "view": "referenceExpected_reportDeliveries",
+   "originalBytes": 23012,
+   "statements": 1,
+   "maxStatementBytes": 23064,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 5.6,
+    "rewritten": 4.9
+   },
+   "oneOwner": null,
+   "createMs": 7.6
+  },
+  {
+   "view": "referenceExpected_reportDocuments",
+   "originalBytes": 20751,
+   "statements": 1,
+   "maxStatementBytes": 20803,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 3.6,
+    "rewritten": 3.7
+   },
+   "oneOwner": null,
+   "createMs": 7.3
+  },
+  {
+   "view": "referenceExpected_reports",
+   "originalBytes": 20293,
+   "statements": 1,
+   "maxStatementBytes": 20345,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 1.9,
+    "rewritten": 2
+   },
+   "oneOwner": null,
+   "createMs": 6.5
+  },
+  {
+   "view": "referenceExpected_researchRuns",
+   "originalBytes": 9621,
+   "statements": 1,
+   "maxStatementBytes": 9641,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 2,
+    "rewritten": 1.4
+   },
+   "oneOwner": null,
+   "createMs": 4.8
+  },
+  {
+   "view": "referenceExpected_talentApplications",
+   "originalBytes": 9787,
+   "statements": 1,
+   "maxStatementBytes": 9807,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 1.7,
+    "rewritten": 1.3
+   },
+   "oneOwner": null,
+   "createMs": 6.6
+  },
+  {
+   "view": "referenceExpected_taskRecurrences",
+   "originalBytes": 89307,
+   "statements": 1,
+   "maxStatementBytes": 89439,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 16.2,
+    "rewritten": 11.8
+   },
+   "oneOwner": null,
+   "createMs": 11.9
+  },
+  {
+   "view": "referenceExpected_tasks",
+   "originalBytes": 163316,
+   "statements": 3,
+   "maxStatementBytes": 93636,
+   "owners": 319,
+   "rows": 853,
+   "same": true,
+   "allOwnersMs": {
+    "original": 108.8,
+    "rewritten": 130.3
+   },
+   "oneOwner": {
+    "originalMs": 34.66,
+    "rewrittenMs": 37.66,
+    "rows": 2,
+    "same": true
+   },
+   "createMs": 34.7
+  },
+  {
+   "view": "referenceExpected_templates",
+   "originalBytes": 175670,
+   "statements": 3,
+   "maxStatementBytes": 93963,
+   "owners": 8,
+   "rows": 32,
+   "same": true,
+   "allOwnersMs": {
+    "original": 53.5,
+    "rewritten": 70.8
+   },
+   "oneOwner": {
+    "originalMs": 39,
+    "rewrittenMs": 36.8,
+    "rows": 19,
+    "same": true
+   },
+   "createMs": 30.2
+  },
+  {
+   "view": "referenceExpected_voiceTaskDrafts",
+   "originalBytes": 9465,
+   "statements": 1,
+   "maxStatementBytes": 9485,
+   "owners": 1,
+   "rows": 2,
+   "same": true,
+   "allOwnersMs": {
+    "original": 1.6,
+    "rewritten": 1.2
+   },
+   "oneOwner": {
+    "originalMs": 0.64,
+    "rewrittenMs": 0.73,
+    "rows": 2,
+    "same": true
+   },
+   "createMs": 4.6
+  },
+  {
+   "view": "referenceExpected_workflowVersions",
+   "originalBytes": 97858,
+   "statements": 3,
+   "maxStatementBytes": 94305,
+   "owners": 5,
+   "rows": 10,
+   "same": true,
+   "allOwnersMs": {
+    "original": 20.1,
+    "rewritten": 26.8
+   },
+   "oneOwner": {
+    "originalMs": 14.94,
+    "rewrittenMs": 15.89,
+    "rows": 2,
+    "same": true
+   },
+   "createMs": 20.5
+  },
+  {
+   "view": "referenceExpected_workplanItems",
+   "originalBytes": 239724,
+   "statements": 4,
+   "maxStatementBytes": 94834,
+   "owners": 9,
+   "rows": 13,
+   "same": true,
+   "allOwnersMs": {
+    "original": 90.9,
+    "rewritten": 200.7
+   },
+   "oneOwner": {
+    "originalMs": 109.81,
+    "rewrittenMs": 95.19,
+    "rows": 1,
+    "same": true
+   },
+   "createMs": 38.9
+  },
+  {
+   "view": "referenceExpected_workspacePreferences",
+   "originalBytes": 63913,
+   "statements": 1,
+   "maxStatementBytes": 64013,
+   "owners": 43,
+   "rows": 134,
+   "same": true,
+   "allOwnersMs": {
+    "original": 18.2,
+    "rewritten": 38.7
+   },
+   "oneOwner": {
+    "originalMs": 7.76,
+    "rewrittenMs": 5.8,
+    "rows": 1,
+    "same": true
+   },
+   "createMs": 18.2
+  },
+  {
+   "view": "referenceExpected_workspaceViews",
+   "originalBytes": 43665,
+   "statements": 1,
+   "maxStatementBytes": 43733,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 6.1,
+    "rewritten": 8.3
+   },
+   "oneOwner": null,
+   "createMs": 8.2
+  },
+  {
+   "view": "referenceExpected_workspaces",
+   "originalBytes": 75664,
+   "statements": 1,
+   "maxStatementBytes": 75780,
+   "owners": 0,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 11.2,
+    "rewritten": 10.7
+   },
+   "oneOwner": null,
+   "createMs": 11.9
+  },
+  {
+   "view": "whTaskCustomFieldSearchDocuments",
+   "originalBytes": 12665,
+   "statements": 1,
+   "maxStatementBytes": 13489,
+   "owners": null,
+   "rows": 0,
+   "same": true,
+   "allOwnersMs": {
+    "original": 2.6,
+    "rewritten": 1.1
+   },
+   "oneOwner": null,
+   "createMs": 5.9
+  },
+  {
+   "view": "whTaskGridProjection",
+   "originalBytes": 5978,
+   "statements": 1,
+   "maxStatementBytes": 6802,
+   "owners": null,
+   "rows": 1950,
+   "same": true,
+   "allOwnersMs": {
+    "original": 98.7,
+    "rewritten": 472.5
+   },
+   "oneOwner": null,
+   "createMs": 4.3
+  },
+  {
+   "view": "whTaskTagSearchDocuments",
+   "originalBytes": 4437,
+   "statements": 1,
+   "maxStatementBytes": 5261,
+   "owners": null,
+   "rows": 50,
+   "same": true,
+   "allOwnersMs": {
+    "original": 3,
+    "rewritten": 14.9
+   },
+   "oneOwner": null,
+   "createMs": 4.6
+  }
+ ]
+}

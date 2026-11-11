@@ -1,0 +1,122 @@
+{
+ "mode": "snapshot",
+ "object": "tenant-a937",
+ "workarounds": true,
+ "steps": [
+  {
+   "step": "create tables",
+   "statements": 524,
+   "requests": 1,
+   "ms": 807,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "import rows",
+   "rows": 225854,
+   "requests": 163,
+   "requestMs": 35999,
+   "wallMs": 37671,
+   "unsafeIntegers": 0,
+   "failed": 0,
+   "failures": []
+  },
+  {
+   "step": "fts rebuild",
+   "statements": 2,
+   "requests": 1,
+   "ms": 276,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "sqlite_sequence",
+   "statements": 1,
+   "requests": 1,
+   "ms": 92,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "create indexes",
+   "statements": 886,
+   "requests": 1,
+   "ms": 5479,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "create views",
+   "statements": 483,
+   "requests": 2,
+   "ms": 3479,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "create triggers",
+   "statements": 7596,
+   "requests": 4,
+   "ms": 73789,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "analyze",
+   "statements": 1,
+   "requests": 1,
+   "ms": 311,
+   "failed": 0,
+   "errorKinds": {},
+   "firstErrors": [],
+   "errors": []
+  },
+  {
+   "step": "verify",
+   "ms": 1373,
+   "tables": 530,
+   "rowCountMismatches": 0,
+   "mismatched": [],
+   "foreignKeyViolations": 0,
+   "quickCheck": [
+    "ok"
+   ],
+   "databaseSize": 100028416
+  },
+  {
+   "step": "final",
+   "databaseSize": 100028416,
+   "schema": [
+    {
+     "type": "index",
+     "n": 941
+    },
+    {
+     "type": "table",
+     "n": 534
+    },
+    {
+     "type": "trigger",
+     "n": 7596
+    },
+    {
+     "type": "view",
+     "n": 483
+    }
+   ]
+  }
+ ],
+ "totalMs": 121605
+}
