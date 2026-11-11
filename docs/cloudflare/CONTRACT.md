@@ -1732,6 +1732,9 @@ new note and waits for the lead.
 | 0023 | Hook-capture quirk on columns added after the row (proposed by A01) | ruled in 0024 §1 | K03, M02 |
 | 0024 | Second wave-1 pass: A01 complete, watermark self-check for K10, K06 findings, numbering | decided | K03, K06, K10, K19, R03, R04, V03 |
 | 0025 | K06 control object findings (proposed by K06) | ruled in 0024 §3 | K06, V03 |
+| 0026 | K03 change-capture differences (proposed by K03) | ruled in 0028 §2 | K03, K07, M02 |
+| 0027 | K02 migration findings (proposed by K02) | ruled in 0028 §3 | K02, K04, K07, K19 |
+| 0028 | Third wave-1 pass: S5 (G0-2 stands; Facet is a stage-3 candidate), K03 and K02 rulings | decided | K02, K03, K04, K07, K19, M02, R05 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
