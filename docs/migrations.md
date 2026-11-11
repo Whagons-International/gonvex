@@ -40,7 +40,13 @@ VACUUM;
 
 In no-transaction mode Gonvex executes top-level statements individually and records the migration only after every statement succeeds. Earlier statements can remain after a later failure, so every statement in such a migration should be safely retryable (`IF EXISTS`/`IF NOT EXISTS` where SQLite supports it). Gonvex's splitter understands quoted strings, quoted identifiers, comments, and trigger bodies.
 
-Tenant rollout continues after an individual tenant fails so healthy tenant databases are not blocked. Gonvex collects every failure, identifies its tenant, and fails the overall sync. The runtime manifest is not activated when any migration fails. Control Plane failure stops before tenant rollout.
+Tenant rollout continues after an individual tenant fails so healthy tenant databases are not blocked. Gonvex collects every failure, identifies its tenant, and fails the overall sync with HTTP 422; the response's `tenants` array gives each tenant's `status` (`provisioned` or `failed`, with its `error`). The runtime manifest is not activated when any migration fails. Control Plane failure stops before tenant rollout.
+
+Applied migrations cannot be rolled back, so after a partial failure the healthy tenants run the previous function bundle on the new schema until the next successful sync. Write migrations and bundles expand/contract compatible: the previous bundle must work on the migrated schema. To recover, repair the failed tenant's data and sync again; tenants that already applied a migration skip it.
+
+At startup the runtime provisions every tenant with the saved manifest. A tenant whose provisioning fails is logged and taken out of service: sessions and other requests for it are refused with `tenant "<id>" is unavailable until an operator repairs its database and redeploys`, background work skips it, and the authenticated `/healthz` diagnostics list it under `runtimeManifests.unavailableTenants`. The other tenants keep serving. A later successful sync brings the tenant back. Startup still fails if every tenant of a project fails, since that indicates a broken runtime build or migration.
+
+A tenant migration containing the line `-- gonvex:foreign-key-rebuild` runs with foreign keys disabled, must be transactional, and must leave no `pragma_foreign_key_check` violation. Inside the same transaction Gonvex validates `_gonvex_table_options` and reinstalls change capture, so an invalid declaration rolls the migration back. Membership triggers on `members` are restored after every batch that applies a migration.
 
 Applied migrations are logged and returned in the `/dev/sync` JSON response. To inspect pending migrations without applying SQL, schema changes, or a runtime bundle, run:
 

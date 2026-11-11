@@ -70,6 +70,12 @@ pub enum DatabaseError {
     TenantNotFound { project: String, tenant: String },
     #[error("tenant {tenant:?} has no configured physical database")]
     TenantDatabaseMissing { tenant: String },
+    /// The tenant's database failed provisioning at startup. The reason is
+    /// operator-only (logged and in operator health), never sent to clients.
+    #[error(
+        "tenant {tenant:?} is unavailable until an operator repairs its database and redeploys"
+    )]
+    TenantUnavailable { tenant: String },
     #[error("active tenant member for account {0:?} not found")]
     MemberNotFound(String),
     #[error("invalid or expired app session")]
@@ -287,6 +293,14 @@ pub struct ControlPlane {
     reader: SqlitePool,
     pools: PoolRegistry,
     configured_tenants: Arc<BTreeMap<String, String>>,
+    /// Tenants whose database failed provisioning at startup, by
+    /// `project:tenant`, with the operator-facing reason. Routing refuses
+    /// them; a later successful provisioning makes them available again.
+    unavailable_tenants: Arc<std::sync::RwLock<BTreeMap<String, String>>>,
+}
+
+fn tenant_scope(route: &TenantRoute) -> String {
+    format!("{}:{}", route.project_id, route.tenant_id)
 }
 
 /// Grant IDs are host-generated. A support caller's free-form reason cannot
@@ -336,6 +350,45 @@ impl ControlPlane {
         &self.database_url
     }
 
+    /// Takes a tenant out of service after its database failed
+    /// provisioning: [`Self::resolve_tenant`] (every session, operator and
+    /// control route) refuses it and [`Self::tenant_routes`] omits it, so no
+    /// module code runs against a schema the module does not expect.
+    pub fn mark_tenant_unavailable(&self, route: &TenantRoute, reason: impl Into<String>) {
+        self.unavailable_tenants
+            .write()
+            .unwrap()
+            .insert(tenant_scope(route), reason.into());
+    }
+
+    /// Unavailable tenants as `(project:tenant, reason)`, for operators.
+    pub fn unavailable_tenants(&self) -> Vec<(String, String)> {
+        self.unavailable_tenants
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(scope, reason)| (scope.clone(), reason.clone()))
+            .collect()
+    }
+
+    pub(crate) fn mark_tenant_available(&self, route: &TenantRoute) {
+        let mut unavailable = self.unavailable_tenants.write().unwrap();
+        if !unavailable.is_empty() {
+            unavailable.remove(&tenant_scope(route));
+        }
+    }
+
+    fn require_available(&self, project_id: &str, tenant_id: &str) -> Result<(), DatabaseError> {
+        let unavailable = self.unavailable_tenants.read().unwrap();
+        if !unavailable.is_empty() && unavailable.contains_key(&format!("{project_id}:{tenant_id}"))
+        {
+            return Err(DatabaseError::TenantUnavailable {
+                tenant: tenant_id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     pub async fn connect(
         database_url: &str,
         pools: PoolRegistry,
@@ -349,6 +402,7 @@ impl ControlPlane {
             reader,
             pools,
             configured_tenants: Arc::new(configured_tenants),
+            unavailable_tenants: Arc::default(),
         };
         control.ping().await?;
         control.prepare_identity_schema_upgrade().await?;
@@ -887,7 +941,23 @@ impl ControlPlane {
         Ok(tenant_from_row(row))
     }
 
+    /// Routes of the project's available tenants (see
+    /// [`Self::mark_tenant_unavailable`]). Background work uses these.
     pub async fn tenant_routes(&self, project_id: &str) -> Result<Vec<TenantRoute>, DatabaseError> {
+        let mut routes = self.all_tenant_routes(project_id).await?;
+        let unavailable = self.unavailable_tenants.read().unwrap();
+        if !unavailable.is_empty() {
+            routes.retain(|route| !unavailable.contains_key(&tenant_scope(route)));
+        }
+        Ok(routes)
+    }
+
+    /// Routes of every tenant of the project, including unavailable ones.
+    /// Provisioning uses these, so a deploy can repair an unavailable tenant.
+    pub async fn all_tenant_routes(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<TenantRoute>, DatabaseError> {
         let project_id = required(project_id, DatabaseError::MissingProject)?;
         let _admission = self.pools.admit(&self.database_url).await?;
         let rows = sqlx::query(
@@ -925,6 +995,7 @@ impl ControlPlane {
         let tenant_id = required(tenant_id, DatabaseError::MissingTenant)?;
         let scope = format!("{project_id}:{tenant_id}");
         if let Some(database_url) = self.configured_tenants.get(&scope) {
+            self.require_available(project_id, tenant_id)?;
             return Ok(TenantRoute {
                 project_id: project_id.to_owned(),
                 tenant_id: tenant_id.to_owned(),
@@ -954,6 +1025,7 @@ impl ControlPlane {
         let database_url = database_url.ok_or_else(|| DatabaseError::TenantDatabaseMissing {
             tenant: canonical_tenant_id.clone(),
         })?;
+        self.require_available(project_id, &canonical_tenant_id)?;
         Ok(TenantRoute {
             project_id: project_id.to_owned(),
             tenant_id: canonical_tenant_id,
@@ -2154,6 +2226,7 @@ mod tests {
                 .unwrap(),
             pools: PoolRegistry::new(PoolLimits::default()),
             configured_tenants: Arc::new(configured),
+            unavailable_tenants: Arc::default(),
         };
         let route = control
             .resolve_tenant("project-a", "tenant-a")
@@ -2162,5 +2235,29 @@ mod tests {
         assert_eq!(route.database_url, "sqlite:///trusted/tenant-a.db");
         assert_eq!(route.project_id, "project-a");
         assert_eq!(route.tenant_id, "tenant-a");
+
+        control.mark_tenant_unavailable(&route, "migration 0012 failed");
+        let error = control
+            .resolve_tenant("project-a", "tenant-a")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, DatabaseError::TenantUnavailable { tenant } if tenant == "tenant-a"),
+            "{error}"
+        );
+        // Clients get a clear refusal without the operator-only reason.
+        assert!(!error.to_string().contains("0012"), "{error}");
+        assert_eq!(
+            control.unavailable_tenants(),
+            vec![(
+                "project-a:tenant-a".to_owned(),
+                "migration 0012 failed".to_owned()
+            )]
+        );
+        control.mark_tenant_available(&route);
+        assert!(control
+            .resolve_tenant("project-a", "tenant-a")
+            .await
+            .is_ok());
     }
 }

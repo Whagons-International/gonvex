@@ -70,6 +70,7 @@ pub fn database_error_class(error: &DatabaseError) -> ReducerErrorClass {
         DatabaseError::ProjectNotFound(_)
         | DatabaseError::TenantNotFound { .. }
         | DatabaseError::TenantDatabaseMissing { .. }
+        | DatabaseError::TenantUnavailable { .. }
         | DatabaseError::AmbiguousReducerReceipts => ReducerErrorClass::Transient,
         // The account lost access: a durable, user-visible refusal.
         DatabaseError::MemberNotFound(_) | DatabaseError::NoTenantMembership => {
