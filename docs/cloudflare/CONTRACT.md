@@ -1719,5 +1719,6 @@ new note and waits for the lead.
 | 0010 | Change capture without custom functions or hooks | **open** (S1 numbers) | K02, K03 |
 | 0011 | `$N` placeholders, read-only Queries, 100-parameter limit | decided | K01, K04 |
 | 0012 | Lead rulings R1-R26 on items found during the freeze (R22, R25 open) | decided except R22 (S3), R25 (S2) | K05, K06, K11, K12, K13, K14, K19 |
+| 0013 | Tenant schema objects DO SQLite refuses (compound-select 5, 100 KB statements, expression depth 100, custom functions) | **open** (S1 on the platform) | K02, K03, K09 |
 
-Stage 1 cannot start K01-K06 until 0004, 0005, 0006 and 0010 are decided at gate G0.
+Stage 1 cannot start K01-K06 until 0004, 0005, 0006, 0010 and 0013 are decided at gate G0.
