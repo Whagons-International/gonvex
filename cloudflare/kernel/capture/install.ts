@@ -101,7 +101,8 @@ function publicKeyIsText(schemaJson: string): boolean {
 /**
  * provision.rs `application_tables`, over `sqlite_schema` (0016 G0-12:
  * `pragma_table_list` costs seconds of CPU on the Whagons schema). The
- * platform's own `_cf_*` tables are excluded too.
+ * platform's own `_cf_*` tables are excluded too, and so is local workerd's
+ * `__miniflare_*` bookkeeping, which the platform does not have.
  */
 function applicationTables(sql: CaptureSql, hasOptions: boolean): string[] {
   // Rust excludes a 7-term UNION ALL; Durable Object SQLite refuses more than 5 compound terms (0014 T1).
@@ -118,6 +119,7 @@ function applicationTables(sql: CaptureSql, hasOptions: boolean): string[] {
          AND m.name NOT LIKE 'gonvex\\_%' ESCAPE '\\'
          AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
          AND m.name NOT LIKE '\\_cf\\_%' ESCAPE '\\'
+         AND m.name NOT LIKE '\\_\\_miniflare\\_%' ESCAPE '\\'
          AND NOT EXISTS (SELECT 1 FROM virtual v WHERE m.name IN (v.name, v.name||'_data', v.name||'_idx', v.name||'_content', v.name||'_docsize', v.name||'_config'))
          ${options}
        ORDER BY m.name`,

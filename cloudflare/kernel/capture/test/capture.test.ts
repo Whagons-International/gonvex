@@ -187,7 +187,7 @@ describe("finalize", () => {
     });
   });
 
-  it("a record that is never finalized cannot commit (the deferred guard)", async () => {
+  it("the record guard is a deferred foreign key, so an unflushed record cannot commit", async () => {
     await withObject((state) => {
       const sql = directSql(state.storage.sql);
       commit(state, () => installChangeFeed(sql));

@@ -44,7 +44,7 @@ await pruneChangeLog(ctx.storage, { maxPages: 50 });
   dependencies get their own named triggers. **Derived tables** (`_gonvex_table_options.capture = 'derived'`) get no
   capture, their old capture and receipt are dropped, and they must declare their owner foreign key, as Rust's
   derived-table-capture-v1. `metadata` tables, `_gonvex*`, `gonvex_*`, `sqlite_*`, FTS5 tables and their shadow tables
-  are not captured, nor are the platform's `_cf_*` tables.
+  are not captured, nor are the platform's `_cf_*` tables or local workerd's `__miniflare_*` tables.
 - **Receipts.** `_gonvex_sync_bootstrap` holds the SHA-256 of the Rust-form script, so it equals Rust's (checked
   against a Rust tenant file: every receipt, including `infrastructure` and the dependency receipts). A unit is planned
   only when its receipt or its installed trigger SQL differs, so a warm wake plans nothing.
