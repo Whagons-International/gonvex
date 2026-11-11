@@ -831,7 +831,7 @@ impl ControlPlane {
         route: TenantRoute,
         migrations: Vec<SqlMigration>,
     ) -> Pin<Box<dyn Future<Output = Result<(), DatabaseError>> + Send + 'static>> {
-        Box::pin(async move {
+        Box::pin(crate::writer_schema::schema_work(async move {
             let database_url = route.database_url.trim().to_owned();
             let pool = self.pools.pool(&database_url).await?;
             let _admission = self.pools.admit(&database_url).await?;
@@ -848,6 +848,10 @@ impl ControlPlane {
                 connection.close_on_drop();
             }
             install_tenant_identity(&mut connection).await?;
+            // Migrations see writer-only objects in the file's schema.
+            if crate::writer_schema::migrations_pending(&mut connection, &migrations).await? {
+                crate::writer_schema::restore(&mut connection).await?;
+            }
             let migrated =
                 apply_migrations_locked(&mut connection, &migrations, MigrationScope::Tenant).await;
             // A migration that rebuilds `members` drops the membership outbox
@@ -860,11 +864,19 @@ impl ControlPlane {
             let notices = migrated?.1;
             restored?;
             install_change_feed_locked(&mut connection).await?;
+            let installed = self
+                .pools
+                .database(&database_url)
+                .await?
+                .writer_objects
+                .installed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            crate::writer_schema::stash(&mut connection, installed).await?;
             drop(connection);
             publish(&self.pools, &database_url, notices).await?;
             self.mark_tenant_available(&route);
             Ok(())
-        })
+        }))
     }
 
     pub fn apply_control_migrations(
@@ -1653,3 +1665,7 @@ mod sync_bootstrap_upgrade_tests;
 #[cfg(test)]
 #[path = "provision_foreign_writer_tests.rs"]
 mod sync_bootstrap_foreign_writer_tests;
+
+#[cfg(test)]
+#[path = "writer_schema_tests.rs"]
+mod writer_schema_tests;

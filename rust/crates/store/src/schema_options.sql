@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS _gonvex_schema_capabilities(name TEXT PRIMARY KEY);
 INSERT INTO _gonvex_schema_capabilities(name) VALUES
-  ('atomic-foreign-key-rebuild-v1'),('derived-table-capture-v1'),('logical-record-storage-v1') ON CONFLICT(name) DO NOTHING;
+  ('atomic-foreign-key-rebuild-v1'),('derived-table-capture-v1'),('logical-record-storage-v1'),('writer-only-schema-v1') ON CONFLICT(name) DO NOTHING;
 CREATE TABLE IF NOT EXISTS _gonvex_table_options(
   name TEXT PRIMARY KEY,
   capture TEXT NOT NULL CHECK(capture IN ('entity','derived','owned','metadata')),
@@ -35,3 +35,16 @@ CREATE TABLE IF NOT EXISTS _gonvex_record_dependencies(
  watch_columns TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(watch_columns) AND json_type(watch_columns)='array'),
  PRIMARY KEY(source_table,source_column,owner_storage,owner_column)
 ) STRICT, WITHOUT ROWID;
+-- Writer-only triggers and views (`writer_schema`): rules a module declares,
+-- and the definitions moved out of the file's schema.
+CREATE TABLE IF NOT EXISTS _gonvex_writer_schema_rules(
+  type TEXT NOT NULL CHECK(type IN ('trigger','view')),
+  pattern TEXT NOT NULL,
+  PRIMARY KEY(type, pattern)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _gonvex_writer_schema(
+  seq INTEGER PRIMARY KEY,
+  type TEXT NOT NULL CHECK(type IN ('trigger','view')),
+  name TEXT NOT NULL UNIQUE,
+  sql TEXT NOT NULL
+) STRICT;

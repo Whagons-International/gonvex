@@ -1647,6 +1647,10 @@ fn memory_json(runtime: &Runtime) -> Value {
         "sqliteBudgetMiB": gonvex_store::sqlite_cache_budget_mib(),
         "sqliteReaderOpens": gonvex_store::sqlite_reader_opens(),
         "sqliteWriterSchemaBytes": gonvex_store::sqlite_writer_schema_heap(),
+        "writerOnlySchema": {
+            "installs": gonvex_store::writer_schema_counters().0,
+            "releases": gonvex_store::writer_schema_counters().1,
+        },
         "feedBacklog": crate::change_feed::backlog::metrics(),
         "eventShares": crate::feed_share::metrics(),
         "sqliteStatements": statements,
