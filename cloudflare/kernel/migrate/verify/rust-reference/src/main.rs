@@ -4,7 +4,8 @@
 //! <data-dir>, then provisions the tenant with every `NNNN_*.sql` file of
 //! <migrations-dir> through `ControlPlane::provision_tenant_database`, the
 //! path `/dev/sync` and new tenants take. Prints JSON: the tenant database
-//! path and the provision time in ms.
+//! path and the provision time in ms. `K02_PROVISION_TWICE=1` provisions it a
+//! second time, as every later sync and runtime start does.
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -70,7 +71,16 @@ async fn main() {
         .await
         .expect("tenant");
     let started = Instant::now();
-    control.clone().provision_tenant_database(route.clone(), migrations).await.expect("provision");
+    control.clone().provision_tenant_database(route.clone(), migrations.clone()).await.expect("provision");
     let ms = started.elapsed().as_millis();
-    println!("{}", serde_json::json!({ "databaseUrl": route.database_url, "provisionMs": ms }));
+    // K02_PROVISION_TWICE=1: provision the same tenant again, as every later /dev/sync and
+    // runtime start does, to compare a re-provisioned tenant.
+    let again_ms = if std::env::var("K02_PROVISION_TWICE").as_deref() == Ok("1") {
+        let again = Instant::now();
+        control.clone().provision_tenant_database(route.clone(), migrations).await.expect("provision again");
+        Some(again.elapsed().as_millis())
+    } else {
+        None
+    };
+    println!("{}", serde_json::json!({ "databaseUrl": route.database_url, "provisionMs": ms, "reprovisionMs": again_ms }));
 }

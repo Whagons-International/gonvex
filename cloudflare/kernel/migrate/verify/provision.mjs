@@ -3,7 +3,7 @@
 // (verify/rust-reference). Prints counts, names and timings only.
 //
 //   node --experimental-strip-types kernel/migrate/verify/provision.mjs <base-url> <migrations-dir> <rust-tenant.db> <object> \
-//        [--kill-after-ms N] [--compare-only] [--out result.json]
+//        [--kill-after-ms N] [--compare-only] [--no-wipe] [--out result.json]
 //
 // <base-url> runs verify/worker (wrangler dev, or the deployed gonvex-cf-dev-k02 with K02_TOKEN set).
 // --kill-after-ms: aborts the object N ms after the apply starts and sends nothing else; the
@@ -86,7 +86,7 @@ if (batch.length) await call(`/plan/${plan.id}/put`, { entries: batch });
 log("upload", { entries: entries.length, ms: Math.round(performance.now() - t1) });
 
 // 3. Apply and wait.
-await call(`/t/${object}/wipe`, {});
+if (!rest.includes("--no-wipe")) await call(`/t/${object}/wipe`, {});
 const started = Date.now();
 const events = [];
 let killed = false;
