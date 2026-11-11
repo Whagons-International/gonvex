@@ -20,6 +20,8 @@ import { releaseKey, type ReleaseSummary } from "./release";
 import type { SyncCoordinator } from "./sync";
 import type { OperatorTenantPort, PortResult, RowsQuery } from "./tenant/port";
 import { internalTable, validIdent } from "./tenant/rows";
+import { findPrincipal } from "../src/auth";
+import { manifestAccess } from "../../kernel/principals/manifest";
 
 export interface Op {
   ctx: Ctx;
@@ -1174,14 +1176,10 @@ async function readView(op: Op, project: string, hash: string): Promise<{ functi
   return (await object.json()) as { functions: unknown; schema: unknown; visibility: unknown };
 }
 
-/** service_principal.rs `manifest_access`. */
+/** service_principal.rs `manifest_access` (K17's port: trimmed token, constant-time digests). */
 async function servicePrincipalAccess(op: Op, request: Request, project: string): Promise<"allowed" | "denied" | undefined> {
-  const token = (request.headers.get("authorization") ?? "").trim().replace(/^Bearer /, "");
-  if (!token.startsWith("gvx_svc_")) return undefined;
-  const hash = sha256Hex(token);
-  const principal = op.ctx.config.servicePrincipals.find((p) => p.tokenSha256 === hash);
-  if (!principal) return undefined;
-  return principal.manifest && principal.projects.includes(project) ? "allowed" : "denied";
+  const access = manifestAccess((token) => findPrincipal(op.ctx.config.servicePrincipals, token), request.headers.get("authorization"), project);
+  return access.kind === "none" ? undefined : access.kind;
 }
 
 // ------------------------------------------------------------- metrics, logs, errors

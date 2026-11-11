@@ -1,0 +1,50 @@
+// Test-only Worker for the K17 specs (never deployed). The principals are the specs' (test/client.ts mints the same tokens).
+{
+  "name": "gonvex-cf-dev-k17-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.sql"
+      ],
+      "fallthrough": true
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GATEWAY",
+        "class_name": "PrincipalsGateway"
+      },
+      {
+        "name": "CONTROL",
+        "class_name": "PrincipalsControlObject"
+      },
+      {
+        "name": "TENANT",
+        "class_name": "TestPrincipalsTenant"
+      }
+    ]
+  },
+  "vars": {
+    "GONVEX_RUNTIME_VERSION": "development",
+    "GONVEX_GATEWAY_SHARDS": "2",
+    "GONVEX_PRESENCE": "1",
+    "GONVEX_SERVICE_PRINCIPALS": "[{\"id\": \"gateway\", \"tokenSha256\": \"09415efaee061021bd41413cffafc140a58cd89b9ff330daab63123b5daeaac6\", \"projects\": [\"k17-project\"], \"functions\": [\"principals.verifyKey\", \"principals.whoami\", \"principals.record\", \"k17.enqueue\"], \"maxDelegationSeconds\": 600, \"manifest\": true}, {\"id\": \"reader\", \"tokenSha256\": \"0df527acbc2a67c1b4b2b1f26d43f340ec67ef7632875d7bc9a0b3a207b1aa26\", \"projects\": [\"k17-project\"], \"functions\": [\"principals.whoami\"]}]"
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "PrincipalsGateway",
+        "PrincipalsControlObject",
+        "TestPrincipalsTenant"
+      ]
+    }
+  ]
+}

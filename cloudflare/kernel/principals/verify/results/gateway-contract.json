@@ -1,0 +1,92 @@
+{
+  "app": {
+    "ref": "origin/staging",
+    "commit": "a6de676951a620251fc09006c7f79e20116b8b5e"
+  },
+  "startedAt": "2026-11-11T22:26:48.929Z",
+  "runtimes": {
+    "rust": {
+      "syncMs": 9532,
+      "status": 200,
+      "keys": [
+        "functions",
+        "module",
+        "project"
+      ],
+      "functions": 1997,
+      "moduleHash": "3b0d099975ffadb863b70e9187bc7c18774ba920f31ceecbdc35281931f8b787",
+      "catalogSha256": "e74c761e7c45a44be0a58da0b7ab90776c3da21a3fa0356ebc774c497a282019",
+      "denied": {
+        "status": 403,
+        "body": {
+          "error": "service principal is not allowed to read this project's manifest"
+        }
+      },
+      "checks": [
+        {
+          "consumer": "whagons-api-gateway",
+          "functions": 40,
+          "errors": [],
+          "warnings": [
+            "whagons-api-gateway reads \"name\" from customFields.listTaskValues rows, which no longer carry it.",
+            "whagons-api-gateway reads \"type\" from customFields.listTaskValues rows, which no longer carry it.",
+            "whagons-api-gateway reads \"valueNumeric\" from customFields.listTaskValues rows, which no longer carry it.",
+            "whagons-api-gateway reads \"valueDate\" from customFields.listTaskValues rows, which no longer carry it.",
+            "whagons-api-gateway reads \"valueJson\" from customFields.listTaskValues rows, which no longer carry it."
+          ]
+        },
+        {
+          "consumer": "whagons-cli",
+          "functions": 0,
+          "errors": [],
+          "warnings": []
+        }
+      ]
+    },
+    "kernel": {
+      "syncMs": 21097,
+      "status": 200,
+      "keys": [
+        "functions",
+        "module",
+        "project"
+      ],
+      "functions": 1997,
+      "moduleHash": "3b0d099975ffadb863b70e9187bc7c18774ba920f31ceecbdc35281931f8b787",
+      "catalogSha256": "e74c761e7c45a44be0a58da0b7ab90776c3da21a3fa0356ebc774c497a282019",
+      "denied": {
+        "status": 403,
+        "body": {
+          "error": "service principal is not allowed to read this project's manifest"
+        }
+      },
+      "checks": [
+        {
+          "consumer": "whagons-api-gateway",
+          "functions": 40,
+          "errors": [],
+          "warnings": [
+            "whagons-api-gateway reads \"name\" from customFields.listTaskValues rows, which no longer carry it.",
+            "whagons-api-gateway reads \"type\" from customFields.listTaskValues rows, which no longer carry it.",
+            "whagons-api-gateway reads \"valueNumeric\" from customFields.listTaskValues rows, which no longer carry it.",
+            "whagons-api-gateway reads \"valueDate\" from customFields.listTaskValues rows, which no longer carry it.",
+            "whagons-api-gateway reads \"valueJson\" from customFields.listTaskValues rows, which no longer carry it."
+          ]
+        },
+        {
+          "consumer": "whagons-cli",
+          "functions": 0,
+          "errors": [],
+          "warnings": []
+        }
+      ]
+    }
+  },
+  "verdict": {
+    "pass": true,
+    "contractErrors": [],
+    "sameCatalog": true,
+    "sameWarnings": true,
+    "sameDenied": true
+  }
+}

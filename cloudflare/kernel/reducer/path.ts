@@ -82,6 +82,17 @@ export interface ReducerPathOptions {
   readonly ownMembershipChanged?: (socket: SocketView, revision: number) => void;
 }
 
+/**
+ * `ExecutionAccess` fields a caller other than a member socket sets (K17:
+ * a service principal's allowlisted call, service_principal.rs:509-525).
+ */
+export interface ExecutionAccess {
+  /** `allow_internal`: the call may target an `internal` function. */
+  readonly allowInternal?: boolean;
+  /** The provenance channel (`direct_provenance(session, Api, ..)`); default `ui`, or `api` for a delegated session. */
+  readonly channel?: "api";
+}
+
 /** Outcome of one call before it becomes frames. */
 export type CallOutcome =
   | { readonly ok: true; readonly result: string; readonly committedRevision: number | undefined }
@@ -113,11 +124,15 @@ export function identityOf(session: TenantSession): Identity {
   };
 }
 
-/** `direct_provenance(session, Ui, command_id, artifact_hash).public_info()`. */
-export function invocationInfoOf(session: TenantSession, commandId: string, artifactHash: string): InvocationInfo {
+/**
+ * `direct_provenance(session, channel, command_id, artifact_hash).public_info()`.
+ * The default channel is `ui`, which a delegated session turns into `api`;
+ * a service socket's own calls pass `api` (K17).
+ */
+export function invocationInfoOf(session: TenantSession, commandId: string, artifactHash: string, requested?: "api"): InvocationInfo {
   const nonempty = (value: string) => (value.trim() ? value.trim() : null);
   const delegation = session.delegation ?? null;
-  const channel = delegation ? "api" : "ui";
+  const channel = requested ?? (delegation ? "api" : "ui");
   return {
     channel,
     rootChannel: channel,
@@ -235,16 +250,18 @@ export class ReducerPath {
   // ---- execution -------------------------------------------------------------------------
 
   /** One Reducer call (execute_tenant_reducer_with_access_counted). Run under `serial`. */
-  async execute(session: TenantSession, request: ReducerCallRequest): Promise<CallOutcome> {
+  async execute(session: TenantSession, request: ReducerCallRequest, access: ExecutionAccess = {}): Promise<CallOutcome> {
     const fail = (failure: ReducerFailure): CallOutcome => ({ ok: false, failure });
     const path = request.path;
     const module = this.options.module();
     if (!module) return fail(errors.moduleMissing(session.identity.projectId));
     const definition = module.functions.get(path);
     if (!definition) return fail(errors.functionMissing(path));
-    if (definition.internal) return fail(errors.internalFunction(path));
+    if (definition.internal && !access.allowInternal) return fail(errors.internalFunction(path));
     if (definition.kind !== "reducer") return fail(errors.wrongKind(path, "reducer", definition.kind));
-    if (session.anonymous && (!definition.public || definition.replica || definition.delivery === "live" || definition.delivery === "replica")) {
+    // require_public_access: `allow_internal` also admits an internal function on an anonymous session.
+    const publicOrAllowed = definition.public || (access.allowInternal === true && definition.internal);
+    if (session.anonymous && (!publicOrAllowed || definition.replica || definition.delivery === "live" || definition.delivery === "replica")) {
       return fail(errors.hostCall(`authenticate with an active tenant before calling a non-public ${definition.kind}`));
     }
     const key = session.anonymous ? undefined : request.idempotencyKey?.trim() || undefined;
@@ -270,7 +287,7 @@ export class ReducerPath {
       throw error;
     }
     const commandId = request.id;
-    const invocation = invocationInfoOf(session, commandId, module.artifactHash);
+    const invocation = invocationInfoOf(session, commandId, module.artifactHash, access.channel);
     const deadlineUnixMs = this.clock() + EXECUTION_TIMEOUT_MS;
     if (request.intentEntropy !== undefined && !ENTROPY.test(request.intentEntropy)) return fail(errors.invalidArguments(path, "Invalid reducer entropy"));
     if (this.options.gateClosed?.()) return fail(errors.migrationInProgress());

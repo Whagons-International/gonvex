@@ -7,6 +7,8 @@ import type { ClientFrame, Json } from "./decode";
 import type { DeliveryBatch, DeliveryReceipt } from "./placement/gateway";
 import type { ConnectionReport } from "../presence/hub";
 import type { PresenceDelivery, PresenceReceipt } from "../presence/tenant";
+import type { ServiceTenantCall, ServiceTenantOutcome } from "../principals/frames";
+import type { ServiceGrant } from "../principals/grant";
 import type {
   Impersonation, Member, ModuleInfo, Outcome, RevalidationItem, SessionIdentity, SocketView, TenantRoute, TenantSession,
 } from "./ports";
@@ -32,6 +34,8 @@ export interface TenantRpc {
   ping(): Promise<number>;
   hopToGateway(gateway: string, n: number): Promise<number[]>;
   presenceLeave(connectionId: string, host: string, previous?: ConnectionReport | null): Promise<void>;
+  /** K17: implemented by the K07 tenant object, reached only after a service grant. */
+  serviceCall?(grant: ServiceGrant, call: ServiceTenantCall): Promise<ServiceTenantOutcome>;
 }
 
 export interface ControlRpc {

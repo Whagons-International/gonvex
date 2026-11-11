@@ -17,6 +17,9 @@ import { type GatewayRpc, rpc } from "../session/rpc";
 import type { CommittedCall } from "./path.ts";
 import { RECEIPT_PRUNE_INTERVAL_MS } from "./receipts.ts";
 import { KernelTenant } from "./tenant.ts";
+import type { ServiceTenantCall, ServiceTenantOutcome } from "../principals/frames.ts";
+import type { ServiceGrant } from "../principals/grant.ts";
+import { serviceTenantCall } from "../principals/tenant.ts";
 
 export interface ReducerTenantEnv {
   GATEWAY: DurableObjectNamespace<any>;
@@ -138,6 +141,11 @@ export abstract class ReducerTenantObject<E extends ReducerTenantEnv = ReducerTe
   }
 
   async ping(): Promise<number> { return Date.now(); }
+
+  /** K17: a service principal's allowlisted call (the socket's gateway checked the allowlist). */
+  async serviceCall(grant: ServiceGrant, call: ServiceTenantCall): Promise<ServiceTenantOutcome> {
+    return serviceTenantCall(this.kernel, grant, call);
+  }
 
   // ---- test and conformance seams ------------------------------------------------------------
 

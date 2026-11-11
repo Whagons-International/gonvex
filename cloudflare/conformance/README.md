@@ -130,6 +130,7 @@ Error **text**: following ruling 0015, the message is compared exactly, host wor
 | `scheduler` | One Reducer schedules `runAfter(0)` and `runAt(+300 ms)` of `scheduler.tick` and three identical `wakeAt` calls that must coalesce into one run, and a Reducer reschedules itself with `runAfter(0)` until the durable hop limit (32) stops it; after a fixed settle time (`GONVEX_CONFORMANCE_SCHEDULER_SETTLE_MS`, default 5 s) the `board` rows must show two ticks, one wake and 32 hops. The kernel's scheduler rules are unit-tested in `kernel/scheduler/test/` | K11 |
 | `live-query-task-grid` | Whagons' real `tasks.grid` plan (whagons5-client `2457bb65f`) over Whagons' legacy masks: windows with exact count, the index sort by status and priority, NULL ordering, search over the projection and the related documents (plain and `$or`), filter operators, a second Member's class; rows entering and leaving through assignment, team membership and `inRelation` workspace contexts (share, finding, revocation), an invisible write (no frame), dependency writes, a delete; resume (`query.progress`) and a stale `windowRevision`; `subscribeMany`, `unsubscribe`; the one-shot plan `tasks.byIds` over 150 ids; error texts. Writes wait for quiet once windows are open (Rust coalesces racing reruns by timing, 0038 §2). `node src/live-query-golden.mjs` writes Rust's run to `kernel/query/test/golden/`, which the kernel's engine replays in workerd | K08 |
 | `presence-edges` | Presence v2 on raw sockets: invalid states ignored, trimmed and case-insensitive states, `gone` = offline without grace, a re-auth that re-announces inside the grace (no transition), a re-auth dropping the subscription, unsubscribe and resubscribe, a socket without the `presence` capability, tenant isolation, a dropped socket offline after the 10 s grace (asserted 9.5-12.5 s on every backend). Snapshots are asserted sorted by Member id on each backend | K14 |
+| `service-principals` | `gvx_svc_` admission (unknown credential, project outside the allowlist, blank project or tenant, unknown tenant), the allowlist (internal Reducer, receipts under the principal, `api` channel) and the narrow frame set (refused and ignored frames, 1003), delegation argument checks and tenant binding, redemption (single use, wrong tenant, rotating reconnect credential) with `ctx.invocation.delegation`, revocation ending the member session at revalidation, re-auth to another tenant or a member, `/dev/manifest` for principals. Needs `servicePrincipals` (the adapter restarts the backend with `GONVEX_SERVICE_PRINCIPALS`) | K17 |
 
 Two receipt checks stay in `verification/backend-receipts/`, because they inject faults inside the Rust process through test-only coordinators that a black-box harness cannot reach: the SDK's own SQLite outbox replay, and the injected replica and receipt write failures.
 
@@ -259,6 +260,17 @@ Other notes:
 - **Node 22 WebSocket.** Node 22.23 fires `error` but no `close` on a refused connection and leaves `readyState` at CONNECTING. Node 26 and browsers follow the spec. Both SDKs reconnect from `close`, so `src/sessions.mjs` completes the spec's failure steps. Without this, any client retrying while a backend restarts stalls for 30 s.
 - **Stream bindings outlive a re-auth.** When one socket re-authenticates without `subscriptionsPreserved`, for example on a tenant switch, Rust drops every subscription. But the delivery v2 stream token can be the same in the new auth, and `expandReplicaBatch` (used by the SDK, the thin client and this harness) keeps a socket's bindings across auths. So Rust's next `replica.delta` and `replica.ready` for that stream also expand to the dropped subscription id (`receipt-owner-switch`, step "tenant switch A -> B"). The SDK ignores the unknown id, and the digest self-check skips subscriptions dropped by a re-auth. Those phantom frames are still in the normalized trace, so a kernel that unbinds or renames its streams at auth shows a diff there. It needs a ruling: either the client clears its bindings at `auth.result`, or the server must unbind.
 - **The SDK alone reacts to a wrong digest.** It reopens the collection again and again (about 80,000 frames in one scenario) and the run eventually fails on timeouts. The digest self-check fails it at the first mismatch and names it. It also covers the thin and raw clients, which never verify digests.
+
+## Service principals (K17)
+
+`service-principals` needs the backend capability `servicePrincipals`: the adapter's `configureServicePrincipals(principals)`
+restarts the backend with `GONVEX_SERVICE_PRINCIPALS` once the scenario's project exists (Rust mints project ids). The
+kernel side is the `cloudflare-principals` backend: `cloudflare/kernel/principals/harness` under `wrangler dev`, K05's
+gateways in front of K06's control object and K07's tenant object.
+
+```bash
+node src/cli.mjs --backend rust=rust --backend cf=cloudflare-principals --scenario service-principals
+```
 
 ## Deploy and operator routes (K19)
 

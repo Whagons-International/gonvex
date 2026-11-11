@@ -1,0 +1,9 @@
+{
+  // The harness imports K06's control object (node:crypto, Text modules), so
+  // it is type-checked here with Node types, like control/ and router/dev/.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types", "@types/node"]
+  },
+  "include": ["*.ts", "harness/*.ts", "test/**/*.ts", "../../control/src/modules.d.ts"]
+}
