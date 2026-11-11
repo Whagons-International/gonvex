@@ -1,6 +1,8 @@
 import type { GreetResult } from "./hello";
+import { handleStubRoute, handleWebSocketUpgrade, STUB_PREFIX } from "../kernel/session";
 
 export { HelloObject } from "./hello";
+export { ControlStubObject, GatewayObject, TenantStubObject } from "../kernel/session";
 
 const TENANT_ROUTE = /^\/t\/([a-z0-9][a-z0-9_-]{0,63})\/(greet|ws)$/;
 
@@ -14,6 +16,9 @@ export default {
     if (url.pathname === "/") {
       return json({ ok: true, service: "gonvex-cloudflare" });
     }
+    // K05: the client socket. The tenant arrives in the first `auth` frame (0004).
+    if (url.pathname === "/ws") return handleWebSocketUpgrade(request, env);
+    if (url.pathname.startsWith(STUB_PREFIX)) return (await handleStubRoute(request, env))!;
 
     const match = TENANT_ROUTE.exec(url.pathname);
     if (!match) return json({ error: "not found" }, 404);

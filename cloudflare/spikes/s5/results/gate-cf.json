@@ -1,0 +1,26 @@
+{
+  "rpc": {
+    "slowDoneAtMs": 30090,
+    "slowStatus": "{\"error\":\"<!DOCTYPE html>\\n<!--[if lt IE 7]> <html class=\\\"no-js ie6 oldie\\\" lang=\\\"en-US\\\"> <![endif]-->\\n<!--[if IE 7]>    <html class=\\\"no-js ie7 oldie\\\" lang=\\\"en-US\\\"> <![endif]-->\\n<!--[if IE 8]",
+    "markDoneAtMs": 30091,
+    "markWaitedForSlow": true,
+    "markSurvived": false,
+    "instanceAfter": "7915039c"
+  },
+  "facet": {
+    "slowDoneAtMs": 213,
+    "slowStatus": "Error: planned failure after 3000 host calls",
+    "markDoneAtMs": 246,
+    "markWaitedForSlow": true,
+    "markSurvived": true,
+    "instanceAfter": "d2a8bf3f"
+  },
+  "inline": {
+    "slowDoneAtMs": 514,
+    "slowStatus": "Error: planned failure after 3000 host calls",
+    "markDoneAtMs": 202,
+    "markWaitedForSlow": false,
+    "markSurvived": true,
+    "instanceAfter": "d0d22933"
+  }
+}

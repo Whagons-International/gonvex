@@ -1,0 +1,7 @@
+.artifact/
+.build/
+.storage/
+.wrangler/
+node_modules/
+.dev.vars
+results/.*

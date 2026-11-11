@@ -13,7 +13,8 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "test", "kernel", "worker-configuration.d.ts"],
   // K01 tests that run SDK code from its sources (vitest.config.ts alias):

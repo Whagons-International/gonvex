@@ -194,7 +194,7 @@ Disposition for auth overall: **adapt**. The 10 s deadline and the 30 s revalida
 | Limit | Value | Behavior when exceeded | Source | Disposition |
 |---|---|---|---|---|
 | Inbound message, authenticated transport | 64 MiB message, 16 MiB frame | Transport read error, break, no application close (plain tungstenite sends no close frame; the compressed ratchet path sends 1002; 1009 never occurs, test at `ws/lib.rs:1107-1150`) | `lib.rs:1609-1618`, `ws/lib.rs:146-155` | adapt: the platform caps received messages at 32 MiB. Document 32 MiB as the new ceiling. SDK frames are far below it |
-| Inbound, public transport | 64 KiB message and frame (`GONVEX_PUBLIC_MAX_PAYLOAD_BYTES`) | Close **1009** "public transport limit exceeded" | `lib.rs:1609-1618,2523-2533` | keep: check `message.length` in `webSocketMessage` |
+| Inbound, public transport | 64 KiB message and frame (`GONVEX_PUBLIC_MAX_PAYLOAD_BYTES`) | The code attempts close 1009 "public transport limit exceeded", but clients observe **1002** (the transport closes with a protocol error first; measured by K05, ruled in 0022 §4.3). The kernel closes 1002 | `lib.rs:1609-1618,2523-2533` | keep: check `message.length` in `webSocketMessage` |
 | Inbound text or binary on an unscoped or anonymous socket | 64 KiB | Close **1009** "public payload too large". A public `auth` over 64 KiB also closes 1009. | `lib.rs:2583-2619,2652-2660` | keep |
 | Inbound binary frames | Ignored after the size check (no handler) | — | `lib.rs:3855` | keep |
 | `query.subscribeMany` | at most 256 | `query.error {id:"",error:"query batch cannot contain more than 256 subscribes"}` | `lib.rs:3155-3169` | keep |
@@ -229,7 +229,7 @@ Disposition for auth overall: **adapt**. The 10 s deadline and the 30 s revalida
 |---|---|---|---|---|
 | 1008 | `authentication deadline exceeded` | No successful identity, tenant or service auth within 10 s of upgrade | `lib.rs:2029-2034` | keep (verify workerd accepts server-sent 1008) |
 | 1008 | `public connection scope is fixed` | A public socket re-auths to another project or tenant (after the `auth.error`) | `lib.rs:2844-2850` | keep |
-| 1009 | `public transport limit exceeded` | Read error (oversize or protocol) on a `?public=1` socket | `lib.rs:2523-2533` | keep (platform-level oversize at 32 MiB closes on its own) |
+| 1002 (observed; code path names 1009 `public transport limit exceeded`) | protocol error | Read error (oversize or protocol) on a `?public=1` socket | `lib.rs:2523-2533` | keep **1002**, what clients see (0022 §4.3) |
 | 1009 | `public payload too large` | Text or binary over 64 KiB on an unscoped or anonymous socket, or a public `auth` over 64 KiB | `lib.rs:2583-2619,2652-2660` | keep |
 | 1003 | `invalid Gonvex protocol frame` | A text frame fails `ClientMessage` deserialization: unknown `type`, a missing required field, or a type mismatch in any field, including optional ones such as `device.viewportWidth` being non-integer. Also any unparsable frame on a service-principal socket. | `lib.rs:3839-3847,2572-2580` | keep: the validator must be exactly as strict as serde (see A.6) |
 | 4000 | `presence liveness timeout` | Presence socket silent for 60 s | `lib.rs:2430-2437` | replace (A.1.8) |
@@ -1726,6 +1726,12 @@ new note and waits for the lead.
 | 0017 | Presence liveness without server pings | decided in 0016 G0-6 (no SDK change in stage 1) | K14 |
 | 0018 | Platform WebSocket message caps | decided in 0016 G0-7 | K05, K10, P02 |
 | 0019 | Stage 1b (R01–R06) and gate G3b before G4; L02–L05 removed | decided (Gabriel) | R01–R06, G4 |
+| 0020 | K05 session-layer findings (proposed by K05) | ruled in 0022 §4 | K05, K10 |
+| 0021 | K04 module-host interfaces and R25 (proposed by K04) | ruled in 0022 §3 | K01, K04, K19, S5 |
+| 0022 | Wave-1 review rulings: K01/K04 ownership, K01 deviations, R25, K05 findings, A01 part 1, harness flake | decided | K01-K05, K08, S5 |
+| 0023 | Hook-capture quirk on columns added after the row (proposed by A01) | ruled in 0024 §1 | K03, M02 |
+| 0024 | Second wave-1 pass: A01 complete, watermark self-check for K10, K06 findings, numbering | decided | K03, K06, K10, K19, R03, R04, V03 |
+| 0025 | K06 control object findings (proposed by K06) | ruled in 0024 §3 | K06, V03 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

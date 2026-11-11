@@ -1,0 +1,2130 @@
+{
+  "date": "2026-11-11",
+  "transformVersion": "a01.1",
+  "whagonsClientStaging": "a6de676951a620251fc09006c7f79e20116b8b5e",
+  "tenants": [
+    {
+      "tenant": "nca",
+      "pass": true,
+      "transform": {
+        "objects": 9544,
+        "outputStatements": 10628,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 6957,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 0,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 364,
+        "failedOnBoth": 2,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 806,
+        "byteIdentical": 634,
+        "byteIdenticalClockMasked": 806,
+        "jsonEqual": 806,
+        "duplicateLiveKey": [],
+        "rustMs": 7817,
+        "transformedMs": 5517
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 27959,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "07ea17fe",
+      "pass": true,
+      "transform": {
+        "objects": 9544,
+        "outputStatements": 10628,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 6066,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 6,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 479,
+        "failedOnBoth": 7,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 6832,
+        "byteIdentical": 3846,
+        "byteIdenticalClockMasked": 6832,
+        "jsonEqual": 6832,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 18757,
+        "transformedMs": 11237
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 48020,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "0c2587f0",
+      "pass": true,
+      "transform": {
+        "objects": 9542,
+        "outputStatements": 10627,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 5,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 0,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 120,
+        "failedOnBoth": 1,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 222,
+        "byteIdentical": 200,
+        "byteIdenticalClockMasked": 222,
+        "jsonEqual": 222,
+        "duplicateLiveKey": [],
+        "rustMs": 8313,
+        "transformedMs": 5451
+      },
+      "tables": {
+        "compared": 518,
+        "rows": 3440,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "1f976153",
+      "pass": true,
+      "transform": {
+        "objects": 9546,
+        "outputStatements": 10630,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 359,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 6,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 387,
+        "failedOnBoth": 4,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 1139,
+        "byteIdentical": 955,
+        "byteIdenticalClockMasked": 1139,
+        "jsonEqual": 1139,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 6429,
+        "transformedMs": 13515
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 7582,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "31969f50",
+      "pass": true,
+      "transform": {
+        "objects": 9544,
+        "outputStatements": 10628,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 298,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 6,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 287,
+        "failedOnBoth": 5,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 466,
+        "byteIdentical": 352,
+        "byteIdenticalClockMasked": 466,
+        "jsonEqual": 466,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 9799,
+        "transformedMs": 6406
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 5546,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "754db746",
+      "pass": true,
+      "transform": {
+        "objects": 9546,
+        "outputStatements": 10630,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 28399,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 7,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 513,
+        "failedOnBoth": 5,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 4872,
+        "byteIdentical": 3290,
+        "byteIdenticalClockMasked": 4872,
+        "jsonEqual": 4872,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 14027,
+        "transformedMs": 9675
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 137113,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "756e173a",
+      "pass": true,
+      "transform": {
+        "objects": 9542,
+        "outputStatements": 10627,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 0,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 6,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 63,
+        "failedOnBoth": 1,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 18,
+        "byteIdentical": 10,
+        "byteIdenticalClockMasked": 18,
+        "jsonEqual": 18,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 2326,
+        "transformedMs": 2208
+      },
+      "tables": {
+        "compared": 518,
+        "rows": 1992,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "832ceebb",
+      "pass": true,
+      "transform": {
+        "objects": 9546,
+        "outputStatements": 10630,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 10925,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 0,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 372,
+        "failedOnBoth": 2,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 16287,
+        "byteIdentical": 8681,
+        "byteIdenticalClockMasked": 16287,
+        "jsonEqual": 16287,
+        "duplicateLiveKey": [],
+        "rustMs": 19114,
+        "transformedMs": 15359
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 111786,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "8915b580",
+      "pass": true,
+      "transform": {
+        "objects": 9542,
+        "outputStatements": 10627,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 3,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 6,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 111,
+        "failedOnBoth": 1,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 39,
+        "byteIdentical": 37,
+        "byteIdenticalClockMasked": 39,
+        "jsonEqual": 39,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 1902,
+        "transformedMs": 1497
+      },
+      "tables": {
+        "compared": 518,
+        "rows": 2053,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "8cb2ffcd",
+      "pass": true,
+      "transform": {
+        "objects": 9546,
+        "outputStatements": 10630,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 192,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 0,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 220,
+        "failedOnBoth": 1,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 939,
+        "byteIdentical": 666,
+        "byteIdenticalClockMasked": 939,
+        "jsonEqual": 939,
+        "duplicateLiveKey": [],
+        "rustMs": 6213,
+        "transformedMs": 3974
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 4595,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "9091d022",
+      "pass": true,
+      "transform": {
+        "objects": 9544,
+        "outputStatements": 10628,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 371,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 8,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 305,
+        "failedOnBoth": 5,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 713,
+        "byteIdentical": 620,
+        "byteIdenticalClockMasked": 713,
+        "jsonEqual": 713,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 5584,
+        "transformedMs": 4400
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 10158,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "a937cee3",
+      "pass": true,
+      "transform": {
+        "objects": 9546,
+        "outputStatements": 10630,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 56033,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 7,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 515,
+        "failedOnBoth": 5,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 5828,
+        "byteIdentical": 3918,
+        "byteIdenticalClockMasked": 5828,
+        "jsonEqual": 5828,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 14964,
+        "transformedMs": 9947
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 186678,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "aba654f6",
+      "pass": true,
+      "transform": {
+        "objects": 9546,
+        "outputStatements": 10630,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 6443,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 7,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 287,
+        "failedOnBoth": 3,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 2138,
+        "byteIdentical": 1806,
+        "byteIdenticalClockMasked": 2138,
+        "jsonEqual": 2138,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 7249,
+        "transformedMs": 5173
+      },
+      "tables": {
+        "compared": 519,
+        "rows": 39580,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "d73a19e2",
+      "pass": true,
+      "transform": {
+        "objects": 9542,
+        "outputStatements": 10627,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 11,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 6,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 173,
+        "failedOnBoth": 1,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 128,
+        "byteIdentical": 114,
+        "byteIdenticalClockMasked": 128,
+        "jsonEqual": 128,
+        "duplicateLiveKey": [
+          {
+            "id": "roles_live_name_key_unique:duplicate-live-key",
+            "rust": "UNIQUE constraint failed: index 'roles_live_name_key_unique'",
+            "transformed": "UNIQUE constraint failed: index 'roles_live_name_key_unique'"
+          }
+        ],
+        "rustMs": 3226,
+        "transformedMs": 1983
+      },
+      "tables": {
+        "compared": 518,
+        "rows": 6837,
+        "different": 0
+      }
+    },
+    {
+      "tenant": "ed721aa0",
+      "pass": true,
+      "transform": {
+        "objects": 9542,
+        "outputStatements": 10627,
+        "rewrites": {
+          "T3": 4,
+          "T6": 537,
+          "T5": 1153
+        },
+        "added": 1152,
+        "maxStatementBytes": 23821
+      },
+      "views": {
+        "checked": 60,
+        "rows": 1322,
+        "allSame": true
+      },
+      "indexes": [
+        {
+          "index": "roles_live_name_key_unique",
+          "rows": 0,
+          "differ": 0,
+          "fuzz": 10000,
+          "fuzzDiffer": 0,
+          "generatedColumns": 2
+        }
+      ],
+      "replay": {
+        "writes": 198,
+        "failedOnBoth": 2,
+        "outcomeDiffs": 0,
+        "errorDiffs": 0,
+        "changeRows": 1235,
+        "byteIdentical": 729,
+        "byteIdenticalClockMasked": 1235,
+        "jsonEqual": 1235,
+        "duplicateLiveKey": [],
+        "rustMs": 4396,
+        "transformedMs": 2584
+      },
+      "tables": {
+        "compared": 518,
+        "rows": 18220,
+        "different": 0
+      }
+    }
+  ],
+  "harness": [
+    {
+      "tenant": "control-auth-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 2,
+      "outcomeDiffs": 0,
+      "changeRows": 2,
+      "byteIdentical": 2,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "control-auth-b",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 2,
+      "outcomeDiffs": 0,
+      "changeRows": 2,
+      "byteIdentical": 2,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "live-query-window-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 14,
+      "outcomeDiffs": 0,
+      "changeRows": 12,
+      "byteIdentical": 12,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "presence-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 8,
+      "outcomeDiffs": 0,
+      "changeRows": 4,
+      "byteIdentical": 4,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "receipt-crash-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 8,
+      "outcomeDiffs": 0,
+      "changeRows": 6,
+      "byteIdentical": 6,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "receipt-lost-reply-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 4,
+      "outcomeDiffs": 0,
+      "changeRows": 4,
+      "byteIdentical": 4,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "receipt-owner-switch-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 16,
+      "outcomeDiffs": 0,
+      "changeRows": 14,
+      "byteIdentical": 14,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "receipt-owner-switch-b",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 4,
+      "outcomeDiffs": 0,
+      "changeRows": 4,
+      "byteIdentical": 4,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "receipt-upgrade-a",
+      "pass": false,
+      "capturedTables": 4,
+      "writes": 12,
+      "outcomeDiffs": 1,
+      "changeRows": 10,
+      "byteIdentical": 10,
+      "tablesDifferent": 0,
+      "mismatches": [
+        {
+          "id": "board#1:noop",
+          "kind": "change-count",
+          "rust": 1,
+          "transformed": 0
+        }
+      ]
+    },
+    {
+      "tenant": "reducer-errors-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 8,
+      "outcomeDiffs": 0,
+      "changeRows": 8,
+      "byteIdentical": 8,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "reducer-second-client-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 12,
+      "outcomeDiffs": 0,
+      "changeRows": 10,
+      "byteIdentical": 10,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "replica-resume-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 14,
+      "outcomeDiffs": 0,
+      "changeRows": 12,
+      "byteIdentical": 12,
+      "tablesDifferent": 0,
+      "mismatches": []
+    },
+    {
+      "tenant": "thin-sdk-parity-a",
+      "pass": true,
+      "capturedTables": 4,
+      "writes": 18,
+      "outcomeDiffs": 0,
+      "changeRows": 16,
+      "byteIdentical": 16,
+      "tablesDifferent": 0,
+      "mismatches": []
+    }
+  ],
+  "platformLoads": [
+    {
+      "tenant": "nca",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 28256,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 33681408,
+      "triggerDdlMs": 88531,
+      "viewDdlMs": 7505
+    },
+    {
+      "tenant": "07ea17fe",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 55127,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 68685824,
+      "triggerDdlMs": 76180,
+      "viewDdlMs": 6595
+    },
+    {
+      "tenant": "0c2587f0",
+      "refused": 0,
+      "tables": 637,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 3457,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 22511616,
+      "triggerDdlMs": 86562,
+      "viewDdlMs": 6350
+    },
+    {
+      "tenant": "1f976153",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 884,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 15262,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 45899776,
+      "triggerDdlMs": 87731,
+      "viewDdlMs": 9525
+    },
+    {
+      "tenant": "31969f50",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 5684,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 22958080,
+      "triggerDdlMs": 42112,
+      "viewDdlMs": 4116
+    },
+    {
+      "tenant": "754db746",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 884,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 145297,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 63287296,
+      "triggerDdlMs": 27619,
+      "viewDdlMs": 2284
+    },
+    {
+      "tenant": "756e173a",
+      "refused": 0,
+      "tables": 637,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 2308,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 21970944,
+      "triggerDdlMs": 88240,
+      "viewDdlMs": 5933
+    },
+    {
+      "tenant": "832ceebb",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 884,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 118533,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 72646656,
+      "triggerDdlMs": 30426,
+      "viewDdlMs": 2157
+    },
+    {
+      "tenant": "8915b580",
+      "refused": 0,
+      "tables": 637,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 2458,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 22204416,
+      "triggerDdlMs": 28277,
+      "viewDdlMs": 2219
+    },
+    {
+      "tenant": "8cb2ffcd",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 884,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 8223,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 30388224,
+      "triggerDdlMs": 94780,
+      "viewDdlMs": 5927
+    },
+    {
+      "tenant": "9091d022",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 11124,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 30965760,
+      "triggerDdlMs": 45185,
+      "viewDdlMs": 3105
+    },
+    {
+      "tenant": "a937cee3",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 884,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 225903,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 107147264,
+      "triggerDdlMs": 83603,
+      "viewDdlMs": 6323
+    },
+    {
+      "tenant": "aba654f6",
+      "refused": 0,
+      "tables": 638,
+      "indexes": 884,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 126885,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 116477952,
+      "triggerDdlMs": 42320,
+      "viewDdlMs": 3114
+    },
+    {
+      "tenant": "d73a19e2",
+      "refused": 0,
+      "tables": 637,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 6882,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 24862720,
+      "triggerDdlMs": 49709,
+      "viewDdlMs": 3639
+    },
+    {
+      "tenant": "ed721aa0",
+      "refused": 0,
+      "tables": 637,
+      "indexes": 882,
+      "views": 1296,
+      "triggers": 7810,
+      "rows": 18287,
+      "rowCountMismatches": 0,
+      "foreignKeyViolations": 0,
+      "quickCheck": [
+        "ok"
+      ],
+      "databaseSize": 27983872,
+      "triggerDdlMs": 82401,
+      "viewDdlMs": 7482
+    }
+  ],
+  "platformMigrations": {
+    "mode": "migrations",
+    "object": "a01-mig-a937",
+    "steps": [
+      {
+        "step": "migration runtime-prelude",
+        "statements": 44,
+        "chunks": 1,
+        "ms": 158,
+        "maxChunkMs": 158,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0000_sqlite_baseline.sql",
+        "statements": 879,
+        "chunks": 5,
+        "ms": 1080,
+        "maxChunkMs": 352,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0001_sqlite_projections.sql",
+        "statements": 81,
+        "chunks": 1,
+        "ms": 125,
+        "maxChunkMs": 125,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0002_agents_and_subtask_references.sql",
+        "statements": 15,
+        "chunks": 1,
+        "ms": 145,
+        "maxChunkMs": 145,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0003_sql_relationship_integrity.sql",
+        "statements": 2956,
+        "chunks": 15,
+        "ms": 22224,
+        "maxChunkMs": 4207,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0004_sql_document_relationships.sql",
+        "statements": 3157,
+        "chunks": 16,
+        "ms": 8239,
+        "maxChunkMs": 883,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0005_compact_record_storage.sql",
+        "statements": 14283,
+        "chunks": 72,
+        "ms": 43946,
+        "maxChunkMs": 2363,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0006_scoped_form_and_poll_relationships.sql",
+        "statements": 185,
+        "chunks": 1,
+        "ms": 1042,
+        "maxChunkMs": 1042,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0007_bounded_identity_projections.sql",
+        "statements": 5106,
+        "chunks": 26,
+        "ms": 83759,
+        "maxChunkMs": 4262,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0008_scoped_json_key_types.sql",
+        "statements": 6,
+        "chunks": 1,
+        "ms": 119,
+        "maxChunkMs": 119,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0009_indexed_public_relationship_filters.sql",
+        "statements": 3691,
+        "chunks": 19,
+        "ms": 62407,
+        "maxChunkMs": 4121,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0010_remove_duplicate_indexes.sql",
+        "statements": 21,
+        "chunks": 1,
+        "ms": 318,
+        "maxChunkMs": 318,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0011_unique_workplan_generation_keys.sql",
+        "statements": 1,
+        "chunks": 1,
+        "ms": 85,
+        "maxChunkMs": 85,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "runtime-generated objects",
+        "objects": 1161,
+        "byType": {
+          "table": 7,
+          "index": 11,
+          "view": 0,
+          "trigger": 1143
+        },
+        "statements": 1161,
+        "ms": 13035,
+        "failed": 0,
+        "errors": []
+      },
+      {
+        "step": "final",
+        "totalMs": 236684,
+        "failures": 0,
+        "schema": [
+          {
+            "type": "index",
+            "n": 941
+          },
+          {
+            "type": "table",
+            "n": 647
+          },
+          {
+            "type": "trigger",
+            "n": 7810
+          },
+          {
+            "type": "view",
+            "n": 1296
+          }
+        ],
+        "databaseSize": 21929984,
+        "added": 1152
+      }
+    ],
+    "migrationsMs": 223649
+  },
+  "localMigrations": {
+    "mode": "migrations",
+    "object": "mig-a937b",
+    "steps": [
+      {
+        "step": "migration runtime-prelude",
+        "statements": 44,
+        "chunks": 1,
+        "ms": 43,
+        "maxChunkMs": 43,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0000_sqlite_baseline.sql",
+        "statements": 879,
+        "chunks": 5,
+        "ms": 290,
+        "maxChunkMs": 66,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0001_sqlite_projections.sql",
+        "statements": 81,
+        "chunks": 1,
+        "ms": 49,
+        "maxChunkMs": 49,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0002_agents_and_subtask_references.sql",
+        "statements": 15,
+        "chunks": 1,
+        "ms": 60,
+        "maxChunkMs": 60,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0003_sql_relationship_integrity.sql",
+        "statements": 2956,
+        "chunks": 15,
+        "ms": 6462,
+        "maxChunkMs": 999,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0004_sql_document_relationships.sql",
+        "statements": 3157,
+        "chunks": 16,
+        "ms": 3377,
+        "maxChunkMs": 407,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0005_compact_record_storage.sql",
+        "statements": 14283,
+        "chunks": 72,
+        "ms": 20311,
+        "maxChunkMs": 836,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0006_scoped_form_and_poll_relationships.sql",
+        "statements": 185,
+        "chunks": 1,
+        "ms": 511,
+        "maxChunkMs": 511,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0007_bounded_identity_projections.sql",
+        "statements": 5106,
+        "chunks": 26,
+        "ms": 32037,
+        "maxChunkMs": 1523,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0008_scoped_json_key_types.sql",
+        "statements": 6,
+        "chunks": 1,
+        "ms": 45,
+        "maxChunkMs": 45,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0009_indexed_public_relationship_filters.sql",
+        "statements": 3691,
+        "chunks": 19,
+        "ms": 24334,
+        "maxChunkMs": 1563,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0010_remove_duplicate_indexes.sql",
+        "statements": 21,
+        "chunks": 1,
+        "ms": 239,
+        "maxChunkMs": 239,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "migration 0011_unique_workplan_generation_keys.sql",
+        "statements": 1,
+        "chunks": 1,
+        "ms": 114,
+        "maxChunkMs": 114,
+        "ok": true,
+        "errors": []
+      },
+      {
+        "step": "runtime-generated objects",
+        "objects": 1161,
+        "byType": {
+          "table": 7,
+          "index": 11,
+          "view": 0,
+          "trigger": 1143
+        },
+        "statements": 1161,
+        "ms": 5717,
+        "failed": 0,
+        "errors": []
+      },
+      {
+        "step": "final",
+        "totalMs": 93589,
+        "failures": 0,
+        "schema": [
+          {
+            "type": "index",
+            "n": 941
+          },
+          {
+            "type": "table",
+            "n": 647
+          },
+          {
+            "type": "trigger",
+            "n": 7810
+          },
+          {
+            "type": "view",
+            "n": 1296
+          }
+        ],
+        "databaseSize": 21901312,
+        "added": 1152
+      }
+    ],
+    "migrationsMs": 87872
+  },
+  "platformCompile": {
+    "mode": "compile",
+    "object": "a01-img-nca",
+    "steps": [
+      {
+        "step": "write statements",
+        "tables": 636,
+        "statements": 1908,
+        "failing": 0,
+        "ms": 113108,
+        "byError": {}
+      },
+      {
+        "step": "views",
+        "views": 1296,
+        "failing": 0,
+        "addedFailing": 0,
+        "byError": {}
+      }
+    ]
+  },
+  "localCompile": {
+    "mode": "compile",
+    "object": "mig-a937b",
+    "steps": [
+      {
+        "step": "write statements",
+        "tables": 636,
+        "statements": 1908,
+        "failing": 0,
+        "ms": 66211,
+        "byError": {}
+      },
+      {
+        "step": "views",
+        "views": 1296,
+        "failing": 4,
+        "addedFailing": 0,
+        "byError": {
+          "out of memory": {
+            "count": 4,
+            "first": [
+              "referenceExpected_tasks",
+              "referenceExpected_templates",
+              "referenceExpected_workflowVersions",
+              "referenceExpected_workplanItems"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "strictHosts": {
+    "objects": 40,
+    "strict": 0,
+    "t6WritesFailing": 0,
+    "t6BindingsEqualLaxT1": true
+  },
+  "strictProbe": [
+    {
+      "object": "a01-img-nca",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-07ea17fe",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-0c2587f0",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-1f976153",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-31969f50",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-754db746",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-756e173a",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-832ceebb",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-8915b580",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-8cb2ffcd",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-9091d022",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-a937cee3",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-aba654f6",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-d73a19e2",
+      "strict": false,
+      "failing": 0
+    },
+    {
+      "object": "a01-img-ed721aa0",
+      "strict": false,
+      "failing": 0
+    }
+  ],
+  "platformCompileLargest": {
+    "mode": "compile",
+    "object": "a01-img-tenant_a937cee33b408f92699da9c7320393ea",
+    "steps": [
+      {
+        "step": "write statements",
+        "tables": 636,
+        "statements": 1908,
+        "failing": 0,
+        "ms": 93331,
+        "byError": {}
+      },
+      {
+        "step": "views",
+        "views": 1296,
+        "failing": 0,
+        "addedFailing": 0,
+        "byError": {}
+      }
+    ]
+  },
+  "exportRoundTrip": [
+    {
+      "tenant": "9091d022",
+      "stageIn": {
+        "findings": [],
+        "copiedTables": 505
+      },
+      "kernelFile": {
+        "added": 1152,
+        "schema": [
+          {
+            "type": "index",
+            "n": 941,
+            "bytes": 110595
+          },
+          {
+            "type": "table",
+            "n": 649,
+            "bytes": 557893
+          },
+          {
+            "type": "trigger",
+            "n": 7810,
+            "bytes": 7107444
+          },
+          {
+            "type": "view",
+            "n": 1296,
+            "bytes": 3409761
+          }
+        ]
+      },
+      "push": {
+        "schemaObjects": 10628,
+        "refused": 0,
+        "rows": 10189
+      },
+      "pull": {
+        "rows": 10189,
+        "addedObjectsInRaw": 1150,
+        "hiddenColumnsInRaw": 2
+      },
+      "export": {
+        "findings": [],
+        "skippedAsKernelObjects": 0,
+        "schemaEqualsRust": true,
+        "schemaObjects": 9544,
+        "addedObjectsInOut": 0,
+        "hiddenColumnsInOut": 0,
+        "checksums": {
+          "tables": 505,
+          "rows": 9794,
+          "mismatches": 0
+        },
+        "installerAccepts": {
+          "installMs": 829,
+          "schemaObjects": 9544,
+          "schemaUnchanged": true,
+          "stagedChangeRows": 0,
+          "integrityCheck": "ok",
+          "foreignKeyViolations": 0,
+          "migrations": 12,
+          "findings": []
+        }
+      },
+      "ms": 113873,
+      "pass": true
+    },
+    {
+      "tenant": "a937cee3",
+      "stageIn": {
+        "findings": [],
+        "copiedTables": 505
+      },
+      "kernelFile": {
+        "added": 1152,
+        "schema": [
+          {
+            "type": "index",
+            "n": 941,
+            "bytes": 110595
+          },
+          {
+            "type": "table",
+            "n": 649,
+            "bytes": 557893
+          },
+          {
+            "type": "trigger",
+            "n": 7810,
+            "bytes": 7107444
+          },
+          {
+            "type": "view",
+            "n": 1296,
+            "bytes": 3409761
+          }
+        ]
+      },
+      "push": {
+        "schemaObjects": 10628,
+        "refused": 0,
+        "rows": 186852
+      },
+      "pull": {
+        "rows": 186852,
+        "addedObjectsInRaw": 1150,
+        "hiddenColumnsInRaw": 2
+      },
+      "export": {
+        "findings": [],
+        "skippedAsKernelObjects": 0,
+        "schemaEqualsRust": true,
+        "schemaObjects": 9544,
+        "addedObjectsInOut": 0,
+        "hiddenColumnsInOut": 0,
+        "checksums": {
+          "tables": 505,
+          "rows": 186457,
+          "mismatches": 0
+        },
+        "installerAccepts": {
+          "installMs": 933,
+          "schemaObjects": 9544,
+          "schemaUnchanged": true,
+          "stagedChangeRows": 0,
+          "integrityCheck": "ok",
+          "foreignKeyViolations": 0,
+          "migrations": 12,
+          "findings": []
+        }
+      },
+      "ms": 132309,
+      "pass": true
+    }
+  ],
+  "headroomMiB": {
+    "transformed": [
+      200,
+      224,
+      224,
+      224
+    ],
+    "withoutT6": [
+      200,
+      224,
+      224,
+      224
+    ],
+    "emptyObject": [
+      200,
+      224,
+      224,
+      224
+    ]
+  },
+  "wake": {
+    "object": "a01-img-tenant_a937cee33b408f92699da9c7320393ea",
+    "rounds": 8,
+    "emptyObjectRoundTripMs": 71,
+    "coldMedianMs": 1058,
+    "coldMaxMs": 1680,
+    "warmMedianMs": 84,
+    "allFresh": true,
+    "results": [
+      {
+        "round": 0,
+        "coldMs": 993,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 79
+      },
+      {
+        "round": 1,
+        "coldMs": 1058,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 90
+      },
+      {
+        "round": 2,
+        "coldMs": 1484,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 59
+      },
+      {
+        "round": 3,
+        "coldMs": 1680,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 84
+      },
+      {
+        "round": 4,
+        "coldMs": 1012,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 97
+      },
+      {
+        "round": 5,
+        "coldMs": 1035,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 102
+      },
+      {
+        "round": 6,
+        "coldMs": 1024,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 79
+      },
+      {
+        "round": 7,
+        "coldMs": 1076,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 79
+      }
+    ]
+  },
+  "wakeNoT6": {
+    "object": "a01-not6-a937",
+    "rounds": 8,
+    "emptyObjectRoundTripMs": 50,
+    "coldMedianMs": 830,
+    "coldMaxMs": 975,
+    "warmMedianMs": 60,
+    "allFresh": true,
+    "results": [
+      {
+        "round": 0,
+        "coldMs": 778,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 60
+      },
+      {
+        "round": 1,
+        "coldMs": 903,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 67
+      },
+      {
+        "round": 2,
+        "coldMs": 830,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 45
+      },
+      {
+        "round": 3,
+        "coldMs": 866,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 46
+      },
+      {
+        "round": 4,
+        "coldMs": 785,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 76
+      },
+      {
+        "round": 5,
+        "coldMs": 747,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 51
+      },
+      {
+        "round": 6,
+        "coldMs": 672,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 75
+      },
+      {
+        "round": 7,
+        "coldMs": 975,
+        "fresh": true,
+        "rows": 50,
+        "warmMs": 50
+      }
+    ]
+  },
+  "writes": {
+    "object": "a01-img-tenant_a937cee33b408f92699da9c7320393ea",
+    "roundTripMs": 57,
+    "records": [
+      {
+        "record": "tasks",
+        "rows": 5,
+        "watched": 1,
+        "touch": {
+          "medianMs": 5,
+          "rowsWritten": 20,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": -3,
+          "rowsWritten": 3,
+          "failed": 0
+        }
+      },
+      {
+        "record": "templates",
+        "rows": 5,
+        "watched": 4,
+        "touch": {
+          "medianMs": -7,
+          "rowsWritten": 3,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": -1,
+          "rowsWritten": 3,
+          "failed": 0
+        }
+      },
+      {
+        "record": "workplanItems",
+        "rows": 5,
+        "watched": 8,
+        "touch": {
+          "medianMs": -5,
+          "rowsWritten": 3,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": 64,
+          "rowsWritten": 41,
+          "failed": 0
+        }
+      },
+      {
+        "record": "approvals",
+        "rows": 2,
+        "watched": 3,
+        "touch": {
+          "medianMs": -7,
+          "rowsWritten": 3,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": 9,
+          "rowsWritten": 37,
+          "failed": 0
+        }
+      },
+      {
+        "record": "workspaces",
+        "rows": 5,
+        "watched": 4,
+        "touch": {
+          "medianMs": -7,
+          "rowsWritten": 3,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": -4,
+          "rowsWritten": 3,
+          "failed": 0
+        }
+      }
+    ]
+  },
+  "writesNoT6": {
+    "object": "a01-not6-a937",
+    "roundTripMs": 41,
+    "records": [
+      {
+        "record": "tasks",
+        "rows": 5,
+        "watched": 1,
+        "touch": {
+          "medianMs": 22,
+          "rowsWritten": 20,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": 18,
+          "rowsWritten": 3,
+          "failed": 0
+        }
+      },
+      {
+        "record": "templates",
+        "rows": 5,
+        "watched": 4,
+        "touch": {
+          "medianMs": 15,
+          "rowsWritten": 3,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": 15,
+          "rowsWritten": 3,
+          "failed": 0
+        }
+      },
+      {
+        "record": "workplanItems",
+        "rows": 5,
+        "watched": 8,
+        "touch": {
+          "medianMs": 12,
+          "rowsWritten": 3,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": 75,
+          "rowsWritten": 17,
+          "failed": 0
+        }
+      },
+      {
+        "record": "approvals",
+        "rows": 2,
+        "watched": 3,
+        "touch": {
+          "medianMs": 33,
+          "rowsWritten": 3,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": 218,
+          "rowsWritten": 13,
+          "failed": 0
+        }
+      },
+      {
+        "record": "workspaces",
+        "rows": 5,
+        "watched": 4,
+        "touch": {
+          "medianMs": 14,
+          "rowsWritten": 3,
+          "failed": 0
+        },
+        "reference": {
+          "medianMs": 220,
+          "rowsWritten": 3,
+          "failed": 0
+        }
+      }
+    ]
+  }
+}
