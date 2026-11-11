@@ -48,6 +48,8 @@ At startup the runtime provisions every tenant with the saved manifest. A tenant
 
 A tenant migration containing the line `-- gonvex:foreign-key-rebuild` runs with foreign keys disabled, must be transactional, and must leave no `pragma_foreign_key_check` violation. Inside the same transaction Gonvex validates `_gonvex_table_options` and reinstalls change capture, so an invalid declaration rolls the migration back. Membership triggers on `members` are restored after every batch that applies a migration.
 
+A rebuild copies the tables it rebuilds and leaves the old pages in the file as free pages, which makes scans and replica snapshot builds slower until the file is vacuumed. After a batch that applied a rebuild, while it still holds the tenant's writer, Gonvex runs `VACUUM` on its own connection (temporary copy on disk, not in memory) when free pages exceed 20% of the file and 8 MiB, then truncates the WAL. Files whose live data exceeds `GONVEX_REBUILD_VACUUM_MAX_BYTES` (default 2 GiB) are skipped. Each compaction or skip is logged with its sizes and time. It is best effort: a failed VACUUM leaves the committed migration and the free pages in place.
+
 Applied migrations are logged and returned in the `/dev/sync` JSON response. To inspect pending migrations without applying SQL, schema changes, or a runtime bundle, run:
 
 ```sh

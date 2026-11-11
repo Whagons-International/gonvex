@@ -31,6 +31,7 @@ pub mod capture;
 pub mod record_views;
 pub use capture::CAPTURE_FUNCTION;
 pub mod checkpoint;
+mod compaction;
 mod data_dir;
 pub mod direct;
 pub mod json_rows;

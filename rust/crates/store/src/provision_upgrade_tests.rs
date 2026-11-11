@@ -1177,3 +1177,79 @@ async fn migrations_may_change_primary_keys_that_ordinary_writes_cannot() {
     );
     database.pools.close().await;
 }
+
+#[tokio::test]
+async fn a_rebuild_that_frees_much_of_the_file_is_compacted_after_the_batch() {
+    let database = Database::new("gonvex-rebuild-compaction");
+    // About 24 MB of rows; the rebuild copies them and frees the old pages.
+    database
+        .execute("CREATE TABLE blobs(id INTEGER PRIMARY KEY,body BLOB); WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3000) INSERT INTO blobs SELECT i,randomblob(8000) FROM n;")
+        .await;
+    database.install().await.unwrap();
+    let path = crate::registry::database_path(&database.url);
+    // An idle reader stays open across the VACUUM.
+    let reader = database.pools.reader(&database.url).await.unwrap();
+    let mut idle = reader.acquire().await.unwrap();
+    let rebuild = |name: &str, table: &str| {
+        SqlMigration::new(
+            name.into(),
+            MigrationScope::Tenant,
+            false,
+            format!("-- gonvex:foreign-key-rebuild\nCREATE TABLE {table}_new(id INTEGER PRIMARY KEY,body BLOB); INSERT INTO {table}_new SELECT * FROM {table}; DROP TABLE {table}; ALTER TABLE {table}_new RENAME TO {table};"),
+        )
+    };
+    apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![rebuild("rebuild", "blobs")],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    assert!(database.scalar("PRAGMA freelist_count").await < 50);
+    let pages = database.scalar("PRAGMA page_count").await;
+    assert!(pages * 4096 < 30 << 20, "{pages} pages");
+    assert!(std::fs::metadata(&path).unwrap().len() < 30 << 20);
+    assert_eq!(database.scalar("SELECT count(*) FROM blobs").await, 3000);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM blobs")
+        .fetch_one(&mut *idle)
+        .await
+        .unwrap();
+    assert_eq!(count, 3000);
+    drop(idle);
+    // Ordinary captured writes continue on the compacted file.
+    let mut tx = begin_transaction(&database.pools, &database.url, false)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO blobs VALUES(3001,x'00')")
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        database
+            .scalar("SELECT count(*) FROM _gonvex_sync_changes WHERE table_name='blobs' AND row_id='3001'")
+            .await,
+        1
+    );
+    // A recorded rebuild never compacts again, and a batch without a
+    // rebuild leaves its free pages alone.
+    apply_migrations(
+        &database.pools,
+        &database.url,
+        vec![
+            rebuild("rebuild", "blobs"),
+            SqlMigration::new(
+                "plain".into(),
+                MigrationScope::Tenant,
+                false,
+                "CREATE TABLE scratch(body BLOB); INSERT INTO scratch SELECT body FROM blobs LIMIT 2000; DROP TABLE scratch;".into(),
+            ),
+        ],
+        MigrationScope::Tenant,
+    )
+    .await
+    .unwrap();
+    assert!(database.scalar("PRAGMA freelist_count").await * 4096 > 12 << 20);
+    database.pools.close().await;
+}
