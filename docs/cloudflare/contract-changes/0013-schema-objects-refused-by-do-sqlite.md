@@ -1,6 +1,6 @@
 # 0013: Tenant schema objects that Durable Object SQLite refuses
 
-Date: 2026-11-10. Status: **open; S1 confirms on the platform, the lead decides before K02**. Reported by P03
+Date: 2026-11-10. Status: **ruled in 0014** (P03 confirmed the same 26 objects on the platform). Reported by P03
 (measured in local workerd with the real Whagons tenant schema). Affects: S1, P03, K02, K03, K09, L03.
 
 ## Finding (P03, local workerd)
@@ -24,8 +24,8 @@ Also:
 
 - `roles_live_name_key_unique` not loading means role-name uniqueness is **not enforced** in a DO. That is a
   semantic loss and blocks K02 until rewritten.
-- The `referenceExpected_*` views feed declared reference integrity (`CONTRACT.md` E.a.5,
-  `_gonvex_reference_*`); without them the kernel cannot reproduce reference checks as Rust does.
+- All 26 objects are read by write-path triggers (see 0014), so writes to `tasks` and 21 other tables fail
+  in a Durable Object until they are fixed.
 
 ## Rules until decided
 

@@ -208,6 +208,26 @@
    "reference": []
   },
   {
+   "id": "A01",
+   "stage": 1,
+   "wave": 1,
+   "title": "App schema generator fix for Durable Object SQLite limits: stage the Unicode lower() fold (3 views, roles_live_name_key_unique) and split the 22 referenceExpected_* compound views into view trees (named app-repo exception, needs Gabriel's approval)",
+   "depends_on": [
+    "S1"
+   ],
+   "repo": "whagons5-client",
+   "owns": [
+    "scripts/schema/reference-sql.mjs",
+    "scripts/generate-sqlite-projections.mjs",
+    "migrations/ (one new migration)"
+   ],
+   "done_when": "Rewritten views and index give identical results to the originals on stock SQLite for all 15 staging tenants; the full tenant schema loads in a Durable Object with zero refused objects; a duplicate live role name is refused with the same error text; a task insert commits in a Durable Object. See contract-changes/0014",
+   "reference": [
+    "docs/cloudflare/contract-changes/0013-schema-objects-refused-by-do-sqlite.md",
+    "docs/cloudflare/contract-changes/0014-ruling-on-refused-schema-objects.md"
+   ]
+  },
+  {
    "id": "K01",
    "stage": 1,
    "wave": 1,
@@ -239,7 +259,8 @@
     "P01",
     "S1",
     "S2",
-    "S3"
+    "S3",
+    "A01"
    ],
    "owns": [
     "cloudflare/kernel/migrate/"
@@ -260,7 +281,8 @@
     "P01",
     "S1",
     "S2",
-    "S3"
+    "S3",
+    "A01"
    ],
    "owns": [
     "cloudflare/kernel/capture/"
@@ -350,7 +372,8 @@
     "K03",
     "K04",
     "K05",
-    "K06"
+    "K06",
+    "A01"
    ],
    "owns": [
     "cloudflare/kernel/reducer/"
