@@ -117,6 +117,14 @@ func manifestSyncDefinitions(current manifest.Manifest) map[string]manifest.Sync
 			for table, columns := range definition.VisibilityColumns {
 				existing.VisibilityColumns[table] = appendUniqueStrings(existing.VisibilityColumns[table], columns...)
 			}
+			if existing.VisibilityPredicates == nil {
+				existing.VisibilityPredicates = map[string]string{}
+			}
+			for table, predicate := range definition.VisibilityPredicates {
+				// Merged definitions only drive trigger capture columns here, so
+				// keeping any declared predicate is enough to capture its columns.
+				existing.VisibilityPredicates[table] = predicate
+			}
 			existing.ExcludeWhenSet = appendUniqueStrings(existing.ExcludeWhenSet, definition.ExcludeWhenSet...)
 			if definition.OrderBy != "" {
 				existing.OrderBy = definition.OrderBy
@@ -155,7 +163,31 @@ func effectiveSyncDefinition(entry manifest.FunctionEntry) manifest.SyncDefiniti
 	for table := range broad {
 		delete(definition.VisibilityColumns, table)
 	}
+	definition.VisibilityPredicates = syncVisibilityPredicates(definition.Table, entry.Dependencies.Reads)
 	return definition
+}
+
+// syncVisibilityPredicates keeps one declared row predicate per dependency
+// table. A table read with differing (or missing) predicates stays unscoped.
+func syncVisibilityPredicates(source string, reads []manifest.ReadDependency) map[string]string {
+	predicates := map[string]string{}
+	unscoped := map[string]bool{}
+	for _, read := range reads {
+		table := strings.TrimSpace(read.Table)
+		if table == "" || table == source {
+			continue
+		}
+		predicate := strings.TrimSpace(read.Predicate)
+		if existing, seen := predicates[table]; predicate == "" || (seen && existing != predicate) {
+			unscoped[table] = true
+			continue
+		}
+		predicates[table] = predicate
+	}
+	for table := range unscoped {
+		delete(predicates, table)
+	}
+	return predicates
 }
 
 func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, current manifest.Schema) (map[string]manifest.SyncDefinition, error) {
@@ -175,12 +207,22 @@ func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, cu
 	// prove freshness after an offline reconnect.
 	for _, definition := range sourceDefinitions {
 		for _, tableName := range definition.VisibilityTables {
-			if existing, exists := filtered[tableName]; exists {
-				existing.Columns = appendUniqueStrings(existing.Columns, definition.VisibilityColumns[tableName]...)
+			table, exists := current.Tables[tableName]
+			// Columns a declared row predicate reads (taskId, workspaceId) must be
+			// in the durable log, or scopedSyncChanges cannot rule a change out.
+			captured := appendUniqueStrings(nil, definition.VisibilityColumns[tableName]...)
+			if exists {
+				for _, column := range syncPredicateColumns(definition.VisibilityPredicates[tableName]) {
+					if _, ok := table.Columns[column]; ok {
+						captured = appendUniqueStrings(captured, column)
+					}
+				}
+			}
+			if existing, ok := filtered[tableName]; ok {
+				existing.Columns = appendUniqueStrings(existing.Columns, captured...)
 				filtered[tableName] = existing
 				continue
 			}
-			table, exists := current.Tables[tableName]
 			if !exists {
 				continue
 			}
@@ -196,7 +238,7 @@ func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, cu
 			filtered[tableName] = manifest.SyncDefinition{
 				Table:   tableName,
 				Key:     key,
-				Columns: appendUniqueStrings([]string{key}, definition.VisibilityColumns[tableName]...),
+				Columns: appendUniqueStrings([]string{key}, captured...),
 			}
 		}
 	}
@@ -639,6 +681,11 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 	changes = relevantSyncChanges(subscription.definition, changes)
 	args := map[string]json.RawMessage{}
 	_ = json.Unmarshal(subscription.args, &args)
+	if subscription.verified {
+		// Drop changes that provably cannot touch this subscription's rows, so a
+		// write in one workspace does not re-run every other workspace's window.
+		changes = scopedSyncChanges(subscription.definition, args, subscription.visibleKeys, changes)
+	}
 	if len(changes) == 0 && subscription.verified {
 		subscription.cursor = latest
 		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, latest))
