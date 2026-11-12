@@ -108,6 +108,11 @@ and publish raw artifacts and rerun commands. Evaluate X02 snapshot offload from
 forward if required by the original gates. No staging/production cutover or load there is authorized.
 See decision 0053 and verification/V03-load-brief.md and V04-budgets-brief.md.
 
+Assembly evidence precision: 0060 applies the existing 0028 JSON-number comparison, retains real-deploy raw
+socket failures and defines separate unchanged-SDK recovery proof; original gates remain. Existing K20 image
+metadata alone does not close its local-source provenance gap. 0061 permits an explicitly acknowledged empty
+server-epoch bootstrap after tenant restart, preserving the unchanged restart test and all scope fences.
+
 ## Uptime and tracing planning (0055, 2026-11-12)
 
 The canonical observability-uptime-plan.md adds independent external monitoring and explicit Gonvex
