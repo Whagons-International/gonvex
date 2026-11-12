@@ -126,6 +126,7 @@ unresolved review findings.
 0067 fences intermediate initial pages and strips unbound split progress without changing normal commits.
 0068 keeps Action reply generations and legacy deployment-skew gaps explicit; no lost history is fabricated.
 0069 permits bounded owner-authority prototyping; terminal release, cleanup and availability remain open.
+0070 permits recovery-only exact-subset correlation cleanup, never progress or normal-completion fallback.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 

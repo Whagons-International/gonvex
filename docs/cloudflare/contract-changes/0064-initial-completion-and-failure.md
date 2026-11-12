@@ -71,6 +71,7 @@ across mixed, split and batched work. Normal independently scoped commit accepta
 Count receipt metadata as well as request metadata. Test mixed enqueued/obsolete, refused/enqueued,
 missing/duplicate/foreign statuses, reverse arrival, sink/batch failure and auth change during acknowledgment.
 See 0067 for the provenance-only intermediate-page fence and conservative split-watermark handling.
+0070 permits partial exact processing facts only during actual recovery; ordinary completion stays full/exact.
 
 ## Ordered terminal failures
 
