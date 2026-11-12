@@ -6,6 +6,7 @@ import { rpc, type TenantRpc } from "../session/rpc";
 import { publicGuard, type PublicGuardEnv } from "../public/guard";
 import { controlTelemetryPort, type TelemetryControlRpc } from "../telemetry/port";
 import type { SessionControlObject } from "./control";
+import { telemetrySubject } from "../telemetry/limiter";
 
 type Control = Pick<SessionControlObject,
   "sessionProject" | "sessionIdentity" | "sessionAuthenticate" | "sessionImpersonation" |
@@ -16,6 +17,7 @@ export interface AssemblyGatewayEnv extends GatewayEnv, PublicGuardEnv {
   GATEWAY: DurableObjectNamespace<any>;
   CONTROL: DurableObjectNamespace<any>;
   TENANT: DurableObjectNamespace<any>;
+  GONVEX_ASSEMBLY_FIXTURE_KEY?: string;
 }
 
 export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
@@ -91,6 +93,19 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
   }
   async presenceChanged(projectId: string): Promise<void> {
     this.ctx.waitUntil(Promise.all([...this.host.sessions.values()].map((session) => session.controlChanged(projectId, "presence-change"))));
+  }
+  /** Private dev evidence only: actual holders and windows, never auth tokens,
+   * Member permissions, recovery metadata or an alternative telemetry handler. */
+  async fixtureTelemetry(projectId: string) {
+    if (!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY) throw new Error("assembly fixture inspection disabled");
+    const sessions = [...this.host.sessions.values()].filter((s) => !s.closed && s.record.connection.projectId === projectId);
+    if (sessions.length > 128) throw new Error("fixture inspection page exceeds 128 sockets");
+    return { holder: this.gatewayName, at: Date.now(), sockets: sessions.map((s) => {
+      const r = s.record, accountId = r.connection.identity?.account.id ?? null;
+      const subject = telemetrySubject(projectId, accountId, r.connectionId);
+      return { connectionId: r.connectionId, accountId, tenantId: r.connection.tenant?.route.tenantId ?? null,
+        window: this.host.telemetry.limiter.inspect(subject.key) };
+    }) };
   }
   async actionFinished(target: { tenantId: string; connectionId: string; epoch: number; id: string; path: string }, text: string): Promise<void> {
     for (const session of this.host.sessions.values()) {

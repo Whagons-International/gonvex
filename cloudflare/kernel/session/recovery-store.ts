@@ -7,6 +7,7 @@ import type { SessionRecord } from "./session";
 const PREFIX = "session-recovery/";
 const MANIFESTS = "session-recovery-manifest/";
 const OWNERS = "session-recovery-owner/";
+const ORPHANS = "session-recovery-orphan/";
 const CHARS = 16_384; // <=64KiB UTF-8, including worst-case non-ASCII text.
 const GROUPS = ["liveQueries", "pendingLiveQueries", "controlQueries", "replicas", "pendingActions"] as const;
 type Group = typeof GROUPS[number];
@@ -82,7 +83,13 @@ export class HolderRecoveryStore {
     const owner = this.storage.kv.get<Owner>(ownerKey(ref.socketOwner));
     if (!manifest || !owner || owner.connectionId !== manifest.owner || (owner.current !== ref.generation && owner.pending !== ref.generation)) throw new Error("holder recovery publication ownership changed");
     if (owner.current === ref.generation && owner.pending === undefined) return;
-    this.storage.kv.put(ownerKey(ref.socketOwner), { v: 2, connectionId: owner.connectionId, current: ref.generation } satisfies Owner);
+    this.storage.transactionSync(() => {
+      this.storage.kv.put(ownerKey(ref.socketOwner), { v: 2, connectionId: owner.connectionId, current: ref.generation } satisfies Owner);
+      for (const generation of [owner.current, owner.pending]) if (generation && generation !== ref.generation) {
+        const old = this.storage.kv.get<Manifest>(manifestKey(generation));
+        if (old) this.storage.kv.put(`${ORPHANS}${generation}`, { ...old, orphanedAt: Date.now() });
+      }
+    });
     for (const generation of [owner.current, owner.pending]) if (generation && generation !== ref.generation) {
       const old = this.storage.kv.get<Manifest>(manifestKey(generation));
       if (old) { try { this.discard(old); } catch { /* The unreferenced generation is reclaimed by orphan sweep. */ } }
@@ -131,6 +138,7 @@ export class HolderRecoveryStore {
   private deleteGeneration(ref: RecoveryReference): void {
     for (const [name] of this.storage.kv.list({ prefix: base(ref.generation) })) this.storage.kv.delete(name);
     this.storage.kv.delete(manifestKey(ref.generation));
+    this.storage.kv.delete(`${ORPHANS}${ref.generation}`);
   }
 
   /** The actual close/error callback owns this physical socket token. */
@@ -146,13 +154,16 @@ export class HolderRecoveryStore {
     });
   }
 
-  /** A closing socket is absent from getWebSockets before its close callback.
-   * Mark first, then reclaim on a later alarm; never erase its private identity
-   * before that callback can report presence/slots and abandon the generation. */
+  /** Reclaim only indexed generations whose publication ownership was removed.
+   * Absence from getWebSockets and elapsed time never authorize owner deletion.
+   * A socket whose terminal callback never arrives remains a lifecycle gap. */
   sweep(active: ReadonlySet<string>, now = Date.now()): number | null {
     const orphaned: string[] = [];
     let next: number | null = null;
-    for (const [name, value] of this.storage.kv.list<Manifest>({ prefix: MANIFESTS })) {
+    // Publication indexes only generations whose owner reference was removed.
+    // Never scan every active socket/manifest on an alarm.
+    const page = [...this.storage.kv.list<Manifest>({ prefix: ORPHANS, limit: 128 })];
+    for (const [name, value] of page) {
       const owner = this.storage.kv.get<Owner>(ownerKey(value.socketOwner));
       if (active.has(value.generation) || owner?.current === value.generation || owner?.pending === value.generation) {
         if (value.orphanedAt !== undefined) { const { orphanedAt: _orphaned, ...live } = value; this.storage.kv.put(name, live); }
@@ -165,7 +176,12 @@ export class HolderRecoveryStore {
         next = Math.min(next ?? Infinity, first + ORPHAN_GRACE_MS);
       }
     }
-    for (const generation of orphaned) { const ref = this.storage.kv.get<Manifest>(manifestKey(generation)); if (ref) this.discard(ref); }
+    for (const generation of orphaned) {
+      const ref = this.storage.kv.get<Manifest>(manifestKey(generation));
+      if (ref) this.discard(ref);
+      else this.storage.kv.delete(`${ORPHANS}${generation}`);
+    }
+    if (page.length === 128) next = Math.min(next ?? Infinity, now + ORPHAN_GRACE_MS);
     return next;
   }
 }

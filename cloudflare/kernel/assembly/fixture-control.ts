@@ -3,10 +3,16 @@
 import { rpc } from "../session/rpc";
 import type { AssemblyTenant } from "./tenant";
 import type { BakedRelease } from "./releases";
+import type { AssemblyGateway } from "./gateway";
+import { CONTROLLER_CELLS } from "../gateway/placement";
+import { gatewayShards } from "../session/placement/gateway";
 // @ts-expect-error K19 release build alias.
 import * as generated from "gonvex:releases";
 interface Env {
   TENANT: DurableObjectNamespace<any>;
+  GATEWAY: DurableObjectNamespace<any>;
+  GATEWAY_CONTROLLER?: DurableObjectNamespace<any>;
+  GONVEX_GATEWAY_SHARDS?: string;
   GONVEX_ASSEMBLY_FIXTURE_KEY?: string;
   WORKER_VERSION?: WorkerVersionMetadata;
 }
@@ -18,6 +24,18 @@ export async function fixtureControl(request: Request, env: Env): Promise<Respon
   if (url.pathname === "/__assembly/version") {
     const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
     return Response.json({ version: (generated as { version?: string }).version ?? null, worker: env.WORKER_VERSION ?? null, releases: Object.fromEntries(Object.entries(releases).map(([id, release]) => [id, release.hash])) });
+  }
+  if (request.method === "GET" && url.pathname === "/__assembly/holders") {
+    const project = url.searchParams.get("project");
+    if (!project) return new Response("project required", { status: 400 });
+    const names = env.GATEWAY_CONTROLLER
+      ? (await Promise.all(Array.from({ length: CONTROLLER_CELLS }, (_, i) => rpc<{ status(): Promise<{ slots: { name: string; mode: string }[] }> }>(env.GATEWAY_CONTROLLER!, `gateway-cell-${i}`).status()))).flatMap((s) => s.slots.filter((slot) => slot.mode !== "retired").map((slot) => slot.name))
+      : Array.from({ length: gatewayShards(env) }, (_, i) => `gw-${i}`);
+    // At most eight concurrent inspection RPCs. This endpoint does not select
+    // placements or offer traffic and exists only on an explicit dev fixture.
+    const holders = [];
+    for (let i = 0; i < names.length; i += 8) holders.push(...await Promise.all(names.slice(i, i + 8).map((name) => rpc<Pick<AssemblyGateway, "fixtureTelemetry">>(env.GATEWAY, name).fixtureTelemetry(project))));
+    return Response.json({ placement: env.GATEWAY_CONTROLLER ? "automatic" : "static", holders: holders.filter((h) => h.sockets.length) });
   }
   if (request.method === "GET" && url.pathname === "/__assembly/changelog") return Response.json(await rpc<FixtureTenant>(env.TENANT, url.searchParams.get("tenant") ?? "").fixtureChangeLog(Math.max(0, Number(url.searchParams.get("offset") ?? 0))));
   if (request.method === "POST") {

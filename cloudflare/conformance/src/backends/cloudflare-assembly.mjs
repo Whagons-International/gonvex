@@ -13,7 +13,7 @@ export class CloudflareAssemblyBackend extends RustBackend {
       this.adminKey = process.env.GONVEX_ASSEMBLY_KEY;
       if (!this.adminKey) throw new Error('GONVEX_ASSEMBLY_KEY is required');
     } else {
-      this.runtime = await startLocalAssembly({ state: this.workDir, port: this.port, vars: {
+      this.runtime = await startLocalAssembly({ state: this.workDir, port: this.port, placement: process.env.GONVEX_ASSEMBLY_PLACEMENT ?? 'automatic', vars: {
         GONVEX_ADMIN_KEY: this.adminKey, ...CONFORMANCE_SECRETS, ...firebaseEmulatorEnv(),
         ...(this.servicePrincipals ? { GONVEX_SERVICE_PRINCIPALS: this.servicePrincipals } : {}),
       } });

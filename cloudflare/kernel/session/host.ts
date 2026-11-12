@@ -73,9 +73,11 @@ export class SocketHost {
     const active = new Set<string>();
     for (const ws of options.ctx.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as Attachment | null;
-      if (attachment?.recovery) active.add(attachment.recovery.generation);
       if (attachment?.session) {
-        try { this.sessions.set(ws, this.restore(ws, attachment.session, attachment.recovery)); }
+        try {
+          this.sessions.set(ws, this.restore(ws, attachment.session, attachment.recovery));
+          if (attachment.recovery) active.add(attachment.recovery.generation);
+        }
         catch (error) {
           console.error("session host: recovery metadata unavailable", error);
           try { ws.close(1012, "session recovery requires reconnect"); } catch { /* already closed */ }
@@ -274,7 +276,7 @@ export class SocketHost {
   private restore(ws: WebSocket, record: AttachmentRecord, ref?: RecoveryReference): Session {
     if (ref) {
       const tagged = this.options.ctx.getTags(ws).find((tag) => tag.startsWith("recovery:"))?.slice("recovery:".length);
-      if (tagged && tagged !== ref.socketOwner) throw new Error("holder recovery socket ownership mismatch");
+      if (tagged !== ref.socketOwner) throw new Error("holder recovery socket ownership mismatch");
       record = this.recovery.restore(record, ref);
       this.recoveryRefs.set(ws, ref);
       this.socketOwners.set(ws, ref.socketOwner);

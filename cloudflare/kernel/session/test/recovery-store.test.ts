@@ -86,7 +86,7 @@ describe("holder recovery metadata", () => {
     });
   });
 
-  it("rolls back partial writes; sweeping abandons only generations with no live attachment reference", async () => {
+  it("rolls back partial writes and retains closing owners until their actual terminal callback", async () => {
     await withStore((storage, store) => {
       const r = record(); r.pendingActions = { a: "agent.run" };
       const old = store.write(r);
@@ -109,6 +109,52 @@ describe("holder recovery metadata", () => {
       expect(store.restore(withoutRecovery(r), newer).pendingActions).toEqual({ a: "agent.run" });
       store.abandon(newer.socketOwner);
       expect([...storage.kv.list({ prefix: "session-recovery/" })]).toEqual([]);
+    });
+  });
+
+  it("resolves an interrupted publication from the actual old or new attachment without replaying pending Actions", async () => {
+    await withStore((storage, store) => {
+      const before = record(); before.pendingActions = { old: "agent.old" };
+      const old = store.write(before); store.commit(old);
+      const after = structuredClone(before); after.pendingActions = { old: "agent.old", next: "agent.next" };
+      // Abort after durable begin, before serializeAttachment: only the old
+      // attachment is authority. The unaccepted new request is not restored.
+      const uncertain = store.write(after, old);
+      expect(store.restore(withoutRecovery(before), old).pendingActions).toEqual(before.pendingActions);
+      expect([...storage.kv.list({ prefix: `session-recovery/${uncertain.generation}/` })]).toEqual([]);
+      // Abort after serializeAttachment, before commit: its exact pending
+      // generation is complete and can become current after full verification.
+      const published = store.write(after, old);
+      expect(store.restore(withoutRecovery(after), published).pendingActions).toEqual(after.pendingActions);
+      expect(() => store.restore(withoutRecovery(before), old)).toThrow("scope/manifest mismatch");
+      const owner = storage.kv.get<{ current: string; pending?: string }>(`session-recovery-owner/${published.socketOwner}`)!;
+      expect(owner).toMatchObject({ current: published.generation });
+      expect(owner.pending).toBeUndefined();
+      store.abandon(published.socketOwner);
+      expect([...storage.kv.list({ prefix: "session-recovery-owner/" })]).toEqual([]);
+      expect([...storage.kv.list({ prefix: "session-recovery/" })]).toEqual([]);
+    });
+  });
+
+  it("indexes a failed obsolete-generation deletion and stops cleanup alarms after bounded reclamation", async () => {
+    await withStore((storage, store) => {
+      const r = record(), old = store.write(r); store.commit(old);
+      r.pendingActions = { waiting: "agent.run" };
+      const next = store.write(r, old);
+      let failDelete = true;
+      const failing = new HolderRecoveryStore({ transactionSync: (fn) => storage.transactionSync(fn), kv: {
+        get: (key) => storage.kv.get(key), list: (options) => storage.kv.list(options), put: (key, value) => storage.kv.put(key, value),
+        delete: (key) => { if (failDelete && key.startsWith(`session-recovery/${old.generation}/`)) throw new Error("injected obsolete deletion failure"); return storage.kv.delete(key); },
+      } });
+      failing.commit(next);
+      expect([...storage.kv.list({ prefix: "session-recovery-orphan/" })]).toHaveLength(1);
+      expect(store.restore(withoutRecovery(r), next).pendingActions).toEqual(r.pendingActions);
+      failDelete = false;
+      expect(failing.sweep(new Set([next.generation]), Date.now() + 61_000)).toBeNull();
+      expect([...storage.kv.list({ prefix: `session-recovery/${old.generation}/` })]).toEqual([]);
+      expect([...storage.kv.list({ prefix: "session-recovery-orphan/" })]).toEqual([]);
+      expect(store.restore(withoutRecovery(r), next).pendingActions).toEqual(r.pendingActions);
+      store.abandon(next.socketOwner);
     });
   });
 });

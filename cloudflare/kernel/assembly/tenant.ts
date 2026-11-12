@@ -48,6 +48,7 @@ import { executeQuery } from "../query/call";
 import { replicaModule } from "../delivery/definition";
 import { collectionQuery } from "./replica-query";
 import { flushReferences } from "../reducer/reference/integrity";
+import { overrunMarkerKey } from "./deadline";
 
 const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
 const PROJECT_KEY = "assembly/project";
@@ -84,13 +85,13 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       tenantOnly: true,
       beforeInvoke: async (call: TenantCall) => {
         if (call.kind !== "reducer") return;
-        this.ctx.storage.kv.put("assembly/active-call", { commandId: call.invocation.commandId, path: call.function, artifact: this.kernel.module?.artifactHash,
+        this.ctx.storage.kv.put(overrunMarkerKey(this.kernel.module?.artifactHash, call.invocation.commandId, call.function), { commandId: call.invocation.commandId, path: call.function, artifact: this.kernel.module?.artifactHash,
           revision: this.ctx.storage.sql.exec<{ revision: number }>("SELECT revision FROM _gonvex_sync_clock WHERE singleton=1").toArray()[0]?.revision ?? 0 });
         // The causal marker must survive the platform resetting a pure loop.
         // This happens before the application storage transaction opens.
         await this.ctx.storage.sync();
       },
-      afterInvoke: (call: TenantCall) => { if (call.kind === "reducer") this.ctx.storage.kv.delete("assembly/active-call"); },
+      afterInvoke: (call: TenantCall) => { if (call.kind === "reducer") this.ctx.storage.kv.delete(overrunMarkerKey(this.kernel.module?.artifactHash, call.invocation.commandId, call.function)); },
       files: () => reducerFiles({ bucket: this.env.FILES, configured: this.files.configured }),
       restoreManifest: (stored: StoredModule): StoredModule => {
         const release = releases[stored.projectId];
@@ -374,10 +375,11 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   filesReleaseUpload(...args: Parameters<FilesTenantRpc["filesReleaseUpload"]>) { return this.filePort.filesReleaseUpload(...args); }
   filesDownloadTarget(...args: Parameters<FilesTenantRpc["filesDownloadTarget"]>) { return this.filePort.filesDownloadTarget(...args); }
   async recordOverrun(commandId: string, path: string): Promise<"quarantined" | "committed" | "unrelated"> {
-    const marker = this.ctx.storage.kv.get<{ commandId: string; path: string; artifact: string; revision: number }>("assembly/active-call");
+    const key = overrunMarkerKey(this.kernel.module?.artifactHash, commandId, path);
+    const marker = this.ctx.storage.kv.get<{ commandId: string; path: string; artifact: string; revision: number }>(key);
     if (!marker || marker.commandId !== commandId || marker.path !== path || marker.artifact !== this.kernel.module?.artifactHash) return "unrelated";
     const committed = this.ctx.storage.sql.exec("SELECT 1 FROM _gonvex_sync_transactions WHERE revision>? AND origin_command_id=? LIMIT 1", marker.revision, commandId).toArray().length > 0;
-    this.ctx.storage.kv.delete("assembly/active-call");
+    this.ctx.storage.kv.delete(key);
     if (committed) return "committed";
     this.kernel.recordOverrun(commandId, path);
     return "quarantined";

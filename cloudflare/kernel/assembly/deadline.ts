@@ -3,6 +3,11 @@
 import type { ClientFrame } from "../session/decode";
 import { frames } from "../session/protocol";
 import { deadlineOverrunError } from "../host/src/invoke";
+import { sha256Hex } from "../capture/digest";
+/** Distinct commands must not overwrite a reset command while its gateway's
+ * fresh-stub report waits behind unrelated follow-up work. */
+export const overrunMarkerKey = (artifact: string | undefined, commandId: string | null | undefined, path: string): string =>
+  `assembly/active-call/${sha256Hex(JSON.stringify([artifact ?? null, commandId ?? null, path]))}`;
 export async function tenantDispatchWithDeadline(projectId: string, frame: ClientFrame, dispatch: () => Promise<string[]>,
   recordOverrun: (commandId: string, path: string) => Promise<"quarantined" | "committed" | "unrelated">): Promise<string[]> {
   try { return await dispatch(); }

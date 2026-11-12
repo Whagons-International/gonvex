@@ -12,6 +12,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { SocketHost } from "../host";
 import { handleWebSocketUpgrade, validExtensionsField } from "../router";
+import { HolderRecoveryStore, attachmentRecord } from "../recovery-store";
 
 const BASE = "https://gonvex.test";
 const KEY = "test-key";
@@ -101,6 +102,7 @@ const gateway = (name: string) => (env as unknown as { GATEWAY: { getByName(name
 /** `runInDurableObject` on a gateway, typed loosely for the same reason. */
 const inGateway = (name: string, fn: (instance: any) => unknown): Promise<unknown> =>
   (runInDurableObject as unknown as (stub: unknown, fn: (instance: any) => unknown) => Promise<unknown>)(gateway(name), fn);
+const inGatewayState = runInDurableObject as unknown as (stub: unknown, fn: (instance: any, state: DurableObjectState) => any) => Promise<any>;
 
 /** Runs `fn` against the host of every gateway shard that holds a socket of `tenant`. */
 async function onGateways(tenant: string, fn: (host: SocketHost) => void | Promise<void>) {
@@ -299,6 +301,33 @@ describe("alarms", () => {
 });
 
 describe("hibernation", () => {
+  for (const publish of [false, true]) it(`recovers the ${publish ? "new" : "old"} semantic generation after eviction ${publish ? "after" : "before"} attachment publication`, async () => {
+    const w = await world({ a: ["ana"] }), c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const transition = await inGatewayState(gateway(name!), (instance, state) => {
+      const [ws, session] = [...instance.host.sessions].find(([, s]: any) => s.record.tenant?.route.tenantId === w.tenants.a)! as [WebSocket, any];
+      const old = ws.deserializeAttachment() as any;
+      const nextRecord = structuredClone(session.record);
+      nextRecord.pendingActions = { correlation: "agent.waiting" };
+      const next = new HolderRecoveryStore(state.storage).write(nextRecord, old.recovery);
+      if (publish) ws.serializeAttachment({ session: attachmentRecord(nextRecord), recovery: next });
+      // Intentionally no commit. Real hibernation discards the host's memory;
+      // the verified native attachment selects which transition was accepted.
+      return { old: old.recovery.generation, next: next.generation, owner: next.socketOwner };
+    });
+    await evictDurableObject(gateway(name!));
+    await inGatewayState(gateway(name!), (instance, state) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any;
+      expect(session.record.pendingActions ?? {}).toEqual(publish ? { correlation: "agent.waiting" } : {});
+      expect(state.storage.kv.get<any>(`session-recovery-owner/${transition.owner}`)?.current).toBe(publish ? transition.next : transition.old);
+      expect([...state.storage.kv.list({ prefix: `session-recovery/${publish ? transition.old : transition.next}/` })]).toEqual([]);
+    });
+    c.ws.close(1000); await c.closed();
+    await runInDurableObject(gateway(name!), (_instance, state) => {
+      expect(state.storage.kv.get(`session-recovery-owner/${transition.owner}`)).toBeUndefined();
+    });
+  });
+
   it("serializes large recovery requests and private identity, restores them after eviction and cleans on close", async () => {
     const w = await world({ a: ["ana"] });
     const c = await signedIn(w, "ana", "a");
