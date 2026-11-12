@@ -1,0 +1,23 @@
+{
+  "name": "gonvex-cf-l09-sandbox-spike",
+  "private": true,
+  "type": "module",
+  "description": "L09 candidate (0047/0048): ctx.sandbox on Dynamic Workers and Durable Object SQLite. Not part of the pnpm workspace or CI.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "platform": "node dev/platform.mjs"
+  },
+  "dependencies": {
+    "fflate": "0.8.2",
+    "sucrase": "3.35.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.10",
+    "@cloudflare/workers-types": "5.20261028.1",
+    "@types/node": "24.12.4",
+    "typescript": "7.0.2",
+    "vitest": "4.1.12",
+    "wrangler": "4.155.0"
+  }
+}

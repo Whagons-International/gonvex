@@ -1,0 +1,610 @@
+{
+  "worker": "gonvex-cf-dev-k20-sandbox",
+  "instanceType": "basic",
+  "runAt": "2026-11-12T01:25:44.422Z",
+  "cases": {
+    "coldStart1": {
+      "clientMs": 3024,
+      "case": "coldStart",
+      "tenantId": "tenant-eb4c01d8-06ee-469e-8292-dd2e3a1b36fe",
+      "at": "2026-11-12T01:26:34.609Z",
+      "result": {
+        "created": {
+          "ms": 1931,
+          "value": "sbx_ee64791e-64e5-48e9-aee9-b18340f1cb8b"
+        },
+        "firstRun": {
+          "ms": 415,
+          "value": {
+            "sandboxId": "sbx_ee64791e-64e5-48e9-aee9-b18340f1cb8b",
+            "executionId": "run_5f959edd-1cee-434c-ad2f-8f7ce29f7be1",
+            "status": "succeeded",
+            "startedAt": 1794446796548,
+            "finishedAt": 1794446796877,
+            "result": 2,
+            "error": "",
+            "logs": []
+          }
+        },
+        "secondRun": {
+          "ms": 113,
+          "value": {
+            "sandboxId": "sbx_ee64791e-64e5-48e9-aee9-b18340f1cb8b",
+            "executionId": "run_7ed333ba-a952-4721-8fb9-a16efc240a2b",
+            "status": "succeeded",
+            "startedAt": 1794446796958,
+            "finishedAt": 1794446796998,
+            "result": 4,
+            "error": "",
+            "logs": []
+          }
+        },
+        "warmCreate": {
+          "ms": 184,
+          "value": "sbx_2e7ca83f-cba6-4035-b600-4d1e78319d1f"
+        },
+        "stats": {
+          "manager": {
+            "live": 2,
+            "active": 0,
+            "running": [],
+            "latestExpiry": 1794447397146,
+            "runsStarted": 2,
+            "runsFinished": 2,
+            "rssBytes": 57274368,
+            "cgroupBytes": null,
+            "cgroupPeak": null,
+            "uptimeMs": 1352
+          },
+          "lastStartMs": 1036,
+          "running": true
+        }
+      }
+    },
+    "coldStart2": {
+      "clientMs": 3006,
+      "case": "coldStart",
+      "tenantId": "tenant-b3a32245-5c07-4624-895a-6929af9a63fd",
+      "at": "2026-11-12T01:26:37.490Z",
+      "result": {
+        "created": {
+          "ms": 1692,
+          "value": "sbx_1b331845-cb82-4d10-ab91-3d5288f735ff"
+        },
+        "firstRun": {
+          "ms": 519,
+          "value": {
+            "sandboxId": "sbx_1b331845-cb82-4d10-ab91-3d5288f735ff",
+            "executionId": "run_1dbb4d33-0d00-422b-97e9-7dd928b31d0b",
+            "status": "succeeded",
+            "startedAt": 1794446799183,
+            "finishedAt": 1794446799611,
+            "result": 2,
+            "error": "",
+            "logs": []
+          }
+        },
+        "secondRun": {
+          "ms": 120,
+          "value": {
+            "sandboxId": "sbx_1b331845-cb82-4d10-ab91-3d5288f735ff",
+            "executionId": "run_d38edbce-6e82-45fe-b0d1-e4a8e69e7737",
+            "status": "succeeded",
+            "startedAt": 1794446799681,
+            "finishedAt": 1794446799732,
+            "result": 4,
+            "error": "",
+            "logs": []
+          }
+        },
+        "warmCreate": {
+          "ms": 557,
+          "value": "sbx_4a283ec4-a3a7-47cd-8fd1-ea6ed542557c"
+        },
+        "stats": {
+          "manager": {
+            "live": 2,
+            "active": 0,
+            "running": [],
+            "latestExpiry": 1794447400251,
+            "runsStarted": 2,
+            "runsFinished": 2,
+            "rssBytes": 57221120,
+            "cgroupBytes": null,
+            "cgroupPeak": null,
+            "uptimeMs": 1615
+          },
+          "lastStartMs": 967,
+          "running": true
+        }
+      }
+    },
+    "coldStart3": {
+      "clientMs": 1848,
+      "case": "coldStart",
+      "tenantId": "tenant-fa9e462b-7f60-4021-b11e-e5890dcbcdde",
+      "at": "2026-11-12T01:26:40.501Z",
+      "result": {
+        "created": {
+          "ms": 1137,
+          "value": "sbx_a81f4fa5-bc0a-467f-8f35-eea4b07d1dbc"
+        },
+        "firstRun": {
+          "ms": 276,
+          "value": {
+            "sandboxId": "sbx_a81f4fa5-bc0a-467f-8f35-eea4b07d1dbc",
+            "executionId": "run_52c36dca-722f-471a-984c-8d35c136755e",
+            "status": "succeeded",
+            "startedAt": 1794446801643,
+            "finishedAt": 1794446801844,
+            "result": 2,
+            "error": "",
+            "logs": []
+          }
+        },
+        "secondRun": {
+          "ms": 112,
+          "value": {
+            "sandboxId": "sbx_a81f4fa5-bc0a-467f-8f35-eea4b07d1dbc",
+            "executionId": "run_18f33129-7108-480d-8989-7e0389cc3846",
+            "status": "succeeded",
+            "startedAt": 1794446801913,
+            "finishedAt": 1794446801956,
+            "result": 4,
+            "error": "",
+            "logs": []
+          }
+        },
+        "warmCreate": {
+          "ms": 187,
+          "value": "sbx_be8fe4f0-b283-40b9-b865-9244f39cfb45"
+        },
+        "stats": {
+          "manager": {
+            "live": 2,
+            "active": 0,
+            "running": [],
+            "latestExpiry": 1794447402110,
+            "runsStarted": 2,
+            "runsFinished": 2,
+            "rssBytes": 57233408,
+            "cgroupBytes": null,
+            "cgroupPeak": null,
+            "uptimeMs": 1005
+          },
+          "lastStartMs": 547,
+          "running": true
+        }
+      }
+    },
+    "network": {
+      "clientMs": 2068,
+      "case": "network",
+      "tenantId": "tenant-warm-07c43ddd",
+      "at": "2026-11-12T01:26:42.338Z",
+      "result": {
+        "ms": 440,
+        "value": {
+          "sandboxId": "sbx_2dab36db-3507-4e60-b4c3-71b13d64e902",
+          "executionId": "run_b5e3498d-581d-474e-94e1-64904f39a8d7",
+          "status": "succeeded",
+          "startedAt": 1794446803720,
+          "finishedAt": 1794446804059,
+          "result": {
+            "fetch": "undefined",
+            "webSocket": "undefined",
+            "httpfs": "host call failed: Permission Error: Cannot access file \"https://example.com/a.csv\" - file system operations are disabled by configuration\n\nLINE 1: SELECT * FROM read_csv_auto('https://example.com/a.csv')\n                      ^",
+            "readCsv": "host call failed: Permission Error: Cannot access file \"/etc/passwd\" - file system operations are disabled by configuration\n\nLINE 1: SELECT * FROM read_csv_auto('/etc/passwd')\n                      ^",
+            "escape": "host call failed: sandbox path must be relative and cannot escape the workspace"
+          },
+          "error": "",
+          "logs": []
+        }
+      }
+    },
+    "isolation": {
+      "clientMs": 2843,
+      "case": "isolation",
+      "tenantId": "tenant-warm-07c43ddd",
+      "at": "2026-11-12T01:26:44.387Z",
+      "result": {
+        "strangerRead": {
+          "ms": 93,
+          "error": "sandbox was not found"
+        },
+        "otherTenantRun": {
+          "ms": 2144,
+          "error": "sandbox was not found"
+        },
+        "ownerRead": {
+          "ms": 109,
+          "value": "owner"
+        }
+      }
+    },
+    "deadline": {
+      "clientMs": 1705,
+      "case": "deadline",
+      "tenantId": "tenant-warm-07c43ddd",
+      "at": "2026-11-12T01:26:47.251Z",
+      "result": {
+        "ms": 1119,
+        "value": {
+          "sandboxId": "sbx_36cca71b-da98-411f-ac95-54cf09f4e5be",
+          "executionId": "run_5326ec5d-932f-4626-8134-39e157d974ec",
+          "status": "failed",
+          "startedAt": 1794446807642,
+          "finishedAt": 1794446808670,
+          "result": null,
+          "error": "module execution exceeded its budget: module exceeded its 982 ms execution deadline",
+          "logs": []
+        }
+      }
+    },
+    "cpuSpin": {
+      "clientMs": 2741,
+      "case": "cpuSpin",
+      "tenantId": "tenant-warm-07c43ddd",
+      "at": "2026-11-12T01:26:48.958Z",
+      "result": {
+        "ms": 2143,
+        "value": {
+          "sandboxId": "sbx_68aee9fa-bb68-498f-a077-af64c5eb57eb",
+          "executionId": "run_8736604f-59ea-4ac8-9379-f012f9e2815d",
+          "status": "failed",
+          "startedAt": 1794446809211,
+          "finishedAt": 1794446811236,
+          "result": null,
+          "error": "module execution exceeded its budget: module exceeded its 1982 ms execution deadline",
+          "logs": []
+        }
+      }
+    },
+    "heap": {
+      "clientMs": 824,
+      "case": "heap",
+      "tenantId": "tenant-warm-07c43ddd",
+      "at": "2026-11-12T01:26:51.675Z",
+      "result": {
+        "ms": 410,
+        "value": {
+          "sandboxId": "sbx_7031aa94-3cea-4c4c-9b9b-03f7728db05b",
+          "executionId": "run_ba36812c-4342-4ae3-a5f7-38a1cf7c54be",
+          "status": "failed",
+          "startedAt": 1794446811928,
+          "finishedAt": 1794446812187,
+          "result": null,
+          "error": "module execution exceeded its budget: module exceeded the 67108864 byte isolate heap limit",
+          "logs": []
+        }
+      }
+    },
+    "analysis": {
+      "clientMs": 2771,
+      "case": "analysis",
+      "tenantId": "tenant-warm-07c43ddd",
+      "at": "2026-11-12T01:26:52.503Z",
+      "result": {
+        "writeText": {
+          "ms": 120,
+          "value": {
+            "path": "tasks.json",
+            "size": 41891
+          }
+        },
+        "runDuckdb": {
+          "ms": 213,
+          "value": {
+            "sandboxId": "sbx_e68da50f-95ba-454b-a805-0849c3f2ec23",
+            "executionId": "run_6c9c21db-9f74-468d-acc2-7ae5e0aebd17",
+            "status": "succeeded",
+            "startedAt": 1794446812880,
+            "finishedAt": 1794446813004,
+            "result": {
+              "columns": [
+                "statusId",
+                "total",
+                "hours"
+              ],
+              "rowCount": 3,
+              "rows": [
+                {
+                  "statusId": "done",
+                  "total": 333,
+                  "hours": 995
+                },
+                {
+                  "statusId": "late",
+                  "total": 333,
+                  "hours": 999
+                },
+                {
+                  "statusId": "open",
+                  "total": 334,
+                  "hours": 1003
+                }
+              ],
+              "truncated": false
+            },
+            "error": "",
+            "logs": []
+          }
+        },
+        "runSmall": {
+          "ms": 148,
+          "value": {
+            "sandboxId": "sbx_e68da50f-95ba-454b-a805-0849c3f2ec23",
+            "executionId": "run_161534d3-b6e4-4e12-93ea-b5e22abf0497",
+            "status": "succeeded",
+            "startedAt": 1794446813112,
+            "finishedAt": 1794446813154,
+            "result": 2,
+            "error": "",
+            "logs": []
+          }
+        },
+        "importCsv": {
+          "ms": 848,
+          "value": {
+            "alias": "import_1",
+            "tables": [
+              {
+                "tableName": "data",
+                "rowCount": 100,
+                "columns": [
+                  "id",
+                  "region",
+                  "amount",
+                  "closed",
+                  "day"
+                ]
+              }
+            ]
+          }
+        },
+        "importXlsx": {
+          "ms": 200,
+          "value": {
+            "alias": "import_2",
+            "tables": [
+              {
+                "tableName": "sales_2024_1",
+                "rowCount": 4,
+                "columns": [
+                  "Region",
+                  "Amount",
+                  "Closed",
+                  "Note",
+                  "Day"
+                ]
+              },
+              {
+                "tableName": "sheet_3_3",
+                "rowCount": 2,
+                "columns": [
+                  "k",
+                  "v"
+                ]
+              }
+            ]
+          }
+        },
+        "importXls": {
+          "ms": 193,
+          "value": {
+            "alias": "import_3",
+            "tables": [
+              {
+                "tableName": "sales_2024_1",
+                "rowCount": 4,
+                "columns": [
+                  "Region",
+                  "Amount",
+                  "Closed",
+                  "Note",
+                  "Day"
+                ]
+              },
+              {
+                "tableName": "sheet_3_3",
+                "rowCount": 2,
+                "columns": [
+                  "k",
+                  "v"
+                ]
+              }
+            ]
+          }
+        },
+        "query": {
+          "ms": 203,
+          "value": {
+            "sandboxId": "sbx_e68da50f-95ba-454b-a805-0849c3f2ec23",
+            "executionId": "run_c36b9731-3765-4894-9d75-c4c9b4c448d2",
+            "status": "succeeded",
+            "startedAt": 1794446814494,
+            "finishedAt": 1794446814596,
+            "result": {
+              "columns": [
+                "region",
+                "n",
+                "mean"
+              ],
+              "rowCount": 4,
+              "rows": [
+                {
+                  "region": "east",
+                  "n": 25,
+                  "mean": 35
+                },
+                {
+                  "region": "north",
+                  "n": 25,
+                  "mean": 33.6
+                },
+                {
+                  "region": "south",
+                  "n": 25,
+                  "mean": 34.3
+                },
+                {
+                  "region": "west",
+                  "n": 25,
+                  "mean": 35.7
+                }
+              ],
+              "truncated": false
+            },
+            "error": "",
+            "logs": []
+          }
+        },
+        "summarize": {
+          "ms": 288,
+          "value": {
+            "sandboxId": "sbx_e68da50f-95ba-454b-a805-0849c3f2ec23",
+            "executionId": "run_b228728f-3c1a-415b-af26-bf056998755d",
+            "status": "succeeded",
+            "startedAt": 1794446814688,
+            "finishedAt": 1794446814881,
+            "result": 5,
+            "error": "",
+            "logs": []
+          }
+        },
+        "destroy": {
+          "ms": 159,
+          "value": {
+            "sandboxId": "sbx_e68da50f-95ba-454b-a805-0849c3f2ec23",
+            "destroyed": true
+          }
+        },
+        "stats": {
+          "manager": {
+            "live": 0,
+            "active": 0,
+            "running": [],
+            "latestExpiry": 0,
+            "runsStarted": 8,
+            "runsFinished": 8,
+            "rssBytes": 57053184,
+            "cgroupBytes": null,
+            "cgroupPeak": null,
+            "uptimeMs": 11952
+          },
+          "lastStartMs": 741,
+          "running": true
+        }
+      }
+    },
+    "largeImport": {
+      "clientMs": 2902,
+      "case": "largeImport",
+      "tenantId": "tenant-warm-07c43ddd",
+      "at": "2026-11-12T01:26:55.270Z",
+      "result": {
+        "bytes": 6662251,
+        "imported": {
+          "ms": 2222,
+          "value": {
+            "alias": "import_1",
+            "tables": [
+              {
+                "tableName": "data",
+                "rowCount": 200000,
+                "columns": [
+                  "id",
+                  "region",
+                  "amount",
+                  "closed",
+                  "day"
+                ]
+              }
+            ]
+          }
+        },
+        "query": {
+          "ms": 181,
+          "value": {
+            "sandboxId": "sbx_15ddff4e-dc6b-4bb9-adf3-eb12ba796c67",
+            "executionId": "run_5dee095f-98db-4d2e-bc0b-798933edb38a",
+            "status": "succeeded",
+            "startedAt": 1794446817715,
+            "finishedAt": 1794446817802,
+            "result": {
+              "columns": [
+                "region",
+                "n",
+                "total"
+              ],
+              "rowCount": 4,
+              "rows": [
+                {
+                  "region": "east",
+                  "n": 50000,
+                  "total": 2500000
+                },
+                {
+                  "region": "north",
+                  "n": 50000,
+                  "total": 2490000.0000000005
+                },
+                {
+                  "region": "south",
+                  "n": 50000,
+                  "total": 2505000
+                },
+                {
+                  "region": "west",
+                  "n": 50000,
+                  "total": 2495000
+                }
+              ],
+              "truncated": false
+            },
+            "error": "",
+            "logs": []
+          }
+        },
+        "stats": {
+          "manager": {
+            "live": 0,
+            "active": 0,
+            "running": [],
+            "latestExpiry": 0,
+            "runsStarted": 9,
+            "runsFinished": 9,
+            "rssBytes": 76582912,
+            "cgroupBytes": null,
+            "cgroupPeak": null,
+            "uptimeMs": 14851
+          },
+          "lastStartMs": 741,
+          "running": true
+        }
+      }
+    },
+    "stats": {
+      "clientMs": 150,
+      "case": "stats",
+      "tenantId": "tenant-warm-07c43ddd",
+      "at": "2026-11-12T01:26:58.172Z",
+      "result": {
+        "manager": {
+          "live": 0,
+          "active": 0,
+          "running": [],
+          "latestExpiry": 0,
+          "runsStarted": 9,
+          "runsFinished": 9,
+          "rssBytes": 70234112,
+          "cgroupBytes": null,
+          "cgroupPeak": null,
+          "uptimeMs": 15003
+        },
+        "lastStartMs": 741,
+        "running": true
+      }
+    }
+  }
+}

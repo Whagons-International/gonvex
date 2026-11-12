@@ -1,0 +1,28 @@
+{
+  "what": "Model-written SQL and sandbox outcomes in assistant tool traces (assistantMessages, role tool_call/tool_result) of every staging tenant. Aggregates only; no tenant data. Read-only copies of the stopped staging runtime's volume, deleted after counting (AGENT_BRIEF Credentials and data; 0015 S0-9).",
+  "sampledAt": "2026-11-12",
+  "source": "Coolify app qijlnydkhsixirfc0ms6rwy8 (Gonvex staging runtime), volume qijlnydkhsixirfc0ms6rwy8-sqlite-data, 15 tenant files, 13 with assistant traces",
+  "stagingImage": {
+    "image": "ghcr.io/whagons-international/gonvex-runtime:84bb4fafa8fbc80f4d03be8788e9f31923f0b9ca",
+    "sandboxWorkerWithDuckdb": false,
+    "workerAnswer": "DuckDB analysis is unavailable in this build; enable the duckdb Cargo feature",
+    "coolifyEnv": { "GONVEX_SANDBOX_ENABLED": "true (staging, production-v2); unset = false (production)", "GONVEX_DUCKDB": "unset (Dockerfile.runtime default false)" }
+  },
+  "currentTools": {
+    "analyzeInSandbox": { "calls": 19, "tenants": 4, "from": "2026-09-20", "to": "2026-11-05", "succeeded": 0, "failures": { "IO Error: Cannot open file \"./analysis.duckdb\": Permission denied": 15, "DuckDB analysis is unavailable in this build": 2, "Conversation data file is not ready": 2 } },
+    "snapshotTasksData": { "calls": 56, "tenants": 6, "from": "2026-09-13", "to": "2026-11-07", "succeeded": 35, "failures": { "DuckDB analysis is unavailable in this build": 14, "sandbox is disabled by runtime policy": 3, "workspaceId is required for a task snapshot": 4 } },
+    "queryDataFile": { "calls": 2, "succeeded": 0, "failures": { "Conversation data file is not ready": 2 } },
+    "inspectDataFile": { "calls": 1, "succeeded": 0, "failures": { "DuckDB analysis is unavailable in this build": 1 } },
+    "readConversationFile": { "calls": 1, "succeeded": 0, "failures": { "DuckDB analysis is unavailable in this build": 1 } },
+    "profileDataFile": { "calls": 0 }
+  },
+  "modelWrittenSql": {
+    "statements": 24,
+    "distinct": 10,
+    "sources": { "queryDataFile (current)": 2, "query_data_file (legacy)": 6, "sandbox_run_go whdataRows (legacy)": 24, "analyzeInSandbox / sandbox_run code literals": 0 },
+    "acceptedByDuckdb141AndSqlite": 8,
+    "failOnBothEngines": { "count": 2, "why": "read_json_auto('tasks-snapshot-1.json'): DuckDB-only, and Rust's DuckDB has no json extension (autoload off), so it fails on Rust too" },
+    "duckdbOnlySyntaxThatRustRunsAndSqliteRefuses": 0,
+    "method": "each statement prepared on DuckDB 1.4.1 (python) and SQLite 3.54 against tables synthesized from its identifiers; read_json_auto checked in the K20 image"
+  }
+}
