@@ -8,11 +8,11 @@ import { replay, validateRaw } from '../reports/replay.mjs';
 
 const ctx = extra => ({ environment:'local-synthetic',syntheticOnly:true,sideEffectsAudited:true,coldFixture:false,
   tenantAlias:'synthetic-monitor',identities:{writer:'synthetic-writer',reader:'synthetic-reader',unauthorized:'synthetic-outsider'},
-  operatorCredentials:false,sourceSha:'revision-regression-fixture',deploy:'review-local',region:'local',executor:'node-local',
+  operatorCredentials:false,sourceSha:process.env.M05_SOURCE_SHA ?? 'revision-regression-fixture',deploy:'review-local',region:'local',executor:'node-local',
   configSha:'review-config',domain:'local-handler-fixture',deadlineMs:10,scheduledAt:Date.now(),...extra });
 const guard = () => new WriteGuard({paused:false,active:null,cleanupHealthy:true,remainingWrites:10,fixtures:[]},async()=>{});
 const block = ms => { const until=performance.now()+ms; while(performance.now()<until) {} };
-const evidence = { domain:'author-local-builtins-and-adapter-fixtures-NOT-SDK-or-hosted-proof',reviewedHead:'445695ee9f4002a571a7aef71a6bda91183490f8',results:{} };
+const evidence = { domain:'author-local-builtins-and-adapter-fixtures-NOT-SDK-or-hosted-proof',reviewedHead:'445695ee9f4002a571a7aef71a6bda91183490f8',sourceCommit:process.env.M05_SOURCE_SHA ?? 'uncommitted-fixture',results:{} };
 after(async()=>{
   const file=process.env.M05_REVISION_RESULTS;
   if(file) {
