@@ -56,7 +56,7 @@ export interface TelemetryHostState {
   limiter: TelemetryLimiter;
   /** The kernel's per-object budget of performance rows forwarded to the control object's SQLite window. */
   storeBudget: TelemetryLimiter;
-  /** Rows per project per minute this object forwards to the control object (0040 §1). */
+  /** Rows per project per minute this object forwards to the control object (0041 §1). */
   storePerMinute: number;
   /** Analytics Engine, when bound: every accepted performance event. */
   sink?: PerformanceSink | undefined;
@@ -151,7 +151,7 @@ export class SocketTelemetry {
     }
     const stored = await this.port.registerErrorSession({
       connectionId: attribution.connectionId, projectId: attribution.projectId, tenantId: attribution.tenantId, accountId: attribution.accountId,
-      release: release ?? "", environment: environment ?? "",
+      release: release ?? "", environment: environment ?? "", live: this.host.presenceEnabled,
     });
     if (!stored) return errorAck(id, { error: ACK_ERRORS.store });
     if (this.host.presenceEnabled) {

@@ -1,6 +1,6 @@
 /**
  * Workers Analytics Engine as the sink of record for performance events
- * (0040 §1). Every accepted event is written as one data point from the
+ * (0041 §1). Every accepted event is written as one data point from the
  * object that owns the socket: no RPC, no SQLite row, no disk of ours, and the
  * platform's own retention (three months). The control object keeps only the
  * bounded recent window the Rust-shaped dashboard routes read.

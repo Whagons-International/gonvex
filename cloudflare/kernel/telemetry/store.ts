@@ -1,7 +1,7 @@
 /**
  * The telemetry tables of the control object: error events and groups,
  * performance events, error support sessions and the Reducer log table, with
- * the retention the reference lacks (contract-changes 0040).
+ * the retention the reference lacks (contract-changes 0041).
  *
  * Writes keep the reference's statements and semantics
  * (`telemetry.rs` `persist_event`, `capture_performance_event`,
@@ -29,7 +29,7 @@ export interface TelemetrySql {
 const DAY = 86_400_000;
 
 /**
- * Retention and size caps (0040 §2). Rust bounds only performance events
+ * Retention and size caps (0041 §2). Rust bounds only performance events
  * (14 days, on every insert); every other table here grows without limit.
  */
 export const RETENTION = {
@@ -145,6 +145,12 @@ export interface ErrorSessionInput {
   /** Already bounded (200 / 100 chars); "" keeps the stored value. */
   release: string;
   environment: string;
+  /**
+   * Live until the socket closes (`support_register`). Only while presence v2
+   * is on: Rust's hub registers nothing when it is off, and the gateway then
+   * reports no close either. Absent: not live.
+   */
+  live?: boolean;
 }
 
 export interface PruneReport {

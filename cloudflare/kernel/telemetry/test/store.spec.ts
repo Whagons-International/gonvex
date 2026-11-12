@@ -2,7 +2,7 @@
  * `TelemetryStore` inside the real control object (K06 schema, DO SQLite):
  * envelope batches behave like Rust's event-by-event writes, counter maps
  * keep their order and cap, performance rows are de-duplicated, and every
- * table has its retention and per-project cap (0040 §2), on the write path
+ * table has its retention and per-project cap (0041 §2), on the write path
  * and on the hourly prune. Rows read and written are measured for the PR.
  */
 import { env, runInDurableObject } from "cloudflare:test";
@@ -185,7 +185,7 @@ describe("the hourly prune", () => {
 describe("error support sessions in the control object", () => {
   it("upserts, keeps a stored release when the new one is empty, and is live until the socket closes", async () => {
     await inControl(async (control) => {
-      const input = { connectionId: "conn-x", projectId: "p-sessions", tenantId: "t", accountId: "a", release: "1.0", environment: "prod" };
+      const input = { connectionId: "conn-x", projectId: "p-sessions", tenantId: "t", accountId: "a", release: "1.0", environment: "prod", live: true };
       expect(await control.telemetryRegisterSession(input)).toBe(true);
       expect(await control.telemetryRegisterSession({ ...input, release: "", environment: "" })).toBe(true);
       expect(control.sql.all("SELECT id,connection_id,release,environment FROM gonvex_support_sessions WHERE project_id='p-sessions'")).toEqual([
@@ -197,6 +197,23 @@ describe("error support sessions in the control object", () => {
       expect([...control.supportLiveIds("p-sessions")].sort()).toEqual(["conn-x", "support_conn-x"]);
       await control.connectionState("conn-x", null);
       expect(control.supportLiveIds("p-sessions").size).toBe(0);
+    });
+  });
+
+  it("does not mark a session live while presence v2 is off, so no session leaks and the prune can take it", async () => {
+    await inControl(async (control) => {
+      // The gateway reports no close for it (presence off keeps no record), so it must never become live.
+      const input = { connectionId: "conn-off", projectId: "p-sessions-off", tenantId: "t", accountId: "a", release: "1", environment: "prod", live: false };
+      expect(await control.telemetryRegisterSession(input)).toBe(true);
+      expect(await control.telemetryRegisterSession({ ...input, live: undefined as unknown as boolean })).toBe(true);
+      expect(control.supportLiveIds("p-sessions-off").size).toBe(0);
+      expect(control.sql.all("SELECT id FROM gonvex_support_sessions WHERE project_id='p-sessions-off'")).toEqual([{ id: "conn-off" }]);
+      // 31 days later the hourly alarm prunes it (a live id would be kept).
+      control.sql.run("UPDATE gonvex_support_sessions SET last_seen_at=$1 WHERE id='conn-off'", Date.now() - 31 * DAY);
+      // K19's alarm runs the hourly prune only when it is due; an earlier test already ran it.
+      (control as unknown as { ctx: DurableObjectState }).ctx.storage.kv.delete("k19/prune-due");
+      await control.alarm();
+      expect(control.sql.all("SELECT id FROM gonvex_support_sessions WHERE project_id='p-sessions-off'")).toEqual([]);
     });
   });
 });

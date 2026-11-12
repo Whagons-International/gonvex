@@ -135,7 +135,7 @@ describe("error support sessions", () => {
     await s.send({ type: "error.register", id: "1", release: " 1.0 ", environment: "prod" });
     await s.send({ type: "error.register", id: "2", release: " 1.0 ", environment: "prod" });
     await s.send(heartbeat("3"));
-    expect(s.port!.sessions).toEqual([{ connectionId: "conn-1", projectId: "p", tenantId: "tenant", accountId: "acct", release: " 1.0 ", environment: "prod" }]);
+    expect(s.port!.sessions).toEqual([{ connectionId: "conn-1", projectId: "p", tenantId: "tenant", accountId: "acct", release: " 1.0 ", environment: "prod", live: true }]);
     expect(s.record.errorSession).toEqual({ project: "p", tenant: "tenant", account: "acct", release: " 1.0 ", environment: "prod" });
     expect(s.persisted()).toBe(1);
     // An empty release is a change (Some("")), but keeps the registered value.
@@ -151,6 +151,8 @@ describe("error support sessions", () => {
     await off.send(heartbeat("1"));
     await off.send(heartbeat("2"));
     expect(off.port!.sessions).toHaveLength(2);
+    // Rust's hub registers nothing while presence is off: the control object must not hold it live.
+    expect(off.port!.sessions.every((input) => input.live === false)).toBe(true);
     expect(off.record.errorSession).toBeUndefined();
     const anonymous = socket(ANONYMOUS);
     expect(await anonymous.send({ type: "error.register", id: "a", release: "1" })).toEqual([{ type: "error.ack", id: "a" }]);

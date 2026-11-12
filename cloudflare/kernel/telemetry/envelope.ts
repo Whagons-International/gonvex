@@ -16,7 +16,7 @@
  * (an IndexMap). Its `remove` is a `swap_remove`, so removing a key moves the
  * map's last key into its slot; `withoutKeys` reproduces that, so a stored
  * payload has Rust's key order. Two differences are inherent to JS values and
- * accepted (contract-changes 0040 §6): integer-like keys (`"0"`, `"42"`) are
+ * accepted (contract-changes 0041 §5): integer-like keys (`"0"`, `"42"`) are
  * ordered first by JS objects, and a float written with a zero fraction
  * (`1.0`) is held as the integer `1`.
  */
@@ -77,11 +77,10 @@ export function isSecretKey(key: string): boolean {
 
 /** `scrub_object`: secret keys removed, every value scrubbed one level deeper. */
 function scrubObject(object: JsonObject, depth: number): JsonObject {
-  const out: JsonObject = {};
-  for (const [key, value] of Object.entries(object)) {
-    if (!isSecretKey(key)) out[key] = scrubValue(value, depth + 1);
-  }
-  return out;
+  // `Object.fromEntries` defines own properties, so a `__proto__` key survives as data, as in serde.
+  return Object.fromEntries(
+    Object.entries(object).filter(([key]) => !isSecretKey(key)).map(([key, value]) => [key, scrubValue(value, depth + 1)]),
+  );
 }
 
 /** `scrub_value`: depth > 8 is truncated, strings to 4,000 chars, arrays to 50, objects to their first 100 keys. */

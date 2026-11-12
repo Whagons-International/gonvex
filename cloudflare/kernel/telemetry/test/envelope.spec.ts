@@ -28,6 +28,19 @@ describe("scrubbing (scrub_object / scrub_value)", () => {
     expect(event.context).toEqual({ safe: "yes", nested: { list: [{ ok: 1 }] } });
   });
 
+  it("keeps `__proto__` keys as data at every depth (serde has no prototype)", async () => {
+    const raw = JSON.parse('{"message":"m","__proto__":{"polluted":true},"context":{"__proto__":"v","safe":1,"list":[{"__proto__":2}]}}') as Json;
+    const event = authoritativeEvent(MEMBER, raw)!;
+    expect(Object.prototype.hasOwnProperty.call(event, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(event)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    const text = JSON.stringify(event);
+    expect(text).toContain('"__proto__":{"polluted":true}');
+    expect(text).toContain('"context":{"__proto__":"v","safe":1,"list":[{"__proto__":2}]}');
+    const [prepared] = await prepareEvents(MEMBER, [raw]);
+    expect(prepared!.payload).toBe(text);
+  });
+
   it("bounds strings by Unicode scalar values, arrays to 50, objects to their first 100 keys", () => {
     const wide = Object.fromEntries(Array.from({ length: 105 }, (_, i) => [`k${i}`, i]));
     const event = authoritativeEvent(MEMBER, { message: "m", long: "\u{1F600}".repeat(4_001), list: Array.from({ length: 60 }, (_, i) => i), wide } as Json) as any;

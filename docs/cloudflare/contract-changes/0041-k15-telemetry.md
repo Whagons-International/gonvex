@@ -1,6 +1,6 @@
 # 0041: Telemetry and errors (K15): sinks, retention and findings
 
-Date: 2026-11-11. Status: **proposed** (K15), for the lead. Numbered 0041: 0039 is K12's (0037) and 0040 is
+Date: 2026-11-11. Status: **ruled in 0045** (§1 accepted; §2's support-session prune and impact-map cap accepted as deviations; rate limits per gateway). Numbered 0041: 0039 is K12's (0037) and 0040 is
 K21's open PR. Affects: `CONTRACT.md` A.1.7 (`error.envelope`, `telemetry.batch`), A.2 (`error.*`,
 `telemetry.*`), C.2 tables 7, 28, 33-35, D.1 "Metrics, logs, errors and caches"; K05, K06, K14, K19, M05.
 Code: `cloudflare/kernel/telemetry/`.
@@ -109,7 +109,9 @@ written before the failure. The answer (`error store unavailable`) is the same.
 - K14 (`kernel/presence/socket.ts`): the close-time `connectionState(…, null)` also runs when only an error
   session was registered.
 - K06 (`control/src/control-object.ts`): three RPC methods, `errorSessionId` in `ConnectionState` (live
-  until close, merged with presence's reports, last seen on close), the prune on the hourly alarm.
+  until close, merged with presence's reports, last seen on close), the prune on the hourly alarm. A session
+  is live only when the gateway registered it with presence v2 on (`live: true`): with presence off Rust's
+  hub holds nothing, and the gateway reports no close, so a live entry would never end (fixed after review).
 - Shared, append-only: `package.json` scripts, the root `tsconfig.json` exclude, the conformance registry
   and README.
 

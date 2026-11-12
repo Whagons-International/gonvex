@@ -293,8 +293,11 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
       console.error("telemetry: error session upsert failed", error);
       return false;
     }
-    const state = this.connections.get(input.connectionId);
-    this.connections.set(input.connectionId, { ...(state ?? { projectId: input.projectId, tenantId: input.tenantId, authenticated: true }), errorSessionId: input.connectionId });
+    // Live only while presence v2 is on (`support_register`); otherwise no close is ever reported for it.
+    if (input.live === true) {
+      const state = this.connections.get(input.connectionId);
+      this.connections.set(input.connectionId, { ...(state ?? { projectId: input.projectId, tenantId: input.tenantId, authenticated: true }), errorSessionId: input.connectionId });
+    }
     this.notify(input.projectId);
     return true;
   }
@@ -365,7 +368,7 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
       if (pruneIdempotency(ctx, 500) < 500) break;
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    // K15: telemetry retention and caps (contract-changes 0040).
+    // K15: telemetry retention and caps (contract-changes 0041).
     try {
       await this.telemetry.prune(this.liveSupportIds());
     } catch (error) {
