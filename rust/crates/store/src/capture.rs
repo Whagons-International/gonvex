@@ -675,6 +675,39 @@ mod tests {
     use serde_json::{json, Value};
     use sqlx::{Connection, Row, SqliteConnection};
 
+    #[tokio::test]
+    async fn refresh_recovers_after_rolled_back_schema_changes() {
+        let mut connection = connection_with(
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)",
+            "t",
+            "id",
+        )
+        .await;
+        sqlx::raw_sql("BEGIN; ALTER TABLE t ADD COLUMN discarded TEXT")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        super::refresh(&mut connection).await.unwrap();
+        sqlx::raw_sql("ROLLBACK; ALTER TABLE t ADD COLUMN kept INTEGER")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        super::refresh(&mut connection).await.unwrap();
+        // The committed ALTER reuses the rolled-back ALTER's schema cookie.
+        // Capture must use the committed shape, including the new column.
+        let mut tx = connection.begin().await.unwrap();
+        sqlx::query("INSERT INTO t VALUES(1, 'saved', 42)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        finalize(&mut tx, &Provenance::default()).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            changes(&mut connection).await[0].2,
+            json!({"id": 1, "value": "saved", "kept": 42})
+        );
+    }
+
     /// The digest gate trusts only committed cookies: a rolled-back schema
     /// change can bring back a cookie value with different definitions.
     #[tokio::test]

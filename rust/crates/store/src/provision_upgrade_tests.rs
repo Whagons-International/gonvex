@@ -513,6 +513,28 @@ async fn provisioning_twice_is_idempotent_and_projects_membership() {
         .unwrap();
     assert_eq!(schema_version().await, version);
 
+    let original: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE name='gonvex_queue_control_plane_membership_update'",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DROP TRIGGER gonvex_queue_control_plane_membership_update;
+        CREATE TRIGGER gonvex_queue_control_plane_membership_update AFTER UPDATE ON members BEGIN SELECT 1; END;")
+        .execute(&writer).await.unwrap();
+    control
+        .clone()
+        .provision_tenant_database(route.clone(), migrations.clone())
+        .await
+        .unwrap();
+    let restored: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE name='gonvex_queue_control_plane_membership_update'",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    assert_eq!(restored, original);
+
     // A later migration's own writes are revisioned under its command id and published.
     let mut listener = pools.listener(&route.database_url).await.unwrap();
     listener.listen(feed::CHANGE_FEED_CHANNEL).await.unwrap();
