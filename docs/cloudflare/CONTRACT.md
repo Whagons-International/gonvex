@@ -1782,6 +1782,7 @@ new note and waits for the lead.
 | 0070 | Recovery-only exact-subset processing facts | follow-up permitted; final independent/deployed proof open | K22 |
 | 0071 | One refresh after proven zero invocation | bounded prototype permitted; ambiguous replay prohibited | K22 |
 | 0072 | Invitation foreign-receipt reference quirk | preserve observed behavior; separate hardening deferred | K22, later hardening |
+| 0073 | Explicit admission for ordered holder rebuild | permitted under0061/0069; no client retry credit or lifetime approval | K22 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
