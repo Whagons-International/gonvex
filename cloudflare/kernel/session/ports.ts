@@ -9,7 +9,9 @@
  *  - `ModulePort`: the active module generation of a project (K19 deploys it):
  *    artifact hash, client contract, replica epoch.
  *  - `TenantPort`: tenant-scoped frames of an authenticated session (K07
- *    Reducers, K08 Queries, K10 replicas, K14 presence, K15 telemetry).
+ *    Reducers, K08 Queries, K10 replicas, K14 presence).
+ *  - `TelemetryPort` (optional): the control object's telemetry store (K15);
+ *    `error.*` and `telemetry.*` frames are handled next to the socket.
  *
  * Until those packages land, `stub/` implements the three ports with the
  * observable behaviour of the Rust runtime for the paths the session layer
@@ -20,6 +22,7 @@ import type { Negotiated } from "./capabilities";
 import type { ConnectionReport } from "../presence/hub";
 import type { ServiceControlOutcome, ServiceTenantCall, ServiceTenantOutcome } from "../principals/frames";
 import type { ServiceGrant } from "../principals/grant";
+import type { TelemetryPort } from "../telemetry/port";
 
 export interface Account {
   id: string;
@@ -185,4 +188,6 @@ export interface Ports {
   control: ControlPort;
   modules: ModulePort;
   tenants: TenantPort;
+  /** K15: the control object's telemetry store. Unset: `error telemetry is unavailable` (no Control Plane in Rust's terms). */
+  telemetry?: TelemetryPort;
 }

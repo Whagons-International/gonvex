@@ -55,6 +55,7 @@ pings. Queue consumers: 15 minutes. Workflow steps: no wall-clock limit.
 | IB3 | Reducer receipts | Receipt table never pruned (E.receipts) | Receipt results expire after the client's offline window; a tombstone refuses late duplicates | 0001, 0009 |
 | IB4 | Webhooks | No runtime route: external adapters verify and invoke an Action (D.1 Webhooks) | One Ingress Worker for every webhook, forwarding the raw body; signatures verified in the invoked Action or the Ingress Worker (0045) | 0001, 0002 |
 | IB5 | Visibility delivery | Rust never delivers a row that becomes visible when its parent is inserted later, though a fresh snapshot shows it (0031) | The kernel delivers it, converging on the snapshot state | 0032 |
+| IB6 | Sandbox workspace | Rust creates the chroot workspace as root and runs the worker as uid 65534, so DuckDB cannot write `./analysis.duckdb` (15 of 19 staging calls fail) | The kernel chowns the workspace to the worker's uid | 0050 |
 
 Out of scope by decision of the brief: the native-rows binary snapshot path (the shipped SDK never
 negotiates it), the Go runtime, and Rust caches, lanes, offload threads and tuning variables.
@@ -1756,6 +1757,8 @@ new note and waits for the lead.
 | 0046 | K10 replica delivery findings | ruled in 0048 | K10, K22 |
 | 0047 | K20 sandbox findings (Dynamic Workers as L09 candidate) | ruled in 0048; L09 pull-forward for Gabriel | K20, L09 |
 | 0048 | K10 and K20 rulings; one commit channel; K22 assembly added | decided | K05, K08, K10, K20, K22, V01 |
+| 0049 | Batch-C re-review: K15, K16, K18, K21; test-harness backends; flake protocol | decided | K22, V01 |
+| 0050 | Final rulings K10, K15, K16, K20; IB6 sandbox workspace; staging DuckDB defect for Gabriel | decided (§2a Gabriel) | K10, K20, K22, L09 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

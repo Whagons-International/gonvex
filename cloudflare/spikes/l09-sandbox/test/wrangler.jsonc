@@ -1,0 +1,20 @@
+// Test-only Worker for the sandbox (K20). Never deployed; the name keeps the
+// gonvex-cf-dev- prefix anyway.
+{
+  "name": "gonvex-cf-dev-l09-sandbox-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // AsyncLocalStorage carries the module invocation (K04 globals.ts) in test/action.test.ts.
+  "compatibility_flags": ["nodejs_als"],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "SANDBOX_WORKSPACE", "class_name": "SandboxWorkspace" },
+      { "name": "SANDBOX_ANALYSIS", "class_name": "SandboxAnalysis" },
+      { "name": "SANDBOX_REGISTRY", "class_name": "SandboxRegistry" },
+      { "name": "SANDBOX_SLOTS", "class_name": "RunSlots" }
+    ]
+  },
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-l09-files" }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SandboxWorkspace", "SandboxAnalysis", "SandboxRegistry", "RunSlots"] }]
+}

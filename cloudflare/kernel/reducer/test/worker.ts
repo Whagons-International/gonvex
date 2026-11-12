@@ -8,6 +8,7 @@ import { HarnessTenant, KernelControlStub, harnessFetch, type HarnessEnv } from 
 import { bundleFor } from "./fixture.ts";
 
 export { GatewayObject, KernelControlStub };
+export { PublicLimiterObject } from "../../public/index";
 
 /** A plain object: `reference/test` drives its storage through `runInDurableObject`. */
 export class RefTestObject extends DurableObject {}

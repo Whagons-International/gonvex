@@ -4,7 +4,8 @@
  * `service_tenant_call` (service_principal.rs:491-558).
  *
  * The call runs as the principal's system identity (`serviceSession`), with
- * `allow_internal` and the `api` invocation channel, through the same path a
+ * `allow_internal` and the `api` invocation channel (`system` when the
+ * principal is configured so, 0045: the Ingress Worker), through the same path a
  * member's call takes (K07 for Reducers), so receipts, capture provenance,
  * commit order and error texts are the member path's. The allowlist was
  * checked by the object that holds the socket; the tenant object trusts the
@@ -32,7 +33,7 @@ export async function serviceTenantCall(kernel: KernelTenant, grant: ServiceGran
     id: call.id, path: call.path, args: call.args,
     ...(call.idempotencyKey !== undefined ? { idempotencyKey: call.idempotencyKey } : {}),
   };
-  const outcome = await kernel.reducers.serial(() => kernel.reducers.execute(session, request, { allowInternal: true, channel: "api" }));
+  const outcome = await kernel.reducers.serial(() => kernel.reducers.execute(session, request, { allowInternal: true, channel: grant.channel ?? "api" }));
   if (!outcome.ok) return { ok: false, error: outcome.failure.message };
   return outcome.committedRevision === undefined
     ? { ok: true, result: outcome.result }

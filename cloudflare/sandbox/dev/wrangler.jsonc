@@ -1,0 +1,29 @@
+// Platform proof for K20 on the development account: the sandbox Worker in its
+// own script (0048 §2.3) with the per-tenant Container, and a probe route
+// (dev/worker.ts). Deploy, probe and delete with dev/platform.mjs.
+{
+  "name": "gonvex-cf-dev-k20-sandbox",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "workers_dev": true,
+  "preview_urls": false,
+  "containers": [
+    {
+      "class_name": "SandboxContainer",
+      "image": "../container/Dockerfile",
+      // The image builds Rust's crates and the manager: the repository is the context.
+      "image_build_context": "../../..",
+      // 1/4 vCPU, 1 GiB, 4 GB disk: two runs at once (V8 64 MiB + DuckDB 128 MiB each) and the manager.
+      "instance_type": "basic",
+      "max_instances": 10
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "SANDBOX_CONTAINER", "class_name": "SandboxContainer" },
+      { "name": "SANDBOX_REGISTRY", "class_name": "SandboxRegistry" }
+    ]
+  },
+  "vars": { "GONVEX_SANDBOX_ENABLED": "true" },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SandboxContainer", "SandboxRegistry"] }]
+}

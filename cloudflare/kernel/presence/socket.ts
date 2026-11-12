@@ -77,6 +77,8 @@ export interface PresenceRecordHost {
   negotiated: Negotiated;
   presence?: PresenceRecord | null;
   support?: SupportRecord | null;
+  /** K15: the error support session this connection registered (its close is reported like `support`'s). */
+  errorSession?: unknown;
   /** Last replica watermark sent since auth (Rust `sent_replica_revision`; 0: none). */
   watermark?: number;
 }
@@ -216,7 +218,8 @@ export class SocketPresence {
   /** The socket is gone: presence leaves, and a registered support session is last seen now (K06 flush). */
   async closed(tenant: TenantSession | null): Promise<void> {
     const work: Array<Promise<void>> = [this.leave(tenant)];
-    if (this.record.support && this.ports.control.connectionState) {
+    // K15: an error support session (`error.register`) is last seen at close too.
+    if ((this.record.support || this.record.errorSession) && this.ports.control.connectionState) {
       work.push(this.ports.control.connectionState(this.record.connectionId, null).catch((error) => console.error("presence: support close failed", error)));
     }
     await Promise.all(work);

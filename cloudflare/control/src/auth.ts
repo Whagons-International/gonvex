@@ -247,7 +247,10 @@ function authenticateServicePrincipal(ctx: Ctx, id: string, token: string, proje
   } catch {
     return authError(id, "transient", "tenant is not available");
   }
-  const grant: ServiceGrant = { principalId: principal.id, route, functions: principal.functions, maxDelegationSeconds: principal.maxDelegationSeconds };
+  const grant: ServiceGrant = {
+    principalId: principal.id, route, functions: principal.functions, maxDelegationSeconds: principal.maxDelegationSeconds,
+    ...(principal.channel === "system" ? { channel: "system" as const } : {}),
+  };
   return {
     message: {
       type: "auth.result",
@@ -281,7 +284,7 @@ export function parseServicePrincipals(value: string | undefined): ServicePrinci
   if (!Array.isArray(entries)) return fail("expected an array");
   const out: ServicePrincipalConfig[] = [];
   for (const raw of entries as Array<Record<string, unknown>>) {
-    const known = ["id", "tokenSha256", "projects", "functions", "maxDelegationSeconds", "manifest"];
+    const known = ["id", "tokenSha256", "projects", "functions", "maxDelegationSeconds", "manifest", "channel"];
     for (const key of Object.keys(raw ?? {})) if (!known.includes(key)) fail(`unknown field \`${key}\``);
     const id = String(raw.id ?? "").trim();
     if (!id || id.length > 64 || !/^[A-Za-z0-9_-]+$/.test(id)) fail(`principal id ${JSON.stringify(id)} must be 1-64 of [A-Za-z0-9_-]`);
@@ -295,7 +298,9 @@ export function parseServicePrincipals(value: string | undefined): ServicePrinci
     if (functions.some((f) => f.startsWith("control.") || f.includes("*"))) fail(`principal ${JSON.stringify(id)} functions must be exact tenant module paths`);
     const seconds = raw.maxDelegationSeconds === undefined || raw.maxDelegationSeconds === null ? 900 : Number(raw.maxDelegationSeconds);
     if (!Number.isInteger(seconds) || seconds < 60 || seconds > 3600) fail(`principal ${JSON.stringify(id)} maxDelegationSeconds must be between 60 and 3600`);
-    out.push({ id, tokenSha256, projects, functions, maxDelegationSeconds: seconds, manifest: raw.manifest === true });
+    const channel = raw.channel === undefined || raw.channel === null ? "api" : raw.channel;
+    if (channel !== "api" && channel !== "system") fail(`principal ${JSON.stringify(id)} channel must be "api" or "system"`);
+    out.push({ id, tokenSha256, projects, functions, maxDelegationSeconds: seconds, manifest: raw.manifest === true, channel: channel as "api" | "system" });
   }
   return out;
 }

@@ -7,6 +7,7 @@ import type { ClientFrame } from "./decode";
 import type { Ports, SocketView, TenantRoute } from "./ports";
 import type { GatewayBindings, TenantLink } from "./placement/gateway";
 import { type ControlRpc, type TenantRpc, rpc } from "./rpc";
+import { publicGuard, type PublicGuardEnv } from "../public/guard";
 
 export interface SessionBindingsEnv {
   CONTROL_STUB: DurableObjectNamespace<any>;
@@ -53,4 +54,5 @@ export const gatewayBindings: GatewayBindings = {
     const tenant = rpc<TenantRpc>((env as SessionBindingsEnv).TENANT_STUB, tenantObjectName(route));
     return { attachGateway: (name) => tenant.attachGateway(name), detachGateway: (name) => tenant.detachGateway(name) };
   },
+  publicGuard: (env) => publicGuard(env as PublicGuardEnv),
 };

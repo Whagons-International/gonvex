@@ -1,0 +1,21 @@
+// The K16 conformance Worker (`cloudflare-public` backend in cloudflare/conformance):
+// K05 sockets with the K16 address limiter, K07's tenant object with public
+// Query and Action calls composed (tenant.ts), and the fixture bundles of the run.
+// Local only; never deployed (the name keeps the prefix anyway).
+{
+  "name": "gonvex-cf-dev-k16-conformance",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // AsyncLocalStorage carries the active invocation across awaits (K04 globals.ts).
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "GATEWAY", "class_name": "GatewayObject" },
+      { "name": "CONTROL_STUB", "class_name": "KernelControlStub" },
+      { "name": "TENANT_STUB", "class_name": "ConformancePublicTenant" },
+      { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" }
+    ]
+  },
+  "vars": { "GONVEX_RUNTIME_VERSION": "development", "GONVEX_GATEWAY_SHARDS": "8", "GONVEX_PRESENCE": "1" },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GatewayObject", "KernelControlStub", "ConformancePublicTenant", "PublicLimiterObject"] }]
+}

@@ -22,15 +22,19 @@ import type { ModuleInfo, Ports, TenantRoute, TenantSession } from "../ports";
 import { SocketHost } from "../host";
 import { deliveryClass } from "../session";
 import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../presence/hub";
+import { type TelemetryEnv, telemetryHostFromEnv } from "../../telemetry/env";
 import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
 import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt } from "../../delivery/protocol";
+import { UNKNOWN_ADDRESS } from "../../public/address";
+import type { PublicGuard } from "../../public/guard";
+import type { SlotKind } from "../../public/limiter";
 
 /** S3: about 125 sockets per gateway carried 30 commits/s to 1,000 sockets. */
 export const SOCKETS_PER_GATEWAY = 125;
 export const DEFAULT_GATEWAY_SHARDS = 8;
 export const PROTOCOL_VERSION = 1;
 
-export interface GatewayEnv extends PresenceEnv {
+export interface GatewayEnv extends PresenceEnv, TelemetryEnv {
   GONVEX_GATEWAY_SHARDS?: string;
   GONVEX_RUNTIME_VERSION?: string;
   GONVEX_PRESENCE?: string;
@@ -79,7 +83,19 @@ export interface TenantLink {
 export interface GatewayBindings {
   ports(env: unknown): Ports;
   tenantLink(env: unknown, route: TenantRoute): TenantLink;
+  /** K16: public-function limits and the address budgets (absent: default payload cap only). */
+  publicGuard?(env: unknown): PublicGuard;
 }
+
+/** Headers the router hands the gateway with an upgrade (K05, K16). */
+export const UPGRADE_HEADERS = {
+  connectionId: "x-gonvex-connection-id",
+  publicTransport: "x-gonvex-public",
+  /** The client address bucket (`CF-Connecting-IP`, kernel/public/address.ts). */
+  address: "x-gonvex-client-address",
+  /** Slots the router reserved in the address limiter, comma-separated (`pending`, `public`). */
+  slots: "x-gonvex-limiter-slots",
+} as const;
 
 /**
  * Gateway object. Sockets of any tenant; the class is exported by the Worker
@@ -98,8 +114,11 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     super(ctx, env);
     this.gatewayName = ctx.id.name ?? ctx.id.toString();
     const presence = presenceConfig(env);
+    const publicGuard = this.bindings().publicGuard?.(env);
     this.host = new SocketHost({
+      ...(publicGuard ? { publicGuard } : {}),
       presence,
+      telemetry: telemetryHostFromEnv(env, presence.enabled),
       ctx,
       ports: this.bindings().ports(env),
       name: this.gatewayName,
@@ -115,8 +134,10 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
 
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket upgrade", { status: 400 });
-    const connectionId = request.headers.get("x-gonvex-connection-id") ?? crypto.randomUUID();
-    return this.host.accept(request.headers.get("x-gonvex-public") === "1", connectionId);
+    const headers = request.headers;
+    const connectionId = headers.get(UPGRADE_HEADERS.connectionId) ?? crypto.randomUUID();
+    const slots = (headers.get(UPGRADE_HEADERS.slots) ?? "").split(",").filter((k): k is SlotKind => k === "pending" || k === "public");
+    return this.host.accept(headers.get(UPGRADE_HEADERS.publicTransport) === "1", connectionId, headers.get(UPGRADE_HEADERS.address) ?? UNKNOWN_ADDRESS, slots);
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -226,6 +247,11 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     this.host.reschedule();
     const missing = Object.keys(payload.sockets).filter((id) => !seen.has(id));
     return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}) };
+  }
+
+  /** K16: which of these connections are open here (the address limiter's audit of leaked slots). */
+  async liveConnections(connectionIds: string[]): Promise<string[]> {
+    return this.host.liveConnections(connectionIds);
   }
 
   /** Liveness of the RPC path itself; used by the hop benchmark. */

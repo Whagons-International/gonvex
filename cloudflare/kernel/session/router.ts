@@ -7,12 +7,15 @@
  * - An invalid `Sec-WebSocket-Extensions` field is HTTP 400, as in Rust
  *   (`ws/negotiation.rs`). Valid offers pass through: workerd negotiates
  *   permessage-deflate itself (A.1.6 adapt, S3 §4).
- * - Per-address pending and public connection limits (HTTP 429) belong to
- *   K16 and plug in here.
+ * - K16: the client address comes from `CF-Connecting-IP`; its pending and
+ *   public connection slots are reserved in the address limiter before the
+ *   upgrade, and an exhausted budget is HTTP 429 with Rust's text.
  */
-import { gatewayFor, type GatewayEnv } from "./placement/gateway";
+import { gatewayFor, type GatewayEnv, UPGRADE_HEADERS } from "./placement/gateway";
+import { clientAddress } from "../public/address";
+import { admitUpgrade, type PublicGuardEnv, publicGuard } from "../public/guard";
 
-export interface WebSocketRouteEnv extends GatewayEnv {
+export interface WebSocketRouteEnv extends GatewayEnv, PublicGuardEnv {
   GATEWAY: DurableObjectNamespace;
 }
 
@@ -23,11 +26,26 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   if (extensions !== null && !validExtensionsField(extensions)) return new Response(null, { status: 400 });
   const url = new URL(request.url);
   const connectionId = crypto.randomUUID();
+  const publicTransport = url.searchParams.get("public") === "1";
+  const address = clientAddress(request.headers);
+  const gatewayName = gatewayFor(env, connectionId);
+  const refused = await admitUpgrade(env, { address, connectionId, gateway: gatewayName, publicTransport });
+  if (refused) return refused;
+  const slots = env.PUBLIC_LIMITER ? (publicTransport ? "pending,public" : "pending") : "";
   const headers = new Headers(request.headers);
-  headers.set("x-gonvex-connection-id", connectionId);
-  headers.set("x-gonvex-public", url.searchParams.get("public") === "1" ? "1" : "0");
-  const gateway = env.GATEWAY.getByName(gatewayFor(env, connectionId));
-  return gateway.fetch(new Request(request.url, { method: "GET", headers }));
+  headers.set(UPGRADE_HEADERS.connectionId, connectionId);
+  headers.set(UPGRADE_HEADERS.publicTransport, publicTransport ? "1" : "0");
+  headers.set(UPGRADE_HEADERS.address, address);
+  headers.set(UPGRADE_HEADERS.slots, slots);
+  const gateway = env.GATEWAY.getByName(gatewayName);
+  let response: Response | undefined;
+  try {
+    response = await gateway.fetch(new Request(request.url, { method: "GET", headers }));
+    return response;
+  } finally {
+    // The socket never reached its gateway: nothing will release the reservation, so release it here.
+    if (slots && response?.status !== 101) await publicGuard(env).release(address, connectionId, slots.split(",") as Array<"pending" | "public">);
+  }
 }
 
 const TOKEN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+/;

@@ -99,6 +99,12 @@ export interface ServicePrincipalConfig {
   functions: string[];
   maxDelegationSeconds: number;
   manifest: boolean;
+  /**
+   * The invocation channel of the principal's own calls: `api` (Rust's, the
+   * default) or `system` for a host component such as the Ingress Worker
+   * (0045, K18 §3). Set only by configuration, never by a request.
+   */
+  channel: "api" | "system";
 }
 
 /** The authenticated state of one service socket (service_principal.rs `ServiceGrant`). */
@@ -107,6 +113,8 @@ export interface ServiceGrant {
   route: TenantRoute;
   functions: string[];
   maxDelegationSeconds: number;
+  /** Present only for a `system` principal (0045); absent means `api`. */
+  channel?: "system";
 }
 
 /** The deployed module facts the control object needs (from `gonvex_runtime_manifests`). */

@@ -1,0 +1,32 @@
+// Test-only configuration of the kernel Worker for K16 (never deployed): the
+// same objects as cloudflare/wrangler.jsonc, with small public limits.
+{
+  "name": "gonvex-cf-dev-k16-public-test",
+  "main": "../../../src/index.ts",
+  "compatibility_date": "2026-10-23",
+  "durable_objects": {
+    "bindings": [
+      { "name": "HELLO", "class_name": "HelloObject" },
+      { "name": "GATEWAY", "class_name": "GatewayObject" },
+      { "name": "CONTROL_STUB", "class_name": "ControlStubObject" },
+      { "name": "TENANT_STUB", "class_name": "TenantStubObject" },
+      { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" }
+    ]
+  },
+  "vars": {
+    "GONVEX_RUNTIME_VERSION": "development",
+    "GONVEX_GATEWAY_SHARDS": "8",
+    "GONVEX_PRESENCE": "1",
+    "GONVEX_PUBLIC_CALLS_PER_CONNECTION": "4",
+    "GONVEX_PUBLIC_CALLS_PER_IP": "6",
+    "GONVEX_PUBLIC_CONNECTIONS_PER_IP": "2",
+    "GONVEX_PENDING_CONNECTIONS_PER_IP": "3",
+    "GONVEX_PUBLIC_MAX_PAYLOAD_BYTES": "512",
+    "GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS": "7"
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["HelloObject"] },
+    { "tag": "v2", "new_sqlite_classes": ["GatewayObject", "ControlStubObject", "TenantStubObject"] },
+    { "tag": "v3", "new_sqlite_classes": ["PublicLimiterObject"] }
+  ]
+}

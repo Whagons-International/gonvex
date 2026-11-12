@@ -22,6 +22,7 @@ export interface GatewayRpc {
   presence(delivery: PresenceDelivery): Promise<PresenceReceipt>;
   presenceConnections(tenantId: string): Promise<ConnectionReport[]>;
   deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt>;
+  liveConnections(connectionIds: string[]): Promise<string[]>;
 }
 
 export interface TenantRpc {
