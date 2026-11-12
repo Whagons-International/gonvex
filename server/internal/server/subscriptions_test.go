@@ -1407,3 +1407,58 @@ func TestDeclaredLandlordWriteColumnsSkipUnrelatedColumnScopedReads(t *testing.T
 	server.broadcastMutationInvalidationsForCommitAt("project-a", "tenant-a", "users.rename", "rename", time.UnixMilli(20))
 	eventually(t, time.Second, func() bool { return executions["spots"].Load() == 1 })
 }
+
+// presence.list returns the same rows for every member of a tenant. Declared
+// with ShareByPermissions it must run once per permission set, not once per
+// user, even though it reads ephemeral state and so bypasses the query cache.
+func TestPermissionSharedEphemeralQueryRunsOncePerPermissionSet(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{Project: "project-a", Functions: map[string]manifest.FunctionEntry{
+		"presence.list": {Kind: manifest.FunctionKindQuery, Dependencies: manifest.FunctionDependencies{
+			Reads:              []manifest.ReadDependency{{Table: "userPresence", Columns: []string{"_id", "userId", "lastSeenAt", "state"}}},
+			ReadsEphemeral:     true,
+			ShareByPermissions: true,
+		}},
+	}, Schema: manifest.EmptySchema()}); err != nil {
+		t.Fatal(err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"_id": "presence-1", "userId": "user-1", "state": "active"}}, nil
+	}
+	connection := &wsConn{server: server, project: "project-a", tenant: "tenant-a", subs: map[string]querySubscription{}}
+	for index, userID := range []string{"user-1", "user-2", "user-3"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		manager.attach(querySubscription{
+			conn: connection, id: fmt.Sprintf("presence-%d", index), project: "project-a", tenant: "tenant-a",
+			path: "presence.list", args: json.RawMessage(`{}`), ctx: ctx, cancel: cancel, token: newSubscriptionToken(),
+			caller:     callerContext{user: &gonvex.User{ID: userID}, permissions: map[string]any{"role": "member"}},
+			cacheScope: "browser-" + userID,
+		})
+	}
+	manager.mu.Lock()
+	groups := len(manager.groups)
+	manager.mu.Unlock()
+	if groups != 1 {
+		t.Fatalf("presence.list subscriptions of three members formed %d groups, want 1", groups)
+	}
+	// Initial hydration may run more than once while members join; only the
+	// rerun caused by a change is under test.
+	eventually(t, time.Second, func() bool { return executions.Load() >= 1 })
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	base := executions.Load()
+
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", table: "userPresence", operation: "update",
+		changedColumns: []string{"state"}, rowIDs: map[string]bool{"presence-1": true}, triggerObserved: true,
+	})
+	eventually(t, time.Second, func() bool { return executions.Load() == base+1 })
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	if got := executions.Load() - base; got != 1 {
+		t.Fatalf("one presence change executed presence.list %d times, want once for all members", got)
+	}
+}
