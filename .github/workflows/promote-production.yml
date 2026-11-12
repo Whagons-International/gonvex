@@ -85,6 +85,14 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      - name: Capture the currently serving runtime for rollback
+        id: baseline
+        env:
+          GONVEX_RUNTIME_HEALTH_URL: ${{ vars.GONVEX_RUNTIME_HEALTH_URL }}
+        run: |
+          SHA=$(node scripts/release-gates.mjs baseline)
+          git cat-file -e "$SHA^{commit}"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
       - name: Roll runtime, then dashboard, at the approved commit
         run: node scripts/deploy-coolify.mjs
         env:
@@ -130,14 +138,14 @@ jobs:
             sleep $((ATTEMPT * 2))
           done
           exit 1
-      - name: Roll back deployment if release metadata cannot be finalized
-        if: ${{ failure() && steps.finalize.outcome != 'success' }}
+      - name: Roll back to the captured live runtime after a failed promotion
+        if: ${{ failure() && steps.baseline.outcome == 'success' && steps.finalize.outcome != 'success' }}
         run: node scripts/deploy-coolify.mjs
         env:
           COOLIFY_API_URL: ${{ vars.COOLIFY_API_URL }}
           COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
           COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
           COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
-          GONVEX_DEPLOY_SHA: ${{ needs.validate.outputs.production_sha }}
+          GONVEX_DEPLOY_SHA: ${{ steps.baseline.outputs.sha }}
           GONVEX_EXPECT_REQUIRE_AUTH: ${{ inputs.require_auth }}
           GONVEX_COOLIFY_AUTO_DEPLOY: "false"
