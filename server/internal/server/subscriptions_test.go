@@ -334,6 +334,9 @@ func TestUnhealthyListenerFallsBackToDeclaredWrites(t *testing.T) {
 	})
 
 	eventually(t, time.Second, func() bool { return executions.Load() == 2 })
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.UnhealthyListenerFallbacks; got != 1 {
+		t.Fatalf("unhealthy listener fallbacks = %d, want 1", got)
+	}
 }
 
 func TestHealthyListenerSuppressesDeclaredOnlyNoOpCommit(t *testing.T) {

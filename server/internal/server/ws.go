@@ -1632,6 +1632,9 @@ func (s *Server) flushTableChange(key string) {
 		// fallback below, and recovery refreshes every tenant subscription.
 		return
 	}
+	if change.commitID != "" && !listenerHealthy {
+		s.metrics.recordReactive(func(metric *reactiveMetricState) { metric.UnhealthyListenerFallbacks++ })
+	}
 	delivery := pendingChangeForDelivery(change, listenerHealthy)
 	if len(tableChangeTables(delivery)) == 0 || (len(delivery.tables) == 0 && strings.TrimSpace(delivery.table) == "") {
 		// An empty table set is never authoritative. Preserve the legacy
