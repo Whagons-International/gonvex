@@ -1,6 +1,6 @@
 # Merge queue for main. Green eligible PRs enter automatically; Mergify
 # tests main + the queued PRs together on a temporary mergify/merge-queue/*
-# PR (the normal `CI` job runs there via pull_request) and squash-merges the
+# PR (the normal `CI` job runs there via pull_request) and merges the
 # batch only when that combined state passes, so PRs never need to be updated
 # just because main moved.
 queue_rules:
@@ -33,7 +33,8 @@ queue_rules:
           - check-skipped = Macroscope - Correctness Check
     merge_conditions:
       - check-success = CI
-    merge_method: squash
+    # Preserve production ancestry so release-gates can fast-forward production.
+    merge_method: merge
     batch_size: 5
     batch_max_wait_time: 1 min
     max_checks_retries: 1
