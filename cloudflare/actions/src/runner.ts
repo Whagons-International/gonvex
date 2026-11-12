@@ -57,7 +57,7 @@ export async function runCall(deps: RunnerDeps, job: CallJob, owner: string): Pr
 
   try {
     const report = await Promise.race([
-      deps.runtime.execute({ session: claim.session, path: claim.path, args: claim.args, provenance: parseProvenance(claim.provenance), allowInternal: false }),
+      deps.runtime.execute({ session: claim.session, path: claim.path, args: claim.args, provenance: parseProvenance(claim.provenance), allowInternal: claim.session.executionAccess?.allowInternal === true }),
       lost,
     ]);
     if (report === "lost") return { kind: "lost", attempt, renewals };

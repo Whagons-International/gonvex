@@ -137,3 +137,44 @@ it("gives quiet tenants shared RPC credits while a busy tenant still has queued 
     await quietWork;
   } finally { releasing = true; for (const release of held) release(); await Promise.all(work); }
 });
+
+const initialFailure = (instance: string, requests: Record<string, readonly import('../../delivery/protocol').InitialRequestRef[]>): ReplicaDelivery => ({v:1,instance,shared:[],sockets:{},initialFailure:{v:1,reason:'delivery-recovery-failed',requests}});
+it('initial-failure skew never calls an old ordinary receiver, including local placement', async()=>{
+ let ordinary=0;
+ const old=new GatewayOutlet('old',()=>({async deliverReplica(){ordinary++;return {v:1,sockets:1};}}),async()=>[]);
+ await expect(old.send('holder',initialFailure('must-not-apply',{c:[{kind:'query',id:'q',path:'p',epoch:1,generation:1}]}))).rejects.toThrow('GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED');
+ expect(ordinary).toBe(0);
+ const {LocalOutlet}=await import('../../delivery/outlet');
+ const local=new LocalOutlet(()=>{ordinary++;return {v:1,sockets:1};},()=>[]);
+ await expect(local.send('local',initialFailure('must-not-apply',{}))).rejects.toThrow('GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED');
+ expect(ordinary).toBe(0);
+});
+it('marker-only delivery rejects mixed data and requires processing acknowledgment', async()=>{
+ let calls=0;
+ const outlet=new GatewayOutlet('new',()=>({async deliverReplica(){throw new Error('wrong receiver');},async deliverInitialFailures(){calls++;return {v:1,sockets:0};}}),async()=>[]);
+ const marker=initialFailure('not-instance-authority',{});
+ await expect(outlet.send('holder',{...marker,watermark:5})).rejects.toThrow('invalid initial-failure-only');
+ expect(calls).toBe(0);
+ await expect(outlet.send('holder',marker)).rejects.toThrow('GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED');
+ expect(calls).toBe(1);
+});
+it('charges distinct failure ref paths/envelopes across two outlet owners before retention',async()=>{
+ let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});
+ const receiver={async deliverReplica(_t:string,p:ReplicaDelivery){return {v:1,sockets:0,...(p.recovery?{recoveryAck:1 as const}:{})};},async deliverInitialFailures(){await gate;return {v:1,sockets:1,initialFailureAck:1 as const};}};
+ const a=new GatewayOutlet('large-failure-a',()=>receiver,async()=>[]),b=new GatewayOutlet('large-failure-b',()=>receiver,async()=>[]);
+ const refs=(n:number)=>Array.from({length:n},(_,i)=>({kind:'query' as const,id:`q-${i}`,path:`${i}`+'p'.repeat(100000),epoch:1,generation:i+1}));
+ const first=a.send('a',initialFailure('a',{socket:refs(12)}));
+ try{
+  expect(deliveryPressure().normal).toBeGreaterThan(9_600_000);
+  await expect(b.send('b',initialFailure('b',{other:refs(10)}))).rejects.toMatchObject({code:DELIVERY_CAPACITY_CODE});
+  await b.reset('b',recovery());
+ }finally{release();await first;}
+});
+it('initial data/completion skew never invokes an old ordinary receiver',async()=>{
+ let ordinary=0;
+ const outlet=new GatewayOutlet('old-initial',()=>({async deliverReplica(){ordinary++;return {v:1,sockets:1};}}),async()=>[]);
+ const request={kind:'query' as const,id:'q',path:'items.live',epoch:1,generation:1};
+ const frame='{"type":"query.result","id":"q","path":"items.live","reason":"initial","result":[]}';
+ const p:ReplicaDelivery={v:1,instance:'must-not-apply',shared:[],sockets:{c:{subscriptionEpoch:1,initialScope:request,ops:[['f',frame]],initialCompletions:[{request,opIndex:0,outcome:'accepted'}]}}};
+ await expect(outlet.send('old',p)).rejects.toThrow('GONVEX_INITIAL_DELIVERY_UNSUPPORTED');expect(ordinary).toBe(0);
+});

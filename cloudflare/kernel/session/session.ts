@@ -28,7 +28,9 @@ import { handleServiceFrame, type ServiceCalls } from "../principals/frames";
 import { serviceAuthResult, type ServiceGrant } from "../principals/grant";
 import { SocketDelivery, type TrackedReplicas } from "../delivery/socket";
 import { recoveryOf, type RecoverySocketView, type ScopedSocketWork } from "../delivery/recovery";
-import type { ReplicaDelivery, SocketWork } from "../delivery/protocol";
+import { assertInitialState } from "./initial-state";
+import { InitialAdmission } from "./initial-admission";
+import { sameInitialRef, initialCompletion, validInitialCompletions, validInitialRef, type InitialCompletion, type InitialCompletionStatus, type InitialRequestRef, type ReplicaDelivery, type SocketOp, type SocketWork } from "../delivery/protocol";
 import { ADMISSION_MAX_AGE_MS } from "../public/config";
 import { UNKNOWN_ADDRESS } from "../public/address";
 import { ADMISSION_ERROR, frameCost, publicAdmissionErrors, publicLimitErrors, runsTenantCode } from "../public/frames";
@@ -78,9 +80,13 @@ export interface SessionRecord {
   /** K22: successful live subscriptions, retained by the socket owner for tenant restarts. */
   liveQueries?: Record<string, Extract<ClientFrame, { type: "query.subscribe" }>>;
   /** Initial replies use ordered delivery and may arrive after dispatch returned. */
-  pendingLiveQueries?: Record<string, Array<Extract<ClientFrame, { type: "query.subscribe" }>>>;
+  pendingLiveQueries?: Record<string, Array<Extract<ClientFrame, { type: "query.subscribe" }> & { initialGeneration?: number }>>;
+  /** Monotonic server authority, retained across hibernation/scope changes. */
+  initialSequence?: number;
+  initialRequests?: Record<string, InitialRequestRef>;
   replicaInstance?: string;
   pendingActions?: Record<string, string>;
+  actionGenerations?: Record<string, number>;
   controlQueries?: Record<string, { request: Extract<ClientFrame, { type: "query.subscribe" }>; last: string }>;
 
   /** K16: the client address bucket (`CF-Connecting-IP`), the key of every per-address budget. */
@@ -171,7 +177,7 @@ export class Session {
   private readonly modules: ModuleCache;
   /** Frames are handled one at a time, in order, as the Rust loop does. */
   private queue: Promise<void> = Promise.resolve();
-  private readonly actionWaiters = new Map<string, { result: Promise<string | null>; resolve(text: string | null): void; delivered: Promise<void>; done(): void }>();
+  private readonly actionWaiters = new Map<string, { result: Promise<string | null>; resolve(text: string | null): void; delivered: Promise<void>; done(error?: unknown): void }>();
   private queueDepth = 0;
   private queueActive = false;
   closed = false;
@@ -181,6 +187,8 @@ export class Session {
   readonly presence: SocketPresence;
   /** K10: replica delivery on this socket (`replica.batch`, watermarks, instance resets). */
   readonly delivery: SocketDelivery;
+  private readonly initialAdmission = new InitialAdmission();
+  private sinkSequence = 0;
   private readonly timers: SessionTimers;
   private readonly publicGuard: PublicGuard | undefined;
   /** `GONVEX_PUBLIC_MAX_PAYLOAD_BYTES`. */
@@ -190,6 +198,14 @@ export class Session {
 
   private constructor(record: SessionRecord, options: SessionOptions) {
     this.record = record;
+    assertInitialState(record);
+    for (const key of ["initialRequests","liveQueries","pendingLiveQueries","pendingActions","actionGenerations","controlQueries","replicas"] as const) {
+      if (record[key]) (record as unknown as Record<string,unknown>)[key] = Object.assign(Object.create(null),record[key]);
+    }
+    for (const ref of Object.values(record.initialRequests ?? {})) {
+      const request = record.pendingLiveQueries?.[ref.id]?.find(r => r.initialGeneration === ref.generation);
+      if (!this.initialAdmission.reserve(ref.generation, this.initialBytes(ref, request))) throw new Error("initial recovery admission exhausted");
+    }
     this.ports = options.ports;
     this.sink = options.sink;
     this.hooks = options.hooks ?? {};
@@ -200,7 +216,7 @@ export class Session {
     this.lastOutboundAt = record.livenessAt;
     this.timers = options.timers ?? { later: (ms, fn) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); } };
     this.delivery = new SocketDelivery({
-      send: (text) => this.send(text),
+      send: (text) => { const before = this.sinkSequence; this.send(text); return this.sinkSequence > before && !this.closed; },
       sendRaw: (text) => this.sendRaw(text),
       end: () => this.close(CLOSE.failed),
       envelope: () => {
@@ -215,7 +231,7 @@ export class Session {
         this.record.watermark = revision;
         if (revision > this.record.sentRevision) this.record.sentRevision = revision;
       },
-      tracked: () => (this.record.replicas ??= {}),
+      tracked: () => (this.record.replicas ??= Object.create(null)),
       instance: () => this.record.replicaInstance ?? "",
       setInstance: (instance) => { this.record.replicaInstance = instance; },
       trackedChanged: () => { this.hooks.recoveryChanged?.(); this.hooks.persist?.(); },
@@ -426,7 +442,7 @@ export class Session {
       const replies = await this.forward(this.ports.control.dispatch(this.view(), f));
       if (f.type === "query.subscribe") {
         const reply = replies.map((text) => JSON.parse(text)).find((value) => value.type === "query.result");
-        if (reply) { (this.record.controlQueries ??= {})[f.id] = { request: f, last: JSON.stringify(reply.result) }; this.hooks.recoveryChanged?.(); }
+        if (reply) { (this.record.controlQueries ??= Object.create(null))[f.id] = { request: f, last: JSON.stringify(reply.result) }; this.hooks.recoveryChanged?.(); }
       }
       if (f.type === "query.unsubscribe") { delete this.record.controlQueries?.[f.id]; this.hooks.recoveryChanged?.(); }
       this.hooks.persist?.();
@@ -449,10 +465,13 @@ export class Session {
       case "query.subscribe":
         if (frame.scope === "control") return control(frame);
         if (tenant) {
-          ((this.record.pendingLiveQueries ??= {})[frame.id] ??= []).push(frame);
+          const initial = this.beginInitial("query", frame.id, frame.path, frame);
+          if (!initial) return;
+          ((this.record.pendingLiveQueries ??= Object.create(null))[frame.id] ??= []).push({ ...frame, initialGeneration: initial.generation });
           this.hooks.recoveryChanged?.();
           this.hooks.persist?.();
-          await this.forward(this.ports.tenants.dispatch(this.view(), frame));
+          if (this.closed) return;
+          await this.forward(this.ports.tenants.dispatch({ ...this.view(), initialRequests: [initial] }, frame), initial);
           return;
         }
         return this.send(frames.queryError(frame.id, frame.path, UNAUTHENTICATED.subscribe));
@@ -468,6 +487,7 @@ export class Session {
       case "query.unsubscribe":
         delete this.record.liveQueries?.[frame.id];
         delete this.record.pendingLiveQueries?.[frame.id];
+        this.forgetInitials("query", frame.id);
         this.hooks.recoveryChanged?.();
         this.hooks.persist?.();
         if (tenant) await toTenant(frame);
@@ -491,23 +511,35 @@ export class Session {
       case "action.call":
         if (frame.scope === "control") return control(frame);
         if (tenant) {
-          this.prepareAction(frame.id, frame.path);
-          const replies = await this.forward(this.ports.tenants.dispatch(this.view(), frame));
+          if(!this.prepareAction(frame.id, frame.path))return;
+          const replies = await this.forward(this.ports.tenants.dispatch({ ...this.view(), actionGeneration: this.record.actionGenerations?.[frame.id] }, frame));
           await this.finishAction(frame.id, replies.length > 0);
           return;
         }
         return this.send(frames.actionError(frame.id, frame.path, UNAUTHENTICATED.action, frame.trace));
       case "replica.open":
         if (tenant) {
+          const initial = this.beginInitial("replica", frame.id, frame.path);
+          if (!initial) return;
+          this.forgetInitials("replica", frame.id, initial.generation);
           this.delivery.opening(frame.id, frame.path);
-          return toTenant(frame);
+          if (this.closed) return;
+          return void await this.forward(this.ports.tenants.dispatch({ ...this.view(), initialRequests: [initial] }, frame), initial);
         }
         return this.send(frames.replicaError(frame.id, frame.path, UNAUTHENTICATED.replica));
       case "replica.openMany":
         if (frame.opens.length > LIMITS.openMany) return this.send(frames.replicaError("", undefined, `replica batch cannot contain more than ${LIMITS.openMany} opens`));
         if (tenant) {
-          for (const open of frame.opens) this.delivery.opening(open.id, open.path);
-          return toTenant(frame);
+          const initials: InitialRequestRef[] = [], opens: typeof frame.opens[number][] = [];
+          for (const open of frame.opens) {
+            const initial = this.beginInitial("replica", open.id, open.path);
+            if (!initial) continue;
+            this.forgetInitials("replica", open.id, initial.generation);
+            this.delivery.opening(open.id, open.path);
+            initials.push(initial); opens.push(open);
+          }
+          if (this.closed || (frame.opens.length && !opens.length)) return;
+          return void await this.forward(this.ports.tenants.dispatch({ ...this.view(), initialRequests: initials }, { ...frame, opens }), initials);
         }
         for (const open of frame.opens) this.send(frames.replicaError(open.id, open.path, UNAUTHENTICATED.replica));
         return;
@@ -515,7 +547,9 @@ export class Session {
         if (tenant && this.record.negotiated.nativeRows) return toTenant(frame);
         return this.send(frames.replicaError(frame.id, undefined, "native snapshot acknowledgements were not negotiated"));
       case "replica.close":
+        this.forgetInitials("replica", frame.id);
         this.delivery.forget(frame.id);
+        this.hooks.persist?.();
         if (tenant) return toTenant(frame);
         return;
       // K14: presence state is kept per socket and forwarded to the tenant object (kernel/presence).
@@ -536,7 +570,7 @@ export class Session {
     }
   }
 
-  private async forward(reply: Promise<string[]>): Promise<string[]> {
+  private async forward(reply: Promise<string[]>, initial?: InitialRequestRef | readonly InitialRequestRef[]): Promise<string[]> {
     let out: string[];
     try {
       out = await reply;
@@ -545,7 +579,12 @@ export class Session {
       this.close(CLOSE.failed);
       return [];
     }
-    for (const text of out) this.send(text);
+    const origins = initial ? (Array.isArray(initial) ? [...initial] : [initial as InitialRequestRef]) : [];
+    for (const text of out) {
+      const at=origins.findIndex(ref=>!!initialCompletion(ref,["f",text],0));
+      const ref=at<0?undefined:origins.splice(at,1)[0];
+      this.send(text,ref?initialCompletion(ref,["f",text],0):undefined);
+    }
     return out;
   }
 
@@ -605,31 +644,77 @@ export class Session {
   }
 
   /** K10: one replica delivery from the tenant object. Applied at once, ahead of frames still being handled. */
-  replicaDelivery(payload: ReplicaDelivery, work: SocketWork | undefined): void {
-    if (this.closed || !this.record.tenant || this.record.tenant.anonymous) return;
+  replicaDelivery(payload: ReplicaDelivery, work: SocketWork | undefined): readonly InitialCompletionStatus[] {
+    if (work && !validInitialCompletions(work)) throw new Error("invalid initial completion metadata");
+    const obsolete = () => (work?.initialCompletions ?? []).map(c => ({ generation: c.request.generation, status: "obsolete" as const }));
+    if (this.closed || !this.record.tenant || this.record.tenant.anonymous) return obsolete();
     const epoch = (work as ScopedSocketWork | undefined)?.subscriptionEpoch;
     if (work && epoch === undefined) {
       // Older senders cannot certify the auth scope of their queued work.
       this.close({ code: 1012, reason: "delivery scope requires reconnect" });
-      return;
+      return obsolete();
     }
-    if (work && epoch !== (this.record.subscriptionEpoch ?? 0)) return;
+    if (work && epoch !== (this.record.subscriptionEpoch ?? 0)) return obsolete();
     if (!work) {
       // An unscoped holder-wide watermark is never an auth-scope certificate.
       if (this.record.replicaInstance && this.record.replicaInstance !== payload.instance) this.close({ code: 1012, reason: "delivery scope requires reconnect" });
-      return;
+      return [];
     }
+    if(work.initialScope){
+      const ref=work.initialScope;
+      if(!validInitialRef(ref)||ref.epoch!==epoch||work.initialCompletions?.some(c=>!sameInitialRef(c.request,ref)))throw new Error("invalid initial origin scope");
+      const pending=ref.kind==="query"?this.record.pendingLiveQueries?.[ref.id]?.some(request=>request.initialGeneration===ref.generation&&request.path===ref.path):this.record.replicas?.[ref.id]===ref.path;
+      if(!validInitialRef(ref)||!this.currentInitial(ref)||!pending)return obsolete();
+      if(!work.ops.length)return [];
+    }
+    if(work.initialCompletions?.length&&work.initialCompletions.every(c=>c.outcome==="refused")&&work.initialCompletions.length===work.ops.length){
+      const statuses:InitialCompletionStatus[]=[];
+      for(const completion of work.initialCompletions){
+        if(!this.currentInitial(completion.request)){statuses.push({generation:completion.request.generation,status:"obsolete"});continue;}
+        const op=work.ops[completion.opIndex]!;
+        if(op[0]!=="f")throw new Error("invalid initial refusal operation");
+        const before=this.sinkSequence;this.send(op[1],completion);
+        if(this.sinkSequence===before||this.closed)throw new Error("initial refusal was not accepted by the socket");
+        statuses.push({generation:completion.request.generation,status:"enqueued"});
+        if(completion.request.kind==="replica")this.delivery.forget(completion.request.id);
+      }
+      return statuses;
+    }
+    if(!work.initialScope&&(work.opened||work.ops.some(op=>op[0]==="f"&&/^\{"type":"replica\.snapshot(?:Page)?"/.test(op[1]))))throw new Error("GONVEX_INITIAL_DELIVERY_UNSUPPORTED");
     const previous = this.record.replicaInstance ?? "";
-    // A tenant reply may already be queued when unsubscribe reaches this holder.
-    // Keep the local semantic request fence ahead of those late LQ frames.
-    const ops = work.ops.filter((op) => {
-      if (op[0] !== "f" || !/^\{"type":"query\.(result|progress|error)"/.test(op[1])) return true;
-      const id = /^\{"type":"query\.(?:result|progress|error)","id":("(?:[^"\\]|\\.)*")/.exec(op[1])?.[1];
-      if (!id) return true;
-      const key = JSON.parse(id) as string;
-      return !!this.record.liveQueries?.[key] || !!this.record.pendingLiveQueries?.[key];
+    const completions = new Map((work.initialCompletions ?? []).map(c => [c.opIndex, c]));
+    const ops: SocketOp[] = [], applied: InitialCompletion[] = [], statuses: InitialCompletionStatus[] = [];
+    const obsoleteIds = new Set<string>();
+    for (let index = 0; index < work.ops.length; index++) {
+      const op: SocketOp = work.ops[index]!;
+      const completion = completions.get(index);
+      if (completion && !this.currentInitial(completion.request)) {
+        statuses.push({ generation: completion.request.generation, status: "obsolete" }); obsoleteIds.add(completion.request.id); continue;
+      }
+      if (op[0] === "f" && /^\{"type":"query\.(result|progress|error)"/.test(op[1])) {
+        const id: string | undefined = /^\{"type":"query\.(?:result|progress|error)","id":("(?:[^"\\]|\\.)*")/.exec(op[1])?.[1];
+        const key = id ? JSON.parse(id) as string : undefined;
+        if (key !== undefined && !this.record.liveQueries?.[key] && !this.record.pendingLiveQueries?.[key]) continue;
+        if (!completion && key !== undefined && this.record.pendingLiveQueries?.[key]?.length && /,"reason":"initial",/.test(op[1])) throw new Error("GONVEX_INITIAL_COMPLETION_UNSUPPORTED");
+      }
+      if (completion) applied.push({ ...completion, opIndex: ops.length });
+      ops.push(op);
+    }
+    if (work.ops.length && !ops.length) return statuses;
+    const initialProgress = !(work.initialCompletions?.length) || (statuses.length === 0 && applied.every(c => c.outcome === "accepted"));
+    const { watermark: _globalWatermark, ...withoutGlobal } = payload;
+    const { watermark: _ownWatermark, ...withoutOwn } = work;
+    const filtered = { ...(initialProgress ? work : withoutOwn), ops, initialCompletions: applied,
+      ...(work.opened ? {opened:Object.fromEntries(Object.entries(work.opened).filter(([id])=>!obsoleteIds.has(id)))} : {}),
+      ...(work.removed ? {removed:work.removed.filter(id=>!obsoleteIds.has(id))} : {}) };
+    this.delivery.apply(initialProgress ? payload : withoutGlobal, filtered, index => {
+      const completion = applied.find(c => c.opIndex === index);
+      if (!completion || !this.currentInitial(completion.request) || this.closed || epoch !== (this.record.subscriptionEpoch ?? 0)) return;
+      const op = ops[index]!;
+      statuses.push({ generation: completion.request.generation, status: "enqueued" });
+      this.trackQueryReply(op[0] === "f" ? op[1] : op[0] === "r" ? op[3].replace(/^(\{"type":"replica.ready","id":)("(?:[^"\\]|\\.)*")/, (_match, prefix: string) => prefix + JSON.stringify(op[1])) : "", completion);
     });
-    this.delivery.apply(payload, { ...work, ops });
+    if (statuses.length !== (work.initialCompletions?.length ?? 0)) throw new Error("initial completion was not accepted by the socket");
     if (previous && previous !== payload.instance && Object.keys(this.record.liveQueries ?? {}).length) {
       const epoch = this.record.subscriptionEpoch ?? 0;
       const recover = async () => {
@@ -644,6 +729,7 @@ export class Session {
       this.hooks.waitUntil?.(next);
     }
     this.record.livenessAt = this.lastOutboundAt;
+    return statuses;
   }
 
   /** 0056: resolves only after reset frames and real live-query rebuilds completed on this socket. */
@@ -666,7 +752,7 @@ export class Session {
   bootstrapReplica(tenantId: string, payload: ReplicaDelivery, work: SocketWork): Promise<void> {
     const epoch = (work as ScopedSocketWork).subscriptionEpoch;
     if (payload.scopeFence !== 1 || epoch === undefined || work.ops.length || work.watermark !== undefined || work.opened || work.removed
-      || payload.shared.length || payload.watermark !== undefined || payload.membership) return Promise.reject(new Error("delivery bootstrap must contain only empty scoped work"));
+      || payload.shared.length || payload.watermark !== undefined || payload.membership || work.initialCompletions?.length || work.initialScope) return Promise.reject(new Error("delivery bootstrap must contain only empty scoped work"));
     return this.serial(async () => {
       this.requireRecoveryScope(tenantId, epoch);
       await this.verifyRecoveryAuth(tenantId, epoch);
@@ -687,7 +773,7 @@ export class Session {
    * tenant handler. Returned challenge epochs never supply identity or data. */
   private async observeRecoveryScope(tenantId: string, epoch: number): Promise<void> {
     this.requireRecoveryScope(tenantId, epoch);
-    const replies = await this.ports.tenants.dispatch(this.view(), { type: "replica.openMany", opens: [] });
+    const replies = await this.ports.tenants.dispatch({ ...this.view(), queryRecovery: true } as RecoverySocketView, { type: "replica.openMany", opens: [] });
     this.requireRecoveryScope(tenantId, epoch);
     if (replies.length) throw new Error("delivery scope registration was refused");
   }
@@ -712,11 +798,32 @@ export class Session {
         const replies = await this.ports.tenants.dispatch({ ...this.view(), queryRecovery: true } as RecoverySocketView, request);
         this.requireRecoveryScope(tenantId, epoch);
         for (const text of replies) {
-          if (text.startsWith('{"type":"query.progress"')) { this.trackQueryReply(text, pending); continue; }
-          this.send(text.replace('"reason":"initial"', '"reason":"reconnect"'), pending);
+          const initial = pending ? this.record.initialRequests?.[String((request as { initialGeneration?: number }).initialGeneration)] : undefined;
+          const result = text.replace('"reason":"initial"', '"reason":"reconnect"');
+          this.send(result, initial ? initialCompletion(initial, ["f", result], 0) : undefined);
           if (text.startsWith('{"type":"query.error"')) throw new Error("live query recovery was refused");
         }
       }
+  }
+
+  /** Processing acknowledgment only: no instance/scope/revision authority. */
+  failReplicaInitials(tenantId: string, refs: readonly InitialRequestRef[]): Promise<void> {
+    if (!Array.isArray(refs) || !refs.every(validInitialRef)) return Promise.reject(new Error("invalid initial request references"));
+    return this.serial(() => {
+      if (this.closed || this.record.tenant?.route.tenantId !== tenantId) return;
+      for (const ref of refs) {
+        if (!this.currentInitial(ref)) continue;
+        if (ref.kind === "query") {
+          const request = this.record.pendingLiveQueries?.[ref.id]?.find(request => request.initialGeneration === ref.generation && request.path === ref.path);
+          if (!request) continue;
+        } else if (this.record.replicas?.[ref.id] !== ref.path) continue;
+        // send() removes exactly this correlation only after the real sink
+        // accepted it. A throw retains it for an explicit idempotent retry.
+        this.send(ref.kind === "query" ? frames.queryError(ref.id, ref.path, "subscription delivery recovery failed")
+          : frames.replicaError(ref.id, ref.path, "subscription delivery recovery failed"), { request: ref, opIndex: 0, outcome: "refused" });
+        if (this.currentInitial(ref)) throw new Error("initial failure could not be admitted to the socket");
+      }
+    });
   }
 
   /** K06 ControlChanged; refreshes stay behind the socket's auth/call queue. */
@@ -743,50 +850,75 @@ export class Session {
     return this.serial(run);
   }
 
-  private prepareAction(id: string, path: string): void {
-    let resolve!: (text: string | null) => void, done!: () => void;
+  private prepareAction(id: string, path: string): boolean {
+    let resolve!: (text: string | null) => void, done!: (error?: unknown) => void;
     const result = new Promise<string | null>((r) => { resolve = r; });
-    const delivered = new Promise<void>((r) => { done = r; });
+    const delivered = new Promise<void>((r, reject) => { done = error => error ? reject(error) : r(); });
+    // A direct inline call has no callback awaiting this promise.
+    void delivered.catch(() => {});
+    const generation = (this.record.initialSequence ?? 0) + 1;
+    if (!Number.isSafeInteger(generation)) { this.send(frames.actionError(id,path,"Action request generation exhausted; reconnect")); return false; }
+    this.record.initialSequence = generation;
+    (this.record.actionGenerations ??= Object.create(null))[id] = generation;
     this.actionWaiters.set(id, { result, resolve, delivered, done });
-    (this.record.pendingActions ??= {})[id] = path;
+    (this.record.pendingActions ??= Object.create(null))[id] = path;
     this.hooks.recoveryChanged?.();
     this.hooks.persist?.();
+    if (this.closed) throw new Error("Action correlation publication failed");
+    return true;
   }
   private async finishAction(id: string, immediate: boolean): Promise<void> {
     const waiter = this.actionWaiters.get(id);
+    let accepted = immediate || this.closed, failure: unknown;
     try {
       if (!immediate && !this.closed && waiter) {
         const text = await waiter.result;
-        if (text !== null && !this.closed) { this.send(text); this.awaitWatermark([text]); }
+        if (text !== null && !this.closed) { this.send(text); this.awaitWatermark([text]); accepted = !this.closed; }
+        else accepted = true; // terminal socket/scope abandonment
       }
-    } finally {
+    } catch (error) { failure = error; throw error; }
+    finally {
       this.actionWaiters.delete(id);
-      delete this.record.pendingActions?.[id];
-      this.hooks.recoveryChanged?.();
-      this.hooks.persist?.();
-      waiter?.done();
+      if (accepted) {
+        delete this.record.pendingActions?.[id]; delete this.record.actionGenerations?.[id];
+        this.hooks.recoveryChanged?.(); this.hooks.persist?.();
+      }
+      waiter?.done(failure);
     }
   }
-  /** Complete the existing serial event; after hibernation, restore delivery from the attachment. */
-  async actionFinished(id: string, path: string, epoch: number, text: string): Promise<void> {
-    if (this.closed || epoch !== (this.record.subscriptionEpoch ?? 0) || this.record.pendingActions?.[id] !== path) return;
+  /** The result RPC settles only after enqueue or authoritative obsolescence.
+   * A failed sink preserves the correlation for the tenant's durable retry. */
+  async actionFinished(id: string, path: string, epoch: number, text: string, generation?: number): Promise<"enqueued" | "obsolete"> {
+    const applicable = () => !this.closed && epoch === (this.record.subscriptionEpoch ?? 0)
+      && this.record.pendingActions?.[id] === path && this.record.actionGenerations?.[id] === generation;
+    if (!applicable()) return "obsolete";
+    if (generation === undefined) throw new Error("Action reply generation unsupported");
     const waiter = this.actionWaiters.get(id);
-    if (waiter) { waiter.resolve(text); await waiter.delivered; return; }
+    if (waiter) { waiter.resolve(text); await waiter.delivered; return this.closed ? "obsolete" : "enqueued"; }
+    let enqueued = false;
     await this.serial(() => {
-      if (this.closed || epoch !== (this.record.subscriptionEpoch ?? 0) || this.record.pendingActions?.[id] !== path) return;
-      this.send(text); this.awaitWatermark([text]);
-      delete this.record.pendingActions[id]; this.hooks.recoveryChanged?.(); this.hooks.persist?.();
+      if (!applicable()) return;
+      this.send(text);
+      if (this.closed) return;
+      this.awaitWatermark([text]);
+      delete this.record.pendingActions![id]; delete this.record.actionGenerations![id];
+      this.hooks.recoveryChanged?.(); this.hooks.persist?.();
+      enqueued = true;
     });
+    return enqueued ? "enqueued" : "obsolete";
   }
 
   /** The socket's subscriptions are gone (re-auth without preservation, discard, reload, close): tell the tenant. */
   private resetSubscriptions(previous: TenantSession | null): void {
     this.record.subscriptionEpoch = (this.record.subscriptionEpoch ?? 0) + 1;
     this.delivery.forget();
-    this.record.liveQueries = {};
-    this.record.pendingLiveQueries = {};
-    this.record.pendingActions = {};
-    this.record.controlQueries = {};
+    this.record.liveQueries = Object.create(null);
+    this.record.pendingLiveQueries = Object.create(null);
+    this.record.initialRequests = Object.create(null);
+    this.initialAdmission.clear();
+    this.record.pendingActions = Object.create(null);
+    this.record.actionGenerations = Object.create(null);
+    this.record.controlQueries = Object.create(null);
     this.record.replicaInstance = "";
     this.hooks.recoveryChanged?.();
     if (!previous || previous.anonymous || !this.ports.tenants.connectionReset) return;
@@ -839,7 +971,7 @@ export class Session {
   /** One frame on a service socket (`handle_service_frame`); a failed port call closes the socket, as `forward` does. */
   private async serviceFrame(grant: ServiceGrant, frame: ClientFrame): Promise<void> {
     const action = frame.type === "action.call" && frame.scope !== "control" ? frame : null;
-    if (action) this.prepareAction(action.id, action.path);
+    if (action&&!this.prepareAction(action.id, action.path))return;
     let out: string[] | null;
     try {
       out = await handleServiceFrame(this.serviceCalls(), grant, frame);
@@ -859,7 +991,7 @@ export class Session {
         ? control.serviceCall(grant, path, args)
         : Promise.resolve({ ok: false, error: AUTH_ERRORS.storeUnavailable }),
       tenant: (grant, call) => tenants.serviceCall
-        ? tenants.serviceCall(grant, call.kind === "action" ? { ...call, reply: { host: this.host, connectionId: this.record.connectionId, epoch: this.record.subscriptionEpoch ?? 0, id: call.id, path: call.path } } : call)
+        ? tenants.serviceCall(grant, call.kind === "action" ? { ...call, reply: { host: this.host, connectionId: this.record.connectionId, epoch: this.record.subscriptionEpoch ?? 0, id: call.id, path: call.path, generation: this.record.actionGenerations?.[call.id] } } : call)
         : Promise.resolve({ ok: false, error: `project ${JSON.stringify(grant.route.projectId)} has no active TypeScript module` }),
     };
   }
@@ -1175,41 +1307,95 @@ export class Session {
   // ---- outbound ------------------------------------------------------------------
 
   /** Sends a frame after any open `replica.batch` (A.4 row 1: a batch is flushed before any other frame). */
-  private send(text: string, consumePending = true): void {
-    // Retain only the result hash for restart recovery, without parsing/copying row payloads per socket.
-    this.trackQueryReply(text, consumePending);
+  private send(text: string, completion?: InitialCompletion): void {
     if (this.closed) return;
+    if (completion && !this.currentInitial(completion.request)) return;
     if (this.delivery?.batcher.hasOpen) this.delivery.batcher.flush();
-    this.sendRaw(text);
+    const accepted = this.sendRaw(text);
+    if (accepted) this.trackQueryReply(text, completion);
   }
 
-  private trackQueryReply(text: string, consumePending = true): void {
-    if (/^\{"type":"query\.(result|progress|error)"/.test(text)) {
-      const encodedId = /^\{"type":"query\.(?:result|progress|error)","id":("(?:[^"\\]|\\.)*")/.exec(text)?.[1];
-      const id: string | undefined = encodedId ? JSON.parse(encodedId) : undefined;
-      const window = /"windowRevision":"([a-f0-9]+)"}$/.exec(text.slice(-100))?.[1];
-      if (id !== undefined) {
-        const queue = this.record.pendingLiveQueries?.[id];
-        const pending = consumePending ? queue?.shift() : undefined;
-        const success = !text.startsWith('{"type":"query.error"');
-        if (pending && success) (this.record.liveQueries ??= {})[id] = { ...pending };
-        if (!queue?.length) delete this.record.pendingLiveQueries?.[id];
-        const request = this.record.liveQueries?.[id];
-        if (request && window && success) request.windowRevision = window;
-        if (pending) { this.hooks.recoveryChanged?.(); this.hooks.persist?.(); }
+  private initialBytes(ref: InitialRequestRef, request?: unknown): number {
+    return 1024 + (ref.id.length + ref.path.length + ref.kind.length) * 8 + (request ? JSON.stringify(request).length * 8 : 0);
+  }
+
+  private beginInitial(kind: InitialRequestRef["kind"], id: string, path: string, request?: unknown): InitialRequestRef | undefined {
+    const generation = (this.record.initialSequence ?? 0) + 1;
+    if (!Number.isSafeInteger(generation)) {
+      this.send(kind==="query"?frames.queryError(id,path,"initial request generation exhausted; reconnect"):frames.replicaError(id,path,"initial request generation exhausted; reconnect"));
+      return undefined;
+    }
+    const ref: InitialRequestRef = { kind, id, path, epoch: this.record.subscriptionEpoch ?? 0, generation };
+    if (!this.initialAdmission.reserve(generation, this.initialBytes(ref, request))) {
+      this.send(kind === "query" ? frames.queryError(id, path, "too many pending subscription requests")
+        : frames.replicaError(id, path, "too many pending subscription requests"));
+      return undefined;
+    }
+    this.record.initialSequence = generation;
+    (this.record.initialRequests ??= Object.create(null))[String(generation)] = ref;
+    this.hooks.recoveryChanged?.();
+    return ref;
+  }
+
+  private forgetInitials(kind: InitialRequestRef["kind"], id: string, keep?: number): void {
+    for (const [key, ref] of Object.entries(this.record.initialRequests ?? {})) {
+      if (ref.kind === kind && ref.id === id && ref.generation !== keep) { delete this.record.initialRequests![key]; this.initialAdmission.release(ref.generation); }
+    }
+    this.hooks.recoveryChanged?.();
+  }
+
+  private currentInitial(ref: InitialRequestRef): boolean {
+    const current = this.record.initialRequests?.[String(ref.generation)];
+    return validInitialRef(ref) && ref.epoch === (this.record.subscriptionEpoch ?? 0) && !!current
+      && current.epoch === ref.epoch && current.kind === ref.kind && current.id === ref.id && current.path === ref.path;
+  }
+
+  /** Only the actual initial operation can accept/reject its semantic request.
+   * Feed changes and progress are never a replacement's completion authority. */
+  private trackQueryReply(text: string, completion?: InitialCompletion): void {
+    const initial = completion?.request;
+    if (!/^\{"type":"(?:query|replica)\./.test(text)) return;
+    const header = /^\{"type":"((?:query|replica)\.[^"]+)","id":("(?:[^"\\]|\\.)*")/.exec(text);
+    if (!header) return;
+    const type = header[1]!, id = JSON.parse(header[2]!) as string;
+    const success = type === "query.result" || (type === "query.progress" && completion?.outcome === "accepted");
+    const window = /"windowRevision":"([a-f0-9]+)"}$/.exec(text.slice(-100))?.[1];
+    if (initial && this.currentInitial(initial) && initial.id === id) {
+      const terminal = !!completion && initialCompletion(initial, ["f", text], 0)?.outcome === completion.outcome;
+      if (terminal) {
+        if (initial.kind === "query") {
+          const queue = this.record.pendingLiveQueries?.[id];
+          const at = queue?.findIndex(request => request.initialGeneration === initial.generation) ?? -1;
+          if (at >= 0) {
+            const pending = queue!.splice(at, 1)[0]!;
+            if (success) {
+              const { initialGeneration: _generation, ...request } = pending;
+              (this.record.liveQueries ??= Object.create(null))[id] = request;
+            }
+            if (!queue!.length) delete this.record.pendingLiveQueries![id];
+          }
+        }
+        delete this.record.initialRequests![String(initial.generation)];
+        this.initialAdmission.release(initial.generation);
+        this.hooks.recoveryChanged?.(); this.hooks.persist?.();
       }
     }
+    const request = this.record.liveQueries?.[id];
+    if (request && window && success) request.windowRevision = window;
   }
 
-  private sendRaw(text: string): void {
-    if (this.closed) return;
+  private sendRaw(text: string): boolean {
+    if (this.closed) return false;
     // 0018: the platform drops outbound frames this large without an error.
     if (exceedsUtf8(text, LIMITS.maxOutboundBytes - 1)) {
       console.error(`session: refusing to send a ${text.length}-character frame over the platform's outbound limit`);
-      return this.close({ code: 1011, reason: "frame exceeds the outbound limit" });
+      this.close({ code: 1011, reason: "frame exceeds the outbound limit" });
+      return false;
     }
     this.lastOutboundAt = this.now();
     this.sink.send(text);
+    this.sinkSequence++;
+    return true;
   }
 
   close(frame: CloseFrame): void {

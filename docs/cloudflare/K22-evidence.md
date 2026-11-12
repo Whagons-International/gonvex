@@ -235,3 +235,87 @@ indexes all39 formal scenarios with source hashes/document references and six
 package golden/definition sources. `package-comparisons.json` records eight
 explicit additional package coverage gaps; documentation mentions are not
 passing receipts. These missing cases must be implemented, not waived.
+
+
+## Independent a957 review follow-up (working tree, not acceptance)
+
+The independent review of published `a957d17b17b5d851e7ef6dc29108d1aa81f95912`
+returned **CHANGES REQUIRED** ([formal COMMENT](https://github.com/Whagons-International/gonvex/pull/400#pullrequestreview-5874287424)).
+Its six findings and the original acceptance failures remain binding until a new immutable artifact,
+regressions and fresh independent review establish their resolution. The original report and seven
+synthetic source-method reproductions remain at `/mnt/data/work/gonvex-k22-review-a957d17b/`.
+
+Current changes under verification:
+
+- N1: nested Reducer calls propagate server-derived anonymity. Synthetic app modules run through the
+  actual AssemblyTenant/Action Worker in workerd. They prove omitted scheduler/outbox surfaces and
+  rollback of an uncaught nested attempt; an outer Action may catch that failure. Catching an omitted
+  surface's local JavaScript TypeError retains ordinary JS semantics and can commit permitted DB writes,
+  while no jobs/outbox entries appear. The existing dispatched-host denial latch test is unchanged.
+- N2: normal, nested and scheduled Reducer write entries share the same migration admission rule.
+  The new integration holds an actual multi-chunk TenantMigrator between chunks and refuses nested
+  and scheduled writes without acknowledging them. This is local module integration, not platform rollback proof.
+- N3: trusted service access, original command id and configured API/system provenance reach inline
+  and Workflow Actions. Ingress/share await actual agent results; pending cannot become successful null.
+  New real-handler tests cover internal standard/agent calls, failure/retry and an actual agent Workflow.
+- N4: execution completion and terminal reply settlement are separate. Full replies use private 64-KiB
+  binary chunks, generation/integrity metadata and an additive generation-bound gateway receiver.
+  Failed delivery retains bytes/correlation without rerunning the Action. Missing native enumeration
+  with durable socket ownership is UNKNOWN, not obsolete. Legal large principal/argument inputs also
+  use an atomic private chunk manifest; integrity failure never invokes a partial/default context.
+  Valid legacy inline inputs remain readable, without minting missing legacy reply generations.
+- N5/0064/0067: actual initial-operation completion has an original server generation, operation index,
+  accepted/refused outcome and explicit enqueued/obsolete receipt. Arbitrary old change/progress frames
+  cannot consume a replacement. A completed no-change initial progress can accept its own request.
+  `initialScope` fences every initial page/split before instance/data/watermark changes; the additive
+  initial-only receiver fails before an older holder can apply an unknown field. Initial-only trailing
+  watermark authority is suppressed when the contributing completion cannot accompany its part.
+- N6/0065: provisional authority admission bounds historical/UNKNOWN retention, without eviction or TTL.
+  This does **not** prove terminal release, safety after losing in-flight accounting, eventual cleanup,
+  availability under sustained churn or 128-MB fit. An authoritative token/drain lifecycle is still open.
+
+Working-tree verification is separate from the published head. Receipts and preserved earlier failures
+are under `/mnt/data/work/gonvex-k22/review-fixes/`. `source-4.json` pins the earlier incremental source;
+its base SHA is not a claim that those edits were present in that commit. The fourth focused run passed
+67 delivery/Session/native Host/recovery/admission cases, 26 gateway/outlet cases, 11 ActionCalls cases
+and 6 actual-handler synthetic-module integrations. The fifth ActionCalls run passed14, including
+2M permissions plus agent args, corrupt/missing input refusal and the complete legal8-MiB result through
+failed delivery/duplicate settlement. Further atomic-transfer and actual-host overlimit regressions were
+added afterward and require their own result. These are author reports, not a source approval or deployed proof.
+A healthy small completion measured **11 statements,8 rows read,9 row/index writes**, versus2 prior writes;
+this excludes once-per-object schema DDL. Large/chunk/failure costs and isolate fit still need measurement.
+
+The frozen `abc8e1a6eed2bb77be8dd875105b404567e8c90c` package run passed821 workerd tests with15 existing
+skips plus4 Node deploy tests. Its named static-one-holder comparison passed thin-SDK, live-query,
+tenant-restart and telemetry4/4 in46.3s. Both predate these review fixes and remain partial evidence.
+All original38-scenario failures, timeouts and unexecuted rows remain unchanged.
+
+Real unchanged-SDK quiet-initial fault followed by immediate write/receipt/revision liveness remains OPEN.
+So do full canonical/default automatic campaigns, exact local pure-loop enforcement (0057), actual
+private-platform CPU/quarantine/rollback/neighbor proof, abrupt owner lifecycle, legacy Action rollout/drain
+preconditions, all additional package matrix gaps, Container/file/application/bridge/device and V/R gates.
+No staging switch, production operation or monitoring activation occurred.
+
+The former hosted preview at a957 was skipped for missing Cloudflare secrets; its green conclusion is
+not image/deploy evidence. The lead now owns standalone credential-free build publication and artifact
+verification (PR404), followed separately by approved Vault-only daemonless publication. K22 removed its
+unpublished duplicate image job. The prepared helper's export path is not an executed build receipt.
+No Cloudflare credential was retrieved or copied to GitHub, and no local Docker build/workaround ran.
+
+The sixth focused run retained one new failed assertion (`calls-6.log`): local SqlStorage accepted
+an aggregate legacy principal/argument row instead of enforcing the expected platform row limit.
+That supplemental expectation was replaced by an exact UTF-8 byte observation; it does not establish
+platform limit enforcement. The same run passed67 root delivery/Session cases,26 gateway cases,
+14 other ActionCalls cases,7 real-handler module integrations and typecheck. Follow-on tests cover
+partial input-publication rollback, atomic terminal transfer, corrupt reply retention and the automatic
+reply retry ceiling; their results belong to the next frozen source.
+
+Reply settlement admits at most8 known failed automatic deliveries at30-second renewal intervals.
+After that it retains the complete private manifest/chunks in an explicit operator-recovery state,
+excludes the row from automatic alarms and receipt expiry, and refuses duplicate completion settlement.
+No Action execution is repeated to reconstruct an answer. This bounds automatic retries, not retained
+unknown-owner availability or memory fit; a recovery/operator lifecycle is still required.
+
+0069 authorizes a prototype tenant-instance owner token/admission/drain protocol, with actual-holder
+confirmation and UNKNOWN transport outcomes. This checkpoint deliberately contains only the finite
+0065 admission guard. No token lifecycle or eventual terminal-owner cleanup is claimed implemented.

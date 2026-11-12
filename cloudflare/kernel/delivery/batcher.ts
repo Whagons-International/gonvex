@@ -12,7 +12,7 @@ import { BATCH_IDLE_MS, BATCH_MAX_BYTES, BATCH_TICK_MS } from "./protocol.ts";
 
 export interface BatchSocket {
   /** Sends a frame without flushing the batch (the batch itself). */
-  sendRaw(text: string): void;
+  sendRaw(text: string): unknown;
   /** `tenant` and `class` of the envelope, or undefined without a tenant session. */
   envelope(): { tenant: string; class: string } | undefined;
   now(): number;
@@ -32,6 +32,7 @@ interface OpenBatch {
 
 export class ReplicaBatcher {
   enabled = false;
+  acceptedBatches = 0;
   private readonly bindings = new Map<string, string>();
   private open: OpenBatch | undefined;
   /** The last watermark sent in a batch (the envelope's `from`). */
@@ -130,19 +131,21 @@ export class ReplicaBatcher {
   }
 
   /** Sends the open batch now. */
-  flush(): void {
+  flush(): boolean {
     this.cancel?.();
     this.cancel = undefined;
     this.dueAt = undefined;
     const batch = this.open;
-    if (!batch) return;
+    if (!batch) return false;
     this.open = undefined;
     const tail = batch.watermark !== undefined ? `],"watermark":${batch.watermark}}` : "]}";
-    this.socket.sendRaw(batch.prefix + batch.parts.join("") + tail);
+    if (this.socket.sendRaw(batch.prefix + batch.parts.join("") + tail) === false) return false;
+    this.acceptedBatches++;
     if (batch.watermark !== undefined) {
       this.lastWatermark = Math.max(this.lastWatermark, batch.watermark);
       for (const revision of this.waiting) if (revision <= batch.watermark) this.waiting.delete(revision);
     }
+    return true;
   }
 
   private callWaiting(): boolean {
@@ -156,7 +159,7 @@ export class ReplicaBatcher {
   private schedule(): void {
     const batch = this.open;
     if (!batch) return;
-    if (this.callWaiting() || batch.bytes >= BATCH_MAX_BYTES) return this.flush();
+    if (this.callWaiting() || batch.bytes >= BATCH_MAX_BYTES) { this.flush(); return; }
     const due = batch.openedAt + (batch.data > 0 ? BATCH_TICK_MS : BATCH_IDLE_MS);
     if (this.dueAt === due) return;
     this.cancel?.();

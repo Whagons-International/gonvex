@@ -164,6 +164,10 @@ export interface DirectCall {
   path: string;
   args: unknown;
   provenance?: Provenance;
+  /** Server service-grant access only; decoded client frames cannot set this. */
+  allowInternal?: boolean;
+  /** K18 provider/share requests await the actual result, including agent Actions. */
+  inline?: boolean;
 }
 
 export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
@@ -172,10 +176,12 @@ export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
     const { runtime, tenant } = runtimeFor(this.env, input.session.tenantId, input.session.projectId);
     const active = runtime.options.registry.activeGeneration;
     const contract = active?.engine.functions.get(input.path);
-    if (contract?.kind === "action" && profileOf(contract) === "agent" && input.session.account.id !== "") {
-      const id = await tenantRpc("beginCall", () => tenant.beginCall({ v: 1, session: input.session, path: input.path, args: input.args, provenance: input.provenance }));
+    if (contract?.kind === "action" && profileOf(contract) === "agent" && input.session.account.id !== "" && input.inline !== true) {
+      const { executionAccess: _oldAccess, ...identity } = input.session;
+      const session: ActionSession = input.allowInternal === true ? { ...identity, executionAccess: { allowInternal: true } } : identity;
+      const id = await tenantRpc("beginCall", () => tenant.beginCall({ v: 1, session, path: input.path, args: input.args, provenance: input.provenance }));
       return { pending: true, id };
     }
-    return runtime.execute({ session: input.session, path: input.path, args: input.args, provenance: input.provenance });
+    return runtime.execute({ session: input.session, path: input.path, args: input.args, provenance: input.provenance, allowInternal: input.allowInternal === true });
   }
 }

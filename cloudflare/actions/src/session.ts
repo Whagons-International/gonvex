@@ -4,8 +4,11 @@
 import type { Identity } from "../../kernel/host/src/index.js";
 
 export interface ActionSession {
+  /** Trusted root-call access, persisted for Workflow recovery. Built by the
+   * Action Worker from its server RPC input; never module identity/client data. */
+  executionAccess?: { allowInternal: true };
   /** Server-owned route for a direct Workflow call's eventual reply; never part of module identity. */
-  reply?: { host: string; connectionId: string; epoch: number; id: string; path: string; traceJson?: string };
+  reply?: { host: string; connectionId: string; epoch: number; id: string; path: string; generation?: number | undefined; traceJson?: string };
   projectId: string;
   tenantId: string;
   account: { id: string; email?: string; name?: string; avatarUrl?: string };

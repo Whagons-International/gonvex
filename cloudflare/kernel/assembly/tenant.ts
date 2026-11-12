@@ -3,7 +3,7 @@ import type { TenantCall } from "../host/src/invoke";
 import type { ModuleExports } from "../host/src/index";
 import { validateValue } from "../host/src/index";
 import { ReplicaTenantObject } from "../delivery/object";
-import { R2PlanStore } from "../migrate/plan";
+import { R2PlanStore, type PlanStore } from "../migrate/plan";
 import { QueryEngine, moduleFromManifest, snapshotRunner, kernelVisibility, type Manifest, type LiveQueries, type QueryModule } from "../query/index";
 import { MODULE_KEY, type StoredModule } from "../reducer/tenant";
 import { RECEIPT_PRUNE_KEY } from "../reducer/tenant";
@@ -35,10 +35,10 @@ import { WorkflowDispatcher } from "../../actions/src/tenant";
 import { WorkflowHandoff, type HandoffJob } from "../../actions/src/handoff";
 import type { TenantActionPort, TenantCallRequest, ClaimRequest, RenewRequest, CompleteRequest, ScheduleRequest } from "../../actions/src/ports";
 import type { ActionSession } from "../../actions/src/session";
-import { identityOf as actionIdentity, systemSession } from "../../actions/src/session";
+import { identityOf as actionIdentity, isAnonymous, systemSession } from "../../actions/src/session";
 import type { DirectCall } from "../../actions/src/worker";
 import type { ActionReport } from "../../actions/src/runtime";
-import { publicInfo, persisted } from "../../actions/src/provenance";
+import { directProvenance, publicInfo, persisted } from "../../actions/src/provenance";
 import { actionSession } from "./action-session";
 import { frames, echoTrace } from "../session/protocol";
 import type { MessageTrace } from "../session/decode";
@@ -49,6 +49,9 @@ import { replicaModule } from "../delivery/definition";
 import { collectionQuery } from "./replica-query";
 import { flushReferences } from "../reducer/reference/integrity";
 import { overrunMarkerKey } from "./deadline";
+import { writeAdmissionError } from "../reducer/admission";
+import { DeliveryAdmissionError } from "../delivery/authority";
+import { retryable } from "../reducer/errors";
 
 const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
 const PROJECT_KEY = "assembly/project";
@@ -77,7 +80,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   private queryModule: { hash: string; module: QueryModule } | undefined;
 
   protected bundle(hash: string): ModuleExports | undefined { return Object.values(releases).find((release) => release.hash === hash)?.exports; }
-  protected plans() { return new R2PlanStore(this.env.RELEASES); }
+  protected plans(): PlanStore { return new R2PlanStore(this.env.RELEASES); }
   protected override liveQueries(): LiveQueries | undefined { return this.queries?.live; }
   protected override operatorSink(): OperatorDataSink { return rpc(this.env.CONTROL, "control"); }
   protected override composition() {
@@ -154,7 +157,18 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   override async dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]> {
     // Every real caller supplies its current server-owned scope, including a
     // writer with no subscriptions. Its no-op commit watermark is scoped too.
-    if (socket.tenant && !this.delivery.observe(socket, false)) return [];
+    try {
+      if (socket.tenant && !socket.tenant.anonymous && !this.delivery.observe(socket, false)) throw new Error("stale tenant subscription scope");
+    } catch (error) {
+      if (!(error instanceof DeliveryAdmissionError) || (socket as SocketView & {queryRecovery?:boolean}).queryRecovery) throw error;
+      const refused = (id:string,path:string,trace?:MessageTrace) => frame.type.startsWith("reducer.") ? frames.reducerError(id,path,error.message,"transient",trace)
+        : frame.type.startsWith("query.") ? frames.queryError(id,path,error.message) : frame.type.startsWith("action.") ? frames.actionError(id,path,error.message,trace) : frames.replicaError(id,path,error.message);
+      if (frame.type === "reducer.call" || frame.type === "query.call" || frame.type === "query.subscribe" || frame.type === "action.call" || frame.type === "replica.open") return [refused(frame.id,frame.path,"trace" in frame?frame.trace:undefined)];
+      if (frame.type === "reducer.callMany") return frame.calls.map(call=>refused(call.id,call.path,call.trace));
+      if (frame.type === "replica.openMany") return frame.opens.map(open=>refused(open.id,open.path));
+      throw error;
+    }
+    if (!(socket as SocketView & { queryRecovery?: boolean }).queryRecovery && !["query.subscribe", "replica.open", "replica.openMany", "replica.close"].includes(frame.type)) this.delivery.externalEvent(socket.host);
     if (frame.type === "query.call" && frame.path === RECEIPT_QUERY) return super.dispatch(socket, frame);
     if (frame.type === "query.unsubscribe") {
       this.delivery.queryUnsubscribe(socket, frame.id);
@@ -176,7 +190,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     if (frame.type === "presence.set" || frame.type === "presence.subscribe" || frame.type === "presence.unsubscribe") return this.presence.frame(socket, frame);
     if (frame.type === "action.call" && socket.tenant) {
       const session = actionSession(socket.tenant);
-      session.reply = { host: socket.host, connectionId: socket.connectionId, epoch: socket.subscriptionEpoch ?? 0, id: frame.id, path: frame.path, ...(frame.trace ? { traceJson: JSON.stringify(echoTrace(frame.trace)) } : {}) };
+      session.reply = { host: socket.host, connectionId: socket.connectionId, epoch: socket.subscriptionEpoch ?? 0, id: frame.id, path: frame.path, ...(socket.actionGeneration === undefined ? {} : { generation: socket.actionGeneration }), ...(frame.trace ? { traceJson: JSON.stringify(echoTrace(frame.trace)) } : {}) };
       const result = await this.env.ACTIONS.call({ session, path: frame.path, args: frame.args });
       if ("pending" in result) return [];
       return [this.actionFrame(frame.id, frame.path, result, frame.trace)];
@@ -256,8 +270,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     let text = finished.ok ? `{"type":"action.result","id":${JSON.stringify(reply.id)},"path":${JSON.stringify(reply.path)},"result":${finished.value ?? "null"}${finished.committedRevision === undefined ? "" : `,"committedRevision":${finished.committedRevision}`}}`
       : frames.actionError(reply.id, reply.path, finished.error ?? "action failed");
     if (reply.traceJson) text = text.slice(0, -1) + `,"trace":${reply.traceJson}}`;
-    await rpc<{ actionFinished(target: typeof reply & { tenantId: string }, text: string): Promise<void> }>(this.env.GATEWAY, reply.host)
-      .actionFinished(reply, text);
+    const receipt = await rpc<{ settleActionReply(target: typeof reply, text: string): Promise<{ v: 1; status: "enqueued" | "obsolete" }> }>(this.env.GATEWAY, reply.host)
+      .settleActionReply(reply, text);
+    if (receipt?.v !== 1 || (receipt.status !== "enqueued" && receipt.status !== "obsolete")) throw new Error("Action reply settlement unsupported");
   }
   async call(request: TenantCallRequest) {
     return this.callWithLane(request, "interactive");
@@ -271,9 +286,11 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       } catch (error) { return { ok: false as const, error: (error as Error).message, transient: false }; }
     }
     const outcome = await this.kernel.reducers.serial(async () => {
+      const admissionError = writeAdmissionError(() => this.kernel.migrator.gateClosed());
+      if (admissionError) return { ok: false as const, error: admissionError.message, transient: retryable(admissionError.class) };
       this.kernel.storage.arm({ provenance: publicInfo(request.provenance), afterSuccess: (db) => { flushReferences(db); } });
       try {
-        const report = await this.kernel.invoke({ function: request.function, kind: "reducer", args: request.args, identity: actionIdentity(request.session), invocation: publicInfo(request.provenance), hostProvenance: persisted(request.provenance), lane });
+        const report = await this.kernel.invoke({ function: request.function, kind: "reducer", args: request.args, identity: actionIdentity(request.session), anonymous: isAnonymous(request.session), invocation: publicInfo(request.provenance), hostProvenance: persisted(request.provenance), lane });
         const commit = this.kernel.storage.takeReport();
         return report.ok ? { ok: true as const, value: report.value ?? "null", committedRevision: commit?.notice?.revision } : { ok: false as const, error: report.error?.message ?? "call failed", transient: report.error?.retryable ?? false };
       } finally { this.kernel.storage.disarm(); }
@@ -309,8 +326,12 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     }
     const session = actionSession(tenant);
     if (call.reply) session.reply = call.reply;
-    const result = await this.env.ACTIONS.call({ session, path: call.path, args: call.args });
-    if ("pending" in result) return { ok: true, result: "null", pending: true };
+    const result = await this.env.ACTIONS.call({ session, path: call.path, args: call.args, allowInternal: true, inline: !call.reply,
+      provenance: directProvenance(session, grant.channel ?? "api", call.id, this.kernel.module!.artifactHash) });
+    if ("pending" in result) {
+      if (!call.reply) throw new Error("awaited service Action returned a pending execution");
+      return { ok: true, result: "null", pending: true };
+    }
     return result.ok ? { ok: true, result: result.value, ...(result.committedRevision === undefined ? {} : { committedRevision: result.committedRevision }) } : { ok: false, error: result.error };
   }
 

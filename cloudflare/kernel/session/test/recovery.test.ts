@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { Session } from "../session";
 import type { Ports, TenantSession } from "../ports";
-import type { ReplicaDelivery } from "../../delivery/protocol";
+import { initialCompletion, type InitialRequestRef, type ReplicaDelivery } from "../../delivery/protocol";
 import type { RecoveryDelivery, RecoverySocketView, ScopedSocketWork } from "../../delivery/recovery";
 
 function tenant(name: string, id = "t"): TenantSession {
@@ -39,7 +39,14 @@ function fixture() {
     sockets: { c: { subscriptionEpoch: epoch, ops: [["f", text]], watermark } as ScopedSocketWork },
   });
   const deliver = (p: ReplicaDelivery) => session.replicaDelivery(p, p.sockets.c);
-  return { session, ports, sent, closes, dispatches, auth, payload, deliver };
+  const complete = (text: string, ref = Object.values(session.record.initialRequests ?? {})[0]!) => {
+    const p = payload(session.record.subscriptionEpoch!, "I", text);
+    const work = p.sockets.c!;
+    const completion = initialCompletion(ref, work.ops[0]!, 0);
+    if (!completion) throw new Error("fixture frame is not a terminal initial operation");
+    deliver({ ...p, sockets: { c: { ...work, initialCompletions: [completion] } } });
+  };
+  return { session, ports, sent, closes, dispatches, auth, payload, deliver, complete };
 }
 
 describe("K22 session delivery scope", () => {
@@ -109,11 +116,11 @@ describe("K22 session delivery scope", () => {
     await subscribe({ owner: "alice" });
     expect(f.session.record.liveQueries?.q).toBeUndefined();
     const hash = "a".repeat(64);
-    f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", `{"type":"query.result","id":"q","result":[],"windowRevision":"${hash}"}`));
+    f.complete(`{"type":"query.result","id":"q","path":"items.live","reason":"initial","result":[],"windowRevision":"${hash}"}`);
     expect(f.session.record.liveQueries?.q?.args).toEqual({ owner: "alice" });
     expect(f.session.record.pendingLiveQueries?.q).toBeUndefined();
     await subscribe({ invalid: true });
-    f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", '{"type":"query.error","id":"q","error":"invalid"}'));
+    f.complete('{"type":"query.error","id":"q","path":"items.live","error":"invalid"}');
     expect(f.session.record.liveQueries?.q?.args).toEqual({ owner: "alice" });
     await f.auth("bob");
     expect(f.session.record.liveQueries).toEqual({});
@@ -122,12 +129,62 @@ describe("K22 session delivery scope", () => {
   it("keeps same-id initial replies correlated when multiple replacements precede delivery", async () => {
     const f = fixture(); await f.auth();
     for (const args of [{ first: true }, { invalid: true }]) await f.session.receive(JSON.stringify({ type: "query.subscribe", id: "q", path: "items.live", args }));
-    f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", '{"type":"query.result","id":"q","result":[]}'));
+    f.complete('{"type":"query.result","id":"q","path":"items.live","reason":"initial","result":[]}');
     expect(f.session.record.liveQueries?.q?.args).toEqual({ first: true });
     expect(f.session.record.pendingLiveQueries?.q).toHaveLength(1);
-    f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", '{"type":"query.error","id":"q","error":"invalid"}'));
+    f.complete('{"type":"query.error","id":"q","path":"items.live","error":"invalid"}');
     expect(f.session.record.liveQueries?.q?.args).toEqual({ first: true });
     expect(f.session.record.pendingLiveQueries?.q).toBeUndefined();
+  });
+
+  it("N5 old A change/progress cannot accept B; refused B retains A through hibernation", async () => {
+    const f = fixture(); await f.auth();
+    const subscribe = (args: unknown) => f.session.receive(JSON.stringify({ type: "query.subscribe", id: "q", path: "items.live", args }));
+    await subscribe({ owner: "A" });
+    f.complete('{"type":"query.result","id":"q","path":"items.live","reason":"initial","result":["A"]}');
+    await subscribe({ owner: "B" });
+    const ref = Object.values(f.session.record.initialRequests!)[0]!;
+    for (const text of ['{"type":"query.result","id":"q","path":"items.live","reason":"change","result":["A changed"]}', '{"type":"query.progress","id":"q","path":"items.live","throughRevision":{"epoch":"e","sequence":5}}']) f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", text));
+    expect(f.session.record.liveQueries?.q?.args).toEqual({ owner: "A" });
+    expect(f.session.record.pendingLiveQueries?.q).toHaveLength(1);
+    f.complete('{"type":"query.error","id":"q","path":"items.live","error":"B refused"}', ref);
+    const restored = Session.restore(JSON.parse(JSON.stringify(f.session.record)), {
+      ports: f.ports, host: "holder", sink: { send: () => {}, close: () => {} }, ready: { runtimeVersion: "test", presence: false }, timers: { later: () => () => {} },
+    });
+    expect(restored.record.liveQueries?.q?.args).toEqual({ owner: "A" });
+    expect(restored.record.pendingLiveQueries?.q).toBeUndefined();
+    expect(restored.record.initialRequests).toEqual({});
+  });
+
+  it("an actual no-change completion accepts B while arbitrary progress does not", async () => {
+    const f = fixture(); await f.auth();
+    await f.session.receive('{"type":"query.subscribe","id":"q","path":"items.live","args":{"owner":"B"},"windowRevision":"known"}');
+    const progress = '{"type":"query.progress","id":"q","path":"items.live","throughRevision":{"epoch":"e","sequence":2}}';
+    f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", progress));
+    expect(f.session.record.liveQueries?.q).toBeUndefined();
+    f.complete(progress);
+    expect(f.session.record.liveQueries?.q?.args).toEqual({ owner: "B" });
+    expect(Object.keys(f.session.record.initialRequests!)).toHaveLength(0);
+  });
+
+  it("failure processing is generation scoped, idempotent, sink-accepted, and never certifies revisions", async () => {
+    const f = fixture(); await f.auth();
+    await f.session.receive('{"type":"query.subscribe","id":"q","path":"items.live","args":{}}');
+    const old = Object.values(f.session.record.initialRequests!)[0]!;
+    const before = { watermark: f.session.record.watermark, instance: f.session.record.replicaInstance, revision: f.session.record.sentRevision };
+    await f.session.failReplicaInitials("t", [old]);
+    expect(JSON.parse(f.sent.at(-1)!)).toMatchObject({ type: "query.error", id: "q", path: "items.live" });
+    const sent = f.sent.length;
+    await f.session.failReplicaInitials("t", [old]);
+    expect(f.sent).toHaveLength(sent);
+    expect({ watermark: f.session.record.watermark, instance: f.session.record.replicaInstance, revision: f.session.record.sentRevision }).toEqual(before);
+    await f.session.receive('{"type":"query.subscribe","id":"q","path":"items.live","args":{"new":true}}');
+    await f.session.failReplicaInitials("t", [old]);
+    expect(f.session.record.pendingLiveQueries?.q).toHaveLength(1);
+    await f.session.receive('{"type":"query.unsubscribe","id":"q"}');
+    await f.session.failReplicaInitials("t", [old]);
+    expect(f.session.record.pendingLiveQueries?.q).toBeUndefined();
+    expect(f.closes).toEqual([]);
   });
 
   it("recovery waits for real LQ replies, includes pending opens, and rejects stale scope or a refused rebuild", async () => {
@@ -138,7 +195,7 @@ describe("K22 session delivery scope", () => {
     f.ports.tenants.dispatch = async (socket, frame) => {
       f.dispatches.push(socket as RecoverySocketView);
       if (frame.type === "replica.openMany" && !frame.opens.length) return [];
-      return ['{"type":"query.error","id":"q","error":"visibility unavailable"}'];
+      return ['{"type":"query.error","id":"q","path":"items.live","error":"visibility unavailable"}'];
     };
     await expect(f.session.recoverReplica("t", recovery)).rejects.toThrow("live query recovery was refused");
     expect(f.sent.some((text) => text.includes('"id":"pending-replica"') && text.includes('"reason":"change-feed-lagged"'))).toBe(true);

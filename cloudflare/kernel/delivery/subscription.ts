@@ -58,6 +58,7 @@ export interface Subscription {
 
 /** The client's open request (decoded by the session layer). */
 export interface OpenRequest {
+  readonly initial?: import("./protocol").InitialRequestRef;
   readonly id: string;
   readonly path: string;
   readonly args: JsonValue;

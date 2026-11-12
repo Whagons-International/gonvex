@@ -13,7 +13,7 @@ export type TrackedReplicas = Record<string, string>;
 
 export interface SocketDeliveryHost extends BatchSocket {
   /** Sends a frame, flushing an open batch first. */
-  send(text: string): void;
+  send(text: string): boolean | void;
   /** Ends the connection where Rust's socket task returns (1011, A.1.9). */
   end(): void;
   batchFrames(): boolean;
@@ -80,7 +80,7 @@ export class SocketDelivery {
   }
 
   /** One delivery for this socket (`work` is its own part, if any). */
-  apply(payload: ReplicaDelivery, work: SocketWork | undefined): void {
+  apply(payload: ReplicaDelivery, work: SocketWork | undefined, completed?: (index: number) => void): void {
     const tracked = this.host.tracked();
     let changed = false;
     const previous = this.host.instance();
@@ -98,12 +98,23 @@ export class SocketDelivery {
       changed = true;
     }
     if (work) {
-      for (const op of work.ops) {
+      for (let index = 0; index < work.ops.length; index++) {
+        const op = work.ops[index]!;
         switch (op[0]) {
-          case "f": this.host.send(op[1]); break;
+          case "f": if (this.host.send(op[1]) !== false) completed?.(index); break;
           case "i": this.batcher.item(payload.shared[op[1]]!); break;
           case "d": this.batcher.delta(op[1], op[2], payload.shared[op[3]]!, op[4]); break;
-          case "r": this.batcher.ready(op[1], op[2], op[3]); break;
+          case "r": {
+            const before = this.batcher.acceptedBatches;
+            this.batcher.ready(op[1], op[2], op[3]);
+            // Completion authority waits for actual sink acceptance, including
+            // ready-only batches which otherwise wait for their idle timer.
+            if (work.initialCompletions?.some(c => c.opIndex === index)) {
+              this.batcher.flush();
+              if (this.batcher.acceptedBatches > before) completed?.(index);
+            }
+            break;
+          }
           case "x": this.host.end(); return;
         }
       }

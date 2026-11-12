@@ -205,6 +205,57 @@ describe("gateway placement", () => {
     }
   });
 
+  it("0067 native sink drops a held initial page after same-epoch close/idreuse on the same ordered outlet",async()=>{
+    const w=await world({a:["ana"]});const c=await signedIn(w,"ana","a");
+    const [name]=await stub("GET",`gateways?tenant=${w.tenants.a}`) as string[];
+    let release=false,releaseInitial!:()=>void;
+    const initialGate=new Promise<void>(resolve=>{releaseInitial=resolve;});
+    let entered=false,held:Promise<unknown>|undefined;
+    try{
+      await inGateway(name!,instance=>{
+        const session=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+        const actual=session.ports.tenants.dispatch;
+        session.ports.tenants.dispatch=(view:any,frame:any)=>frame.type==="replica.open"?Promise.resolve([]):actual(view,frame);
+      });
+      c.send({type:"replica.open",id:"r",path:"items.all",args:{version:"A"}});
+      let origin:any;
+      for(let i=0;i<50&&!origin;i++){
+        origin=await inGateway(name!,instance=>{const session=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+          const ref=Object.values(session.record.initialRequests??{})[0];return ref?{id:session.record.connectionId,ref}:null;});
+        if(!origin)await new Promise(r=>setTimeout(r,1));
+      }
+      expect(origin).toBeTruthy();
+      const {GatewayOutlet}=await import('../../delivery/outlet');
+      // Synthetic delay at the transport boundary; after release the actual
+      // additive DO method and native Session/sink perform all application.
+      const outlet=new GatewayOutlet(w.tenants.a!,()=>({
+        deliverReplica:(tenant,payload)=>gateway(name!).deliverReplica(tenant,payload),
+        deliverReplicaInitial:async(tenant,payload)=>{entered=true;await initialGate;return gateway(name!).deliverReplicaInitial(tenant,payload);},
+      }),async()=>[name!]);
+      const page=JSON.stringify({type:"replica.snapshotPage",snapshotId:"held",sequence:0,last:false,id:"r",result:[{id:"stale-row",path:"application value"}],cursor:{epoch:"e",revision:1},key:"id",maxBytes:262144,maxRows:512,mode:"eager",orderBy:"id",orderDirection:"asc",path:"items.all",scope:"s",truncated:false,visibilityScope:"v"});
+      held=outlet.send(name!,{v:1,instance:"must-not-install",shared:[],sockets:{[origin.id]:{subscriptionEpoch:origin.ref.epoch,initialScope:origin.ref,ops:[["f",page]]}}});
+      void held.catch(()=>{});
+      for(let i=0;i<50&&!entered;i++)await new Promise(r=>setTimeout(r,1));
+      expect(entered).toBe(true);
+      c.send({type:"replica.close",id:"r"});c.send({type:"replica.open",id:"r",path:"items.all",args:{version:"B"}});
+      let changed=false;
+      for(let i=0;i<50&&!changed;i++){
+        changed=await inGateway(name!,instance=>{const session=[...instance.host.sessions.values()].find((s:any)=>s.record.connectionId===origin.id) as any;
+          return Object.values(session.record.initialRequests??{}).some((ref:any)=>ref.generation!==origin.ref.generation);}) as boolean;
+        if(!changed)await new Promise(r=>setTimeout(r,1));
+      }
+      expect(changed).toBe(true);
+      const before=await inGateway(name!,instance=>{const s=[...instance.host.sessions.values()].find((s:any)=>s.record.connectionId===origin.id) as any;return JSON.stringify(s.record);});
+      releaseInitial();release=true;await held;
+      const after=await inGateway(name!,instance=>{const s=[...instance.host.sessions.values()].find((s:any)=>s.record.connectionId===origin.id) as any;return JSON.stringify(s.record);});
+      expect(after).toBe(before);expect(c.raw.some(text=>text.includes('stale-row'))).toBe(false);
+    }finally{
+      if(!release)releaseInitial();
+      if(held)await Promise.allSettled([held]);
+      c.ws.close(1000);await c.closed();
+    }
+  });
+
   it("0061 challenges a restarted sender without mutation, rejects a stale Member fence, then acknowledges only real empty bootstrap", async () => {
     const w = await world({ a: ["ana", "ben"] });
     const c = await signedIn(w, "ana", "a");

@@ -26,7 +26,7 @@ import { deliveryClass } from "../session";
 import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../presence/hub";
 import { type TelemetryEnv, telemetryHostFromEnv } from "../../telemetry/env";
 import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
-import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt, type SocketWork } from "../../delivery/protocol";
+import { initialDeliveryOnly, initialFailureOnly, validInitialCompletions, REPLICA_DELIVERY_VERSION, type InitialCompletionStatus, type ReplicaDelivery, type ReplicaReceipt, type SocketWork } from "../../delivery/protocol";
 import { UNKNOWN_ADDRESS } from "../../public/address";
 import type { PublicGuard } from "../../public/guard";
 import { publicLimits } from "../../public/config";
@@ -281,7 +281,37 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
    * the socket is still handling, so a call's reply never waits for, nor
    * overtakes, the commit frames the tenant already delivered.
    */
-  async deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+  /** Additive marker-only method: old receivers fail before ordinary apply. */
+  async deliverInitialFailures(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+    if (!initialFailureOnly(payload)) throw new Error("invalid initial-failure-only delivery");
+    const pending = new Set(Object.keys(payload.initialFailure!.requests));
+    const work: Array<Promise<void>> = [];
+    for (const ws of this.byTenant.get(tenantId) ?? []) {
+      const session = this.host.sessions.get(ws);
+      if (!session || session.closed || session.record.tenant?.route.tenantId !== tenantId) continue;
+      const refs = payload.initialFailure!.requests[session.record.connectionId];
+      if (!refs) continue;
+      pending.delete(session.record.connectionId);
+      work.push(session.failReplicaInitials(tenantId, refs));
+    }
+    await Promise.all(work);
+    this.host.reschedule();
+    return { v: REPLICA_DELIVERY_VERSION, sockets: work.length, initialFailureAck: 1,
+      ...(pending.size ? { missing: [...pending] } : {}) };
+  }
+
+  async deliverReplicaInitial(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt> {
+    if(!initialDeliveryOnly(payload))throw new Error("invalid initial-only delivery");
+    return this.applyReplica(tenantId,payload);
+  }
+  async deliverReplica(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt> {
+    if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length))throw new Error("initial work requires the initial-only receiver");
+    return this.applyReplica(tenantId,payload);
+  }
+  private async applyReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+    if (payload.initialFailure) throw new Error("initial failures require the marker-only receiver");
+    if (Object.values(payload.sockets).some(work=>!validInitialCompletions(work))) throw new Error("invalid initial completion metadata");
+    const initialCompletions: Record<string, readonly InitialCompletionStatus[]> = Object.create(null);
     const started = performance.now();
     const sockets = this.byTenant.get(tenantId);
     const seen = new Set<string>();
@@ -329,7 +359,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
         if (payload.watermark === undefined) continue;
       }
       if (payload.scopeFence === 1 && own && !own.ops.length && own.watermark === undefined && !own.opened && !own.removed
-        && !payload.shared.length && payload.watermark === undefined && !payload.membership) {
+        && !payload.shared.length && payload.watermark === undefined && !payload.membership && !own.initialScope && !own.initialCompletions?.length) {
         const epoch = (own as SocketWork & { subscriptionEpoch?: number }).subscriptionEpoch;
         bootstraps.push(session.bootstrapReplica(tenantId, payload, own).then(() => { if (epoch !== undefined) scopeAck[id] = epoch; }, (error) => {
           if ((error as Error)?.message !== "delivery recovery scope changed") throw error;
@@ -340,7 +370,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
         }));
         continue;
       }
-      session.replicaDelivery(payload, payload.sockets[id]);
+      const completed = session.replicaDelivery(payload, own);
+      if (own?.initialCompletions?.length) initialCompletions[id] = completed;
     }
     await Promise.all(bootstraps);
     if (work.length) this.ctx.waitUntil(Promise.all(work).then(() => this.host.reschedule()));
@@ -348,8 +379,21 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     this.metrics.delivery(performance.now() - started, payload.pressure?.queueAgeMs, payload.pressure?.rpcMs);
     this.reportCapacity();
     const missing = Object.keys(payload.sockets).filter((id) => !seen.has(id));
+    for (const id of missing) {
+      const own = payload.sockets[id]!;
+      if (!own.initialCompletions?.length) continue;
+      const physical = [...this.host.sessions.values()].find(session=>session.record.connectionId===id);
+      if (physical) {
+        // Actual current physical scope superseded the old tenant/epoch.
+        initialCompletions[id] = own.initialCompletions.map(c=>({generation:c.request.generation,status:"obsolete"}));
+      } else {
+        if (this.host.ownsConnection(id)) throw new Error("initial completion holder unavailable with retained owner");
+        initialCompletions[id] = own.initialCompletions.map(c=>({generation:c.request.generation,status:"obsolete"}));
+      }
+    }
     return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}),
-      ...(Object.keys(scopeRequired).length ? { scopeRequired } : {}), ...(Object.keys(scopeAck).length ? { scopeAck } : {}) };
+      ...(Object.keys(scopeRequired).length ? { scopeRequired } : {}), ...(Object.keys(scopeAck).length ? { scopeAck } : {}),
+      ...(Object.keys(initialCompletions).length ? { initialCompletions } : {}) };
   }
 
   /** K16: which of these connections are open here (the address limiter's audit of leaked slots). */

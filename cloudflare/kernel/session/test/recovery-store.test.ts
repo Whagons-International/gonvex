@@ -19,7 +19,8 @@ describe("holder recovery metadata", () => {
     await withStore((storage, store) => {
       const r = record(), value = "🍉漢字".repeat(150_000);
       r.liveQueries = { q: { type: "query.subscribe", id: "q", path: "items.live", args: { value }, windowRevision: "memory-only" } };
-      r.pendingLiveQueries = { pending: [{ type: "query.subscribe", id: "pending", path: "items.other", args: { value: value.slice(0, 100_000) } }] };
+      r.pendingLiveQueries = { pending: [{ type: "query.subscribe", id: "pending", path: "items.other", args: { value: value.slice(0, 100_000) }, initialGeneration: 1 }] };
+      r.initialSequence=1;r.initialRequests={1:{kind:"query",id:"pending",path:"items.other",epoch:0,generation:1}};
       r.controlQueries = { control: { request: { type: "query.subscribe", id: "control", path: "control.tenants.list", scope: "control", args: {} }, last: "memory-only-result" } };
       r.replicas = Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`r${i}`, "items.all"]));
       r.pendingActions = { action: "agent.run" };
@@ -39,6 +40,20 @@ describe("holder recovery metadata", () => {
       expect(restored.pendingActions).toEqual(r.pendingActions);
       store.abandon(ref.socketOwner);
       expect([...storage.kv.list({ prefix: "session-recovery/" })]).toEqual([]);
+    });
+  });
+
+  it("binds counter and active book to the same published generation and rejects reuse/corruption",async()=>{
+    await withStore((_storage,store)=>{
+      const r=record();r.initialSequence=7;
+      r.initialRequests={7:{kind:"query",id:"q",path:"items.live",epoch:0,generation:7}};
+      r.pendingLiveQueries={q:[{type:"query.subscribe",id:"q",path:"items.live",args:{unchanged:"legal"},initialGeneration:7}]};
+      const ref=store.write(r),attachment=withoutRecovery(r);
+      expect(store.restore(attachment,ref).initialRequests).toEqual(r.initialRequests);
+      expect(()=>store.restore({...attachment,initialSequence:6},ref)).toThrow("initial sequence mismatch");
+      expect(()=>store.write({...r,initialSequence:6},ref)).toThrow("invalid initial recovery authority");
+      expect(()=>store.write({...r,pendingLiveQueries:{}},ref)).toThrow("initial semantic request is missing");
+      store.abandon(ref.socketOwner);
     });
   });
 

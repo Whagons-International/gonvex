@@ -504,7 +504,7 @@ describe("K22 ordered query and replica commits", () => {
       expect((commitPayload.sockets.initial as ScopedSocketWork).subscriptionEpoch).toBe(0);
       engine.reset(view.connectionId, 2);
       let ran = false;
-      await engine.querySubscribe(view, () => { ran = true; return "stale"; });
+      await expect(engine.querySubscribe(view, () => { ran = true; return "stale"; })).rejects.toThrow("stale tenant subscription scope");
       expect(ran).toBe(false);
       expect(live.subscriptionIds(view.connectionId)).toEqual([]);
       view.subscriptionEpoch = 2;

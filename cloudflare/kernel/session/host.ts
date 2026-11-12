@@ -52,6 +52,7 @@ export interface HostOptions {
 interface Attachment { session: AttachmentRecord; recovery?: RecoveryReference }
 
 export class SocketHost {
+  ownsConnection(connectionId: string): boolean { return this.recovery.ownsConnection(connectionId); }
   readonly sessions = new Map<WebSocket, Session>();
   readonly modules: ModuleCache;
   /** K15: one set of telemetry rate-limit windows for every socket of this object. */

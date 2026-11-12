@@ -107,6 +107,18 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
         window: this.host.telemetry.limiter.inspect(subject.key) };
     }) };
   }
+  /** New method fails closed against older holders before same-id replies
+   * could be applied without generation authority. */
+  async settleActionReply(target: { tenantId: string; connectionId: string; epoch: number; id: string; path: string; generation?: number }, text: string): Promise<{ v: 1; status: "enqueued" | "obsolete" }> {
+    if (!Number.isSafeInteger(target.generation) || target.generation! <= 0) throw new Error("Action reply generation unsupported");
+    for (const session of this.host.sessions.values()) {
+      if (session.record.connectionId === target.connectionId && (session.record.tenant?.route.tenantId ?? session.record.service?.route.tenantId) === target.tenantId) {
+        return { v: 1, status: await session.actionFinished(target.id, target.path, target.epoch, text, target.generation) };
+      }
+    }
+    if (this.host.ownsConnection(target.connectionId)) throw new Error("Action reply holder is unavailable with durable ownership retained");
+    return { v: 1, status: "obsolete" };
+  }
   async actionFinished(target: { tenantId: string; connectionId: string; epoch: number; id: string; path: string }, text: string): Promise<void> {
     for (const session of this.host.sessions.values()) {
       if (session.record.connectionId === target.connectionId && (session.record.tenant?.route.tenantId ?? session.record.service?.route.tenantId) === target.tenantId) {

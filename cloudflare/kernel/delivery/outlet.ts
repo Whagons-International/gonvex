@@ -8,7 +8,7 @@
 // because snapshot pages are posted chunk by chunk (0020 §6, 0022 §4.4).
 
 import type { DeliveryOutlet } from "./engine.ts";
-import type { ReplicaDelivery, ReplicaReceipt } from "./protocol.ts";
+import { initialDeliveryOnly, initialFailureOnly, type InitialRequestRef, type ReplicaDelivery, type ReplicaReceipt } from "./protocol.ts";
 
 const pressureCounts = { capacityRejections: 0, unsupportedRecoveries: 0 };
 export const DELIVERY_CAPACITY_CODE = "GONVEX_DELIVERY_CAPACITY";
@@ -58,6 +58,8 @@ interface Queue {
 
 export interface ReplicaHolderRpc {
   deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt>;
+  deliverInitialFailures?(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt>;
+  deliverReplicaInitial?(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt>;
 }
 
 abstract class OrderedOutlet implements DeliveryOutlet {
@@ -93,6 +95,8 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
 
   send(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined> {
+    if (payload.initialFailure && !initialFailureOnly(payload)) return Promise.reject(new Error("invalid initial-failure-only delivery"));
+    if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length)&&!initialDeliveryOnly(payload))return Promise.reject(new Error("invalid initial-only delivery"));
     let queue: Queue;
     try { queue = this.queue(host); } catch (error) { return Promise.reject(error); }
     const bytes = retainedBytes(payload);
@@ -168,6 +172,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     try {
       const receipt = await this.deliver(host, { ...item.payload,
         pressure: { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs } });
+      if (item.payload.initialFailure && receipt.initialFailureAck !== 1) throw new Error("GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED");
       if (item.recovery) {
         if (receipt.recoveryAck !== 1) throw new DeliveryRecoveryUnsupportedError();
         queue.recoveryRequired = false;
@@ -238,6 +243,18 @@ export class GatewayOutlet extends OrderedOutlet {
   }
 
   protected deliver(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+    // Never expose a new marker to an old ordinary receiver: the absent
+    // additive RPC fails before it can apply even an empty envelope/instance.
+    if (payload.initialFailure) {
+      const receiver = this.gateway(host);
+      if (typeof receiver.deliverInitialFailures !== "function") return Promise.reject(new Error("GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED"));
+      return receiver.deliverInitialFailures(this.tenantId, payload);
+    }
+    if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length)){
+      const receiver=this.gateway(host);
+      if(typeof receiver.deliverReplicaInitial!=="function")return Promise.reject(new Error("GONVEX_INITIAL_DELIVERY_UNSUPPORTED"));
+      return receiver.deliverReplicaInitial(this.tenantId,payload);
+    }
     return this.gateway(host).deliverReplica(this.tenantId, payload);
   }
 
@@ -248,11 +265,21 @@ export class GatewayOutlet extends OrderedOutlet {
 
 /** Tenant placement: the sockets live in this object; `deliver` is a local call. */
 export class LocalOutlet extends OrderedOutlet {
-  constructor(private readonly local: (host: string, payload: ReplicaDelivery) => ReplicaReceipt, private readonly names: () => string[]) {
+  constructor(private readonly local: (host: string, payload: ReplicaDelivery) => ReplicaReceipt, private readonly names: () => string[],
+    private readonly failures?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt>,
+    private readonly initials?: (host:string,payload:ReplicaDelivery)=>ReplicaReceipt|Promise<ReplicaReceipt>) {
     super();
   }
 
   protected async deliver(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+    if (payload.initialFailure) {
+      if (!this.failures) throw new Error("GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED");
+      return this.failures(host, payload);
+    }
+    if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length)){
+      if(!this.initials)throw new Error("GONVEX_INITIAL_DELIVERY_UNSUPPORTED");
+      return this.initials(host,payload);
+    }
     return this.local(host, payload);
   }
 
@@ -264,6 +291,13 @@ export class LocalOutlet extends OrderedOutlet {
 /** Conservative text/copy credits (UTF16 plus two worst-case UTF8 copies), no second JSON encoding of the delivery payload. */
 function retainedBytes(payload: ReplicaDelivery): number {
   let bytes = 256 + payload.instance.length * 8;
+  if (payload.initialFailure) {
+    bytes += 256 + payload.initialFailure.reason.length * 8;
+    for (const [id, refs] of Object.entries(payload.initialFailure.requests)) {
+      bytes += 128 + id.length * 8;
+      for (const ref of refs) bytes += initialRefBytes(ref);
+    }
+  }
   if (payload.recovery) bytes += payload.recovery.reason.length * 8 + 64;
   if (payload.membership) {
     bytes += 128;
@@ -273,12 +307,20 @@ function retainedBytes(payload: ReplicaDelivery): number {
   for (const text of payload.shared) bytes += text.length * 8 + 64;
   for (const [id, work] of Object.entries(payload.sockets)) {
     bytes += id.length * 8 + 256;
+    if(work.initialScope)bytes+=256+initialRefBytes(work.initialScope);
     for (const op of work.ops) {
       bytes += 64;
       for (const value of op) if (typeof value === "string") bytes += value.length * 8;
+
     }
+    for (const completion of work.initialCompletions ?? []) bytes += 512 + initialRefBytes(completion.request); // request + bounded status receipt/copies
     for (const [id, path] of Object.entries(work.opened ?? {})) bytes += (id.length + path.length) * 8 + 128;
     for (const id of work.removed ?? []) bytes += id.length * 8 + 64;
   }
   return bytes;
+}
+
+/** Object keys, array slots, string/copy and safe-integer metadata allowance. */
+function initialRefBytes(ref: InitialRequestRef): number {
+  return 1024 + (ref.kind.length + ref.id.length + ref.path.length) * 8;
 }

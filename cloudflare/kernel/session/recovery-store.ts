@@ -1,18 +1,20 @@
 // 0058: bounded rows for holder recovery metadata, outside WebSocket attachments.
 // This is a recovery record, never an invocation/replay queue. Only semantic
 // request/correlation mutations dirty a generation; feed resume hashes stay in memory.
+import { assertInitialState } from "./initial-state";
 import { sha256Hex } from "../capture/digest";
 import type { SessionRecord } from "./session";
 
 const PREFIX = "session-recovery/";
 const MANIFESTS = "session-recovery-manifest/";
 const OWNERS = "session-recovery-owner/";
+const CONNECTION_OWNERS = "session-recovery-connection/";
 const ORPHANS = "session-recovery-orphan/";
 const CHARS = 16_384; // <=64KiB UTF-8, including worst-case non-ASCII text.
-const GROUPS = ["liveQueries", "pendingLiveQueries", "controlQueries", "replicas", "pendingActions"] as const;
+const GROUPS = ["liveQueries", "pendingLiveQueries", "controlQueries", "replicas", "pendingActions", "initialRequests", "actionGenerations"] as const;
 type Group = typeof GROUPS[number];
 export interface RecoveryReference { v: 2; socketOwner: string; generation: string; scope: string; chunks: number; hash: string }
-interface Manifest extends RecoveryReference { owner: string; createdAt: number; orphanedAt?: number }
+interface Manifest extends RecoveryReference { initialSequence?: number; owner: string; createdAt: number; orphanedAt?: number }
 interface Owner { v: 2; connectionId: string; current?: string; pending?: string }
 const ORPHAN_GRACE_MS = 60_000;
 interface Chunk { text: string; end: boolean }
@@ -28,7 +30,7 @@ const manifestKey = (generation: string) => `${MANIFESTS}${generation}`;
 const ownerKey = (socketOwner: string) => `${OWNERS}${socketOwner}`;
 
 export function withoutRecovery(record: SessionRecord): SessionRecord {
-  const { liveQueries: _live, pendingLiveQueries: _pending, controlQueries: _control, replicas: _replicas, pendingActions: _actions, ...attachment } = record;
+  const { liveQueries: _live, pendingLiveQueries: _pending, controlQueries: _control, replicas: _replicas, pendingActions: _actions, initialRequests: _initials, actionGenerations: _actionGenerations, ...attachment } = record;
   return attachment;
 }
 
@@ -44,6 +46,7 @@ export class HolderRecoveryStore {
   constructor(private readonly storage: Pick<DurableObjectStorage, "kv" | "transactionSync">) {}
 
   write(record: SessionRecord, previous?: RecoveryReference, socketOwner = previous?.socketOwner ?? crypto.randomUUID()): RecoveryReference {
+    assertInitialState(record);
     const generation = crypto.randomUUID(), scope = recoveryScope(record);
     let chunks = 0, hash = "";
     // A failed partial write cannot publish a manifest or a usable attachment reference.
@@ -70,10 +73,11 @@ export class HolderRecoveryStore {
         }
         append(JSON.stringify([group, id, semantic]));
       }
-      this.storage.kv.put(manifestKey(generation), { v: 2, socketOwner, owner: record.connectionId, generation, scope, chunks, hash, createdAt: Date.now() } satisfies Manifest);
+      this.storage.kv.put(manifestKey(generation), { v: 2, socketOwner, owner: record.connectionId, generation, scope, chunks, hash, initialSequence: record.initialSequence ?? 0, createdAt: Date.now() } satisfies Manifest);
       // Protect both the old published generation and this uncertain transition
       // BEFORE a socket attachment can reference the new one.
       this.storage.kv.put(ownerKey(socketOwner), { v: 2, connectionId: record.connectionId, ...(previous ? { current: previous.generation } : {}), pending: generation } satisfies Owner);
+      this.storage.kv.put(`${CONNECTION_OWNERS}${record.connectionId}/${socketOwner}`, 1);
     });
     return { v: 2, socketOwner, generation, scope, chunks, hash };
   }
@@ -102,7 +106,8 @@ export class HolderRecoveryStore {
     if (ref.v !== 2 || !manifest || manifest.v !== 2 || manifest.owner !== record.connectionId
       || manifest.socketOwner !== ref.socketOwner || !owner || owner.connectionId !== record.connectionId || (owner.current !== ref.generation && owner.pending !== ref.generation)
       || manifest.scope !== ref.scope || manifest.chunks !== ref.chunks || manifest.hash !== ref.hash) throw new Error("holder recovery metadata scope/manifest mismatch");
-    const maps: Record<Group, Record<string, unknown>> = { liveQueries: Object.create(null), pendingLiveQueries: Object.create(null), controlQueries: Object.create(null), replicas: Object.create(null), pendingActions: Object.create(null) };
+    if ((manifest.initialSequence ?? 0) !== (record.initialSequence ?? 0)) throw new Error("holder recovery initial sequence mismatch");
+    const maps: Record<Group, Record<string, unknown>> = { liveQueries: Object.create(null), pendingLiveQueries: Object.create(null), controlQueries: Object.create(null), replicas: Object.create(null), pendingActions: Object.create(null), initialRequests: Object.create(null), actionGenerations: Object.create(null) };
     let text = "", hash = "";
     let identity: Pick<SessionRecord, "connection" | "tenant" | "service"> | undefined;
     for (let i = 0; i < ref.chunks; i++) {
@@ -123,6 +128,7 @@ export class HolderRecoveryStore {
     if (!identity?.connection || !("tenant" in identity)) throw new Error("holder recovery identity missing/corrupt");
     const restored = { ...record, ...(record.privateIdentity === 1 ? identity : {}), ...maps } as SessionRecord;
     if (recoveryScope(restored) !== ref.scope) throw new Error("holder recovery metadata scope/manifest mismatch");
+    assertInitialState(restored);
     // Return only after the entire generation, identity and scope validated.
     delete (restored as AttachmentRecord).privateIdentity;
     this.commit(ref); // Resolve a crash on either side of attachment publication.
@@ -147,11 +153,18 @@ export class HolderRecoveryStore {
     if (!owner) return;
     this.storage.transactionSync(() => {
       this.storage.kv.delete(ownerKey(socketOwner));
+      this.storage.kv.delete(`${CONNECTION_OWNERS}${owner.connectionId}/${socketOwner}`);
       for (const generation of [owner.current, owner.pending]) if (generation) {
         const ref = this.storage.kv.get<Manifest>(manifestKey(generation));
         if (ref) this.deleteGeneration(ref);
       }
     });
+  }
+
+  /** An omitted/closing native socket may still own durable pending Actions.
+   * Only actual owner abandonment removes this exact indexed authority. */
+  ownsConnection(connectionId: string): boolean {
+    return [...this.storage.kv.list({ prefix: `${CONNECTION_OWNERS}${connectionId}/`, limit: 1 })].length > 0;
   }
 
   /** Reclaim only indexed generations whose publication ownership was removed.

@@ -23,6 +23,7 @@ import type { ConnectionReport } from "../presence/hub";
 import type { ServiceControlOutcome, ServiceTenantCall, ServiceTenantOutcome } from "../principals/frames";
 import type { ServiceGrant } from "../principals/grant";
 import type { TelemetryPort } from "../telemetry/port";
+import type { InitialRequestRef } from "../delivery/protocol";
 
 export interface Account {
   id: string;
@@ -115,6 +116,10 @@ export interface RevalidationItem {
 
 /** What a port sees of a socket when it handles a frame. */
 export interface SocketView {
+  /** Built only by Session before actual initial dispatch; not client authority. */
+  initialRequests?: readonly InitialRequestRef[];
+  /** Server-only direct Action correlation, independent of client id reuse. */
+  actionGeneration?: number | undefined;
   connectionId: string;
   connection: Connection;
   /** The tenant data session (null for control-only sockets). */
