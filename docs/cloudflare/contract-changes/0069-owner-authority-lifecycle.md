@@ -24,6 +24,10 @@ interface OwnerTenantRpc {
 }
 ```
 
+The `dispatchOwned` return above is the original prototype shape. Decision 0071 requires a tagged
+frames/zero-invocation outcome bound to the offered authority and fresh external event before any owner
+refresh is allowed. It permits at most one first-invocation continuation, never an ambiguous-call retry.
+
 An actual-holder `confirmOwner` callback verifies the current Session, physical tag, issuer, epoch and
 auth scope. The tenant binds opaque random authority to that owner, tenant instance and confirmed server
 view. These are private server fields, never decoded client authority, public wire changes, idempotency
