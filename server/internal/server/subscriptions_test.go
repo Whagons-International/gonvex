@@ -1462,3 +1462,90 @@ func TestPermissionSharedEphemeralQueryRunsOncePerPermissionSet(t *testing.T) {
 		t.Fatalf("one presence change executed presence.list %d times, want once for all members", got)
 	}
 }
+
+// Per-user tables (notifications.userId) store the caller's landlord users.id,
+// not the auth subject that callerIdColumn compares. callerUserIdColumn
+// compares against the ids the handler reported for its last result and
+// reruns whenever those ids are unknown.
+func TestCallerUserIDPredicateUsesHandlerReportedIDs(t *testing.T) {
+	detail := tableChangeDetail{precise: true, operation: "insert", userIDs: map[string]bool{"landlord-7": true}}
+	reported := callerContext{user: &gonvex.User{ID: "firebase-uid"}, referenceIDs: map[string]bool{"landlord-7": true}}
+	other := callerContext{user: &gonvex.User{ID: "firebase-uid-2"}, referenceIDs: map[string]bool{"landlord-8": true}}
+	unknown := callerContext{user: &gonvex.User{ID: "landlord-7"}}
+	if !readPredicateMatches("callerUserIdColumn:userId", nil, reported, detail, nil) {
+		t.Fatal("a change addressed to the reported landlord id must rerun")
+	}
+	if readPredicateMatches("callerUserIdColumn:userId", nil, other, detail, nil) {
+		t.Fatal("a change addressed to another user must not rerun")
+	}
+	if !readPredicateMatches("callerUserIdColumn:userId", nil, unknown, detail, nil) {
+		t.Fatal("unreported caller ids must rerun, never compare the auth subject")
+	}
+	if !readPredicateMatches("callerUserIdColumn:userId", nil, other, tableChangeDetail{precise: true}, nil) {
+		t.Fatal("a change without userIds must rerun")
+	}
+	if !readPredicateMatches("callerUserIdColumn:recipientId", nil, other, detail, nil) {
+		t.Fatal("an unsupported column must rerun")
+	}
+}
+
+func TestCallerUserIDPredicateSkipsOtherUsersNotifications(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{Project: "project-a", Functions: map[string]manifest.FunctionEntry{
+		"settings.listNotifications": {Kind: manifest.FunctionKindQuery, Dependencies: manifest.FunctionDependencies{
+			Reads: []manifest.ReadDependency{{Table: "notifications", Columns: []string{"userId", "title"}, Filters: []string{"userId"}, Predicate: "callerUserIdColumn:userId"}},
+		}},
+	}, Schema: manifest.EmptySchema()}); err != nil {
+		t.Fatal(err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	landlordIDs := map[string]string{"uid-a": "landlord-a", "uid-b": "landlord-b"}
+	executions := map[string]*atomic.Int32{"uid-a": {}, "uid-b": {}}
+	reportIDs := atomic.Bool{}
+	reportIDs.Store(true)
+	manager.execute = func(ctx context.Context, _ *sharedSubscription, listener querySubscription, _ string, _ float64) (any, error) {
+		executions[listener.caller.user.ID].Add(1)
+		if reportIDs.Load() {
+			gonvex.ReportCallerUserIDs(ctx, landlordIDs[listener.caller.user.ID])
+		}
+		return []map[string]any{}, nil
+	}
+	connection := &wsConn{server: server, project: "project-a", tenant: "tenant-a", subs: map[string]querySubscription{}}
+	for _, uid := range []string{"uid-a", "uid-b"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		manager.attach(querySubscription{
+			conn: connection, id: "inbox-" + uid, project: "project-a", tenant: "tenant-a",
+			path: "settings.listNotifications", args: json.RawMessage(`{}`), ctx: ctx, cancel: cancel, token: newSubscriptionToken(),
+			caller: callerContext{user: &gonvex.User{ID: uid}, permissions: map[string]any{"role": "member"}},
+		})
+	}
+	for _, uid := range []string{"uid-a", "uid-b"} {
+		eventually(t, time.Second, func() bool { return executions[uid].Load() >= 1 })
+	}
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	baseA, baseB := executions["uid-a"].Load(), executions["uid-b"].Load()
+
+	notify := func(userID string) {
+		server.scheduleTableChange(tableChange{
+			project: "project-a", tenant: "tenant-a", table: "notifications", operation: "insert",
+			rowIDs: map[string]bool{"notification-" + userID: true}, userIDs: map[string]bool{userID: true}, triggerObserved: true,
+		})
+	}
+	notify("landlord-b")
+	eventually(t, time.Second, func() bool { return executions["uid-b"].Load() == baseB+1 })
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	if got := executions["uid-a"].Load(); got != baseA {
+		t.Fatalf("user A's inbox reran %d times for user B's notification", got-baseA)
+	}
+
+	// Once a handler run stops reporting ids, every notification reruns it.
+	reportIDs.Store(false)
+	notify("landlord-b")
+	eventually(t, time.Second, func() bool { return executions["uid-b"].Load() == baseB+2 })
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	notify("landlord-a")
+	eventually(t, time.Second, func() bool { return executions["uid-a"].Load() == baseA+1 })
+	eventually(t, time.Second, func() bool { return executions["uid-b"].Load() == baseB+3 })
+}

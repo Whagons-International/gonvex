@@ -418,6 +418,10 @@ const queryResultMaxBatchDelay = 50 * time.Millisecond
 type callerContext struct {
 	user        *gonvex.User
 	permissions map[string]any
+	// referenceIDs are the caller's application user ids as reported by the
+	// subscription's last execution (gonvex.ReportCallerUserIDs). Only set on
+	// the copy matchResult evaluates predicates with.
+	referenceIDs map[string]bool
 }
 
 // subject is the authenticated identity that idempotency claims are scoped

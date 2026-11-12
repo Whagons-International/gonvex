@@ -169,6 +169,10 @@ type sharedSubscription struct {
 	visibilityUsers         []map[string]string
 	visibilityUsersRevision uint64
 	idleTimer               *time.Timer
+	// callerUserIDs are the ids the last execution reported with
+	// gonvex.ReportCallerUserIDs; nil when it reported none or the group's
+	// result is shared across users.
+	callerUserIDs map[string]bool
 }
 
 func newSubscriptionManager(server *Server) *subscriptionManager {
@@ -688,6 +692,8 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 	}
 	group.mu.Lock()
 	rowIDs := group.rowIDs
+	caller := group.caller
+	caller.referenceIDs = group.callerUserIDs
 	group.mu.Unlock()
 	intersected := false
 	for _, read := range group.reads {
@@ -696,7 +702,7 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 		}
 		intersected = true
 		detail := tableDetail(change, read.Table)
-		if detail.precise && !readPredicateMatches(read.Predicate, group.args, group.caller, detail, rowIDs) {
+		if detail.precise && !readPredicateMatches(read.Predicate, group.args, caller, detail, rowIDs) {
 			continue
 		}
 		if !detail.precise || detail.broad || detail.operation == "insert" || detail.operation == "delete" {
@@ -768,6 +774,21 @@ func readPredicateMatches(predicate string, args json.RawMessage, caller callerC
 			return true
 		}
 		return readPredicateMatches("columnArg:"+column, args, caller, detail, resultRowIDs)
+	}
+	if strings.HasPrefix(predicate, "callerUserIdColumn:") {
+		// The trigger reports userIds only for a physical "userId" column. Any
+		// missing piece (other column, no ids in the change, no ids reported by
+		// the last execution) reruns.
+		if strings.TrimSpace(strings.TrimPrefix(predicate, "callerUserIdColumn:")) != "userId" ||
+			len(detail.userIDs) == 0 || len(caller.referenceIDs) == 0 {
+			return true
+		}
+		for id := range detail.userIDs {
+			if caller.referenceIDs[id] {
+				return true
+			}
+		}
+		return false
 	}
 	if strings.HasPrefix(predicate, "callerIdColumn:") {
 		// The column suffix documents the manifest/trigger contract. userIds is
@@ -1021,7 +1042,10 @@ func (group *sharedSubscription) run() {
 		startedAt := time.Now().UTC()
 		group.manager.server.metrics.recordQueryCommitExecution(group.project, group.tenant, group.key, commitIDs)
 		executionCtx := gonvex.WithQueryChangeDetails(group.ctx, reason, changedAtMS, sortedStringSet(tables), sortedStringSet(taskIDs))
+		callerUserIDs := &gonvex.CallerUserIDCollector{}
+		executionCtx = gonvex.WithCallerUserIDCollector(executionCtx, callerUserIDs)
 		result, err := group.manager.executeVisibilityShared(executionCtx, group, representative, reason, changedAtMS)
+		group.recordCallerUserIDs(callerUserIDs, err)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.QueriesRerun++
 			metric.ReactiveExecutionPasses++
@@ -1064,6 +1088,28 @@ func (group *sharedSubscription) run() {
 		group.mu.Unlock()
 		return
 	}
+}
+
+// recordCallerUserIDs keeps the caller ids an execution reported, for the
+// callerUserIdColumn predicate. They are trusted only for a group whose
+// listeners are all the same user: a result shared by permission or
+// visibility, or served from another query, keeps the predicate conservative.
+// A failed execution, a cache hit, or a handler that reported nothing clears
+// them, so the next change reruns.
+func (group *sharedSubscription) recordCallerUserIDs(collector *gonvex.CallerUserIDCollector, err error) {
+	ids := collector.IDs()
+	if err != nil || group.caller.user == nil || strings.TrimSpace(group.caller.user.ID) == "" {
+		ids = nil
+	}
+	if ids != nil {
+		dependencies := group.manager.server.runtime.ManifestForProject(group.project).Functions[group.path].Dependencies
+		if dependencies.ShareByPermissions || strings.TrimSpace(dependencies.ShareByVisibility) != "" || strings.TrimSpace(dependencies.ShareResultFrom) != "" {
+			ids = nil
+		}
+	}
+	group.mu.Lock()
+	group.callerUserIDs = ids
+	group.mu.Unlock()
 }
 
 func (m *subscriptionManager) executeVisibilityShared(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
