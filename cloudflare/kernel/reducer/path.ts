@@ -90,7 +90,7 @@ export interface ExecutionAccess {
   /** `allow_internal`: the call may target an `internal` function. */
   readonly allowInternal?: boolean;
   /** The provenance channel (`direct_provenance(session, Api, ..)`); default `ui`, or `api` for a delegated session. */
-  readonly channel?: "api";
+  readonly channel?: "api" | "system";
 }
 
 /** Outcome of one call before it becomes frames. */
@@ -127,9 +127,10 @@ export function identityOf(session: TenantSession): Identity {
 /**
  * `direct_provenance(session, channel, command_id, artifact_hash).public_info()`.
  * The default channel is `ui`, which a delegated session turns into `api`;
- * a service socket's own calls pass `api` (K17).
+ * a service socket's own calls pass `api` (K17), or `system` for a principal
+ * configured so (0045).
  */
-export function invocationInfoOf(session: TenantSession, commandId: string, artifactHash: string, requested?: "api"): InvocationInfo {
+export function invocationInfoOf(session: TenantSession, commandId: string, artifactHash: string, requested?: "api" | "system"): InvocationInfo {
   const nonempty = (value: string) => (value.trim() ? value.trim() : null);
   const delegation = session.delegation ?? null;
   const channel = requested ?? (delegation ? "api" : "ui");

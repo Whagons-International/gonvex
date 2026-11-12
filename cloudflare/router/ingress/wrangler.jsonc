@@ -1,9 +1,10 @@
 // The Ingress Worker (K18). Deploy only under a gonvex-cf-dev- name until
-// cutover. `CONTROL` is the control object of the kernel Worker and
-// `INGRESS_ACTIONS` the entrypoint that implements `serviceAction` (K12's
-// Action Worker or K17's tenant path); their script names are fixed when the
-// kernel router is composed. Secrets: GONVEX_INGRESS_SERVICE_TOKEN (its
-// SHA-256 goes in the kernel's GONVEX_SERVICE_PRINCIPALS).
+// cutover. `CONTROL` is the kernel Worker's control object and `TENANT` its
+// tenant objects, whose `serviceCall` is K17's service path (0045 §4); the
+// kernel's script and tenant class names are fixed by the assembly (0045
+// "Assembly"). Secrets:
+// GONVEX_INGRESS_SERVICE_TOKEN; its SHA-256 goes in the kernel's
+// GONVEX_SERVICE_PRINCIPALS entry with `"channel": "system"` (0045 §3).
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "gonvex-cf-dev-ingress",
@@ -15,10 +16,10 @@
   "durable_objects": {
     "bindings": [
       { "name": "INGRESS", "class_name": "IngressObject" },
-      { "name": "CONTROL", "class_name": "OperatorControlObject", "script_name": "gonvex-cf-dev-kernel" }
+      { "name": "CONTROL", "class_name": "OperatorControlObject", "script_name": "gonvex-cf-dev-kernel" },
+      { "name": "TENANT", "class_name": "ReducerTenantObject", "script_name": "gonvex-cf-dev-kernel" }
     ]
   },
-  "services": [{ "binding": "INGRESS_ACTIONS", "service": "gonvex-cf-dev-actions", "entrypoint": "ActionWorker" }],
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["IngressObject"] }],
   "vars": {
     // Projects served, comma separated; the first is the default for `?project=`.
@@ -26,6 +27,8 @@
     // Per tenant: `<per second>/<burst>` (the gateway's 50/100), and for share pages.
     "GONVEX_INGRESS_TENANT_RATE": "50/100",
     "GONVEX_INGRESS_SHARE_RATE": "20/40",
+    // Tenant lookups that miss the cache, per project and isolate (bounds what unknown selectors cost the control object).
+    "GONVEX_INGRESS_LOOKUP_RATE": "20/40",
     "GONVEX_SHARE_SITE_NAME": "Whagons",
     "GONVEX_SHARE_APP_SCHEME": "whagons",
     // The web app's origin for "Open on web"; `{tenant}` is the link's tenant selector.

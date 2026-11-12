@@ -13,13 +13,12 @@
   "durable_objects": {
     "bindings": [
       { "name": "CONTROL", "class_name": "TestControlObject" },
-      { "name": "TENANT", "class_name": "StubTenantObject" },
+      { "name": "TENANT", "class_name": "TestTenant" },
       { "name": "INGRESS", "class_name": "IngressObject" },
       { "name": "RECORDER", "class_name": "Recorder" }
     ]
   },
-  "services": [{ "binding": "INGRESS_ACTIONS", "service": "gonvex-cf-dev-k18-ingress", "entrypoint": "TestActions" }],
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestControlObject", "StubTenantObject", "IngressObject", "Recorder"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestControlObject", "TestTenant", "IngressObject", "Recorder"] }],
   "vars": {
     "GONVEX_RUNTIME_VERSION": "development",
     "GONVEX_INGRESS_PROJECTS": "proj-fixture",

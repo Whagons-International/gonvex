@@ -38,6 +38,7 @@ const principals = JSON.stringify([{
   tokenSha256: createHash("sha256").update(token).digest("hex"),
   projects: [PROJECT],
   functions: ["calling.ingestWebhook", "relay.ingestTelnyxWebhook", "github.ingestWebhook", "taskPublicShares.getPublicPreviewByToken"],
+  channel: "system",
 }]);
 
 // Ed25519 from a fixed seed, as the workerd tests do; GitHub's documented secret.
@@ -83,14 +84,18 @@ try {
   results.upload = upload;
   console.log(`deployed ${NAME} (${upload})`);
 
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const health = await fetch(`${base}/share/task`).catch(() => null);
-    if (health && health.status !== 522 && health.status !== 530) break;
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+  // A new workers.dev route takes a moment to go live; until then the edge answers its own 404 page.
+  // Wait for this Worker's admin route to answer JSON.
+  let live = false;
+  for (let attempt = 0; attempt < 60 && !live; attempt++) {
+    const probe = await fetch(`${base}/_k18/calls?project=${PROJECT}`, { headers: { authorization: `Bearer ${admin}` } }).catch(() => null);
+    live = probe?.status === 200 && (probe.headers.get("content-type") ?? "").includes("application/json");
+    if (!live) await new Promise((resolve) => setTimeout(resolve, 2000));
   }
+  if (!live) throw new Error("the Worker did not come live within 120 s");
   const adminInit = (body) => ({ method: "POST", headers: { authorization: `Bearer ${admin}`, "content-type": "application/json" }, body: JSON.stringify(body) });
   const seeded = await timed(`${base}/_k18/seed`, adminInit({ project: PROJECT, tenants: [{ id: "tenant_alpha", domain: "alpha" }, { id: "tenant_off", status: "disabled" }], secrets: { TELNYX_PUBLIC_KEY: publicRaw, GITHUB_WEBHOOK_SECRET: GITHUB_SECRET } }));
-  check("seed", seeded.status === 200, seeded.status === 200 ? undefined : seeded.text.slice(0, 300));
+  check("seed", seeded.status === 200, seeded.status === 200 ? undefined : { status: seeded.status, title: /<title>([^<]*)/.exec(seeded.text)?.[1] ?? seeded.text.slice(0, 300) });
 
   const telnyx = async (path, body, { key = privateKey, timestamp = now(), tenant = "alpha" } = {}) =>
     timed(`${base}${path}?tenant=${tenant}`, { method: "POST", headers: { "content-type": "application/json", "telnyx-signature-ed25519": telnyxSign(key, timestamp, body), "telnyx-timestamp": timestamp }, body });

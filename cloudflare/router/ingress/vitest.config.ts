@@ -10,6 +10,8 @@ import { wrapBundle } from "../../kernel/host/src/bundle.ts";
 // module Actions on K04's engine (test/worker.ts).
 
 export const INGRESS_TOKEN = "gvx_svc_k18_ingress_test_credential";
+/** A principal configured without `channel` (Rust's `api`). */
+export const PLAIN_TOKEN = "gvx_svc_k18_plain_test_credential";
 
 const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 const moduleGlobals = here("../../kernel/host/src/module-globals.ts");
@@ -46,6 +48,14 @@ export default defineConfig({
               projects: ["proj-fixture", "proj-whagons"],
               functions: ["calling.ingestWebhook", "relay.ingestTelnyxWebhook", "github.ingestWebhook", "taskPublicShares.getPublicPreviewByToken"],
               maxDelegationSeconds: 600,
+              // 0045 §3: the channel comes from the principal's configuration, never the request.
+              channel: "system",
+            },
+            {
+              id: "plain",
+              tokenSha256: createHash("sha256").update(PLAIN_TOKEN).digest("hex"),
+              projects: ["proj-fixture"],
+              functions: ["calling.ingestWebhook"],
             },
           ]),
           WHAGONS_BUILT: built ? "1" : "",

@@ -5,25 +5,23 @@
  * replaces (whagons-api-gateway `runtime/pool.rs` `service`): it presents its
  * `gvx_svc_` credential with the request's project and tenant selector to the
  * control object's `authenticate` (K06, `service_principal.rs:241`). That
- * gives the canonical tenant id (the selector may be the id or the tenant's
- * domain, `resolve_tenant`), refuses disabled and deleted tenants with
- * "tenant is not available", and returns the principal's function allowlist.
- * Nothing in K06 changes for this.
+ * gives the grant: the canonical tenant (the selector may be the id or the
+ * tenant's domain, `resolve_tenant`), the function allowlist and the
+ * principal's configured channel. Disabled and deleted tenants answer
+ * "tenant is not available". Nothing in K06 changes for this.
+ *
+ * The cache is keyed by the **exact** selector, as the gateway's is. K06
+ * matches `tenant_id` case-sensitively and the domain case-insensitively, so
+ * folding case here would let `?tenant=TENANT_ALPHA` (a miss) poison the
+ * entry of `tenant_alpha` (0043 §5, review of #368).
  */
 import type { AuthOutcome, AuthRequest } from "../../control/src/auth.ts";
-
-/** What the ingress may do in one tenant. */
-export interface IngressGrant {
-  principalId: string;
-  projectId: string;
-  tenantId: string;
-  /** The principal's allowlist (`GONVEX_SERVICE_PRINCIPALS[].functions`). */
-  functions: readonly string[];
-}
+import type { ServiceGrant } from "../../control/src/types.ts";
+import { LOOKUP_RATE, Limiter, type RateLimit } from "./limits.ts";
 
 export interface IngressDirectory {
-  /** The grant, or `null` when the project or tenant is unknown, disabled or deleted. */
-  resolve(projectId: string, tenant: string): Promise<IngressGrant | null>;
+  /** The grant, or `null` when the tenant is unknown, disabled or deleted. */
+  resolve(projectId: string, tenant: string): Promise<ServiceGrant | null>;
 }
 
 /** The control object's method this needs (K06 `ControlObject.authenticate`). */
@@ -38,10 +36,8 @@ const UNKNOWN_TENANT = "tenant is not available";
 /** The ingress credential itself was refused: a deploy error, never the caller's. */
 export class IngressMisconfigured extends Error {}
 
-interface Cached {
-  grant: IngressGrant | null;
-  until: number;
-}
+/** The project's budget of control lookups is spent: answered 429, the provider retries. */
+export class LookupBudgetExceeded extends Error {}
 
 /**
  * The gateway remembers an unknown tenant for 30 s (`UNKNOWN_TENANT_TTL`) and
@@ -50,22 +46,65 @@ interface Cached {
  * disabled tenant stops receiving deliveries within 30 s.
  */
 export const DIRECTORY_TTL_MS = 30_000;
-const MAX_CACHED = 10_000;
+/** The gateway's `MAX_UNKNOWN_TENANTS`; the same cap bounds known tenants. */
+export const MAX_CACHED = 10_000;
+
+interface Cached<T> {
+  value: T;
+  until: number;
+}
+
+/** A TTL cache with a size cap: expired entries go first, then the oldest. */
+class Bounded<T> {
+  readonly entries = new Map<string, Cached<T>>();
+
+  constructor(private readonly cap: number) {}
+
+  get(key: string, now: number): Cached<T> | undefined {
+    const entry = this.entries.get(key);
+    if (entry && entry.until <= now) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return entry;
+  }
+
+  set(key: string, value: T, until: number, now: number): void {
+    this.entries.delete(key);
+    if (this.entries.size >= this.cap) for (const [entry, cached] of this.entries) if (cached.until <= now) this.entries.delete(entry);
+    while (this.entries.size >= this.cap) this.entries.delete(this.entries.keys().next().value!);
+    this.entries.set(key, { value, until });
+  }
+}
 
 export class ControlDirectory implements IngressDirectory {
-  private readonly cache = new Map<string, Cached>();
+  readonly known: Bounded<ServiceGrant>;
+  readonly unknown: Bounded<null>;
+  private readonly budget: Limiter;
+  /** Lookups that reached the control object (tests and numbers). */
+  lookups = 0;
 
   constructor(
     private readonly control: () => ControlAuthenticator,
     private readonly token: string,
-    private readonly clock: () => number = () => Date.now(),
-  ) {}
+    options: { clock?: () => number; lookupRate?: RateLimit; cap?: number } = {},
+  ) {
+    this.clock = options.clock ?? (() => Date.now());
+    this.known = new Bounded(options.cap ?? MAX_CACHED);
+    this.unknown = new Bounded(options.cap ?? MAX_CACHED);
+    this.budget = new Limiter({ lookup: options.lookupRate ?? LOOKUP_RATE });
+  }
 
-  async resolve(projectId: string, tenant: string): Promise<IngressGrant | null> {
-    const key = `${projectId}\u0000${tenant.toLowerCase()}`;
+  private readonly clock: () => number;
+
+  async resolve(projectId: string, tenant: string): Promise<ServiceGrant | null> {
+    const key = `${projectId}\u0000${tenant}`;
     const now = this.clock();
-    const cached = this.cache.get(key);
-    if (cached && cached.until > now) return cached.grant;
+    const known = this.known.get(key, now);
+    if (known) return known.value;
+    if (this.unknown.get(key, now)) return null;
+    if (!this.budget.take("lookup", now, projectId)) throw new LookupBudgetExceeded(`tenant lookups for project ${projectId} are over budget`);
+    this.lookups++;
     const outcome = await this.control().authenticate({
       id: "ingress",
       token: this.token,
@@ -75,24 +114,19 @@ export class ControlDirectory implements IngressDirectory {
       public: false,
       connectionId: `ingress:${crypto.randomUUID()}`,
     });
-    let grant: IngressGrant | null;
     if (outcome.message.type === "auth.result" && outcome.service) {
-      const route = outcome.service.route;
-      grant = { principalId: outcome.service.principalId, projectId: route.projectId, tenantId: route.tenantId, functions: [...outcome.service.functions] };
-    } else if (outcome.message.type === "auth.error" && outcome.message.error === UNKNOWN_TENANT) {
-      grant = null;
-    } else if (outcome.message.type === "auth.error" && outcome.message.error === SERVICE_FAILURE) {
+      this.known.set(key, outcome.service, now + DIRECTORY_TTL_MS, now);
+      return outcome.service;
+    }
+    if (outcome.message.type === "auth.error" && outcome.message.error === UNKNOWN_TENANT) {
+      this.unknown.set(key, null, now + DIRECTORY_TTL_MS, now);
+      return null;
+    }
+    if (outcome.message.type === "auth.error" && outcome.message.error === SERVICE_FAILURE) {
       // The project is one this ingress serves (the router checked), so the
       // credential or GONVEX_SERVICE_PRINCIPALS is wrong. Never cached.
       throw new IngressMisconfigured(`the control object refused the ingress service credential for project ${projectId}`);
-    } else {
-      throw new Error(outcome.message.type === "auth.error" ? outcome.message.error : "the control object answered no service grant");
     }
-    if (this.cache.size >= MAX_CACHED) {
-      for (const [entry, value] of this.cache) if (value.until <= now) this.cache.delete(entry);
-      if (this.cache.size >= MAX_CACHED) this.cache.delete(this.cache.keys().next().value!);
-    }
-    this.cache.set(key, { grant, until: now + DIRECTORY_TTL_MS });
-    return grant;
+    throw new Error(outcome.message.type === "auth.error" ? outcome.message.error : "the control object answered no service grant");
   }
 }

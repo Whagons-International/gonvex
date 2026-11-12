@@ -2,7 +2,7 @@
  * Public task share pages (K18): `GET /share/task?token=&tenant=` and
  * `GET /share/task-image?token=&tenant=`.
  *
- * History (0040 §6): Convex served both from `convex/http.ts` (a server-rendered
+ * History (0043 §7): Convex served both from `convex/http.ts` (a server-rendered
  * page with Open Graph tags and an SVG card). The Go module kept them
  * (`gonvex/task_public_shares.go`). Since the TypeScript v2 migration
  * (whagons5-client `e8168dc04d`) nothing serves them: `/share/task` is only a

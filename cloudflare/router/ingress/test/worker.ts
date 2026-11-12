@@ -3,31 +3,42 @@
  * keeps the gonvex-cf-dev- prefix anyway.
  *
  * - The router: `handleIngressRequest`.
- * - K06's control object (tenant resolution through `authenticate`), with K06's
- *   stub tenant object behind it, and one test-only method to set a tenant's
- *   domain and status.
+ * - K06's control object (tenant resolution through `authenticate`), with one
+ *   test-only method to set a tenant's domain and status.
  * - `IngressObject`.
- * - `TestActions`: the `serviceAction` port K12/K17 will implement, here a
- *   K04 `ModuleEngine` over either the fixture module (project
- *   `proj-fixture`) or the real Whagons bundle (project `proj-whagons`, only
- *   when `whagons/prepare.mjs` built it). Tool calls are answered by stubs.
- *   Every call is recorded in `Recorder`.
+ * - `TestTenant`: K06's stub tenant plus K17's `serviceCall(grant, call)`,
+ *   running Actions on a K04 `ModuleEngine` over either the fixture module
+ *   (project `proj-fixture`) or the real Whagons bundle (project
+ *   `proj-whagons`, only when `whagons/prepare.mjs` built it). Tool calls are
+ *   answered by stubs. Every call is recorded in `Recorder`.
  */
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject } from "cloudflare:workers";
 import { ControlObject, type ControlEnv } from "../../../control/src/control-object.ts";
 import { StubTenantObject } from "../../../control/test-support/stub-tenant.ts";
 import { ModuleEngine, type FunctionContract, type ModuleHost } from "../../../kernel/host/src/index.js";
 import type { HostPayload } from "../../../kernel/host/src/context.js";
 import { IngressObject } from "../object.ts";
 import { handleIngressRequest, type IngressEnv } from "../routes.ts";
-import { serviceMemberId, type ServiceActionReport, type ServiceActionRequest } from "../invoke.ts";
+import { serviceMemberId, type ServiceActionReport } from "../invoke.ts";
+import type { ServiceTenantCall, ServiceTenantOutcome } from "../../../kernel/principals/frames.ts";
+import type { ServiceGrant } from "../../../control/src/types.ts";
 import * as fixture from "./fixtures/webhooks.module.js";
 // @ts-expect-error resolved by the vitest alias (the Whagons bundle, or an empty stand-in).
 import * as whagonsApp from "gonvex:whagons-app";
 // @ts-expect-error resolved by the vitest alias.
 import whagonsFunctions from "gonvex:whagons-functions";
 
-export { IngressObject, StubTenantObject };
+export { IngressObject };
+
+/** What the recorder keeps of one call: the grant and call K17's path receives, flattened for the tests. */
+export interface ServiceActionRequest {
+  principal: { id: string; projectId: string; tenantId: string; functions: readonly string[] };
+  path: string;
+  args: Record<string, unknown>;
+  /** The channel the tenant side took from the grant (the principal's configuration). */
+  channel: string;
+  commandId: string;
+}
 
 export class TestControlObject extends ControlObject {
   testTenant(projectId: string, tenantId: string, patch: { domain?: string | null; status?: string }): void {
@@ -58,7 +69,7 @@ export class Recorder extends DurableObject {
   value(name: string): unknown { return this.seal[name]; }
 }
 
-interface TestEnv extends IngressEnv, ControlEnv {
+interface TestEnv extends Omit<IngressEnv, "TENANT">, ControlEnv {
   RECORDER: DurableObjectNamespace<Recorder>;
 }
 
@@ -134,16 +145,31 @@ async function tool(env: TestEnv, request: ServiceActionRequest, name: string, a
   }
 }
 
-export class TestActions extends WorkerEntrypoint<TestEnv> {
-  async serviceAction(request: ServiceActionRequest): Promise<ServiceActionReport> {
-    const recorder = this.env.RECORDER.getByName(request.principal.projectId);
+/**
+ * The tenant object for the tests: K06's stub tenant (provisioning, admission)
+ * plus K17's `serviceCall(grant, call)` for Actions, which the assembled
+ * kernel composes from K07 + K12 (0045). Like K17's `serviceTenantCall`, it
+ * runs the call as `_gonvex_service:<id>`, trusts the grant (the ingress
+ * checked the allowlist) and takes the channel from the grant.
+ */
+export class TestTenant extends StubTenantObject {
+  async serviceCall(grant: ServiceGrant, call: ServiceTenantCall): Promise<ServiceTenantOutcome> {
+    const channel = grant.channel ?? "api";
+    const request: ServiceActionRequest = {
+      principal: { id: grant.principalId, projectId: grant.route.projectId, tenantId: grant.route.tenantId, functions: grant.functions },
+      path: call.path,
+      args: call.args as Record<string, unknown>,
+      channel,
+      commandId: call.id,
+    };
+    const env = (this as unknown as { env: TestEnv }).env;
+    const recorder = env.RECORDER.getByName(request.principal.projectId);
     const tools: RecordedCall["tools"] = [];
     const member = serviceMemberId(request.principal.id);
     const identity = { member, role: "system", tenant: request.principal.tenantId };
     let report: ServiceActionReport;
     try {
-      // K17's check, repeated on the tenant side.
-      if (!request.principal.functions.includes(request.path)) throw new Error(`function ${JSON.stringify(request.path)} is not allowed for this service principal`);
+      if (call.kind !== "action") throw new Error("the test tenant serves Actions only");
       const engine = engineFor(request.principal.projectId);
       if (!engine) throw new Error(`project ${request.principal.projectId} has no module`);
       const contract = engine.functions.get(request.path);
@@ -155,7 +181,7 @@ export class TestActions extends WorkerEntrypoint<TestEnv> {
           if (payload.kind !== "toolInvoke") throw new Error(`the test host has no ${payload.kind}`);
           const name = String(payload["tool"]);
           tools.push({ tool: name, args: payload["args"] });
-          return tool(this.env, request, name, payload["args"]);
+          return tool(env, request, name, payload["args"]);
         },
       };
       const result = await engine.invoke(host, {
@@ -180,7 +206,7 @@ export class TestActions extends WorkerEntrypoint<TestEnv> {
       report = { ok: false, error: String((error as Error)?.message ?? error) };
     }
     await recorder.push({ request, identity, tools, report });
-    return report;
+    return report.ok ? { ok: true, result: JSON.stringify(report.value) } : { ok: false, error: report.error };
   }
 }
 

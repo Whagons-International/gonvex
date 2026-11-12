@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-11T22:25:39.627Z",
+  "date": "2026-11-12T00:08:58.439Z",
   "worker": "gonvex-cf-dev-k18-ingress",
   "checks": [
     {
@@ -10,7 +10,7 @@
       "name": "telnyx: first signed delivery 200",
       "ok": true,
       "detail": {
-        "ms": 577
+        "ms": 424
       }
     },
     {
@@ -34,7 +34,7 @@
       "ok": true,
       "detail": {
         "status": 401,
-        "ms": 111
+        "ms": 143
       }
     },
     {
@@ -73,14 +73,14 @@
       "name": "relay: signed delivery 200",
       "ok": true,
       "detail": {
-        "ms": 104
+        "ms": 75
       }
     },
     {
       "name": "github: documented vector 200",
       "ok": true,
       "detail": {
-        "ms": 248
+        "ms": 117
       }
     },
     {
@@ -95,7 +95,7 @@
       "ok": true,
       "detail": {
         "status": 200,
-        "ms": 730
+        "ms": 907
       }
     },
     {
@@ -110,7 +110,7 @@
       "ok": true,
       "detail": {
         "status": 200,
-        "ms": 89
+        "ms": 87
       }
     },
     {
@@ -118,7 +118,7 @@
       "ok": true,
       "detail": {
         "status": 200,
-        "ms": 85
+        "ms": 89
       }
     },
     {
@@ -134,13 +134,13 @@
     }
   ],
   "latencyMs": {
-    "firstDelivery": 577,
+    "firstDelivery": 424,
     "telnyxWarm": {
-      "p50": 120,
-      "p95": 207,
-      "max": 228
+      "p50": 93,
+      "p95": 141,
+      "max": 180
     },
-    "sharePage": 89
+    "sharePage": 87
   },
-  "upload": "347.60 KiB / gzip: 79.48 KiB"
+  "upload": "350.13 KiB / gzip: 80.10 KiB"
 }

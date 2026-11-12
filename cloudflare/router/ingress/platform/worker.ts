@@ -4,9 +4,9 @@
  * Action port recorded. Deployed only by `run.mjs`, under a gonvex-cf-dev-
  * name, and deleted at the end of the run.
  */
-import base, { IngressObject, Recorder, StubTenantObject, TestActions, TestControlObject } from "../test/worker.ts";
+import base, { IngressObject, Recorder, TestControlObject, TestTenant } from "../test/worker.ts";
 
-export { IngressObject, Recorder, StubTenantObject, TestActions, TestControlObject };
+export { IngressObject, Recorder, TestControlObject, TestTenant };
 
 interface PlatformEnv {
   CONTROL: DurableObjectNamespace<TestControlObject>;

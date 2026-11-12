@@ -1,6 +1,6 @@
 /**
  * The Ingress Worker's routes (K18; CONTRACT D.1 "Webhooks and HTTP actions",
- * IB4; decisions 0002 and 0040).
+ * IB4; decisions 0002, 0043 and 0045).
  *
  * - `POST /webhooks/telnyx?tenant=<tenant>[&project=<project>]` →
  *   `calling.ingestWebhook {rawBody, signature, timestamp}`
@@ -11,11 +11,18 @@
  * Answers to providers follow the adapter they replace (whagons-api-gateway
  * `webhooks.rs`): 200 handled, 401 unsigned or bad signature, 400 malformed,
  * 404 unknown tenant or project, 405 not POST, 413 too large, 429 over the
- * tenant's rate, 503 anything else (the provider retries). The body is
- * `{"ok":<status is 200>}`.
+ * rate, 503 anything else (the provider retries). The body is
+ * `{"ok":<status is 200>}`. Where the order of checks differs from the
+ * gateway's, 0043 §2 lists it.
+ *
+ * Before any tenant lookup, a request draws from a token bucket keyed by
+ * (project, selector), as the gateway's limiter is; a lookup that misses the
+ * cache also draws from the project's lookup budget (directory.ts).
  */
 import { BodyTooLarge, exactUtf8, readRawBody } from "./body.ts";
-import { ControlDirectory, IngressMisconfigured, type ControlAuthenticator, type IngressDirectory, type IngressGrant } from "./directory.ts";
+import type { ServiceGrant } from "../../control/src/types.ts";
+import { ControlDirectory, IngressMisconfigured, LookupBudgetExceeded, type ControlAuthenticator, type IngressDirectory } from "./directory.ts";
+import { LOOKUP_RATE, Limiter, parseRate, SHARE_RATE, WEBHOOK_RATE } from "./limits.ts";
 import { ingressObjectName, type DeliveryOutcome, type DeliveryRequest, type IngressObjectEnv } from "./object.ts";
 import {
   classifyFailure,
@@ -54,6 +61,8 @@ export interface IngressEnv extends IngressObjectEnv {
   GONVEX_INGRESS_SERVICE_TOKEN?: string;
   /** Projects the ingress serves, comma separated; the first is the default for `?project=`. */
   GONVEX_INGRESS_PROJECTS?: string;
+  /** Control lookups (cache misses) per project and isolate, `<per second>/<burst>`; default 20/40. */
+  GONVEX_INGRESS_LOOKUP_RATE?: string;
   GONVEX_SHARE_SITE_NAME?: string;
   GONVEX_SHARE_APP_SCHEME?: string;
   GONVEX_SHARE_WEB_URL?: string;
@@ -65,18 +74,29 @@ interface IngressDelivery {
 }
 
 let directory: { token: string; value: IngressDirectory } | undefined;
+let selectors: Limiter | undefined;
 
 function directoryFor(env: IngressEnv, token: string): IngressDirectory {
   if (!directory || directory.token !== token) {
     const control = () => env.CONTROL.getByName(CONTROL_NAME) as unknown as ControlAuthenticator;
-    directory = { token, value: new ControlDirectory(control, token) };
+    directory = { token, value: new ControlDirectory(control, token, { lookupRate: parseRate(env.GONVEX_INGRESS_LOOKUP_RATE, LOOKUP_RATE) }) };
   }
   return directory.value;
 }
 
-/** Tests: forget cached tenant resolutions. */
+/** The per-isolate limiter keyed by (project, selector), checked before any tenant lookup. */
+function selectorLimiter(env: IngressEnv): Limiter {
+  selectors ??= new Limiter({
+    webhook: parseRate(env.GONVEX_INGRESS_TENANT_RATE, WEBHOOK_RATE),
+    share: parseRate(env.GONVEX_INGRESS_SHARE_RATE, SHARE_RATE),
+  });
+  return selectors;
+}
+
+/** Tests: forget cached tenant resolutions and rate buckets. */
 export function resetIngressDirectory(): void {
   directory = undefined;
+  selectors = undefined;
 }
 
 const projectsOf = (env: IngressEnv): string[] => (env.GONVEX_INGRESS_PROJECTS ?? "").split(",").map((p) => p.trim()).filter(Boolean);
@@ -126,19 +146,22 @@ function target(env: IngressEnv, url: URL): Target {
   return { ok: true, project, tenant };
 }
 
-async function resolve(env: IngressEnv, project: string, tenant: string): Promise<{ grant: IngressGrant } | { status: number; reason: string }> {
+/** Rate limit on (project, selector), then the tenant lookup. */
+async function resolve(env: IngressEnv, bucket: "webhook" | "share", project: string, tenant: string): Promise<{ grant: ServiceGrant } | { status: number; reason: string }> {
   const token = env.GONVEX_INGRESS_SERVICE_TOKEN?.trim();
   if (!token) return { status: 503, reason: "GONVEX_INGRESS_SERVICE_TOKEN is not set" };
+  if (!selectorLimiter(env).take(bucket, Date.now(), `${project}\u0000${tenant}`)) return { status: 429, reason: "over the selector's rate" };
   try {
     const grant = await directoryFor(env, token).resolve(project, tenant);
     return grant ? { grant } : { status: 404, reason: "unknown tenant" };
   } catch (error) {
+    if (error instanceof LookupBudgetExceeded) return { status: 429, reason: error.message };
     if (error instanceof IngressMisconfigured) console.error(JSON.stringify({ target: "ingress", error: error.message }));
     return { status: 503, reason: String((error as Error)?.message ?? error) };
   }
 }
 
-const deskFor = (env: IngressEnv, grant: IngressGrant): IngressDelivery => env.INGRESS.getByName(ingressObjectName(grant)) as unknown as IngressDelivery;
+const deskFor = (env: IngressEnv, grant: ServiceGrant): IngressDelivery => env.INGRESS.getByName(ingressObjectName(grant)) as unknown as IngressDelivery;
 
 async function webhook(provider: Provider, request: Request, env: IngressEnv, url: URL): Promise<Response> {
   const started = Date.now();
@@ -179,12 +202,12 @@ async function webhook(provider: Provider, request: Request, env: IngressEnv, ur
       replay = { key: await replayKey(provider, [event, String(args.event), String(args.signature)], bytes), untilMs: Date.now() + GITHUB_REPLAY_MS };
     }
     args.rawBody = rawBody;
-    const resolved = await resolve(env, where.project, where.tenant);
+    const resolved = await resolve(env, "webhook", where.project, where.tenant);
     if (!("grant" in resolved)) return resolved.status;
     const outcome = await deskFor(env, resolved.grant).deliver({ v: 1, grant: resolved.grant, path: provider.function, args, bucket: "webhook", replay });
     if (outcome.kind === "limited") return 429;
     if (outcome.kind === "unavailable") {
-      console.error(JSON.stringify({ target: "ingress", route: provider.route, project: where.project, tenant: resolved.grant.tenantId, error: outcome.reason }));
+      console.error(JSON.stringify({ target: "ingress", route: provider.route, project: where.project, tenant: resolved.grant.route.tenantId, error: outcome.reason }));
       return 503;
     }
     duplicate = outcome.duplicate === true;
@@ -194,7 +217,7 @@ async function webhook(provider: Provider, request: Request, env: IngressEnv, ur
       case "tooLarge": return 413;
       case "unknownTenant": return 404;
       case "other":
-        console.warn(JSON.stringify({ target: "ingress", route: provider.route, project: where.project, tenant: resolved.grant.tenantId, event, error: outcome.report.error.slice(0, 500) }));
+        console.warn(JSON.stringify({ target: "ingress", route: provider.route, project: where.project, tenant: resolved.grant.route.tenantId, event, error: outcome.report.error.slice(0, 500) }));
         return 503;
     }
   })();
@@ -249,13 +272,13 @@ async function share(request: Request, env: IngressEnv, url: URL): Promise<Respo
   if (!token || new TextEncoder().encode(token).byteLength > MAX_TOKEN_BYTES) return notFound();
   const where = target(env, url);
   if (!where.ok) return where.status === 503 ? unavailable(503) : notFound();
-  const resolved = await resolve(env, where.project, where.tenant);
-  if (!("grant" in resolved)) return resolved.status === 404 ? notFound() : unavailable(503);
+  const resolved = await resolve(env, "share", where.project, where.tenant);
+  if (!("grant" in resolved)) return resolved.status === 404 ? notFound() : unavailable(resolved.status === 429 ? 429 : 503);
   const outcome = await deskFor(env, resolved.grant).deliver({ v: 1, grant: resolved.grant, path: PREVIEW_FUNCTION, args: { token }, bucket: "share" });
   if (outcome.kind === "limited") return unavailable(429);
   if (outcome.kind === "unavailable" || !outcome.report.ok) {
     const error = outcome.kind === "unavailable" ? outcome.reason : outcome.report.ok ? "" : outcome.report.error;
-    console.warn(JSON.stringify({ target: "ingress", route: url.pathname, project: where.project, tenant: resolved.grant.tenantId, error: error.slice(0, 500) }));
+    console.warn(JSON.stringify({ target: "ingress", route: url.pathname, project: where.project, tenant: resolved.grant.route.tenantId, error: error.slice(0, 500) }));
     return unavailable(503);
   }
   const preview = outcome.report.value;

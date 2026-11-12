@@ -1,9 +1,11 @@
 # Ingress Worker (K18)
 
 One Worker for every inbound webhook and for the public task share pages (CONTRACT "Ingress Worker", IB4,
-decisions 0002 and 0040). It holds no tenant data and no provider key. The control object resolves the tenant,
-one ingress object per tenant applies the rate limit and catches replays, and the Action runs through the
-service-call port, where it verifies the provider's signature on the exact bytes the provider sent.
+decisions 0002, 0043 and 0045). It holds no tenant data and no provider key. A per-(project, selector) rate
+limit runs first; the control object resolves the tenant (cached by exact selector, misses budgeted); one
+ingress object per tenant applies the tenant's rate limit and catches replays; and the Action runs through
+K17's tenant service path (`serviceCall`), where it verifies the provider's signature on the exact bytes the
+provider sent.
 
 | Route | Action | Arguments |
 |---|---|---|
@@ -21,7 +23,7 @@ service-call port, where it verifies the provider's signature on the exact bytes
 - 404: unknown tenant or project;
 - 405: not POST;
 - 413: over 1 MiB (5 MiB for GitHub);
-- 429: over the tenant's rate;
+- 429: over the (project, selector) rate, the project's lookup budget or the tenant's rate;
 - 503: anything else (the provider retries).
 
 The body is `{"ok":<status is 200>}`.
@@ -31,9 +33,10 @@ The body is `{"ok":<status is 200>}`.
 | `routes.ts` | `handleIngressRequest(request, env)`: the routes above; `null` for any other path |
 | `providers.ts` | The provider table, header and event checks, the Telnyx timestamp window, Action error classes |
 | `body.ts` | Bounded raw-body reads and strict UTF-8 that round-trips every byte, a leading BOM included |
-| `directory.ts` | Tenant resolution: the ingress authenticates as a `gvx_svc_` service principal through K06's `authenticate` |
+| `directory.ts` | Tenant resolution: the ingress authenticates as a `gvx_svc_` service principal through K06's `authenticate`; caches keyed by the exact selector, capped; a per-project lookup budget |
 | `object.ts` | `IngressObject`, one per (project, tenant): token-bucket rate limit, in-memory replay ledger, the Action call |
-| `invoke.ts` | The `serviceAction` port K12/K17 implement, and the binding adapter |
+| `invoke.ts` | The call through K17's tenant `serviceCall(grant, call)`, and its result |
+| `limits.ts` | Token buckets keyed by name and key, capped at 10,000 keys |
 | `share.ts` | Share page and image rendering, escaping, links, Open Graph tags |
 | `worker.ts`, `wrangler.jsonc` | The deployable Ingress Worker |
 | `test/` | workerd tests: K06's control object, the ingress object, Actions on K04's engine |
@@ -44,14 +47,16 @@ The body is `{"ok":<status is 200>}`.
 
 - **Secrets.** `GONVEX_INGRESS_SERVICE_TOKEN`, a `gvx_svc_` credential. Its SHA-256 goes into the kernel's
   `GONVEX_SERVICE_PRINCIPALS` with
-  `functions: ["calling.ingestWebhook","relay.ingestTelnyxWebhook","github.ingestWebhook","taskPublicShares.getPublicPreviewByToken"]`.
+  `functions: ["calling.ingestWebhook","relay.ingestTelnyxWebhook","github.ingestWebhook","taskPublicShares.getPublicPreviewByToken"]`
+  and `"channel": "system"` (0045 §3: the channel comes from configuration, never from the request).
 - **Projects.** `GONVEX_INGRESS_PROJECTS` lists the projects served, comma separated; the first is the default.
 - **Rate limits.** `GONVEX_INGRESS_TENANT_RATE` (default `50/100`) and `GONVEX_INGRESS_SHARE_RATE` (default
-  `20/40`), each `<per second>/<burst>`.
+  `20/40`), each `<per second>/<burst>`, applied per (project, selector) before the lookup and per tenant after
+  it. `GONVEX_INGRESS_LOOKUP_RATE` (default `20/40`): control lookups on a cache miss, per project and isolate.
 - **Share pages.** `GONVEX_SHARE_SITE_NAME`, `GONVEX_SHARE_APP_SCHEME`, `GONVEX_SHARE_WEB_URL` (the web app
   origin; `{tenant}` is replaced) and `GONVEX_SHARE_IMAGE_PROXY_URL` (an imgproxy base for PNG cards).
-- **Bindings.** `CONTROL` (the kernel's control object), `INGRESS` (this Worker's objects) and `INGRESS_ACTIONS`
-  (an entrypoint with `serviceAction`).
+- **Bindings.** `CONTROL` (the kernel's control object), `TENANT` (the kernel's tenant objects, for `serviceCall`)
+  and `INGRESS` (this Worker's objects).
 
 ## Commands (run in `cloudflare/`)
 

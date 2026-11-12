@@ -11,17 +11,17 @@
   "durable_objects": {
     "bindings": [
       { "name": "CONTROL", "class_name": "TestControlObject" },
-      { "name": "TENANT", "class_name": "StubTenantObject" },
+      { "name": "TENANT", "class_name": "TestTenant" },
       { "name": "INGRESS", "class_name": "IngressObject" },
       { "name": "RECORDER", "class_name": "Recorder" }
     ]
   },
-  // The Action runtime port (K12/K17), served here by this Worker's `TestActions`.
-  "services": [{ "binding": "INGRESS_ACTIONS", "service": "gonvex-cf-dev-k18-ingress-test", "entrypoint": "TestActions" }],
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestControlObject", "StubTenantObject", "IngressObject", "Recorder"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestControlObject", "TestTenant", "IngressObject", "Recorder"] }],
   "vars": {
     "GONVEX_RUNTIME_VERSION": "development",
     "GONVEX_INGRESS_PROJECTS": "proj-fixture,proj-whagons,proj-elsewhere",
-    "GONVEX_SHARE_WEB_URL": "https://{tenant}.app.example.test"
+    "GONVEX_SHARE_WEB_URL": "https://{tenant}.app.example.test",
+    // Small, so the lookup-budget test reaches it.
+    "GONVEX_INGRESS_LOOKUP_RATE": "1/10"
   }
 }

@@ -19,6 +19,8 @@ import {
 } from "./helpers.ts";
 
 const PROJECT = "proj-fixture";
+/** vitest.config.ts `PLAIN_TOKEN`: a principal configured without `channel`. */
+const PLAIN_TOKEN = "gvx_svc_k18_plain_test_credential";
 const ALPHA = "tenant_alpha";
 const GITHUB_SECRET = GITHUB_DOC_VECTOR.secret;
 let telnyxKey: CryptoKey;
@@ -66,7 +68,7 @@ describe("Telnyx (calling.ingestWebhook)", () => {
     expect(reply.headers.get("content-type")).toBe("application/json; charset=utf-8");
     const [call, ...rest] = await calls();
     expect(rest).toEqual([]);
-    // 0002: the invocation the adapter made (path, args, principal), with the channel of 0040 §3.
+    // 0002: the invocation the adapter made (path, args, principal), with the channel the principal is configured with (0045 §3).
     expect(call!.request.path).toBe("calling.ingestWebhook");
     expect(call!.request.args).toEqual({ rawBody: INITIATED, signature, timestamp });
     expect(call!.request.principal).toMatchObject({ id: "ingress", projectId: PROJECT, tenantId: ALPHA });
@@ -143,6 +145,44 @@ describe("Telnyx (calling.ingestWebhook)", () => {
     const { reply } = await signedTelnyx("/webhooks/telnyx", INITIATED, { tenant: "ALPHA" });
     expect(reply.status).toBe(200);
     expect((await calls())[0]!.request.principal.tenantId).toBe(ALPHA);
+  });
+
+  it("keys the tenant cache on the exact selector: a wrong-case miss cannot block the real tenant (review of #368)", async () => {
+    // K06 matches tenant_id case-sensitively, so TENANT_ALPHA is unknown; it must not poison tenant_alpha.
+    expect((await signedTelnyx("/webhooks/telnyx", fresh(TELNYX_CALL_INITIATED), { tenant: "TENANT_ALPHA" })).reply.status).toBe(404);
+    expect((await signedTelnyx("/webhooks/telnyx", fresh(TELNYX_CALL_INITIATED), { tenant: ALPHA })).reply.status).toBe(200);
+    // The domain matches case-insensitively in K06; each spelling is its own cache entry.
+    expect((await signedTelnyx("/webhooks/telnyx", fresh(TELNYX_CALL_INITIATED), { tenant: "Alpha" })).reply.status).toBe(200);
+    expect((await calls()).map((call) => call.request.principal.tenantId)).toEqual([ALPHA, ALPHA]);
+  });
+
+  it("rate-limits on (project, selector) before the tenant lookup, so an unknown selector answers 429 past the burst", async () => {
+    const statuses: number[] = [];
+    // The burst is 100 and the bucket refills at 50/s while the loop runs, so the first 429 comes a little after 100.
+    for (let n = 0; n < 160 && !statuses.includes(429); n++) statuses.push((await signedTelnyx("/webhooks/telnyx", fresh(TELNYX_CALL_INITIATED), { tenant: "ghost" })).reply.status);
+    expect(statuses.slice(0, 100)).toEqual(new Array(100).fill(404));
+    expect(statuses.at(-1)).toBe(429);
+    expect(new Set(statuses)).toEqual(new Set([404, 429]));
+    // Another selector has its own bucket.
+    expect((await signedTelnyx("/webhooks/telnyx", fresh(TELNYX_CALL_INITIATED), { tenant: ALPHA })).reply.status).toBe(200);
+  });
+
+  it("bounds control lookups for unknown selectors: past the project's budget, misses answer 429 without a lookup", async () => {
+    // GONVEX_INGRESS_LOOKUP_RATE is 1/10 in the test Worker.
+    const statuses: number[] = [];
+    for (let n = 0; n < 12; n++) statuses.push((await signedTelnyx("/webhooks/telnyx", fresh(TELNYX_CALL_INITIATED), { tenant: `random-${n}` })).reply.status);
+    expect(statuses.slice(0, 10)).toEqual(new Array(10).fill(404));
+    expect(statuses.slice(10)).toEqual([429, 429]);
+    expect(await calls()).toEqual([]);
+  });
+
+  it("takes the channel from the principal's configuration (0045 §3)", async () => {
+    const grantOf = (token: string) => runInDurableObject(control(), async (instance) =>
+      new ControlDirectory(() => instance as unknown as ControlAuthenticator, token).resolve(PROJECT, ALPHA));
+    expect((await grantOf("gvx_svc_k18_ingress_test_credential"))?.channel).toBe("system");
+    const plain = await grantOf(PLAIN_TOKEN);
+    expect(plain?.principalId).toBe("plain");
+    expect(plain && "channel" in plain).toBe(false);
   });
 
   it("refuses a disabled tenant within the directory cache window", async () => {
@@ -398,7 +438,7 @@ describe("parity with the adapter it replaces (whagons-api-gateway tests/webhook
 });
 
 describe("cost", () => {
-  it("resolves a tenant in the control object with no write, reading each tenant row of the project once (K06 resolveTenant, 0040 §9)", async () => {
+  it("resolves a tenant in the control object with no write, reading each tenant row of the project once (K06 resolveTenant, 0043 §10)", async () => {
     // Twenty tenants, so a scan would show.
     for (let n = 0; n < 20; n++) await control().devCreateTenant(PROJECT, `tenant_cost_${n}`, `cost ${n}`);
     const cost = await runInDurableObject(control(), async (instance) => {
@@ -408,7 +448,7 @@ describe("cost", () => {
       const middle = instance.sql.mark();
       const byDomain = await directory.resolve(PROJECT, "alpha");
       const after = instance.sql.mark();
-      return { byId: byId?.tenantId, byDomain: byDomain?.tenantId, id: { read: middle.read - before.read, written: middle.written - before.written }, domain: { read: after.read - middle.read, written: after.written - middle.written } };
+      return { byId: byId?.route.tenantId, byDomain: byDomain?.route.tenantId, id: { read: middle.read - before.read, written: middle.written - before.written }, domain: { read: after.read - middle.read, written: after.written - middle.written } };
     });
     console.log(JSON.stringify({ target: "cost", ...cost }));
     expect(cost.byId).toBe("tenant_cost_7");

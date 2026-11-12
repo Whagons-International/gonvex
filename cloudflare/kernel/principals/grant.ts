@@ -30,6 +30,8 @@ export interface ServiceGrant {
   route: TenantRoute;
   functions: string[];
   maxDelegationSeconds: number;
+  /** `system` for a host principal such as the Ingress Worker, from configuration only (0045); absent means `api`. */
+  channel?: "system";
 }
 
 /** `ServiceGrant::allows`: exact paths, no wildcards (rejected at configuration). */
