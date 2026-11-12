@@ -58,8 +58,8 @@ export function assertDashboardHealth(body) {
   if (String(body).trim() !== "ok") throw new Error("production dashboard is not healthy");
 }
 
-async function getJSON(fetchImpl, url, headers) {
-  const response = await fetchImpl(url, { headers });
+async function getJSON(fetchImpl, url, headers, signal) {
+  const response = await fetchImpl(url, { headers, ...(signal ? { signal } : {}) });
   if (!response.ok) throw new Error(`GET ${url} failed (${response.status})`);
   return response.json();
 }
@@ -118,8 +118,21 @@ export async function verifyDeployedEndpoints({ runtimeURL, dashboardURL, sha, f
   assertDashboardHealth(await dashboardResponse.text());
 }
 
+export async function captureRuntimeRollbackSHA(runtimeURL, fetchImpl = fetch) {
+  const payload = await getJSON(fetchImpl, new URL("/healthz", runtimeURL), { "Cache-Control": "no-cache" }, AbortSignal.timeout(15_000));
+  if (!fullSHA.test(payload?.version ?? "")) {
+    throw new Error("live runtime does not advertise a full rollback commit SHA");
+  }
+  assertRuntimeHealth(payload, payload.version);
+  return payload.version;
+}
+
 async function main() {
   const mode = process.argv[2];
+  if (mode === "baseline") {
+    console.log(await captureRuntimeRollbackSHA(requiredEnvironment("GONVEX_RUNTIME_HEALTH_URL")));
+    return;
+  }
   if (mode === "candidate") {
     await verifyPromotionCandidate({
       githubRepository: requiredEnvironment("GITHUB_REPOSITORY"),
@@ -144,7 +157,7 @@ async function main() {
     console.log(`Production endpoints are healthy at ${process.env.GONVEX_DEPLOY_SHA}`);
     return;
   }
-  throw new Error("usage: node scripts/release-gates.mjs candidate|deployment");
+  throw new Error("usage: node scripts/release-gates.mjs baseline|candidate|deployment");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
