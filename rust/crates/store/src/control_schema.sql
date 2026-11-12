@@ -361,6 +361,8 @@ CREATE TABLE IF NOT EXISTS gonvex_storage_uploads (
 -- valid while `gonvex_runtime_manifests` still has `module_hash` and
 -- `manifest_updated_at`. Bodies live once per checksum in
 -- `gonvex_runtime_migration_bodies` (see `stored_artifact.rs`).
+-- `migrations` is [entries, sha256(entries)]; execution flags are verified
+-- alongside the manifest text before a cached artifact is used.
 CREATE TABLE IF NOT EXISTS gonvex_runtime_artifacts (
   project_id TEXT PRIMARY KEY,
   module_hash TEXT NOT NULL,
@@ -373,3 +375,7 @@ CREATE TABLE IF NOT EXISTS gonvex_runtime_migration_bodies (
   checksum TEXT PRIMARY KEY,
   sql TEXT NOT NULL
 ) STRICT;
+-- Boot reads each manifest row's identity without its (large) manifest:
+-- columns after `manifest` would otherwise walk its overflow pages.
+CREATE INDEX IF NOT EXISTS gonvex_runtime_manifests_by_head
+  ON gonvex_runtime_manifests(project_id, module_hash, updated_at);

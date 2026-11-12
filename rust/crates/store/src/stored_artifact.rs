@@ -26,6 +26,9 @@ use sqlx::{Row, SqliteConnection};
 use crate::provision::sql_checksum;
 use crate::{ControlPlane, DatabaseError, MigrationScope, RuntimeManifestRecord, SqlMigration};
 
+const MANIFEST_HEADS_SQL: &str = r#"SELECT project_id, module_hash, updated_at
+    FROM gonvex_runtime_manifests WHERE module_hash <> '' ORDER BY updated_at, project_id"#;
+
 /// The identity of a project's stored manifest row, read without the
 /// manifest itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +59,15 @@ struct StoredMigration {
     checksum: String,
 }
 
+// An array envelope preserves the existing table's JSON-array constraint.
+// Earlier, unverified arrays of entries are cache misses and are rebuilt.
+type StoredMigrations = (Vec<StoredMigration>, String);
+
+fn migration_metadata_sha256(entries: &[StoredMigration]) -> Result<String, DatabaseError> {
+    let text = serde_json::to_string(entries).map_err(|error| protocol(error.to_string()))?;
+    Ok(manifest_sha256(&text))
+}
+
 /// Lowercase hex SHA-256 of a stored manifest text.
 pub fn manifest_sha256(text: &str) -> String {
     Sha256::digest(text.as_bytes())
@@ -73,14 +85,9 @@ impl ControlPlane {
     /// [`ControlPlane::runtime_manifests`] returns).
     pub async fn runtime_manifest_heads(&self) -> Result<Vec<RuntimeManifestHead>, DatabaseError> {
         let _admission = self.pools.admit(&self.database_url).await?;
-        let rows = sqlx::query(
-            r#"SELECT project_id, module_hash, updated_at
-               FROM gonvex_runtime_manifests
-               WHERE module_hash <> ''
-               ORDER BY updated_at, project_id"#,
-        )
-        .fetch_all(&self.reader)
-        .await?;
+        let rows = sqlx::query(MANIFEST_HEADS_SQL)
+            .fetch_all(&self.reader)
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| RuntimeManifestHead {
@@ -139,9 +146,17 @@ impl ControlPlane {
             );
             return Ok(None);
         }
-        let migrations: Vec<StoredMigration> =
-            serde_json::from_str(row.get::<&str, _>("migrations"))
-                .map_err(|error| protocol(format!("stored artifact migrations: {error}")))?;
+        // Flags and checksums are executable migration metadata too. A damaged
+        // cache must fall back to the fully verified manifest, never change
+        // transaction or rebuild semantics. Older cache formats also rebuild.
+        let Ok((migrations, metadata_sha256)) =
+            serde_json::from_str::<StoredMigrations>(row.get("migrations"))
+        else {
+            return Ok(None);
+        };
+        if migration_metadata_sha256(&migrations)? != metadata_sha256 {
+            return Ok(None);
+        }
         Ok(Some(StoredArtifact {
             project_id: head.project_id.clone(),
             module_hash: head.module_hash.clone(),
@@ -249,12 +264,13 @@ impl ControlPlane {
                 checksum: migration.checksum.clone(),
             })
             .collect::<Vec<_>>();
-        let migrations =
-            serde_json::to_string(&migrations).map_err(|error| protocol(error.to_string()))?;
+        let checksum = migration_metadata_sha256(&migrations)?;
+        let migrations = serde_json::to_string(&(migrations, checksum))
+            .map_err(|error| protocol(error.to_string()))?;
         let _admission = self.pools.admit(&self.database_url).await?;
         let mut transaction = self.pool.begin().await?;
         let missing: Option<String> = sqlx::query_scalar(
-            r#"SELECT json_extract(value,'$.name') FROM json_each($1)
+            r#"SELECT json_extract(value,'$.name') FROM json_each($1,'$[0]')
                WHERE json_extract(value,'$.checksum') NOT IN (SELECT checksum FROM gonvex_runtime_migration_bodies)
                LIMIT 1"#,
         )
@@ -284,7 +300,9 @@ impl ControlPlane {
         sqlx::query(
             r#"DELETE FROM gonvex_runtime_migration_bodies WHERE checksum NOT IN (
                  SELECT json_extract(m.value,'$.checksum')
-                 FROM gonvex_runtime_artifacts a, json_each(a.migrations) m)"#,
+                 FROM gonvex_runtime_artifacts a, json_each(
+                   CASE WHEN json_type(a.migrations,'$[0]')='array'
+                     THEN json_extract(a.migrations,'$[0]') ELSE a.migrations END) m)"#,
         )
         .execute(&mut *transaction)
         .await?;
@@ -431,10 +449,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_cache_entries_are_rebuilt_and_keep_their_bodies_until_replaced() {
+        let f = fixture("gonvex-stored-legacy").await;
+        let first = migration("0001_a.sql", "CREATE TABLE a(id TEXT PRIMARY KEY);");
+        let head = store(&f, "hash-1", std::slice::from_ref(&first)).await;
+        sqlx::query(
+            "UPDATE gonvex_runtime_artifacts SET migrations=json_extract(migrations,'$[0]')",
+        )
+        .execute(&f.control.pool)
+        .await
+        .unwrap();
+        assert!(f.control.stored_artifact(&head).await.unwrap().is_none());
+        sqlx::query("INSERT INTO gonvex_runtime_artifacts SELECT 'legacy-project',module_hash,manifest_updated_at,manifest_sha256,manifest,migrations FROM gonvex_runtime_artifacts WHERE project_id='project'")
+            .execute(&f.control.pool).await.unwrap();
+        let second = migration("0002_b.sql", "CREATE TABLE b(id TEXT PRIMARY KEY);");
+        store(&f, "hash-2", std::slice::from_ref(&second)).await;
+        assert_eq!(bodies(&f).await, 2);
+        sqlx::query("DELETE FROM gonvex_runtime_artifacts WHERE project_id='legacy-project'")
+            .execute(&f.control.pool)
+            .await
+            .unwrap();
+        store(&f, "hash-3", std::slice::from_ref(&second)).await;
+        assert_eq!(bodies(&f).await, 1);
+    }
+
+    #[tokio::test]
     async fn a_stored_artifact_describes_only_its_manifest_row_and_intact_text() {
         let f = fixture("gonvex-stored-artifact").await;
         let first = migration("0001_a.sql", "CREATE TABLE a(id TEXT PRIMARY KEY);");
         let head = store(&f, "hash-1", std::slice::from_ref(&first)).await;
+        let plan = sqlx::query(&format!("EXPLAIN QUERY PLAN {MANIFEST_HEADS_SQL}"))
+            .fetch_all(&f.control.reader)
+            .await
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|row| row.get::<String, _>("detail").contains("COVERING INDEX")),
+            "reading manifest heads must not visit the large manifest rows"
+        );
         let stored = f.control.stored_artifact(&head).await.unwrap().unwrap();
         assert_eq!(stored.migrations, vec![first.without_body()]);
         assert!(f
@@ -470,6 +522,12 @@ mod tests {
             .execute(&f.control.pool)
             .await
             .unwrap();
+        assert!(f.control.stored_artifact(&head).await.unwrap().is_none());
+
+        // Valid JSON with altered execution flags is still a corrupt cache.
+        let head = store(&f, "hash-1", std::slice::from_ref(&first)).await;
+        sqlx::query("UPDATE gonvex_runtime_artifacts SET migrations=json_set(migrations,'$[0][0].noTransaction',json('true'))")
+            .execute(&f.control.pool).await.unwrap();
         assert!(f.control.stored_artifact(&head).await.unwrap().is_none());
 
         // Bodies no stored artifact references are dropped.
