@@ -1,13 +1,9 @@
-// Bindings the sandbox objects need. The Worker that hosts them declares the
-// three classes as SQLite-backed Durable Objects and one Worker Loader.
-import type { SandboxAnalysis } from "./analysis";
+// Bindings of the Worker that hosts the sandbox (its own script, 0048 §2.3):
+// the per-tenant Container class and the deployment's registry.
+import type { SandboxContainer } from "./container";
 import type { SandboxRegistry } from "./registry";
-import type { SandboxWorkspace } from "./workspace";
 
 export interface SandboxEnv {
-  SANDBOX_WORKSPACE: DurableObjectNamespace<SandboxWorkspace>;
-  SANDBOX_ANALYSIS: DurableObjectNamespace<SandboxAnalysis>;
+  SANDBOX_CONTAINER: DurableObjectNamespace<SandboxContainer>;
   SANDBOX_REGISTRY: DurableObjectNamespace<SandboxRegistry>;
-  LOADER: WorkerLoader;
 }
-

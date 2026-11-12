@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"],
+    "allowJs": true,
+    "checkJs": false
+  },
+  // test/action.test.ts runs K12's runtime on K04's host: their shims come along.
+  "include": ["src", "test", "dev", "../../kernel/host/src/shims.d.ts"],
+  "exclude": ["../../kernel/storage/test/sdk"]
+}

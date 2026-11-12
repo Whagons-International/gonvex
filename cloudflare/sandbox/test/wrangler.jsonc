@@ -1,19 +1,25 @@
 // Test-only Worker for the sandbox (K20). Never deployed; the name keeps the
-// gonvex-cf-dev- prefix anyway.
+// gonvex-cf-dev- prefix anyway. The Container object reaches the manager that
+// test/global-setup.ts starts through SANDBOX_CONTAINER_URL (vitest.config.ts).
 {
   "name": "gonvex-cf-dev-k20-sandbox-test",
   "main": "worker.ts",
   "compatibility_date": "2026-10-23",
   // AsyncLocalStorage carries the module invocation (K04 globals.ts) in test/action.test.ts.
   "compatibility_flags": ["nodejs_als"],
-  "worker_loaders": [{ "binding": "LOADER" }],
   "durable_objects": {
     "bindings": [
-      { "name": "SANDBOX_WORKSPACE", "class_name": "SandboxWorkspace" },
-      { "name": "SANDBOX_ANALYSIS", "class_name": "SandboxAnalysis" },
-      { "name": "SANDBOX_REGISTRY", "class_name": "SandboxRegistry" }
+      { "name": "SANDBOX_CONTAINER", "class_name": "SandboxContainer" },
+      { "name": "SANDBOX_REGISTRY", "class_name": "SandboxRegistry" },
+      { "name": "TENANT", "class_name": "FilesTenant" }
     ]
   },
-  "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-k20-files" }],
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SandboxWorkspace", "SandboxAnalysis", "SandboxRegistry"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SandboxContainer", "SandboxRegistry", "FilesTenant"] }],
+  // K13's files (kernel/files/test/wrangler.jsonc): a local bucket and its configuration.
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-k20-files-test" }],
+  "vars": {
+    "GONVEX_PUBLIC_URL": "https://gonvex.test",
+    "GONVEX_STORAGE_SECRET": "k20-test-secret",
+    "GONVEX_STORAGE_BUCKET": "gonvex-cf-dev-k20-files-test"
+  }
 }

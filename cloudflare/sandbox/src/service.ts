@@ -1,8 +1,9 @@
 // `ctx.sandbox` for the Action runtime: K12's `SandboxPort`
-// (cloudflare/actions/src/ports.ts on #362). The reference is
+// (cloudflare/actions/src/ports.ts). The reference is
 // `Runtime::sandbox_call` and `SandboxManager::call` (RT/sandbox.rs:194-686).
 import type { SandboxBackend, SandboxScope } from "./backend";
 import type { SandboxConfig } from "./config";
+import type { FilesSession } from "../../kernel/files/access";
 import { asU64, decodeBase64Strict, encodeBase64, exactFields, requiredString, stringField, utf8Length } from "./payload";
 
 /** The parts of K12's `ActionSession` the sandbox reads. */
@@ -10,16 +11,21 @@ export interface SandboxSession {
   projectId: string;
   tenantId: string;
   account: { id: string };
+  member?: { id: string } | undefined;
 }
 
 /**
  * Sandbox `importFile`'s read (`StorageService::read_file`, RT/storage.rs:324-363):
- * the owner check, `uploaded` required and the size cap are the storage
- * package's (K13). K13's `ActionFiles` satisfies this as it is; `r2FileSource`
- * (files.ts) streams instead of buffering.
+ * K13's `ActionFiles.readFile` (kernel/files/rpc.ts) as it is, with its owner
+ * checks (IB1), `uploaded` required and Rust's size text.
  */
 export interface SandboxFileSource {
-  readFile(session: SandboxSession, fileId: string, maxBytes: number): Promise<{ bytes: Uint8Array } | { stream: ReadableStream<Uint8Array>; size: number }>;
+  readFile(session: FilesSession, fileId: string, maxBytes: number): Promise<{ bytes: Uint8Array }>;
+}
+
+/** K13's caller: the account id and the tenant Member id (0032 K13 §1). */
+export function filesSession(session: SandboxSession): FilesSession {
+  return { projectId: session.projectId, tenantId: session.tenantId, accountId: session.account.id, memberId: session.member?.id ?? "" };
 }
 
 export interface SandboxServiceOptions {
@@ -115,10 +121,9 @@ export class SandboxService {
     const fileId = requiredString(fields, "fileId");
     const filename = requiredString(fields, "filename");
     if (!files) throw new Error(STORAGE_NOT_CONFIGURED);
-    const read = await files.readFile(session, fileId, config.maxFileBytes);
-    const { body, size } = "bytes" in read
-      ? { body: new Blob([read.bytes]).stream(), size: read.bytes.byteLength }
-      : { body: read.stream, size: read.size };
+    const { bytes } = await files.readFile(filesSession(session), fileId, config.maxFileBytes);
+    const body = new Blob([bytes]).stream();
+    const size = bytes.byteLength;
     // `import_file` checks the name and the size before it looks the sandbox up.
     if (filename.trim() === "") {
       await body.cancel().catch(() => undefined);

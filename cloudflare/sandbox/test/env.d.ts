@@ -1,10 +1,10 @@
 // Bindings of test/wrangler.jsonc.
 declare namespace Cloudflare {
   interface Env {
-    SANDBOX_WORKSPACE: DurableObjectNamespace<import("../src/workspace").SandboxWorkspace>;
-    SANDBOX_ANALYSIS: DurableObjectNamespace<import("../src/analysis").SandboxAnalysis>;
+    SANDBOX_CONTAINER: DurableObjectNamespace<import("../src/container").SandboxContainer>;
     SANDBOX_REGISTRY: DurableObjectNamespace<import("../src/registry").SandboxRegistry>;
-    LOADER: WorkerLoader;
+    SANDBOX_CONTAINER_URL: string;
+    TENANT: DurableObjectNamespace<import("./worker").FilesTenant>;
     FILES: R2Bucket;
   }
 }

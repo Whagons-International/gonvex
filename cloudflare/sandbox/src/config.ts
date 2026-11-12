@@ -1,12 +1,12 @@
 // Sandbox policy (RT/config.rs:108-158, 366-460). The defaults and the
-// GONVEX_SANDBOX_* variable names are Rust's. Settings that only describe the
-// Rust host (worker binary, root directory, chroot uid/gid, unconfined mode,
-// DuckDB memory) have no counterpart here.
+// GONVEX_SANDBOX_* variable names are Rust's. The settings that describe the
+// host (worker binary, root directory, chroot uid/gid, DuckDB memory) are the
+// Container's and keep Rust's values there (container/manager.mjs).
 
 export interface SandboxConfig {
   /** GONVEX_SANDBOX_ENABLED (default false): "sandbox is disabled by runtime policy". */
   enabled: boolean;
-  /** Runs executing at once across the deployment (Rust: one process). */
+  /** Runs executing at once per tenant (Rust: per process; 0048 §2.3). */
   concurrency: number;
   /** Live sandboxes per (project, tenant, account). */
   maxPerAccount: number;
@@ -24,10 +24,7 @@ export interface SandboxConfig {
   maxOutputBytes: number;
   /** Rows one `duckdb.query` returns before `truncated: true`. */
   maxRows: number;
-  /**
-   * Rust's V8 heap cap. A Dynamic Worker isolate cannot be capped below the
-   * platform's 128 MB, so this is reported, not enforced (note 0040 §5).
-   */
+  /** The V8 heap cap the worker applies to a run. */
   maxHeapBytes: number;
 }
 
@@ -48,9 +45,6 @@ export const DEFAULT_SANDBOX_CONFIG: Readonly<SandboxConfig> = Object.freeze({
   maxRows: 500,
   maxHeapBytes: 64 << 20,
 });
-
-/** The platform's isolate memory limit, which is what actually stops a run. */
-export const PLATFORM_ISOLATE_BYTES = 128 * 1024 * 1024;
 
 const INTEGER_SETTINGS: ReadonlyArray<[keyof SandboxConfig, string]> = [
   ["concurrency", "GONVEX_SANDBOX_CONCURRENCY"],

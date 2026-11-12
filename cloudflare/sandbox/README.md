@@ -1,179 +1,115 @@
 # Sandbox (K20)
 
-`ctx.sandbox` for Actions on Cloudflare: the ten calls (`create`, `destroy`, `run`, `cancel`, `status`, `readFile`,
-`readText`, `writeFile`, `writeText`, `importFile`), per-workspace files with a TTL, Rust's execution caps, and the
-`duckdb` binding (`query`, `register`) inside a run. The reference is `rust/crates/runtime/src/sandbox.rs`,
-`data_ingest.rs` and `rust/crates/sandbox-worker/` at `0bf3ad13`; the contract rows are CONTRACT.md B.2a `sandbox`.
+`ctx.sandbox` for Actions on Cloudflare, by the stage-1 contract (CONTRACT B.2a, ruling 0048 §2.1): Rust's sandbox
+worker in a Container, DuckDB included, with Rust's limits. It covers:
+- the ten calls: `create`, `destroy`, `run`, `cancel`, `status`, `readFile`, `readText`, `writeFile`, `writeText`
+  and `importFile`;
+- per-workspace files with TTLs;
+- the `duckdb` binding inside a run.
 
-**Backend: Dynamic Workers and Durable Object SQLite, no Container.** Note
-`docs/cloudflare/contract-changes/0040-k20-sandbox-on-dynamic-workers.md` records the evaluation of both options, why
-this one covers every Whagons call site, and each deviation from Rust.
+The reference is `rust/crates/runtime/src/sandbox.rs`, `data_ingest.rs` and `rust/crates/sandbox-worker/` at
+`0bf3ad13`. Findings, numbers and the L09 candidate are in note
+`docs/cloudflare/contract-changes/0047-k20-sandbox-findings.md`.
 
 ## Layout
 
-| File | What | Rust reference |
+| Path | What | Rust reference |
 |---|---|---|
-| `src/service.ts` | `SandboxService.call(operation, payload, session, duckdb)`: K12's `SandboxPort`. Payload checks, policy and texts in Rust's order; `importFile`'s storage read | `Runtime::sandbox_call`, `SandboxManager::call`, `create`, `run`, `read_file`, `write_file` |
-| `src/backend.ts` | `SandboxBackend`, the one interface between the contract and what runs code. A Container backend would implement it | — |
-| `src/dynamic.ts` | `DynamicWorkerBackend`: routes each call to the sandbox's objects | — |
-| `src/workspace.ts` | `SandboxWorkspace` (one per sandbox): files, TTL alarm, executions, the run in a Dynamic Worker, `ExecutionHost` (what module code may call) | `Workspace`, `run`, `execute_worker`, `WorkerHost::dispatch` |
-| `src/analysis.ts` | `SandboxAnalysis` (one per sandbox): the `duckdb` binding on SQLite, imports, `SUMMARIZE`/`DESCRIBE`/`SHOW TABLES` | `WorkerHost::query`, `register` |
-| `src/registry.ts` | `SandboxRegistry` (one per deployment): `max_total`, `max_per_account`, the run slots (`concurrency`) | `SandboxManager` counts, `admission` |
-| `src/program.ts` | Rust's TypeScript wrapper (console, `files`, `duckdb`), type-stripped by Sucrase; the Dynamic Worker's entry module | sandbox-worker `transpile` |
-| `src/sql.ts` | Statement split, `$N`, `"import_1"."data"` → the stored import table | — |
-| `src/ingest/` | CSV/TSV/TXT (streamed), XLSX/XLSM (sheets inflated as streams), XLS (BIFF8) into tables | `data_ingest.rs`, calamine 0.36 |
-| `src/config.ts` | `GONVEX_SANDBOX_*` with Rust's names and defaults (disabled by default) | `config.rs:108-158` |
-| `src/files.ts` | `r2FileSource`: `importFile`'s read through K13's owner check, streamed from R2 | `StorageService::read_file` |
-| `test/` | workerd tests (below) and the Whagons call-site code they run (`test/whagons.ts`) | |
-| `dev/` | Platform proof: a Worker with a probe route, `platform.mjs` (deploy, probe, delete), `results/platform.json` | |
-| `scripts/make-fixtures.mjs` | Builds `test/fixtures/workbook.xlsx`, `.xls` (LibreOffice) and `workbooks.ts` | |
+| `src/service.ts` | `SandboxService.call(operation, payload, session, duckdb)`: K12's `SandboxPort`. Rust's payload checks, policy and texts, in Rust's order; `importFile`'s read through K13's `ActionFiles.readFile` | `Runtime::sandbox_call`, `SandboxManager::call`, `create`, `run`, `read_file`, `write_file` |
+| `src/backend.ts` | `SandboxBackend`, the interface between the contract and what runs code (the L09 candidate implements it too) | — |
+| `src/container-backend.ts` | `ContainerBackend`: the registry's counts, then the tenant's Container | — |
+| `src/container.ts` | `SandboxContainer`: one Durable Object and Container per tenant; starts it with no Internet, forwards operations, stops it when no workspace is alive | — |
+| `src/registry.ts` | `SandboxRegistry`: the deployment's `max_total` and `max_per_account` | `SandboxManager` counts |
+| `src/config.ts`, `src/payload.ts` | `GONVEX_SANDBOX_*` with Rust's names and defaults; `exact_fields`, `as_u64`, path and base64 rules | `config.rs:108-158`, `sandbox.rs:712-752` |
+| `container/Dockerfile` | The image: `gonvex-sandbox-worker --features duckdb` (unchanged), `k20-ingest`, the manager | `Dockerfile.runtime` |
+| `container/ingest/` | `k20-ingest`: Rust's `data_ingest.rs` compiled unchanged (`#[path]`), its lock seeded from `rust/Cargo.lock` | `data_ingest.rs` |
+| `container/manager.mjs` | `SandboxManager` as a small HTTP server: workspaces, TTL prune, per-tenant admission, one worker process per run with Rust's request JSON, the ingest | `sandbox.rs` |
+| `test/` | workerd tests against the manager, which runs with the Rust binaries, the image, or protocol stubs (below) | |
+| `dev/` | Platform proof: a Worker in its own script with the Container, a probe route, `platform.mjs` (deploy, probe, delete), `results/platform.json` | |
 
-## Wiring it in (K12 and K19)
+## Wiring (K22)
 
 ```ts
-// Worker that hosts the objects (wrangler.jsonc): a Worker Loader and three SQLite-backed classes.
-//   "worker_loaders": [{ "binding": "LOADER" }],
-//   durable_objects: SANDBOX_WORKSPACE → SandboxWorkspace, SANDBOX_ANALYSIS → SandboxAnalysis, SANDBOX_REGISTRY → SandboxRegistry
-//   "limits": { "cpu_ms": 120000 }   // the longest run timeout; bounds one analysis statement (note 0040 §6)
+// The sandbox Worker, its own script (0048 §2.3), wrangler.jsonc as dev/wrangler.jsonc:
+//   "containers": [{ "class_name": "SandboxContainer", "image": "<path>/container/Dockerfile",
+//                    "image_build_context": "<repository root>", "instance_type": "basic" }],
+//   durable_objects: SANDBOX_CONTAINER → SandboxContainer, SANDBOX_REGISTRY → SandboxRegistry,
 //   vars: GONVEX_SANDBOX_ENABLED = "true" (and any GONVEX_SANDBOX_* override)
-export { SandboxAnalysis, SandboxRegistry, SandboxWorkspace } from "../sandbox/src/index";
+export { SandboxContainer, SandboxRegistry } from "../sandbox/src/index";
 
-// The Action runtime (K12, actions/src/worker.ts):
-configureActions({ ..., sandbox: (env) => sandboxFromEnv(env, files) });
-// files: K13's `new ActionFiles({ tenant, bucket, config })` as it is, or the streaming
-// `r2FileSource({ tenant: (s) => env.TENANT.getByName(s.tenantId), bucket: env.FILES })`.
+// The Action runtime (K12, actions/src/worker.ts); files is K13's ActionFiles for the tenant:
+configureActions({ ..., sandbox: (env, tenantId) => sandboxFromEnv(env, { readFile: (s, id, max) => new ActionFiles({ tenant: env.TENANT.getByName(tenantId), bucket: env.FILES, config }).readFile(s, id, max) }) });
 ```
 
 ## How a call runs
 
 ```
-K12 host call ─► SandboxService ─(checks, Rust's order and texts)─► DynamicWorkerBackend
-                                                                     │  name = [project, tenant, account] / sbx_<uuid>
-     create ─► SandboxRegistry.admit (128 total, 4 per account) ─► SandboxWorkspace.create (alarm at expiresAt)
-     run    ─► SandboxWorkspace: record ─► registry run slot ─► Sucrase ─► LOADER.load({ globalOutbound: null,
-                env: {}, limits: { cpuMs: timeoutMs } }) ─► runner.run(ExecutionHost) ─┬─ files.* → workspace KV
-                                                                                       └─ duckdb.* → SandboxAnalysis SQL
-                the answer, the deadline timer, an expired host call or a cancel ends it; the host is closed
-     importFile ─► K13 owner check, bytes from R2 ─► SandboxAnalysis.ingest ─► tables "import_N.<table>"
+K12 host call ─► SandboxService (Rust's checks and texts) ─► ContainerBackend
+     create ─► SandboxRegistry.admit (128 total, 4 per account) ─► SandboxContainer [project, tenant]
+                                                                    │ start({ enableInternet: false }) if stopped
+                                                                    ▼
+                                    manager.mjs: workspaces /var/lib/gonvex/sandboxes/<id>/{files,imports}
+     run        ─► per-tenant admission (concurrency 2) ─► gonvex-sandbox-worker (chroot, uid 65534, seccomp,
+                   V8 64 MiB, DuckDB 128 MiB, the deadline) ─► execution record
+     importFile ─► K13 ActionFiles.readFile (IB1) ─► bytes streamed ─► k20-ingest ─► imports/import_N.duckdb
 ```
 
-- **Files and records** are in the workspace object's key-value storage, in 512 KiB chunks. SQL cannot read `_cf_KV`,
-  so module SQL never reaches them.
-- **The run** executes in a Dynamic Worker loaded for that one execution. Its only capability is the `ExecutionHost`
-  it receives. It has no network (`globalOutbound: null`), no bindings, no `eval` and no cache.
-- **The `duckdb` binding** runs in a separate object, so a long statement never blocks the workspace. If a statement
-  exceeds the CPU limit, only that object is reset: the open statement rolls back and committed tables stay.
-- **The TTL**: every call refuses an expired sandbox ("sandbox was not found"). The alarm then deletes both objects'
-  storage and the registry entry. A running execution delays the deletion until it ends, as Rust's prune does.
-
-## Behaviour
-
-**Kept from Rust:**
-- Every operation's payload fields and checks, in Rust's order and with Rust's texts (`exact_fields`, `required_string`,
-  `as_u64` fallbacks to the defaults, path rules, base64, UTF-8).
-- All limits (table below); the execution JSON and its statuses; one active execution per sandbox; and the cancel
-  semantics (the answer still says `running`).
-- The 4,000-character error bound.
-- The worker's wrapper (`console` with 500 lines of 16,384 characters, `files`, `duckdb` only when declared), the
-  bootstrap's argument checks, and `ctx.sandbox.*` inside a run answering `unsupported sandbox worker operation`.
-- The V8 engine's error texts for a thrown error, a result over the cap and the deadline.
-- The worker's errno texts for files.
-- `importFile`'s order (storage read, name, size, then the sandbox). Alias numbering (`import_N`). Sheet table names
-  and limits. `register`'s types and errors. Query rows capped at `maxRows` with `truncated`. duckdb-rs running every
-  statement and answering the last.
-
-**Platform-forced or intended (note 0040):**
-- The memory limit is the platform's 128 MB.
-- Tables hold at most 100 columns.
-- XLSB and ODS are refused (Whagons never sends them).
-- DuckDB-only SQL that Whagons' own code does not emit fails with a SQLite error.
-- Dates are ISO text instead of `Date32(…)`, and booleans are 1/0.
-- Executions survive an object eviction.
-
-| Limit (Rust default) | Mechanism | Proven |
-|---|---|---|
-| disabled by default | `GONVEX_SANDBOX_ENABLED` | test |
-| TTL 30 min, max 2 h | `expiresAt` check on every call; alarm deletes | test (expiry and wipe) |
-| 128 total, 4 per account | registry object | test |
-| 16 executions | workspace record | test |
-| run timeout 30 s, max 120 s | caller-side timer + expired host calls + `limits.cpuMs = timeoutMs` | test (timer); platform (CPU, microtask and host-call spins) |
-| heap 64 MiB | platform isolate limit, 128 MB | platform |
-| code 512 KiB, file 64 MiB, workspace 256 MiB | service and host checks; SQL growth checked in its transaction | test |
-| output 8 MiB, rows 500 | runner and manager caps; cursor stops at `maxRows` | test |
-| concurrency 2 | registry run slots | test |
-| no network | `globalOutbound: null` | test and platform |
+- The manager keeps Rust's behaviour, with one exception (0047 §2b): it chowns each workspace to the worker's uid.
+  Without that, the chrooted worker cannot create `analysis.duckdb`, which is the "Permission denied" every
+  current `analyzeInSandbox` call on staging hit.
+- Workspaces live on the Container's disk. The object stops the Container 60 s after its last workspace is
+  destroyed or expires. A Container that stops loses its workspaces, as a Rust runtime restart does.
 
 ## Tests
 
-`pnpm test` runs `vitest run --root sandbox`: 48 tests in workerd with real objects, a real Worker Loader and local R2.
+`pnpm test` runs `vitest run --root sandbox`. `test/global-setup.mjs` decides what the tests' Container object
+talks to:
 
-- `scenarios.test.ts`: **the assistant data-analysis scenarios.** Every Whagons call site runs the app's own helper
-  code, copied from whagons5-client staging `a6de676951` into `test/whagons.ts`:
-  - `analyzeWorkspaceTasks`, with and without an upload;
-  - `ingestAttachment` for CSV, XLSX and XLS;
-  - the shared-sandbox data-file tools: `readConversationFile`, `inspectDataFile`, `queryDataFile` (with
-    `qualifyImportedTables`) and `profileDataFile` (`SUMMARIZE`);
-  - `snapshotTasksData` with `analyzeInSandbox`, including the `console.log` answer path and TypeScript errors;
-  - the cloud agent's `runCode`;
-  - `parseExcelAttachment` (see note 0040 §7).
-- `action.test.ts`: `ctx.sandbox` end to end. K12's `ActionRuntime` and K04's module host run an agent Action whose
-  `sandbox` port is this package's service: an analysis with an upload, and Rust's host-call error text, including
-  "sandbox importFile also requires the storage capability".
-- `isolation.test.ts`: another account, tenant or project reaches nothing, by any operation. Two sandboxes of one
-  account share nothing. A private file of another account is refused (IB1). Paths stay inside the workspace. A run
-  has no fetch, `connect`, `eval`, `new Function` or cache. SQL cannot read `_cf_KV`, `ATTACH`, `PRAGMA` or files. A
-  run past its deadline can no longer write.
-- `limits.test.ts`: every policy and cap above, with Rust's texts and order.
-- `ingest.test.ts`: the CSV dialect, the XLSX and XLS readers against the fixtures, Rust's number and name formats,
-  and atomic imports.
-- `numbers.test.ts`: rows read and written per analysis call.
-- `sql.test.ts`: the statement rewrite (import names, `$N`, statement split) and the DuckDB-only statements.
-
-Local workerd enforces neither `limits.cpuMs` nor isolate memory. A pure spin locally never ends, so the suite has no
-such test; `dev/` proves both on the platform.
-
-## Platform results
+| Setting | Manager | Run |
+|---|---|---|
+| none (CI) | the manager here, with the protocol stubs in `test/stub/` | 15 tests; 10 need Rust and skip |
+| `K20_SANDBOX_BIN=<dir>` with `gonvex-sandbox-worker` and `k20-ingest` | the manager here, with the Rust binaries (unconfined: no root) | 24 tests |
+| `K20_SANDBOX_URL=http://127.0.0.1:<port>` | the image under `docker run` (root, chroot, seccomp) | 24 tests |
 
 ```sh
-cd cloudflare
-whagons-dev credentials exec full-cloudflare-access -- node sandbox/dev/platform.mjs
+docker build -f cloudflare/sandbox/container/Dockerfile -t gonvex-cf-dev-k20-sandbox:local .   # repository root, ~10 min cold
+docker run -d --name k20 -p 127.0.0.1:47821:8080 gonvex-cf-dev-k20-sandbox:local
+cd cloudflare && K20_SANDBOX_URL=http://127.0.0.1:47821 npx vitest run --root sandbox
 ```
 
-This deploys `gonvex-cf-dev-k20-sandbox`, runs the probes through the real service, writes `dev/results/platform.json`
-and deletes the Worker. Results from 2026-11-11:
+- `contract.test.ts` (every mode): payload checks and policy; counts per account, total and TTL expiry; code,
+  timeout, execution, file and workspace caps; paths; cancel; the deadline; run slots per tenant; isolation by
+  account, tenant and project; imports through K13's real `ActionFiles` with a private file of another account
+  refused (IB1). In stub mode it also checks that the worker request is Rust's, field by field.
+- `rust.test.ts` (Rust only): the seven Whagons call sites with the app's own helper code (`test/whagons.ts`, from
+  whagons5-client staging `a6de676951`):
+  - `analyzeWorkspaceTasks`, with and without an upload;
+  - `ingestAttachment` for CSV, XLSX and XLS;
+  - the shared-sandbox read, sample, query and `SUMMARIZE`;
+  - snapshots with `analyzeInSandbox`;
+  - `runCode`;
+  - `parseExcelAttachment`.
 
-| Probe | Result |
+  It also covers the V8 heap, deadline, result size and row caps with Rust's texts; no network and no DuckDB file
+  access; and an agent Action through K12's runtime.
+
+## Platform results and numbers
+
+`whagons-dev credentials exec full-cloudflare-access -- node sandbox/dev/platform.mjs` (from `cloudflare/`, needs
+docker) deploys `gonvex-cf-dev-k20-sandbox` with a `basic` Container (1/4 vCPU, 1 GiB, 4 GB), runs the probes,
+writes `dev/results/platform.json`, and deletes the Worker and its Container application. Results from 2026-11-12:
+
+| Measure | Result |
 |---|---|
-| `fetch`, `connect`, `eval` in a run | refused: "This worker is not permitted to access the internet…", "Code generation from strings disallowed" |
-| another account / another tenant | "sandbox was not found"; the owner still reads its file |
-| `await` past a 1 s timeout | failed after 1.2 s, `module exceeded its 1000 ms execution deadline` |
-| `for (;;) {}`, 2 s timeout | stopped by `cpuMs`, failed in 4.7 s with the deadline text |
-| `for (;;) await null`, 2 s | 5.0 s, deadline text |
-| `for (;;) await files.list()`, 2 s | 12.4 s, deadline text: the host calls queue on the workspace object (note 0040 §5h) |
-| the same sandbox after a spin | the next run succeeds in 215 ms |
-| 60 MB allocated / 400 MB allocated | succeeds / `module exceeded the 134217728 byte isolate heap limit` |
-| create; first run (register 1,000 tasks, GROUP BY) | 638 ms for the first run, including the Dynamic Worker load |
-| a trivial run | 205 ms |
-| import CSV (100 rows) / XLSX / XLS | 160 / 155 / 149 ms |
-| import a 6.6 MB CSV (200,000 rows), then GROUP BY | 1.9 s, then 530 ms |
+| Cold start (Container to manager listening) | 547–1,036 ms; the first `create` of a new tenant 1.1–1.9 s |
+| First run / later trivial run | 276–519 ms / 112–148 ms |
+| DuckDB register 1,000 + GROUP BY / `SUMMARIZE` | 213 / 288 ms |
+| Import CSV / XLSX / XLS | 848 (first DuckDB load) / 200 / 193 ms |
+| 6.7 MB CSV, 200,000 rows: import, GROUP BY | 2.2 s, 181 ms |
+| Deadline 1 s / CPU spin 2 s / 64 MiB heap | 1.12 s / 2.14 s / 410 ms, each with Rust's text |
+| Network, DuckDB file access, another account or tenant | refused / refused / "sandbox was not found" |
+| Memory | manager 57–77 MB RSS; worker peak 49 MB (trivial) to 56 MB (DuckDB), measured locally |
+| Cost | $0.00000278/s while a tenant's Container runs (about $0.010/hour); CPU ≤ $0.000001 per DuckDB run; about $0.0005 for a 2-minute assistant turn |
 
-## Numbers
-
-- **Bundle** (esbuild, `src/index.ts`): 51.7 KB minified (17.8 KB gzip) of this package. Sucrase and fflate bring it to
-  264 KB (68 KB gzip). The dev Worker's upload is 613 KiB (115 KiB gzip) with source maps and fixtures.
-- **Rows on the analysis object** (`numbers.test.ts`; writes include index entries):
-
-| Call | Statements | Rows read | Rows written |
-|---|---|---|---|
-| `register` 1,000 rows | 3 | 1,001 | 1,002 |
-| `GROUP BY` over 1,000 rows | 1 | 2,000 | 0 |
-| point query on a registered table (no index, as in DuckDB) | 1 | 1,000 | 0 |
-| `SUMMARIZE` of 3 columns, 1,000 rows | 8 | 11,000 | 0 |
-| import a 100-row CSV | 2 | 101 | 102 |
-| import the fixture XLSX (2 sheets) | 4 | 8 | 10 |
-
-- **Tenant object**: none. The sandbox never touches tenant SQLite. The workspace object uses key-value storage only:
-  per file write, one meta write and one entry per 512 KiB chunk; per run, one record write at the start and one at
-  the end, plus one meta write each time.
-- **Memory**: a CSV import streams, so its memory is flat. An XLSX or XLS import holds the compressed file (64 MiB at
-  most) and its shared strings. Worksheet XML is inflated as a stream, twice.
+The Worker side adds no dependency and is a few kilobytes; the image is 380 MB. The sandbox reads and writes no
+tenant SQLite. Per call, the registry writes one entry at create and deletes it at destroy.

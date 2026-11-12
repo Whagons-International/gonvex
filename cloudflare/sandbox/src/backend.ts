@@ -3,9 +3,9 @@
 // `SandboxService` (service.ts) owns the contract: the payload checks, Rust's
 // texts and their order, the policy and the storage read for `importFile`.
 // A backend owns the workspaces: their files, their TTL, the executions and
-// the analysis tables. This package ships `DynamicWorkerBackend`
-// (Dynamic Workers + Durable Object SQLite, note 0040). A Container backend
-// running Rust's sandbox worker would implement the same interface.
+// the analysis tables. K20 ships `ContainerBackend` (Rust's sandbox worker
+// with DuckDB in a Container, 0048 §2.1). The L09 candidate
+// (cloudflare/spikes/l09-sandbox, note 0047 §4) implements the same interface.
 import type { SandboxConfig } from "./config";
 
 /** Rust's `Scope`: a sandbox belongs to one account in one tenant of one project. */
