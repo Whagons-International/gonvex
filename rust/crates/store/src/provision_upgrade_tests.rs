@@ -485,9 +485,55 @@ async fn provisioning_twice_is_idempotent_and_projects_membership() {
         .provision_tenant_database(route.clone(), migrations.clone())
         .await
         .unwrap();
-    // Membership triggers are rebuilt on each boot; nothing else changes.
-    let rebuilt = schema_version().await;
-    assert!(rebuilt - version <= 6, "{version} -> {rebuilt}");
+    // A boot over an unchanged tenant changes no schema (no re-parse by
+    // other connections, no synced commit).
+    assert_eq!(schema_version().await, version);
+    // A missing or edited membership trigger is restored.
+    sqlx::raw_sql("DROP TRIGGER gonvex_queue_control_plane_membership_update")
+        .execute(&writer)
+        .await
+        .unwrap();
+    control
+        .clone()
+        .provision_tenant_database(route.clone(), migrations.clone())
+        .await
+        .unwrap();
+    let triggers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name LIKE 'gonvex_queue_control_plane_membership_%'",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    assert_eq!(triggers, 3);
+    let version = schema_version().await;
+    control
+        .clone()
+        .provision_tenant_database(route.clone(), migrations.clone())
+        .await
+        .unwrap();
+    assert_eq!(schema_version().await, version);
+
+    let original: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE name='gonvex_queue_control_plane_membership_update'",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DROP TRIGGER gonvex_queue_control_plane_membership_update;
+        CREATE TRIGGER gonvex_queue_control_plane_membership_update AFTER UPDATE ON members BEGIN SELECT 1; END;")
+        .execute(&writer).await.unwrap();
+    control
+        .clone()
+        .provision_tenant_database(route.clone(), migrations.clone())
+        .await
+        .unwrap();
+    let restored: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE name='gonvex_queue_control_plane_membership_update'",
+    )
+    .fetch_one(&writer)
+    .await
+    .unwrap();
+    assert_eq!(restored, original);
 
     // A later migration's own writes are revisioned under its command id and published.
     let mut listener = pools.listener(&route.database_url).await.unwrap();
