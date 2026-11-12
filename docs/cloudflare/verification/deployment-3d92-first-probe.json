@@ -102,12 +102,237 @@
   "evidenceHashes": {
     "deployment/deployment.json": "94cdfefd002b09f2c67496e9c4ebf7cba79f133faf91f48e7bb59ee1e81c8875",
     "cpu-proof/report.json": "01f5631596303a156a90c1baebd95b2ca28b7804a821ae27c65e4aff00c2ee1c",
-    "cpu-tail-private.jsonl": "8b23bf3ba065d357062a237218940f03572a36d6651559f8966597be88e9a823"
+    "cpu-tail-private.jsonl": "8b23bf3ba065d357062a237218940f03572a36d6651559f8966597be88e9a823",
+    "remote-content.json": "a2dd23b561a293a10000003ec1a76517570ac3c9a3011f11c1e99a6542a1bf38",
+    "source-map-comparison.json": "2af8911103270023e1947f49cca8d7dbeef93fbafd05ae39a5cf1c99910245fa",
+    "image-startup/result.json": "de5c75e96422580b8f1ae70e78deb51b3622f73b0be7d399ae6bf3b548a52e5f",
+    "builder-diagnostic.json": "b1ce84f313d90e60e74ecc8a96dde3fac7dc056c3ee31769779aa85741da2936",
+    "cleanup-final.json": "47f075d711157c8e5c51afff51c5c5cb53881f36a82e37ecccc84481558175fe",
+    "cleanup-confirmed-owned-references.json": "cf17fc673a17a4df84f8fa27139bcb7721a674527395341f57262e1fd21d4d44"
   },
   "limitations": [
     "No CPU enforcement/quarantine/rollback/quiet-neighbor/SDK pass",
     "No K22/X01 or lifecycle acceptance",
     "Builder/Container startup diagnosis remains with implementation owner",
     "Final owner-lifecycle changes require a new full-context build"
-  ]
+  ],
+  "subsequentDiagnostics": {
+    "nativeImageNodeVersion": "v22.18.0",
+    "nativeStartup": {
+      "startedAt": "2026-11-12T16:45:32.903Z",
+      "classification": "exact published image Node binary + archived3d92 sources, native Linux startup only; NOT platform startup/CPU acceptance",
+      "health": {
+        "status": 200,
+        "body": {
+          "ok": true,
+          "target": "local"
+        }
+      },
+      "finishedAt": "2026-11-12T16:45:33.152Z"
+    },
+    "nativeOnlyNotContainer": true,
+    "remoteExecutableParts": [
+      {
+        "kind": "kernel",
+        "parts": [
+          {
+            "name": "index.js",
+            "bytes": 1683682,
+            "sha256": "bf40f55f26ce9de0993064f2aa69ab8df919d5c5ab14602abfdfab8d8588a7e1",
+            "matchesLocal": true
+          },
+          {
+            "name": "039f7f76ef7f922d7d5493b075962c52647b760b-control_schema.sql",
+            "bytes": 23024,
+            "sha256": "66c51d8168d9ab52bfd93a938a936599144781239228299de653de2829c3d15c",
+            "matchesLocal": true
+          },
+          {
+            "name": "aace5a285f82b91f86bbe1a019d0acb6c6b58093-pbkdf2.wasm",
+            "bytes": 12768,
+            "sha256": "94756f97d5e9513f6822f63e93dfa6359205d553cd0ecb06759848a63254b135",
+            "matchesLocal": true
+          }
+        ]
+      },
+      {
+        "kind": "actions",
+        "parts": [
+          {
+            "name": "actions.js",
+            "bytes": 121534,
+            "sha256": "e1c35d0c6cb6f08e35c45ca44de0c2eb7a4b2d8eb33559076b1bd6c278f82826",
+            "matchesLocal": true
+          }
+        ]
+      },
+      {
+        "kind": "sandbox",
+        "parts": [
+          {
+            "name": "sandbox.js",
+            "bytes": 28125,
+            "sha256": "a7e1bfd9e6d5262f8613a67add4d7d24ad3935756bebab5f8a5c54b8c0deba9d",
+            "matchesLocal": true
+          }
+        ]
+      },
+      {
+        "kind": "builder",
+        "parts": [
+          {
+            "name": "builder.js",
+            "bytes": 1998,
+            "sha256": "76ba2566efb35cfbd80fe5af38389db3e0ab9275b18cbecd667c59ccd4502c48",
+            "matchesLocal": true
+          }
+        ]
+      }
+    ],
+    "sourceMapComparison": [
+      {
+        "kind": "kernel",
+        "differingKeys": [
+          "sources",
+          "sourceRoot",
+          "file"
+        ],
+        "sourceContentsEqual": true,
+        "mappingsEqual": true
+      },
+      {
+        "kind": "actions",
+        "differingKeys": [
+          "sources",
+          "sourceRoot",
+          "file"
+        ],
+        "sourceContentsEqual": true,
+        "mappingsEqual": true
+      },
+      {
+        "kind": "sandbox",
+        "differingKeys": [
+          "sources",
+          "sourceRoot",
+          "file"
+        ],
+        "sourceContentsEqual": true,
+        "mappingsEqual": true
+      },
+      {
+        "kind": "builder",
+        "differingKeys": [
+          "sources",
+          "sourceRoot",
+          "file"
+        ],
+        "sourceContentsEqual": true,
+        "mappingsEqual": true
+      }
+    ],
+    "containerHealthDiagnostic": {
+      "status": 503,
+      "ms": 60613,
+      "bodyBytes": 29
+    },
+    "builderLogsRestoredEnabled": false,
+    "containerStartupCause": "UNKNOWN"
+  },
+  "cleanup": {
+    "at": "2026-11-12T16:55:09.030Z",
+    "status": "PASS",
+    "manifest": {
+      "name": "gonvex-cf-dev-k22-3d92-platform",
+      "workers": [
+        "gonvex-cf-dev-k22-3d92-platform",
+        "gonvex-cf-dev-k22-3d92-platform-actions",
+        "gonvex-cf-dev-k22-3d92-platform-sandbox",
+        "gonvex-cf-dev-k22-3d92-platform-builder"
+      ],
+      "containers": [
+        {
+          "id": "a03f8620-bd1c-4aa7-b96d-59aaac760c2e",
+          "name": "gonvex-cf-dev-k22-3d92-platform-builder-releasebuildercontainer"
+        },
+        {
+          "id": "a03258a9-cb8d-4a27-bf95-71202626794b",
+          "name": "gonvex-cf-dev-k22-3d92-platform-sandbox-sandboxcontainer"
+        }
+      ],
+      "workflow": "gonvex-cf-dev-k22-3d92-platform-actions",
+      "resources": [
+        {
+          "kind": "r2",
+          "name": "gonvex-cf-dev-k22-3d92-platform-releases"
+        },
+        {
+          "kind": "r2",
+          "name": "gonvex-cf-dev-k22-3d92-platform-files"
+        },
+        {
+          "kind": "queue",
+          "name": "gonvex-cf-dev-k22-3d92-platform-rollout",
+          "id": "eee172e2d5d2468ca3f72d0926553ead"
+        }
+      ],
+      "registryImagesExcluded": true,
+      "rawEvidenceExcluded": true
+    },
+    "removed": [
+      {
+        "kind": "container-application",
+        "id": "a03f8620-bd1c-4aa7-b96d-59aaac760c2e",
+        "name": "gonvex-cf-dev-k22-3d92-platform-builder-releasebuildercontainer"
+      },
+      {
+        "kind": "container-application",
+        "id": "a03258a9-cb8d-4a27-bf95-71202626794b",
+        "name": "gonvex-cf-dev-k22-3d92-platform-sandbox-sandboxcontainer"
+      },
+      {
+        "kind": "workflow",
+        "name": "gonvex-cf-dev-k22-3d92-platform-actions"
+      },
+      {
+        "kind": "queue-consumer",
+        "queue": "gonvex-cf-dev-k22-3d92-platform-rollout",
+        "id": "25c377c49f154c3983c7ab8252643dfc",
+        "script": "gonvex-cf-dev-k22-3d92-platform"
+      },
+      {
+        "kind": "worker",
+        "name": "gonvex-cf-dev-k22-3d92-platform"
+      },
+      {
+        "kind": "worker",
+        "name": "gonvex-cf-dev-k22-3d92-platform-actions"
+      },
+      {
+        "kind": "worker",
+        "name": "gonvex-cf-dev-k22-3d92-platform-sandbox"
+      },
+      {
+        "kind": "worker",
+        "name": "gonvex-cf-dev-k22-3d92-platform-builder"
+      },
+      {
+        "kind": "queue",
+        "name": "gonvex-cf-dev-k22-3d92-platform-rollout"
+      },
+      {
+        "kind": "r2",
+        "name": "gonvex-cf-dev-k22-3d92-platform-releases"
+      },
+      {
+        "kind": "r2",
+        "name": "gonvex-cf-dev-k22-3d92-platform-files"
+      }
+    ],
+    "remaining": [],
+    "registryImagesAndRawEvidencePreserved": true,
+    "firstFailure": "Cloudflare10064: remove Queue consumer before Worker deletion",
+    "secondRefusal": "consumer API field is script, not script_name; no deletion on unknown ownership shape",
+    "scope": "explicit owned manifest only; no claim about other account resources"
+  }
 }
