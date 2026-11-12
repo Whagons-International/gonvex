@@ -12,9 +12,13 @@
     "bindings": [
       { "name": "GATEWAY", "class_name": "GatewayObject" },
       { "name": "CONTROL_STUB", "class_name": "KernelControlStub" },
-      { "name": "TENANT_STUB", "class_name": "ConformanceTenant" }
+      { "name": "TENANT_STUB", "class_name": "ConformanceTenant" },
+      { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" }
     ]
   },
   "vars": { "GONVEX_RUNTIME_VERSION": "development", "GONVEX_GATEWAY_SHARDS": "8", "GONVEX_PRESENCE": "1" },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GatewayObject", "KernelControlStub", "ConformanceTenant"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["GatewayObject", "KernelControlStub", "ConformanceTenant"] },
+    { "tag": "v2", "new_sqlite_classes": ["PublicLimiterObject"] }
+  ]
 }

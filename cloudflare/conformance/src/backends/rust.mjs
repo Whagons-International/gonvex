@@ -66,7 +66,7 @@ export class RustBackend extends Backend {
     this.restarts = 0;
   }
 
-  get capabilities() { return { restart: true, crash: true, changeLog: true, servicePrincipals: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
+  get capabilities() { return { restart: true, crash: true, changeLog: true, servicePrincipals: true, publicCalls: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
 
   async start() {
     await mkdir(this.dataDir, { recursive: true });
@@ -89,6 +89,10 @@ export class RustBackend extends Backend {
         // A Reducer that never returns fails `transient` within the scenario budget.
         GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS: '2000',
         GONVEX_AUTH_URL: this.httpUrl,
+        // K16: the client address comes from CF-Connecting-IP, as on Cloudflare, so `public-limits` can give each
+        // step its own address. Only the harness (127.0.0.1) is trusted; sockets without the header use the peer.
+        GONVEX_TRUSTED_PROXY_CIDRS: '127.0.0.1/32',
+        GONVEX_CLIENT_IP_HEADER: 'cf-connecting-ip',
         ...CONFORMANCE_SECRETS,
         ...firebaseEmulatorEnv(),
         ...(this.servicePrincipals ? { GONVEX_SERVICE_PRINCIPALS: this.servicePrincipals } : {}),

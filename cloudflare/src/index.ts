@@ -3,6 +3,7 @@ import { handleStubRoute, handleWebSocketUpgrade, STUB_PREFIX } from "../kernel/
 
 export { HelloObject } from "./hello";
 export { ControlStubObject, GatewayObject, TenantStubObject } from "../kernel/session";
+export { PublicLimiterObject } from "../kernel/public";
 
 const TENANT_ROUTE = /^\/t\/([a-z0-9][a-z0-9_-]{0,63})\/(greet|ws)$/;
 

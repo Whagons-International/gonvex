@@ -25,8 +25,9 @@ import { tenantRpc } from "./rpc.js";
 import { runCall, type RunOutcome } from "./runner.js";
 import { ActionRuntime, profileOf, type ActionReport } from "./runtime.js";
 import type { ActionSession } from "./session.js";
+import { publicLimits, type PublicLimitsEnv } from "../../kernel/public/config";
 
-export interface ActionEnv {
+export interface ActionEnv extends PublicLimitsEnv {
   /** Tenant objects, `getByName(tenantId)`; they expose `TenantActions`' methods by RPC (tenant.ts). */
   TENANT: DurableObjectNamespace;
   /** Workflow step timeout for a run (default "24 hours"; agent Actions have no other deadline). */
@@ -76,6 +77,8 @@ function runtimeFor(env: ActionEnv, tenantId: string): { runtime: ActionRuntime;
     storage: c.storage?.(env, tenantId),
     sandbox: c.sandbox?.(env, tenantId),
     fetcher: c.fetcher?.(env),
+    // K16 (0042): GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS is read in one place; the 60 s rule itself is this runtime's.
+    publicActionTimeoutMs: publicLimits(env).actionTimeoutMs,
   });
   return { runtime, tenant, control };
 }

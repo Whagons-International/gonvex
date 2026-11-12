@@ -14,6 +14,8 @@
  *   projectMemberships    membership projection from tenant objects (C.4 item 6)
  *   connectionState       live sockets per tenant and support presence
  *   watch / unwatch       ControlChanged notification of socket owners
+ *   telemetry*            K15: error envelopes, error support sessions and performance events
+ *                         (kernel/telemetry/store.ts); the hourly alarm applies their retention
  *   fetch                 native OAuth routes `/auth/*` (C.3.5)
  *
  * Every RPC returns plain JSON; errors come back as `Outcome` values because
@@ -40,6 +42,8 @@ import { ServiceError, serviceControlCall } from "./service";
 import { Sql } from "./sql";
 import type { TenantPort } from "./tenant-port";
 import type { ControlConnection, Cost, Member, Outcome, ServiceGrant, TenantRoute } from "./types";
+import type { PerformanceRow, PreparedErrorEvent } from "../../kernel/telemetry/envelope";
+import { type ErrorSessionInput, TelemetryStore } from "../../kernel/telemetry/store";
 
 export interface ControlEnv {
   /** Tenant objects, `idFromName(tenantId)`. */
@@ -70,6 +74,8 @@ export interface ConnectionState {
   authenticated: boolean;
   /** `support_<connectionId>` once a support heartbeat registered it. */
   supportSessionId?: string;
+  /** K15: the connection id once `error.register` registered it (`register_error_session`). */
+  errorSessionId?: string;
 }
 
 const loopback = (host: string | undefined): boolean => {
@@ -100,6 +106,7 @@ const PRUNE_EVERY_MS = 60 * 60 * 1000;
 export class ControlObject extends DurableObject<ControlEnv> implements LiveConnections {
   readonly sql: Sql;
   readonly config: ControlConfig;
+  private telemetryStore: TelemetryStore | undefined;
   private readonly connections = new Map<string, ConnectionState>();
   private readonly watchers = new Map<string, Map<string, { binding: string; name: string }>>();
 
@@ -111,6 +118,11 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
       this.sql.script(schema);
       if ((await state.storage.getAlarm()) === null) await state.storage.setAlarm(Date.now() + PRUNE_EVERY_MS);
     });
+  }
+
+  /** K15: error envelopes, performance events and their retention (created on first use). */
+  get telemetry(): TelemetryStore {
+    return (this.telemetryStore ??= new TelemetryStore(this.sql));
   }
 
   /** A fresh per-call context. */
@@ -238,14 +250,14 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
 
   async connectionState(connectionId: string, state: ConnectionState | null): Promise<void> {
     const before = this.connections.get(connectionId);
-    if (state) this.connections.set(connectionId, state);
+    // K15: a report from presence does not know the error session; keep it.
+    if (state) this.connections.set(connectionId, before?.errorSessionId && !state.errorSessionId ? { ...state, errorSessionId: before.errorSessionId } : state);
     else {
       this.connections.delete(connectionId);
-      // A closed connection's support session is last seen now (presence `disconnect` flush).
-      if (before?.supportSessionId) {
-        this.sql.tx(() =>
-          this.sql.run("UPDATE gonvex_support_sessions SET last_seen_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1", before.supportSessionId),
-        );
+      // A closed connection's support sessions are last seen now (presence `disconnect` flush).
+      for (const id of [before?.supportSessionId, before?.errorSessionId]) {
+        if (!id) continue;
+        this.sql.tx(() => this.sql.run("UPDATE gonvex_support_sessions SET last_seen_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1", id));
       }
     }
   }
@@ -260,7 +272,61 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
 
   supportLiveIds(projectId: string): Set<string> {
     const ids = new Set<string>();
-    for (const state of this.connections.values()) if (state.projectId === projectId && state.supportSessionId) ids.add(state.supportSessionId);
+    for (const state of this.connections.values()) {
+      if (state.projectId !== projectId) continue;
+      if (state.supportSessionId) ids.add(state.supportSessionId);
+      if (state.errorSessionId) ids.add(state.errorSessionId);
+    }
+    return ids;
+  }
+
+  // ------------------------------------------------------------ telemetry (K15)
+
+  /**
+   * `register_error_session`'s upsert (the socket owner answers repeats from
+   * memory). The session is live until the socket closes, then last seen.
+   */
+  async telemetryRegisterSession(input: ErrorSessionInput): Promise<boolean> {
+    try {
+      this.telemetry.registerErrorSession(input);
+    } catch (error) {
+      console.error("telemetry: error session upsert failed", error);
+      return false;
+    }
+    // Live only while presence v2 is on (`support_register`); otherwise no close is ever reported for it.
+    if (input.live === true) {
+      const state = this.connections.get(input.connectionId);
+      this.connections.set(input.connectionId, { ...(state ?? { projectId: input.projectId, tenantId: input.tenantId, authenticated: true }), errorSessionId: input.connectionId });
+    }
+    this.notify(input.projectId);
+    return true;
+  }
+
+  /** `persist_event` for one envelope's events; null when the store failed (`error store unavailable`). */
+  async telemetryRecordErrors(projectId: string, events: PreparedErrorEvent[]): Promise<boolean[] | null> {
+    let inserted: boolean[];
+    try {
+      inserted = this.telemetry.recordErrors(projectId, events);
+    } catch (error) {
+      console.error("telemetry: error events not stored", error);
+      return null;
+    }
+    if (inserted.some(Boolean)) this.notify(projectId);
+    return inserted;
+  }
+
+  /** `capture_performance_event` rows (the bounded window the dashboard routes read). */
+  async telemetryRecordPerformance(projectId: string, rows: PerformanceRow[]): Promise<number> {
+    return this.telemetry.recordPerformance(projectId, rows);
+  }
+
+  /** Every live support session id, any project (the telemetry prune keeps them). */
+  private liveSupportIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const state of this.connections.values()) {
+      if (state.supportSessionId) ids.add(state.supportSessionId);
+      if (state.errorSessionId) ids.add(state.errorSessionId);
+    }
     return ids;
   }
 
@@ -301,6 +367,12 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
     for (let page = 0; page < 20; page++) {
       if (pruneIdempotency(ctx, 500) < 500) break;
       await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    // K15: telemetry retention and caps (contract-changes 0041).
+    try {
+      await this.telemetry.prune(this.liveSupportIds());
+    } catch (error) {
+      console.error("telemetry: prune failed", error);
     }
     await this.ctx.storage.setAlarm(Date.now() + PRUNE_EVERY_MS);
   }
