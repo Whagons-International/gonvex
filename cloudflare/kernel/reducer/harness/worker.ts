@@ -8,6 +8,7 @@ import { HarnessTenant, KernelControlStub, harnessFetch, type HarnessEnv } from 
 import { BUNDLES } from "./.generated/bundles.js";
 
 export { GatewayObject, KernelControlStub };
+export { PublicLimiterObject } from "../../public/index";
 
 export class ConformanceTenant extends HarnessTenant {
   protected bundle(hash: string): ModuleExports | undefined { return (BUNDLES as Record<string, ModuleExports>)[hash]; }

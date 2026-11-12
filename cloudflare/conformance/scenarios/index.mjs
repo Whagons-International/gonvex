@@ -32,6 +32,8 @@ import operatorRoutes from './operator-routes.mjs';
 import presenceEdges from './presence-edges.mjs';
 import actions from './actions.mjs';
 import servicePrincipals from './service-principals.mjs';
+import publicLimits from './public-limits.mjs';
+import publicCalls from './public-calls.mjs';
 import bridgeUpstream from './bridge-upstream.mjs';
 
 export const SCENARIOS = [
@@ -68,6 +70,9 @@ export const SCENARIOS = [
   bridgeUpstream,
   // K17: restarts the backend once, with its principals configured.
   servicePrincipals,
+  // K16: public transport budgets (each step on its own client address) and anonymous calls.
+  publicLimits,
+  publicCalls,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
 ];
