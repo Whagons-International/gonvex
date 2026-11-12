@@ -115,6 +115,9 @@ server-epoch bootstrap after tenant restart, preserving the unchanged restart te
 0062 records the existing per-holder telemetry limiter domain: one-holder canonical parity keeps exact
 assertions, with separate real multi-holder evidence and mandatory final X01-enabled capacity/security
 verification. It does not introduce a global account budget or weaken K16's per-address enforcement.
+0063 permits digest-only resume checker reuse only from a verified same-socket/scope window, preserving
+all digest assertions. It also requires unrelated targeted delivery to leave other sockets untouched,
+while preserving genuine whole-holder/global scope barriers. Frozen failing campaigns remain evidence.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
