@@ -23,6 +23,7 @@ import type { PresenceConfig } from "../presence/hub";
 import { UNKNOWN_ADDRESS } from "../public/address";
 import { type PublicGuard, validatePublicScope } from "../public/guard";
 import type { SlotKind } from "../public/limiter";
+import { type TelemetryHostState, telemetryHostState } from "../telemetry/socket";
 
 /** Liveness and revalidation due within this window run in the same alarm (deadlines never run early). */
 const ALARM_SLACK_MS = 2_000;
@@ -39,6 +40,8 @@ export interface HostOptions {
   presence?: PresenceConfig;
   /** K16: public-function limits and the address budgets. */
   publicGuard?: PublicGuard;
+  /** K15: telemetry state shared by this object's sockets (rate limits per owning object, 0012 R11). */
+  telemetry?: TelemetryHostState;
 }
 
 interface Attachment { session: SessionRecord }
@@ -46,10 +49,13 @@ interface Attachment { session: SessionRecord }
 export class SocketHost {
   readonly sessions = new Map<WebSocket, Session>();
   readonly modules: ModuleCache;
+  /** K15: one set of telemetry rate-limit windows for every socket of this object. */
+  readonly telemetry: TelemetryHostState;
   private scheduled: number | null | undefined;
 
   constructor(private readonly options: HostOptions) {
     this.modules = new ModuleCache(options.ports);
+    this.telemetry = options.telemetry ?? telemetryHostState({ presenceEnabled: options.presence?.enabled ?? options.ready.presence });
     options.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
     // Rebuild the in-memory index from attachments on every wake (S3 §8: eager rebuild costs nothing measurable).
     for (const ws of options.ctx.getWebSockets()) {
@@ -180,6 +186,7 @@ export class SocketHost {
       hooks,
       ...(this.options.presence ? { presence: this.options.presence } : {}),
       ...(this.options.publicGuard ? { publicGuard: this.options.publicGuard } : {}),
+      telemetry: this.telemetry,
       sink: {
         send: (text: string) => ws.send(text),
         close: (frame: { code: number; reason: string }) => {

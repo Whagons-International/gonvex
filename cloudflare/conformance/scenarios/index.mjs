@@ -35,6 +35,7 @@ import servicePrincipals from './service-principals.mjs';
 import publicLimits from './public-limits.mjs';
 import publicCalls from './public-calls.mjs';
 import bridgeUpstream from './bridge-upstream.mjs';
+import errorTelemetry from './error-telemetry.mjs';
 
 export const SCENARIOS = [
   thinSdkParity,
@@ -73,6 +74,8 @@ export const SCENARIOS = [
   // K16: public transport budgets (each step on its own client address) and anonymous calls.
   publicLimits,
   publicCalls,
+  // K15: error.* acks, envelope limits, rate limits, performance events and the error-triage routes.
+  errorTelemetry,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
 ];

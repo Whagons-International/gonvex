@@ -22,6 +22,7 @@ import type { ModuleInfo, Ports, TenantRoute, TenantSession } from "../ports";
 import { SocketHost } from "../host";
 import { deliveryClass } from "../session";
 import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../presence/hub";
+import { type TelemetryEnv, telemetryHostFromEnv } from "../../telemetry/env";
 import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
 import { UNKNOWN_ADDRESS } from "../../public/address";
 import type { PublicGuard } from "../../public/guard";
@@ -32,7 +33,7 @@ export const SOCKETS_PER_GATEWAY = 125;
 export const DEFAULT_GATEWAY_SHARDS = 8;
 export const PROTOCOL_VERSION = 1;
 
-export interface GatewayEnv extends PresenceEnv {
+export interface GatewayEnv extends PresenceEnv, TelemetryEnv {
   GONVEX_GATEWAY_SHARDS?: string;
   GONVEX_RUNTIME_VERSION?: string;
   GONVEX_PRESENCE?: string;
@@ -116,6 +117,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     this.host = new SocketHost({
       ...(publicGuard ? { publicGuard } : {}),
       presence,
+      telemetry: telemetryHostFromEnv(env, presence.enabled),
       ctx,
       ports: this.bindings().ports(env),
       name: this.gatewayName,

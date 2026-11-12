@@ -32,6 +32,7 @@ import { ADMISSION_ERROR, frameCost, publicAdmissionErrors, publicLimitErrors, r
 import { type PublicGuard, validatePublicScope } from "../public/guard";
 import type { SlotKind } from "../public/limiter";
 import { allowCalls, type CallWindow, newWindow } from "../public/window";
+import { type ErrorSessionRecord, SocketTelemetry, type TelemetryFrame, type TelemetryHostState, telemetryHostState } from "../telemetry/socket";
 
 export const SERVICE_TOKEN_PREFIX = "gvx_svc_";
 
@@ -73,6 +74,10 @@ export interface SessionRecord {
   publicWindow?: CallWindow;
   /** K16: public admission, created by the first public auth (`PublicAdmission`); a revoked one stays revoked. */
   admission?: { checkedAt: number; revoked: boolean } | null;
+  /** K15: the error support session registered by this connection (repeat registers answered from memory). */
+  errorSession?: ErrorSessionRecord | null;
+  /** K15: `telemetry_device`, the last `auth` frame's `device` (at most 2 KiB of JSON; larger is not kept). */
+  telemetryDevice?: Json | null;
 }
 
 /** Where frames go. The host maps it onto a hibernatable WebSocket. */
@@ -108,6 +113,8 @@ export interface SessionOptions {
   presence?: PresenceConfig;
   /** K16: public-function limits and budgets. Without it only the default payload cap applies. */
   publicGuard?: PublicGuard;
+  /** K15: telemetry state shared by the host's sockets (rate-limit windows); default: one per session. */
+  telemetry?: TelemetryHostState;
 }
 
 /** Per-host cache of each project's active module (one RPC per project, refreshed on reload). */
@@ -147,6 +154,8 @@ export class Session {
   private readonly publicGuard: PublicGuard | undefined;
   /** `GONVEX_PUBLIC_MAX_PAYLOAD_BYTES`. */
   private readonly payloadBytes: number;
+  /** Error and performance telemetry on this socket (K15). */
+  readonly telemetry: SocketTelemetry;
 
   private constructor(record: SessionRecord, options: SessionOptions) {
     this.record = record;
@@ -168,6 +177,11 @@ export class Session {
       sendItem: (text) => this.sendItem(text),
       persist: () => this.hooks.persist?.(),
     }, this.ports, presence, echoTrace);
+    this.telemetry = new SocketTelemetry(
+      { record: this.record, persist: () => this.hooks.persist?.() },
+      this.ports.telemetry,
+      options.telemetry ?? telemetryHostState({ presenceEnabled: presence.enabled, now: this.now }),
+    );
   }
 
   /** A new socket: sends `session.ready` before anything else (A.1.2 step 1). */
@@ -428,8 +442,8 @@ export class Session {
       case "error.envelope":
       case "telemetry.event":
       case "telemetry.batch":
-        // K15 owns error telemetry and performance events; they reach it through the tenant port.
-        if (tenant) return toTenant(frame);
+        // K15: handled next to the socket, with or without a tenant (the project decides); the store is the control object's.
+        for (const text of await this.telemetry.handle(frame as TelemetryFrame)) this.send(text);
         return;
     }
   }
@@ -591,6 +605,8 @@ export class Session {
       delete response.result.localIdentity;
     }
     record.negotiated = negotiate(frame.capabilities, this.ready.presence);
+    // lib.rs:2932 `telemetry_device = device.clone()` (K15), kept only while it fits the attachment comfortably.
+    record.telemetryDevice = frame.device !== undefined && JSON.stringify(frame.device).length <= 2048 ? (frame.device as unknown as Json) : null;
     const next = frame.controlOnly ? null : connection.tenant;
     const preserved = !frame.controlOnly && record.tenant !== null && preserveScope(record.connection, connection, frame.capabilities);
     if (preserved) {

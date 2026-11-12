@@ -1,0 +1,10 @@
+{
+  // K15 tests run against the control object (K06 + K19), which needs Node types (node:crypto)
+  // and the control schema's text module; the root config excludes them and this one checks them.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types", "@types/node"]
+  },
+  "include": ["*.ts", "test/**/*.ts", "../../control/src/modules.d.ts"],
+  "exclude": []
+}
