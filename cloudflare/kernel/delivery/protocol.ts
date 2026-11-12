@@ -36,6 +36,8 @@ export interface ReplicaDelivery {
   readonly v: number;
   /** The tenant object's instance: a new one means its in-memory subscriptions are gone. */
   readonly instance: string;
+  /** 0061: sender understands the server-only empty-work restart fence. */
+  readonly scopeFence?: 1;
   readonly shared: readonly string[];
   /** Work per connection id. */
   readonly sockets: Readonly<Record<string, SocketWork>>;
@@ -50,6 +52,10 @@ export interface ReplicaReceipt {
   readonly v: number;
   readonly sockets: number;
   readonly missing?: readonly string[];
+  /** No data/instance/watermark was applied for these current holder scopes. */
+  readonly scopeRequired?: Readonly<Record<string, number>>;
+  /** Only after the empty fence's real authorized reset/rebuild completed. */
+  readonly scopeAck?: Readonly<Record<string, number>>;
 }
 
 /** `replica.batch` timing (delivery.rs `BatchConfig` defaults). */

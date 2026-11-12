@@ -78,7 +78,7 @@ export interface SessionRecord {
   /** K22: successful live subscriptions, retained by the socket owner for tenant restarts. */
   liveQueries?: Record<string, Extract<ClientFrame, { type: "query.subscribe" }>>;
   /** Initial replies use ordered delivery and may arrive after dispatch returned. */
-  pendingLiveQueries?: Record<string, Extract<ClientFrame, { type: "query.subscribe" }>>;
+  pendingLiveQueries?: Record<string, Array<Extract<ClientFrame, { type: "query.subscribe" }>>>;
   replicaInstance?: string;
   pendingActions?: Record<string, string>;
   controlQueries?: Record<string, { request: Extract<ClientFrame, { type: "query.subscribe" }>; last: string }>;
@@ -449,7 +449,7 @@ export class Session {
       case "query.subscribe":
         if (frame.scope === "control") return control(frame);
         if (tenant) {
-          (this.record.pendingLiveQueries ??= {})[frame.id] = frame;
+          ((this.record.pendingLiveQueries ??= {})[frame.id] ??= []).push(frame);
           this.hooks.recoveryChanged?.();
           this.hooks.persist?.();
           await this.forward(this.ports.tenants.dispatch(this.view(), frame));
@@ -470,8 +470,8 @@ export class Session {
         delete this.record.pendingLiveQueries?.[frame.id];
         this.hooks.recoveryChanged?.();
         this.hooks.persist?.();
-        await control(frame);
         if (tenant) await toTenant(frame);
+        await control(frame);
         return;
       case "reducer.call":
         return this.reducerCall(frame);
@@ -620,7 +620,16 @@ export class Session {
       return;
     }
     const previous = this.record.replicaInstance ?? "";
-    this.delivery.apply(payload, work);
+    // A tenant reply may already be queued when unsubscribe reaches this holder.
+    // Keep the local semantic request fence ahead of those late LQ frames.
+    const ops = work.ops.filter((op) => {
+      if (op[0] !== "f" || !/^\{"type":"query\.(result|progress|error)"/.test(op[1])) return true;
+      const id = /^\{"type":"query\.(?:result|progress|error)","id":("(?:[^"\\]|\\.)*")/.exec(op[1])?.[1];
+      if (!id) return true;
+      const key = JSON.parse(id) as string;
+      return !!this.record.liveQueries?.[key] || !!this.record.pendingLiveQueries?.[key];
+    });
+    this.delivery.apply(payload, { ...work, ops });
     if (previous && previous !== payload.instance && Object.keys(this.record.liveQueries ?? {}).length) {
       const epoch = this.record.subscriptionEpoch ?? 0;
       const recover = async () => {
@@ -644,19 +653,59 @@ export class Session {
       if (this.closed || epoch !== (this.record.subscriptionEpoch ?? 0) || this.record.tenant?.route.tenantId !== tenantId) throw new Error("delivery recovery scope changed");
       const recovery = recoveryOf(payload);
       if (!recovery) throw new Error("recovery marker is required");
+      await this.verifyRecoveryAuth(tenantId, epoch);
       this.delivery.recover(payload.instance, recovery.reason);
-      const requests = { ...this.record.liveQueries, ...this.record.pendingLiveQueries };
-      for (const request of Object.values(requests)) {
+      await this.rebuildLiveQueries(tenantId, epoch);
+      await this.verifyRecoveryAuth(tenantId, epoch);
+      this.hooks.persist?.();
+    });
+  }
+
+  /** 0061: a returned epoch can authorize only this EMPTY bootstrap, never retained data. */
+  bootstrapReplica(tenantId: string, payload: ReplicaDelivery, work: SocketWork): Promise<void> {
+    const epoch = (work as ScopedSocketWork).subscriptionEpoch;
+    if (payload.scopeFence !== 1 || epoch === undefined || work.ops.length || work.watermark !== undefined || work.opened || work.removed
+      || payload.shared.length || payload.watermark !== undefined || payload.membership) return Promise.reject(new Error("delivery bootstrap must contain only empty scoped work"));
+    return this.serial(async () => {
+      this.requireRecoveryScope(tenantId, epoch);
+      await this.verifyRecoveryAuth(tenantId, epoch);
+      this.delivery.recover(payload.instance, "change-feed-reset");
+      await this.rebuildLiveQueries(tenantId, epoch);
+      await this.verifyRecoveryAuth(tenantId, epoch);
+      this.requireRecoveryScope(tenantId, epoch);
+      this.hooks.persist?.();
+    });
+  }
+
+  private requireRecoveryScope(tenantId: string, epoch: number): void {
+    if (this.closed || epoch !== (this.record.subscriptionEpoch ?? 0) || this.record.tenant?.route.tenantId !== tenantId) throw new Error("delivery recovery scope changed");
+  }
+
+  private async verifyRecoveryAuth(tenantId: string, epoch: number): Promise<void> {
+    this.requireRecoveryScope(tenantId, epoch);
+    const item = this.revalidationItem();
+    if (!item || !(await this.ports.control.revalidate([item]))[0]) {
+      this.close({ code: 1012, reason: "session recovery requires reconnect" });
+      throw new Error("delivery recovery authorization changed");
+    }
+    this.requireRecoveryScope(tenantId, epoch);
+  }
+
+  private async rebuildLiveQueries(tenantId: string, epoch: number): Promise<void> {
+      const requests = [
+        ...Object.entries(this.record.liveQueries ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, request]) => ({ request, pending: false })),
+        ...Object.entries(this.record.pendingLiveQueries ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).flatMap(([, pending]) => pending.map((request) => ({ request, pending: true }))),
+      ];
+      for (const { request, pending } of requests) {
+        this.requireRecoveryScope(tenantId, epoch);
         const replies = await this.ports.tenants.dispatch({ ...this.view(), queryRecovery: true } as RecoverySocketView, request);
-        if (this.closed || epoch !== (this.record.subscriptionEpoch ?? 0) || this.record.tenant?.route.tenantId !== tenantId) throw new Error("delivery recovery scope changed");
+        this.requireRecoveryScope(tenantId, epoch);
         for (const text of replies) {
-          if (text.startsWith('{"type":"query.progress"')) { this.trackQueryReply(text); continue; }
-          this.send(text.replace('"reason":"initial"', '"reason":"reconnect"'));
+          if (text.startsWith('{"type":"query.progress"')) { this.trackQueryReply(text, pending); continue; }
+          this.send(text.replace('"reason":"initial"', '"reason":"reconnect"'), pending);
           if (text.startsWith('{"type":"query.error"')) throw new Error("live query recovery was refused");
         }
       }
-      this.hooks.persist?.();
-    });
   }
 
   /** K06 ControlChanged; refreshes stay behind the socket's auth/call queue. */
@@ -964,7 +1013,9 @@ export class Session {
 
   private reportConnection(closed = false): void {
     if (!this.ports.control.connectionState) return;
-    const tenant = this.record.tenant;
+    // tenantControl can retain a Control connection's tenant while tenant-data
+    // dispatch intentionally has no tenant session (Rust's count uses the former).
+    const tenant = this.record.connection.tenant;
     const state = closed ? null : { projectId: this.record.connection.projectId, tenantId: tenant?.anonymous ? "" : tenant?.route.tenantId ?? "",
       authenticated: !!this.record.connection.identity || (!!tenant && !tenant.anonymous), ...(this.record.support ? { supportSessionId: this.record.support.sessionId } : {}) };
     const work = this.ports.control.connectionState(this.record.connectionId, state).catch((error) => console.error("session: connection report failed", error));
@@ -1113,24 +1164,25 @@ export class Session {
   // ---- outbound ------------------------------------------------------------------
 
   /** Sends a frame after any open `replica.batch` (A.4 row 1: a batch is flushed before any other frame). */
-  private send(text: string): void {
+  private send(text: string, consumePending = true): void {
     // Retain only the result hash for restart recovery, without parsing/copying row payloads per socket.
-    this.trackQueryReply(text);
+    this.trackQueryReply(text, consumePending);
     if (this.closed) return;
     if (this.delivery?.batcher.hasOpen) this.delivery.batcher.flush();
     this.sendRaw(text);
   }
 
-  private trackQueryReply(text: string): void {
+  private trackQueryReply(text: string, consumePending = true): void {
     if (/^\{"type":"query\.(result|progress|error)"/.test(text)) {
       const encodedId = /^\{"type":"query\.(?:result|progress|error)","id":("(?:[^"\\]|\\.)*")/.exec(text)?.[1];
       const id: string | undefined = encodedId ? JSON.parse(encodedId) : undefined;
       const window = /"windowRevision":"([a-f0-9]+)"}$/.exec(text.slice(-100))?.[1];
       if (id !== undefined) {
-        const pending = this.record.pendingLiveQueries?.[id];
+        const queue = this.record.pendingLiveQueries?.[id];
+        const pending = consumePending ? queue?.shift() : undefined;
         const success = !text.startsWith('{"type":"query.error"');
-        if (pending && success) (this.record.liveQueries ??= {})[id] = pending;
-        delete this.record.pendingLiveQueries?.[id];
+        if (pending && success) (this.record.liveQueries ??= {})[id] = { ...pending };
+        if (!queue?.length) delete this.record.pendingLiveQueries?.[id];
         const request = this.record.liveQueries?.[id];
         if (request && window && success) request.windowRevision = window;
         if (pending) { this.hooks.recoveryChanged?.(); this.hooks.persist?.(); }

@@ -1,27 +1,48 @@
 {
   "base": "e72d3a437b65bea5a8524064e3e04904fc4a1f7b",
-  "status": "in-progress; no K22 completion claim",
+  "status": "INCOMPLETE/FAILED: frozen local comparison 24 passed,12 failed,2 skipped of38; reducer-errors separately blocked; no remote proof",
   "scenarios": [
     {
       "scenario": "thin-sdk-parity",
       "source": "cloudflare/conformance/scenarios/thin-sdk-parity.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "reducer-second-client",
       "source": "cloudflare/conformance/scenarios/reducer-second-client.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "replica-resume",
       "source": "cloudflare/conformance/scenarios/replica-resume.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "reducer-errors",
@@ -35,245 +56,507 @@
       "source": "cloudflare/conformance/scenarios/presence.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "live-query-window",
       "source": "cloudflare/conformance/scenarios/live-query-window.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 6
+      }
     },
     {
       "scenario": "control-auth",
       "source": "cloudflare/conformance/scenarios/control-auth.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "control-tenants",
       "source": "cloudflare/conformance/scenarios/control-tenants.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "control-invitations",
       "source": "cloudflare/conformance/scenarios/control-invitations.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "control-support",
       "source": "cloudflare/conformance/scenarios/control-support.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 6
+      }
     },
     {
       "scenario": "control-external-auth",
       "source": "cloudflare/conformance/scenarios/control-external-auth.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "SKIP",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "control-native-auth",
       "source": "cloudflare/conformance/scenarios/control-native-auth.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "control-sessions",
       "source": "cloudflare/conformance/scenarios/control-sessions.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "receipt-lost-reply",
       "source": "cloudflare/conformance/scenarios/receipt-lost-reply.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "receipt-owner-switch",
       "source": "cloudflare/conformance/scenarios/receipt-owner-switch.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "receipt-upgrade",
       "source": "cloudflare/conformance/scenarios/receipt-upgrade.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [
+          "[kernel] step \"the connected socket runs generation 2\": timed out waiting for generation 2 active",
+          "[kernel] step \"a call pinned to the generation 1 artifact\": raw socket closed while waiting for board.rename reply",
+          "[kernel] step \"generation 1 receipts survive the upgrade\": raw socket closed while waiting for __gonvex.reducerReceipt reply",
+          "[kernel] step \"SDK clients on v1 and v2 definitions converge\": timed out waiting for v1 SDK sees the new row",
+          "[kernel] digest self-check, session sdk-v1: digest mismatch on replica.ready for board.all: server sent xor1:124c737fd9fc19cfa1da294f8bab5c705c32e1c3fc27e6e2a16f65d7a17f83e3, the 0 rows the client holds give xor1:0000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "diff_count": 100
+      }
     },
     {
       "scenario": "receipt-crash",
       "source": "cloudflare/conformance/scenarios/receipt-crash.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "storage-sql",
       "source": "cloudflare/conformance/scenarios/storage-sql.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "module-host",
       "source": "cloudflare/conformance/scenarios/module-host.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "session-handshake",
       "source": "cloudflare/conformance/scenarios/session-handshake.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [
+          "[kernel] step \"a client contract deployed while sockets are connected\": raw socket closed while waiting for {\"type\":\"system.reload\"}"
+        ],
+        "diff_count": 24
+      }
     },
     {
       "scenario": "session-frames",
       "source": "cloudflare/conformance/scenarios/session-frames.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 3
+      }
     },
     {
       "scenario": "change-capture",
       "source": "cloudflare/conformance/scenarios/change-capture.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 14
+      }
     },
     {
       "scenario": "visibility-masks",
       "source": "cloudflare/conformance/scenarios/visibility-masks.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "receipt-expiry",
       "source": "cloudflare/conformance/scenarios/receipt-expiry.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "SKIP",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "scheduler",
       "source": "cloudflare/conformance/scenarios/scheduler.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [
+          "[kernel] step \"scheduled work runs\": expectation failed: expected two bumps, one coalesced wake and a 32-hop chain, got [{\"id\":\"chain\",\"title\":\"chain\",\"position\":259,\"bumps\":259},{\"id\":\"sched\",\"title\":\"planned+wake\",\"position\":100,\"bumps\":2}]"
+        ],
+        "diff_count": 11
+      }
     },
     {
       "scenario": "live-query-task-grid",
       "source": "cloudflare/conformance/scenarios/live-query-task-grid.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 4
+      }
     },
     {
       "scenario": "operator-routes",
       "source": "cloudflare/conformance/scenarios/operator-routes.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "presence-edges",
       "source": "cloudflare/conformance/scenarios/presence-edges.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "actions",
       "source": "cloudflare/conformance/scenarios/actions.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 5
+      }
     },
     {
       "scenario": "service-principals",
       "source": "cloudflare/conformance/scenarios/service-principals.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "replica-orphan-reveal",
       "source": "cloudflare/conformance/scenarios/replica-orphan-reveal.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "replica-windows",
       "source": "cloudflare/conformance/scenarios/replica-windows.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "replica-reset",
       "source": "cloudflare/conformance/scenarios/replica-reset.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "replica-tenant-restart",
       "source": "cloudflare/conformance/scenarios/replica-tenant-restart.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [
+          "[kernel] step \"the tenant object restarts; the next commit resets its collections\": raw socket closed while waiting for replica.reset",
+          "[kernel] step \"the restarted object serves the resumed collections\": raw socket closed while waiting for delta after the resume"
+        ],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "replica-reconnect-wave",
       "source": "cloudflare/conformance/scenarios/replica-reconnect-wave.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "public-limits",
       "source": "cloudflare/conformance/scenarios/public-limits.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [
+          "[kernel] setup failed: POST /dev/sync -> 503: Your worker restarted mid-request. Please try sending the request again. Only GET or HEAD requests are retried automatically."
+        ],
+        "diff_count": 10
+      }
     },
     {
       "scenario": "public-calls",
       "source": "cloudflare/conformance/scenarios/public-calls.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "bridge-upstream",
       "source": "cloudflare/conformance/scenarios/bridge-upstream.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [],
+        "diff_count": 0
+      }
     },
     {
       "scenario": "error-telemetry",
       "source": "cloudflare/conformance/scenarios/error-telemetry.mjs",
       "local": "not-yet-complete",
       "remote": "not-run",
-      "classification": "inventory pending package-evidence attribution"
+      "classification": "inventory pending package-evidence attribution",
+      "local_frozen_comparison": {
+        "status": "FAIL",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-compare-local-1.json",
+        "runtime_commit": "b9b7a727",
+        "failures": [
+          "[kernel] setup failed: POST /dev/sync -> 503: Your worker restarted mid-request. Please try sending the request again. Only GET or HEAD requests are retried automatically."
+        ],
+        "diff_count": 19
+      }
     }
   ]
 }

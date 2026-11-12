@@ -45,6 +45,8 @@ export interface DatabaseHostOptions {
   session: StorageSession;
   identity: Identity;
   invocation: InvocationInfo;
+  /** Complete server-owned lineage for deferred work (including durable hops). */
+  provenance?: Record<string, unknown>;
   /** Registered Reducer or Action of the active generation (scheduler targets). */
   schedulable: (path: string) => boolean;
   permissions?: PermissionIndex | undefined;
@@ -266,6 +268,7 @@ export class DatabaseHost implements ModuleHost {
   }
 
   private provenance(): Record<string, unknown> {
+    if (this.options.provenance) return this.options.provenance;
     const i = this.options.invocation;
     return {
       commandId: i.commandId ?? null, rootCommandId: i.rootCommandId ?? null, rootChannel: i.rootChannel ?? null, channel: i.channel ?? null,

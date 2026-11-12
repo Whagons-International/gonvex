@@ -57,6 +57,8 @@ export class SocketHost {
   private readonly recoveryDirty = new WeakSet<WebSocket>();
   private readonly recoveryRefs = new WeakMap<WebSocket, RecoveryReference>();
   private readonly publishing = new WeakSet<WebSocket>();
+  private readonly socketOwners = new WeakMap<WebSocket, string>();
+  private recoveryCleanupAt: number | null = null;
 
   constructor(private readonly options: HostOptions) {
     this.recovery = new HolderRecoveryStore(options.ctx.storage);
@@ -73,11 +75,13 @@ export class SocketHost {
         catch (error) {
           console.error("session host: recovery metadata unavailable", error);
           try { ws.close(1012, "session recovery requires reconnect"); } catch { /* already closed */ }
-          if (attachment.recovery) this.recovery.discard(attachment.recovery);
+          this.abandonRecovery(ws);
+          this.releaseAttachmentSlots(attachment.session);
         }
       }
     }
-    this.recovery.sweep(active);
+    this.recoveryCleanupAt = this.recovery.sweep(active);
+    this.reschedule();
   }
 
   /**
@@ -87,7 +91,9 @@ export class SocketHost {
   accept(publicTransport: boolean, connectionId: string, address: string = UNKNOWN_ADDRESS, slots: SlotKind[] = []): Response {
     const pair = new WebSocketPair();
     const client = pair[0], server = pair[1];
-    this.options.ctx.acceptWebSocket(server);
+    const socketOwner = crypto.randomUUID();
+    this.options.ctx.acceptWebSocket(server, [`recovery:${socketOwner}`]);
+    this.socketOwners.set(server, socketOwner);
     const session = Session.open({
       ...this.sessionOptions(server),
       connectionId,
@@ -121,7 +127,7 @@ export class SocketHost {
       const attachment = ws.deserializeAttachment() as Attachment | null;
       if (attachment?.session) {
         try { session = this.restore(ws, attachment.session, attachment.recovery); }
-        catch { /* Missing private identity cannot authorize even a restored close-time session. */ }
+        catch { this.releaseAttachmentSlots(attachment.session); }
       }
     }
     this.sessions.delete(ws);
@@ -134,6 +140,9 @@ export class SocketHost {
   async alarm(): Promise<void> {
     this.scheduled = null;
     const now = Date.now();
+    const active = new Set<string>();
+    for (const ws of this.sessions.keys()) { const ref = this.recoveryRefs.get(ws); if (ref) active.add(ref.generation); }
+    this.recoveryCleanupAt = this.recovery.sweep(active, now);
     const work: Array<Promise<void>> = [];
     const revalidate: Session[] = [];
     const admissions = new Map<string, { scope: readonly [string, string]; sessions: Session[] }>();
@@ -181,7 +190,7 @@ export class SocketHost {
 
   /** Arms the single alarm for the earliest session need. */
   reschedule(): void {
-    let next: number | null = null;
+    let next: number | null = this.recoveryCleanupAt;
     for (const session of this.sessions.values()) {
       const at = session.nextWake();
       if (at !== null && (next === null || at < next)) next = at;
@@ -241,6 +250,13 @@ export class SocketHost {
     if (guard) this.options.ctx.waitUntil(guard.release(session.record.address ?? UNKNOWN_ADDRESS, session.record.connectionId, freed));
   }
 
+  /** A corrupt private identity cannot resume, but its trusted attachment's
+   * primitive reservation locator can still release this closing socket. */
+  private releaseAttachmentSlots(record: AttachmentRecord): void {
+    const held = record.slots ?? [];
+    if (held.length && this.options.publicGuard) this.options.ctx.waitUntil(this.options.publicGuard.release(record.address ?? UNKNOWN_ADDRESS, record.connectionId, held));
+  }
+
   /** K16: which of `connectionIds` are open on this object (the address limiter's audit). */
   liveConnections(connectionIds: readonly string[]): string[] {
     const open = new Set<string>();
@@ -250,8 +266,11 @@ export class SocketHost {
 
   private restore(ws: WebSocket, record: AttachmentRecord, ref?: RecoveryReference): Session {
     if (ref) {
+      const tagged = this.options.ctx.getTags(ws).find((tag) => tag.startsWith("recovery:"))?.slice("recovery:".length);
+      if (tagged && tagged !== ref.socketOwner) throw new Error("holder recovery socket ownership mismatch");
       record = this.recovery.restore(record, ref);
       this.recoveryRefs.set(ws, ref);
+      this.socketOwners.set(ws, ref.socketOwner);
     } else {
       if (!record.connection || !("tenant" in record) || record.privateIdentity) throw new Error("holder recovery identity unavailable");
       this.recoveryDirty.add(ws); // Old attachments migrate on their next semantic/attachment change.
@@ -260,8 +279,9 @@ export class SocketHost {
   }
 
   private abandonRecovery(ws: WebSocket): void {
-    const ref = this.recoveryRefs.get(ws);
-    if (ref) this.recovery.discard(ref);
+    const owner = this.socketOwners.get(ws) ?? this.options.ctx.getTags(ws).find((tag) => tag.startsWith("recovery:"))?.slice("recovery:".length);
+    if (owner) this.recovery.abandon(owner);
+    this.socketOwners.delete(ws);
     this.recoveryRefs.delete(ws);
     this.recoveryDirty.delete(ws);
   }
@@ -272,9 +292,11 @@ export class SocketHost {
     const previous = this.recoveryRefs.get(ws);
     let next = previous;
     try {
-      if (!previous || this.recoveryDirty.has(ws) || previous.scope !== recoveryScope(session.record)) next = this.recovery.write(session.record);
+      if (!previous || this.recoveryDirty.has(ws) || previous.scope !== recoveryScope(session.record)) next = this.recovery.write(session.record, previous, this.socketOwners.get(ws));
       ws.serializeAttachment({ session: attachmentRecord(session.record), recovery: next! } satisfies Attachment);
       this.recoveryRefs.set(ws, next!);
+      this.socketOwners.set(ws, next!.socketOwner);
+      if (next !== previous) this.recovery.commit(next!);
       this.recoveryDirty.delete(ws);
     } catch (error) {
       // Do not leave the socket running under a stale current-looking attachment.

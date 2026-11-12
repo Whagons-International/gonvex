@@ -38,7 +38,7 @@ import type { ActionSession } from "../../actions/src/session";
 import { identityOf as actionIdentity, systemSession } from "../../actions/src/session";
 import type { DirectCall } from "../../actions/src/worker";
 import type { ActionReport } from "../../actions/src/runtime";
-import { publicInfo } from "../../actions/src/provenance";
+import { publicInfo, persisted } from "../../actions/src/provenance";
 import { actionSession } from "./action-session";
 import { frames, echoTrace } from "../session/protocol";
 import type { MessageTrace } from "../session/decode";
@@ -82,10 +82,13 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   protected override composition() {
     return {
       tenantOnly: true,
-      beforeInvoke: (call: TenantCall) => {
+      beforeInvoke: async (call: TenantCall) => {
         if (call.kind !== "reducer") return;
         this.ctx.storage.kv.put("assembly/active-call", { commandId: call.invocation.commandId, path: call.function, artifact: this.kernel.module?.artifactHash,
           revision: this.ctx.storage.sql.exec<{ revision: number }>("SELECT revision FROM _gonvex_sync_clock WHERE singleton=1").toArray()[0]?.revision ?? 0 });
+        // The causal marker must survive the platform resetting a pure loop.
+        // This happens before the application storage transaction opens.
+        await this.ctx.storage.sync();
       },
       afterInvoke: (call: TenantCall) => { if (call.kind === "reducer") this.ctx.storage.kv.delete("assembly/active-call"); },
       files: () => reducerFiles({ bucket: this.env.FILES, configured: this.files.configured }),
@@ -149,9 +152,19 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   }
   override async dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]> {
     if (frame.type === "query.call" && frame.path === RECEIPT_QUERY) return super.dispatch(socket, frame);
-    if (frame.type === "query.subscribe") return this.delivery.querySubscribe(socket, (db) => {
+    if (frame.type === "query.unsubscribe") {
+      this.delivery.queryUnsubscribe(socket, frame.id);
+      return [];
+    }
+    if (frame.type === "query.subscribe") return this.delivery.querySubscribe({ ...socket, queryId: frame.id } as SocketView, (db) => {
       // Install and enqueue the initial result before a later reducer can commit.
       // Recovery uses this identical auth/visibility path inside the holder barrier.
+      if ((socket as SocketView & { queryRecovery?: boolean }).queryRecovery === true && socket.tenant) {
+        const session = socket.tenant;
+        const row = db.run("SELECT account_id,status,role,permissions,membership_revision FROM members WHERE id=$1", [session.member.id]).rows[0];
+        if (!row || row[0] !== session.identity.account.id || row[1] !== "active" || row[2] !== session.member.role
+          || JSON.stringify(JSON.parse(String(row[3]))) !== JSON.stringify(session.member.permissions) || Number(row[4]) !== session.member.membershipRevision) throw new Error("delivery recovery Member authorization changed");
+      }
       return this.queries.live.subscribeSnapshot(db, socket.connectionId, socket.tenant, frame);
     }, (socket as SocketView & { queryRecovery?: boolean }).queryRecovery === true);
     const query = await this.queries.dispatch(socket, frame);
@@ -229,8 +242,8 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   private async runScheduledReducer(run: DurableRun) {
     const session = run.actor.kind === "system" ? systemSession(this.kernel.module!.projectId, this.ctx.id.name ?? "")
       : await rpc<{ tenantSessionForAccount(p: string, t: string, a: string): Promise<ActionSession> }>(this.env.CONTROL, "control").tenantSessionForAccount(this.kernel.module!.projectId, this.ctx.id.name ?? "", run.actor.accountId);
-    const report = await this.call({ v: 1, function: run.function, kind: "reducer", args: run.args, session,
-      provenance: run.provenance as unknown as TenantCallRequest["provenance"], allowInternal: true });
+    const report = await this.callWithLane({ v: 1, function: run.function, kind: "reducer", args: run.args, session,
+      provenance: run.provenance as unknown as TenantCallRequest["provenance"], allowInternal: true }, "scheduled");
     return report.ok ? { ok: true as const } : { ok: false as const, error: report.error };
   }
   private async finished(finished: CallFinished): Promise<void> {
@@ -243,6 +256,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       .actionFinished(reply, text);
   }
   async call(request: TenantCallRequest) {
+    return this.callWithLane(request, "interactive");
+  }
+  private async callWithLane(request: TenantCallRequest, lane: "interactive" | "scheduled") {
     if (request.kind === "query") {
       try {
         const tenant = this.sessionFromAction(request.session);
@@ -253,7 +269,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     const outcome = await this.kernel.reducers.serial(async () => {
       this.kernel.storage.arm({ provenance: publicInfo(request.provenance), afterSuccess: (db) => { flushReferences(db); } });
       try {
-        const report = await this.kernel.invoke({ function: request.function, kind: "reducer", args: request.args, identity: actionIdentity(request.session), invocation: publicInfo(request.provenance) });
+        const report = await this.kernel.invoke({ function: request.function, kind: "reducer", args: request.args, identity: actionIdentity(request.session), invocation: publicInfo(request.provenance), hostProvenance: persisted(request.provenance), lane });
         const commit = this.kernel.storage.takeReport();
         return report.ok ? { ok: true as const, value: report.value ?? "null", committedRevision: commit?.notice?.revision } : { ok: false as const, error: report.error?.message ?? "call failed", transient: report.error?.retryable ?? false };
       } finally { this.kernel.storage.disarm(); }
@@ -363,7 +379,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     const committed = this.ctx.storage.sql.exec("SELECT 1 FROM _gonvex_sync_transactions WHERE revision>? AND origin_command_id=? LIMIT 1", marker.revision, commandId).toArray().length > 0;
     this.ctx.storage.kv.delete("assembly/active-call");
     if (committed) return "committed";
-    this.kernel.recordOverrun(commandId);
+    this.kernel.recordOverrun(commandId, path);
     return "quarantined";
   }
   async fixtureEpoch(epoch: string): Promise<void> {

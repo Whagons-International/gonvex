@@ -19,7 +19,7 @@ describe("holder recovery metadata", () => {
     await withStore((storage, store) => {
       const r = record(), value = "🍉漢字".repeat(150_000);
       r.liveQueries = { q: { type: "query.subscribe", id: "q", path: "items.live", args: { value }, windowRevision: "memory-only" } };
-      r.pendingLiveQueries = { pending: { type: "query.subscribe", id: "pending", path: "items.other", args: { value: value.slice(0, 100_000) } } };
+      r.pendingLiveQueries = { pending: [{ type: "query.subscribe", id: "pending", path: "items.other", args: { value: value.slice(0, 100_000) } }] };
       r.controlQueries = { control: { request: { type: "query.subscribe", id: "control", path: "control.tenants.list", scope: "control", args: {} }, last: "memory-only-result" } };
       r.replicas = Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`r${i}`, "items.all"]));
       r.pendingActions = { action: "agent.run" };
@@ -33,11 +33,11 @@ describe("holder recovery metadata", () => {
       const restored = store.restore(structuredClone(attachment.session), ref);
       expect(restored.liveQueries?.q?.args).toEqual({ value });
       expect(restored.liveQueries?.q?.windowRevision).toBeUndefined();
-      expect(restored.pendingLiveQueries?.pending?.args).toEqual(r.pendingLiveQueries.pending?.args);
+      expect(restored.pendingLiveQueries?.pending?.[0]?.args).toEqual(r.pendingLiveQueries.pending?.[0]?.args);
       expect(restored.controlQueries?.control?.last).toBe("");
       expect(restored.replicas).toEqual(r.replicas);
       expect(restored.pendingActions).toEqual(r.pendingActions);
-      store.discard(ref);
+      store.abandon(ref.socketOwner);
       expect([...storage.kv.list({ prefix: "session-recovery/" })]).toEqual([]);
     });
   });
@@ -52,7 +52,7 @@ describe("holder recovery metadata", () => {
       const target = structuredClone(attachment);
       expect(() => store.restore(target, ref)).toThrow("digest mismatch");
       expect(target.pendingActions).toBeUndefined();
-      store.discard(ref);
+      store.abandon(ref.socketOwner);
       expect(() => store.restore(attachment, ref)).toThrow("scope/manifest mismatch");
     });
   });
@@ -81,7 +81,7 @@ describe("holder recovery metadata", () => {
       expect(() => store.restore(withoutRecovery(rotated), ref)).toThrow("scope/manifest mismatch");
       const switched = structuredClone(r); switched.tenant!.member.id = "other-member";
       expect(() => store.restore(withoutRecovery(switched), ref)).toThrow("scope/manifest mismatch");
-      store.discard(ref);
+      store.abandon(ref.socketOwner);
       expect(() => store.restore(packed, ref)).toThrow("scope/manifest mismatch");
     });
   });
@@ -97,11 +97,17 @@ describe("holder recovery metadata", () => {
       } });
       expect(() => failing.write(r)).toThrow("injected partial write");
       expect(store.restore(withoutRecovery(r), old).pendingActions).toEqual({ a: "agent.run" });
-      const abandoned = store.write(r);
-      store.sweep(new Set([old.generation]));
-      expect(() => store.restore(withoutRecovery(r), abandoned)).toThrow("manifest mismatch");
+      // A published (or uncertain pending) socket owner remains protected even
+      // when getWebSockets omits its closing socket. Time is not authority.
+      const now = Date.now();
+      store.sweep(new Set(), now + 365 * 24 * 3600_000);
       expect(store.restore(withoutRecovery(r), old).pendingActions).toEqual({ a: "agent.run" });
-      store.sweep(new Set());
+      // Another physical socket with the same synthetic connection id has a
+      // different owner token; a late close cannot erase its generation.
+      const newer = store.write(r);
+      store.abandon(old.socketOwner);
+      expect(store.restore(withoutRecovery(r), newer).pendingActions).toEqual({ a: "agent.run" });
+      store.abandon(newer.socketOwner);
       expect([...storage.kv.list({ prefix: "session-recovery/" })]).toEqual([]);
     });
   });

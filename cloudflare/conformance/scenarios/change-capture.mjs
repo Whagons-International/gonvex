@@ -13,6 +13,8 @@
  * (cloudflare/kernel/capture/test/capture-parity.test.ts).
  */
 
+import { numbersByValue } from '../src/number-text.mjs';
+
 const CTE_ROWS = `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40)
   INSERT INTO capture_values (id, label, n, amount, flag) SELECT printf('bulk-%02d', i), CASE WHEN i % 2 THEN 'odd' ELSE 'even' END, i, i / 4.0, i % 3 = 0 FROM n`;
 
@@ -99,7 +101,7 @@ export function comparableLog(log, base) {
       .map(c => ({
         rev: c.revision - base, sameTransaction: c.transaction_id === c.revision, ordinal: c.ordinal, event: order.get(c.event_id),
         command: c.command_id, table: c.table_name, row: c.row_id, op: c.operation,
-        old: c.old_value, new: c.new_value, changed: c.changed_columns,
+        old: numbersByValue(c.old_value), new: numbersByValue(c.new_value), changed: c.changed_columns,
         createdAtIsInteger: Number.isSafeInteger(c.created_at),
       })),
     transactions: log.transactions

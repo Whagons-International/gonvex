@@ -82,7 +82,7 @@ export function splitPayload(payload: ReplicaDelivery, limit = MAX_PAYLOAD_CHARS
     }
     const last = index === parts.length - 1;
     return {
-      v: payload.v, instance: payload.instance, shared, sockets,
+      v: payload.v, instance: payload.instance, ...(payload.scopeFence ? { scopeFence: payload.scopeFence } : {}), shared, sockets,
       ...(last && payload.watermark !== undefined ? { watermark: payload.watermark } : {}),
       ...(last && payload.membership ? { membership: payload.membership } : {}),
     };
@@ -154,6 +154,8 @@ export interface DeliveryStats {
 }
 
 const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+interface HostBarrier { pending: boolean; retryAt: number; catchup: boolean }
+interface DeferredQuery { readonly socket: SocketView; readonly id: string; readonly snapshot: (db: StorageSession) => string }
 
 /** FNV-1a 64 of path and arguments: the stream identity (any per-socket-unique token works, A.4 row 2). */
 export function streamIdentity(path: string, argsText: string): string {
@@ -177,7 +179,9 @@ export class ReplicaDeliveryEngine {
   private running: Promise<void> | undefined;
   /** Highest revision whose payload each holder accepted. */
   private readonly accepted = new Map<string, number>();
-  private readonly recovering = new Map<string, { pending: boolean; retryAt: number }>();
+  private readonly recovering = new Map<string, HostBarrier>();
+  private readonly fencing = new Map<string, HostBarrier>();
+  private readonly deferredQueries = new Map<string, DeferredQuery[]>();
   private waitingOpens = 0;
   private lastOpened: string | undefined;
 
@@ -251,6 +255,14 @@ export class ReplicaDeliveryEngine {
   querySubscribe(socket: SocketView, snapshot: (db: StorageSession) => string, recovery = false): Promise<string[]> {
     return this.options.serial(async () => {
       if (socket.tenant && !this.observe(socket, false)) return [];
+      if (!recovery && this.paused(socket.host)) {
+        const pending = this.deferredQueries.get(socket.connectionId) ?? [];
+        // This stores only the semantic request/plan, never a retained row result.
+        pending.push({ socket, id: (socket as SocketView & { queryId?: string }).queryId ?? "", snapshot });
+        this.deferredQueries.set(socket.connectionId, pending);
+        this.retryBarriers(socket.host);
+        return [];
+      }
       const replies = await this.options.read((db) => [snapshot(db)]);
       if (recovery) return replies;
       this.queryReply(socket, replies);
@@ -258,10 +270,19 @@ export class ReplicaDeliveryEngine {
     });
   }
 
+  queryUnsubscribe(socket: SocketView, id: string): boolean {
+    if ((socket.subscriptionEpoch ?? 0) < (this.epochs.get(socket.connectionId) ?? 0)) return false;
+    const pending = this.deferredQueries.get(socket.connectionId);
+    if (pending) this.deferredQueries.set(socket.connectionId, pending.filter((query) => query.id !== id));
+    this.options.live?.unsubscribe(socket.connectionId, id);
+    return true;
+  }
+
   /** The socket's session changed (re-auth without preservation, discard, close): its subscriptions go. */
   reset(connectionId: string, epoch: number): void {
     if (epoch < (this.epochs.get(connectionId) ?? 0)) return;
     this.epochs.set(connectionId, epoch);
+    this.deferredQueries.delete(connectionId);
     const connection = this.connections.get(connectionId);
     if (!connection || epoch < connection.epoch) return;
     this.options.live?.clear(connectionId);
@@ -286,8 +307,9 @@ export class ReplicaDeliveryEngine {
   /** K07's call watermark rule: undefined without subscriptions, else the revision this socket's holder accepted. */
   subscriptionFloor(socket: SocketView): number | undefined {
     const connection = this.connections.get(socket.connectionId);
+    if (connection && connection.epoch !== (socket.subscriptionEpoch ?? 0)) return undefined;
     if (!connection || (!connection.subscriptions.size && !connection.pending.length && !this.options.live?.subscriptionIds(connection.id).length)) return undefined;
-    if (this.recovering.has(connection.host)) return 0;
+    if (this.recovering.has(connection.host) || this.fencing.has(connection.host)) return 0;
     return Math.min(this.accepted.get(connection.id) ?? 0, ...(this.options.live?.computedRevisions(connection.id) ?? []));
   }
 
@@ -307,7 +329,7 @@ export class ReplicaDeliveryEngine {
 
   /** A commit was published (K03 `ChangeWake`): deliver everything up to `revision`. */
   wake(revision: number): void {
-    for (const [host, recovery] of this.recovering) if (!recovery.pending && Date.now() >= recovery.retryAt) this.requestRecovery(host);
+    for (const host of new Set([...this.recovering.keys(), ...this.fencing.keys()])) this.retryBarriers(host);
     this.wanted = Math.max(this.wanted, revision);
     this.kick();
   }
@@ -407,7 +429,7 @@ export class ReplicaDeliveryEngine {
 
   /** Round robin over connections with pending opens (one open per turn, as Rust pages one subscription per turn). */
   private nextOpen(): { connection: Connection; request: OpenRequest } | undefined {
-    const ids = [...this.connections.keys()].filter((id) => { const c = this.connections.get(id)!; return c.pending.length && !this.recovering.has(c.host); }).sort(byId);
+    const ids = [...this.connections.keys()].filter((id) => { const c = this.connections.get(id)!; return c.pending.length && !this.paused(c.host); }).sort(byId);
     if (!ids.length) return undefined;
     const id = ids.find((candidate) => this.lastOpened === undefined || candidate > this.lastOpened) ?? ids[0]!;
     this.lastOpened = id;
@@ -638,7 +660,7 @@ export class ReplicaDeliveryEngine {
 
   private payload(shared: readonly string[], sockets: Record<string, SocketWork>, watermark?: number, membership?: ReplicaDelivery["membership"]): ReplicaDelivery {
     return {
-      v: REPLICA_DELIVERY_VERSION, instance: this.instance, shared, sockets,
+      v: REPLICA_DELIVERY_VERSION, instance: this.instance, scopeFence: 1, shared, sockets,
       ...(watermark !== undefined ? { watermark } : {}), ...(membership ? { membership } : {}),
     };
   }
@@ -653,13 +675,18 @@ export class ReplicaDeliveryEngine {
   }
 
   private send(host: string, payload: ReplicaDelivery, revision: number): Promise<void> {
-    if (this.recovering.has(host)) return Promise.resolve();
+    if (this.paused(host)) {
+      // Auth invalidation must not disappear behind a capacity/restart barrier.
+      if (payload.membership) return this.sendOne(host, this.payload([], {}, undefined, payload.membership), 0, true);
+      return Promise.resolve();
+    }
     const parts = splitPayload(payload);
     for (const part of parts.slice(0, -1)) void this.sendOne(host, part, 0);
     return this.sendOne(host, parts[parts.length - 1]!, revision);
   }
 
   private accept(host: string, payload: ReplicaDelivery, receipt: ReplicaReceipt, revision: number): void {
+    if (this.paused(host) || Object.keys(receipt.scopeRequired ?? {}).length) return;
     const missing = new Set(receipt.missing ?? []);
     for (const connection of this.connections.values()) {
       if (connection.host !== host) continue;
@@ -672,17 +699,102 @@ export class ReplicaDeliveryEngine {
     if (revision) this.options.delivered?.(revision);
   }
 
+  private paused(host: string): boolean {
+    return [this.recovering.get(host), this.fencing.get(host)].some((state) => state && !state.catchup);
+  }
+
+  private retryBarriers(host: string): void {
+    const recovery = this.recovering.get(host), fence = this.fencing.get(host);
+    if (recovery && !recovery.pending && Date.now() >= recovery.retryAt) this.requestRecovery(host);
+    else if (fence && !fence.pending && Date.now() >= fence.retryAt) this.requestScopeFence(host);
+  }
+
+  private dropHost(host: string): void {
+    for (const connection of this.connections.values()) if (connection.host === host) {
+      this.stats.resets += connection.subscriptions.size;
+      this.drop(connection);
+      this.accepted.delete(connection.id);
+    }
+  }
+
+  /** The challenge's authoritative epochs stamp EMPTY work only. */
+  private requestScopeFence(host: string, supplied?: Readonly<Record<string, number>>): void {
+    if (this.recovering.has(host) || this.fencing.get(host)?.pending) return;
+    const state: HostBarrier = { pending: true, retryAt: 0, catchup: false };
+    this.fencing.set(host, state);
+    void this.options.serial(async () => {
+      this.dropHost(host);
+      this.options.outlet.discard(host);
+      return { challenge: supplied ? Promise.resolve({ scopeRequired: supplied }) : this.options.outlet.send(host, this.payload([], {})) };
+    }).then(async ({ challenge }) => {
+      const challenged = await challenge;
+      const scopes = challenged?.scopeRequired;
+      if (!scopes) throw new Error("delivery scope challenge was not understood");
+      const sockets: Record<string, SocketWork> = {};
+      for (const [id, epoch] of Object.entries(scopes)) {
+        if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error("invalid delivery scope challenge");
+        sockets[id] = { ops: [], subscriptionEpoch: epoch } as ScopedSocketWork;
+      }
+      const receipt = await this.options.outlet.send(host, this.payload([], sockets));
+      if (!receipt || Object.keys(receipt.scopeRequired ?? {}).length) throw new Error("delivery scope fence was not applied");
+      const missing = new Set(receipt.missing ?? []);
+      for (const [id, epoch] of Object.entries(scopes)) if (!missing.has(id) && receipt.scopeAck?.[id] !== epoch) throw new Error("delivery scope fence was not acknowledged");
+      await this.finishBarrier(host, state, this.fencing);
+    }).catch((error) => {
+      if (this.fencing.get(host) !== state) return;
+      state.pending = false; state.catchup = false; state.retryAt = Date.now() + 1000;
+      console.error(`delivery: scope fence for ${host} requires a fresh event`, error);
+    });
+  }
+
+  /** Catch-up is enqueued in one invocation turn; later normal sends stay behind its RPC acknowledgment. */
+  private async finishBarrier(host: string, state: HostBarrier, owners: Map<string, HostBarrier>): Promise<void> {
+    const catchup = await this.options.serial(async () => {
+      if (owners.get(host) !== state) throw new Error("delivery barrier superseded");
+      const result = await this.options.read((db) => {
+        const ids = new Set([...this.connections.values()].filter((c) => c.host === host).map((c) => c.id));
+        const frames = this.options.live?.applyFeedSnapshot(db, { kind: "reset" }, undefined, ids);
+        const clock = readClock(sqlOf(db));
+        const sockets: Record<string, SocketWork> = {};
+        for (const id of ids) {
+          const computed = this.options.live?.computedRevisions(id) ?? [];
+          sockets[id] = { ops: (frames?.get(id) ?? []).map((text) => ["f", text] as const), subscriptionEpoch: this.connections.get(id)!.epoch, watermark: computed.length ? Math.min(...computed) : 0 } as ScopedSocketWork;
+        }
+        return { payload: this.payload([], sockets, 0), revision: clock.revision };
+      });
+      const receipt = this.options.outlet.send(host, result.payload);
+      // The outlet runs exactly one RPC per host: normals may now enqueue,
+      // but cannot be delivered before catch-up was acknowledged. Floors stay
+      // zero until the barrier's receipt resolves and ownership is cleared.
+      state.catchup = true;
+      for (const [id, queries] of [...this.deferredQueries]) {
+        const own = queries.filter((query) => query.socket.host === host);
+        if (!own.length) continue;
+        this.deferredQueries.delete(id);
+        for (const query of own) {
+          if ((query.socket.subscriptionEpoch ?? 0) !== this.epochs.get(id)) continue;
+          const replies = await this.options.read((db) => [query.snapshot(db)]);
+          this.queryReply(query.socket, replies);
+        }
+      }
+      return { ...result, receipt };
+    });
+    const accepted = await catchup.receipt;
+    if (!accepted || Object.keys(accepted.scopeRequired ?? {}).length) throw new Error("delivery catch-up was discarded or unscoped");
+    if (owners.get(host) !== state) return;
+    owners.delete(host);
+    this.accept(host, catchup.payload, accepted, catchup.revision);
+    this.kick();
+  }
+
   private requestRecovery(host: string): void {
     const existing = this.recovering.get(host);
     if (existing?.pending) return;
-    const state = { pending: true, retryAt: 0 };
+    const state: HostBarrier = { pending: true, retryAt: 0, catchup: false };
+    this.fencing.delete(host);
     this.recovering.set(host, state); // Suppress immediately, before the serialized reset job can run.
     void this.options.serial(async () => {
-      for (const connection of this.connections.values()) if (connection.host === host) {
-        this.stats.resets += connection.subscriptions.size;
-        this.drop(connection);
-        this.accepted.delete(connection.id);
-      }
+      this.dropHost(host);
       const payload: RecoveryDelivery = { ...this.payload([], {}), recovery: { reason: "change-feed-lagged" } };
       if (this.options.outlet.reset) return { recovery: this.options.outlet.reset(host, payload) };
       this.options.outlet.discard(host);
@@ -690,44 +802,23 @@ export class ReplicaDeliveryEngine {
     }).then(async ({ recovery }) => {
       const receipt = await recovery as RecoveryReceipt | undefined;
       if (receipt?.recoveryAck !== 1) throw new Error("GONVEX_DELIVERY_RECOVERY_UNSUPPORTED");
-      // Rebuilds may await a busy socket. Re-read only this holder's LQs at the latest clock,
-      // so commits accepted while the reset RPC was in flight cannot be silently lost.
-      const catchup = await this.options.serial(async () => {
-        const result = await this.options.read((db) => {
-        const ids = new Set([...this.connections.values()].filter((c) => c.host === host).map((c) => c.id));
-        const frames = this.options.live?.applyFeedSnapshot(db, { kind: "reset" }, undefined, ids);
-        const clock = readClock(sqlOf(db));
-        const sockets: Record<string, SocketWork> = {};
-        for (const id of ids) {
-          const computed = this.options.live?.computedRevisions(id) ?? [];
-          sockets[id] = { ops: (frames?.get(id) ?? []).map((text) => ["f", text] as const), subscriptionEpoch: this.connections.get(id)!.epoch, ...(computed.length ? { watermark: Math.min(...computed) } : {}) } as ScopedSocketWork;
-        }
-          return { payload: this.payload([], sockets), revision: clock.revision };
-        });
-        // Enqueue before releasing this invocation turn. Later commits now queue
-        // behind catch-up rather than being suppressed in a snapshot/receipt gap.
-        const receipt = this.options.outlet.send(host, result.payload);
-        if (this.recovering.get(host) === state) this.recovering.delete(host);
-        return { ...result, receipt };
-      });
-      const accepted = await catchup.receipt;
-      if (!accepted) throw new Error("recovery catch-up was discarded");
-      this.accept(host, catchup.payload, accepted, catchup.revision);
-      this.kick();
+      await this.finishBarrier(host, state, this.recovering);
     }).catch((error) => {
       if (!this.recovering.has(host)) this.recovering.set(host, state);
       state.pending = false;
+      state.catchup = false;
       state.retryAt = Date.now() + 1000;
       console.error(`delivery: recovery of ${host} requires a fresh event`, error);
     });
   }
 
-  private sendOne(host: string, payload: ReplicaDelivery, revision: number): Promise<void> {
-    if (this.recovering.has(host)) return Promise.resolve();
+  private sendOne(host: string, payload: ReplicaDelivery, revision: number, membershipOnly = false): Promise<void> {
+    if (!membershipOnly && this.paused(host)) return Promise.resolve();
     this.stats.payloads += 1;
     return this.options.outlet.send(host, payload).then((receipt) => {
       // X01 settles discarded pending work with undefined; it certifies no delivery.
-      if (receipt) this.accept(host, payload, receipt, revision);
+      if (Object.keys(receipt?.scopeRequired ?? {}).length) this.requestScopeFence(host, receipt!.scopeRequired);
+      else if (receipt) this.accept(host, payload, receipt, revision);
     }, (error) => {
       if ((error as { code?: unknown })?.code === "GONVEX_DELIVERY_CAPACITY") this.requestRecovery(host);
       else { console.error(`delivery: payload to ${host} failed`, error); this.requestRecovery(host); }

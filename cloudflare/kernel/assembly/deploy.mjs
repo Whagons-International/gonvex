@@ -25,11 +25,11 @@ export function accountApi(credentials) {
     });
     if (missing && response.status === 404) return null;
     const reply = await response.json();
-    if (!response.ok || !reply.success) {
+    if (!response.ok || reply.success === false) {
       if (missing && reply.errors?.some((e) => [10007, 10006, 10004].includes(e.code))) return null;
       throw new Error(`Cloudflare ${method} ${path} failed HTTP ${response.status}, codes ${(reply.errors ?? []).map((e) => e.code).join(',')}`);
     }
-    return reply.result;
+    return reply.success === undefined ? reply : reply.result;
   };
 }
 
@@ -120,4 +120,39 @@ export async function deployAssembly({ name, directory, images, secrets = {} }) 
   const evidence = { name, url, at: new Date().toISOString(), images, resources, workers };
   await writeFile(join(directory, 'deployment.json'), JSON.stringify(evidence, null, 2));
   return evidence;
+}
+
+/** Removes only this exact branch's development composition, including its data buckets. */
+export async function deleteAssembly({ name, directory }) {
+  developmentName(name); directory = resolve(directory);
+  const credentials = await cloudflareCredentials(), api = accountApi(credentials);
+  const removed = [];
+  for (const kind of ['', '-actions', '-sandbox', '-builder']) {
+    const script = `${name}${kind}`;
+    if (!await api(`/workers/scripts/${script}/settings`, { missing: true })) continue;
+    await wrangler(['delete', '--name', script, '--force'], credentials, directory);
+    removed.push({ kind: 'worker', name: script });
+  }
+  const queues = await api(`/queues?name=${encodeURIComponent(`${name}-rollout`)}`);
+  for (const queue of queues.filter((queue) => queue.queue_name === `${name}-rollout`)) {
+    await api(`/queues/${queue.queue_id}`, { method: 'DELETE' });
+    removed.push({ kind: 'queue', name: queue.queue_name });
+  }
+  const deadline = Date.now() + 120_000;
+  for (const suffix of ['releases', 'files']) {
+    const bucket = `${name}-${suffix}`;
+    if (!await api(`/r2/buckets/${bucket}`, { missing: true })) continue;
+    for (;;) {
+      if (Date.now() > deadline) throw new Error('owned development bucket cleanup exceeded its finite budget');
+      const page = await api(`/r2/buckets/${bucket}/objects?limit=1000`);
+      const objects = Array.isArray(page) ? page : page.objects;
+      if (!Array.isArray(objects)) throw new Error('R2 object list shape unsupported; no inferred cleanup');
+      if (!objects.length) break;
+      for (const object of objects) await api(`/r2/buckets/${bucket}/objects/${encodeURIComponent(object.key)}`, { method: 'DELETE' });
+    }
+    await api(`/r2/buckets/${bucket}`, { method: 'DELETE' });
+    removed.push({ kind: 'r2', name: bucket });
+  }
+  await writeFile(join(directory, 'cleanup.json'), JSON.stringify({ name, at: new Date().toISOString(), removed }, null, 2));
+  return removed;
 }

@@ -1,6 +1,5 @@
 // Production session ports. No fixture handlers or K05 stand-ins enter this graph.
-import { deadlineOverrunError } from "../host/src/invoke";
-import { frames } from "../session/protocol";
+import { tenantDispatchWithDeadline } from "./deadline";
 import { GatewayObjectBase, type GatewayBindings, type GatewayEnv } from "../session/placement/gateway";
 import type { Ports } from "../session/ports";
 import { rpc, type TenantRpc } from "../session/rpc";
@@ -45,17 +44,8 @@ export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
     tenants: {
       dispatch: async (socket, frame) => {
         const route = socket.tenant!.route;
-        try { return await tenant(route.tenantId).dispatch(socket, frame); }
-        catch (error) {
-          if (!/exceeded its CPU time limit and was reset/.test(String((error as Error)?.message ?? error)) || (frame.type !== "reducer.call" && frame.type !== "query.call")) throw error;
-          if (frame.type === "reducer.call") {
-            const outcome = await rpc<{ recordOverrun(id: string, path: string): Promise<"quarantined" | "committed" | "unrelated"> }>(env.TENANT, route.tenantId).recordOverrun(frame.id, frame.path);
-            // Only a durable key authorizes replay after a possibly committed call.
-            if (outcome === "committed" && frame.idempotencyKey) return tenant(route.tenantId).dispatch(socket, frame);
-          }
-          const failure = deadlineOverrunError(route.projectId, frame.path);
-          return [frame.type === "reducer.call" ? frames.reducerError(frame.id, frame.path, failure.message, "transient", frame.trace) : frames.queryError(frame.id, frame.path, failure.message)];
-        }
+        return tenantDispatchWithDeadline(route.projectId, frame, () => tenant(route.tenantId).dispatch(socket, frame),
+          (id, path) => rpc<{ recordOverrun(id: string, path: string): Promise<"quarantined" | "committed" | "unrelated"> }>(env.TENANT, route.tenantId).recordOverrun(id, path));
       },
       serviceCall: (grant, call) => tenant(grant.route.tenantId).serviceCall(grant, call),
       presenceLeave: (route, id, host, previous) => tenant(route.tenantId).presenceLeave(id, host, previous ?? null),

@@ -15,7 +15,7 @@ import { Aggregate, stableJson } from "../canonical.ts";
 import { parseDefinition, type ReplicaModule } from "../definition.ts";
 import { ReplicaDeliveryEngine } from "../engine.ts";
 import { LocalOutlet } from "../outlet.ts";
-import type { ReplicaDelivery } from "../protocol.ts";
+import type { ReplicaDelivery, ReplicaReceipt } from "../protocol.ts";
 import type { ScopedSocketWork } from "../recovery.ts";
 import { SocketDelivery, type TrackedReplicas } from "../socket.ts";
 import { LiveQueries, snapshotRunner, kernelVisibility, moduleFromManifest } from "../../query/index";
@@ -58,6 +58,8 @@ interface Harness {
   engine: ReplicaDeliveryEngine;
   live: LiveQueries;
   payloads: Array<[string, ReplicaDelivery]>;
+  receiver: { deliver?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt> };
+  delivered: number[];
   commit(statements: Array<[string, unknown[]]>): Promise<number>;
 }
 
@@ -80,6 +82,8 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     const context = { state: new CaptureState(), wake: new ChangeWake() };
     let queue: Promise<unknown> = Promise.resolve();
     const payloads: Array<[string, ReplicaDelivery]> = [];
+    const receiver: Harness["receiver"] = {};
+    const delivered: number[] = [];
     const liveModule = moduleFromManifest("p", {
       functions: { "items.live": { kind: "query", delivery: "live", dependencies: { liveQueryPlan: {
         table: "items", key: "id", columns: ["id", "rank", "label"],
@@ -90,14 +94,15 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     const engine = new ReplicaDeliveryEngine({
       ...(composeLive ? { live } : {}),
       tenantId: "t",
+      delivered: (revision) => delivered.push(revision),
       serial: <R>(fn: () => Promise<R>) => { const next = queue.then(fn, fn); queue = next.catch(() => undefined); return next; },
       read: async (fn) => { const r = await storage.invoke("query", async (s) => fn(s)); if (!r.ok) throw r.error; return r.value; },
       module: () => module,
-      outlet: new LocalOutlet((host, payload) => { payloads.push([host, payload]); return { v: 1, sockets: Object.keys(payload.sockets).length }; }, () => ["h1"]),
+      outlet: new LocalOutlet((host, payload) => { payloads.push([host, payload]); return (receiver.deliver?.(host, payload) ?? { v: 1, sockets: Object.keys(payload.sockets).length }) as ReplicaReceipt; }, () => ["h1"]),
     });
     let commands = 0;
     return body({
-      engine, live, payloads,
+      engine, live, payloads, receiver, delivered,
       async commit(statements) {
         const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (s) => {
           for (const [text, parameters] of statements) s.run(text, parameters);
@@ -430,6 +435,61 @@ describe("design rule: no SQL per subscriber", () => {
 
 
 describe("K22 ordered query and replica commits", () => {
+  // Receiver controls below test the engine/barrier wiring; actual holder
+  // scope validation and rebuilding are covered separately on Gateway/Session.
+  it("0061 uses challenge epochs only for empty work and keeps deferred query replies behind acknowledged catch-up", async () => {
+    await withEngine(async ({ engine, live, payloads, receiver, delivered, commit }) => {
+      await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);
+      let acknowledge!: (receipt: ReplicaReceipt) => void;
+      let fence: ReplicaDelivery | undefined;
+      receiver.deliver = (_host, payload) => {
+        if (!Object.keys(payload.sockets).length && payload.watermark! > 0) return { v: 1, sockets: 1, scopeRequired: { restored: 7 } };
+        if (Object.values(payload.sockets).some((work) => !work.ops.length && work.watermark === undefined)) {
+          fence = payload;
+          return new Promise((resolve) => { acknowledge = resolve; });
+        }
+        return { v: 1, sockets: Object.keys(payload.sockets).length };
+      };
+      await commit([["UPDATE items SET label='after' WHERE id='i1'", []]]);
+      for (let i = 0; i < 50 && !fence; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      expect(fence).toBeDefined();
+      expect(fence!.shared).toEqual([]);
+      expect(fence!.sockets.restored!.ops).toEqual([]);
+      expect((fence!.sockets.restored as ScopedSocketWork).subscriptionEpoch).toBe(7);
+      expect(delivered).toEqual([]); // Challenge receipt is not commit acceptance.
+      const view = { ...socket("late"), subscriptionEpoch: 7, queryId: "live" };
+      let executed = false;
+      await engine.querySubscribe(view, (db) => { executed = true; return live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }); });
+      expect(executed).toBe(false);
+      expect(engine.subscriptionFloor(view)).toBeUndefined(); // No successfully installed subscription yet.
+      acknowledge({ v: 1, sockets: 1, scopeAck: { restored: 7 } });
+      for (let i = 0; i < 100 && !executed; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      expect(executed).toBe(true);
+      await engine.settled();
+      const query = payloads.findIndex(([, payload]) => payload.sockets.late?.ops.some((op) => op[0] === "f" && op[1].includes('"type":"query.result"')));
+      expect(query).toBeGreaterThan(payloads.findIndex(([, payload]) => payload === fence));
+      expect(JSON.stringify(payloads[query]![1])).toContain("after");
+    }, MODULE, true);
+  });
+
+  it("does not accept an older holder's ordinary receipt as an empty-scope fence acknowledgment", async () => {
+    await withEngine(async ({ engine, live, receiver, delivered, commit }) => {
+      await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);
+      let fences = 0;
+      receiver.deliver = (_host, payload) => {
+        if (!Object.keys(payload.sockets).length && payload.watermark! > 0) return { v: 1, sockets: 1, scopeRequired: { restored: 4 } };
+        fences++; return { v: 1, sockets: 1 }; // Old sender/holder skew: no explicit ack.
+      };
+      await commit([["UPDATE items SET label='after' WHERE id='i1'", []]]);
+      for (let i = 0; i < 25; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      const view = { ...socket("late"), subscriptionEpoch: 4, queryId: "live" };
+      let executed = false;
+      await engine.querySubscribe(view, (db) => { executed = true; return live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }); });
+      expect(executed).toBe(false);
+      expect(fences).toBe(1);
+      expect(delivered).toEqual([]);
+    }, MODULE, true);
+  });
   it("queues an initial query snapshot before a later commit and fences delayed requests after scope reset", async () => {
     await withEngine(async ({ engine, live, payloads, commit }) => {
       await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);

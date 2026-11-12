@@ -15,7 +15,7 @@ export const freePort = () => new Promise((ok, fail) => {
   server.listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => ok(port)); });
 });
 const load = async (path) => JSON.parse((await readFile(path, 'utf8')).replace(/^\s*\/\/.*$/gm, ''));
-export async function startLocalAssembly({ state, port, vars = {}, deferMs = 500 } = {}) {
+export async function startLocalAssembly({ state, port, vars = {}, deferMs = 1500 } = {}) {
   if (!state) throw new Error('an owned state directory is required');
   state = resolve(state); await mkdir(state, { recursive: true, mode: 0o700 });
   const generated = join(state, 'generated'); await mkdir(generated, { recursive: true });

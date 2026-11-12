@@ -6,7 +6,7 @@ import { startLocalAssembly } from '../../../kernel/assembly/local.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 export class CloudflareAssemblyBackend extends RustBackend {
   constructor(options) { super({ ...options, binary: process.execPath }); }
-  get capabilities() { return { ...super.capabilities, orphanReveal: true, tenantRestart: true }; }
+  get capabilities() { return { ...super.capabilities, orphanReveal: true, tenantRestart: true, receiptExpiry: true }; }
   async start() {
     if (process.env.GONVEX_ASSEMBLY_URL) {
       this.httpUrl = process.env.GONVEX_ASSEMBLY_URL.replace(/\/$/, '');
@@ -50,5 +50,6 @@ export class CloudflareAssemblyBackend extends RustBackend {
     }
   }
   pruneReceipts(_project, tenant, now, offlineMaxAgeMs) { return this.request('POST', '/__assembly/receipt-prune', { body: { tenant, now, offlineMaxAgeMs } }); }
+  expireReceipts(project, tenant, { now, offlineMaxAgeMs }) { return this.pruneReceipts(project, tenant, now, offlineMaxAgeMs); }
 }
 export default CloudflareAssemblyBackend;

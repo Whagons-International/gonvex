@@ -24,7 +24,7 @@ import { deliveryClass } from "../session";
 import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../presence/hub";
 import { type TelemetryEnv, telemetryHostFromEnv } from "../../telemetry/env";
 import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
-import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt } from "../../delivery/protocol";
+import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt, type SocketWork } from "../../delivery/protocol";
 import { UNKNOWN_ADDRESS } from "../../public/address";
 import type { PublicGuard } from "../../public/guard";
 import type { SlotKind } from "../../public/limiter";
@@ -230,6 +230,9 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     const seen = new Set<string>();
     const membership = payload.membership;
     const work: Array<Promise<void>> = [];
+    const scopeRequired: Record<string, number> = {};
+    const scopeAck: Record<string, number> = {};
+    const bootstraps: Array<Promise<void>> = [];
     for (const ws of sockets ?? []) {
       const session = this.host.sessions.get(ws);
       const tenant = session?.record.tenant;
@@ -241,12 +244,32 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
         work.push(session.membershipChanged(membership.revision));
         continue;
       }
+      const own = payload.sockets[id];
+      if (payload.scopeFence === 1 && !own && (session.record.replicaInstance !== payload.instance || payload.watermark === undefined)) {
+        // Authoritative scope only: zero application of this unscoped payload.
+        scopeRequired[id] = session.record.subscriptionEpoch ?? 0;
+        continue;
+      }
+      if (payload.scopeFence === 1 && own && !own.ops.length && own.watermark === undefined && !own.opened && !own.removed
+        && !payload.shared.length && payload.watermark === undefined && !payload.membership) {
+        const epoch = (own as SocketWork & { subscriptionEpoch?: number }).subscriptionEpoch;
+        bootstraps.push(session.bootstrapReplica(tenantId, payload, own).then(() => { if (epoch !== undefined) scopeAck[id] = epoch; }, (error) => {
+          if ((error as Error)?.message !== "delivery recovery scope changed") throw error;
+          // A scope switch is a fresh negative challenge, never an ack or an
+          // automatic replay of this fence's epoch/data.
+          if (!session.closed && session.record.tenant?.route.tenantId === tenantId) scopeRequired[id] = session.record.subscriptionEpoch ?? 0;
+          else seen.delete(id);
+        }));
+        continue;
+      }
       session.replicaDelivery(payload, payload.sockets[id]);
     }
+    await Promise.all(bootstraps);
     if (work.length) this.ctx.waitUntil(Promise.all(work).then(() => this.host.reschedule()));
     this.host.reschedule();
     const missing = Object.keys(payload.sockets).filter((id) => !seen.has(id));
-    return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}) };
+    return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}),
+      ...(Object.keys(scopeRequired).length ? { scopeRequired } : {}), ...(Object.keys(scopeAck).length ? { scopeAck } : {}) };
   }
 
   /** K16: which of these connections are open here (the address limiter's audit of leaked slots). */

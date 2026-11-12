@@ -77,7 +77,8 @@ jobs:
     # Same-repo PRs only: fork PRs never receive secrets.
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Fresh Rust/DuckDB Container build, with immutable source/input receipts.
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: cloudflare
@@ -113,7 +114,24 @@ jobs:
       - name: Deploy and smoke-test preview
         id: deploy
         if: steps.secrets.outputs.ready == 'true'
-        run: node scripts/deploy-preview.mjs deploy --branch "$PREVIEW_BRANCH"
+        env:
+          GONVEX_ASSEMBLY_IMAGES_FILE: ${{ runner.temp }}/gonvex-assembly-build/images.json
+          GONVEX_ASSEMBLY_DEPLOY_DIR: ${{ runner.temp }}/gonvex-assembly-deploy
+        run: |
+          name=$(node scripts/deploy-preview.mjs name --branch "$PREVIEW_BRANCH")
+          node kernel/assembly/build-images.mjs "$name" "$RUNNER_TEMP/gonvex-assembly-build"
+          node scripts/deploy-preview.mjs deploy --branch "$PREVIEW_BRANCH"
+      - name: Retain exact development build and config identities
+        if: always() && steps.secrets.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-assembly-identities
+          path: |
+            ${{ runner.temp }}/gonvex-assembly-build/inputs.json
+            ${{ runner.temp }}/gonvex-assembly-build/images.json
+            ${{ runner.temp }}/gonvex-assembly-build/*.Dockerfile
+            ${{ runner.temp }}/gonvex-assembly-deploy/deployment.json
+          if-no-files-found: warn
       - name: Summary
         if: steps.secrets.outputs.ready == 'true'
         working-directory: .
@@ -161,6 +179,8 @@ jobs:
         run: pnpm install --frozen-lockfile --filter @gonvex/cloudflare
       - name: Delete preview
         if: steps.secrets.outputs.ready == 'true'
+        env:
+          GONVEX_ASSEMBLY_DEPLOY_DIR: ${{ runner.temp }}/gonvex-assembly-cleanup
         run: node scripts/deploy-preview.mjs delete --branch "$PREVIEW_BRANCH"
 
   # A01 (contract-changes/0014, rule 5): run the kernel schema transform over

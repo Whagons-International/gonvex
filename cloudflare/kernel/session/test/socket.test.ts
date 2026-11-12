@@ -149,6 +149,44 @@ describe("handshake", () => {
 });
 
 describe("gateway placement", () => {
+  it("0061 challenges a restarted sender without mutation, rejects a stale Member fence, then acknowledges only real empty bootstrap", async () => {
+    const w = await world({ a: ["ana", "ben"] });
+    const c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const before = await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any;
+      session.record.replicaInstance = "before";
+      session.delivery.opening("pending-open", "items.all");
+      return { id: session.record.connectionId, epoch: session.record.subscriptionEpoch, watermark: session.record.watermark ?? 0 };
+    }) as { id: string; epoch: number; watermark: number };
+    const payload = { v: 1, scopeFence: 1, instance: "after", shared: [], sockets: {}, watermark: 90 };
+    const challenge = await gateway(name!).deliverReplica(w.tenants.a, payload);
+    expect(challenge.scopeRequired).toEqual({ [before.id]: before.epoch });
+    await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === before.id) as any;
+      expect(session.record.replicaInstance).toBe("before");
+      expect(session.record.watermark ?? 0).toBe(before.watermark);
+    });
+    await c.auth({ id: "switch", project: w.projectId, tenant: w.tenants.a, token: w.tokens.ben });
+    const fence = (epoch: number) => ({ v: 1, scopeFence: 1, instance: "after", shared: [], sockets: { [before.id]: { ops: [], subscriptionEpoch: epoch } } });
+    const stale = await gateway(name!).deliverReplica(w.tenants.a, fence(before.epoch));
+    expect(stale.scopeAck).toBeUndefined();
+    expect(stale.scopeRequired[before.id]).toBeGreaterThan(before.epoch);
+    const current = await gateway(name!).deliverReplica(w.tenants.a, payload);
+    const epoch = current.scopeRequired[before.id];
+    expect(epoch).toBeGreaterThan(before.epoch);
+    const ack = await gateway(name!).deliverReplica(w.tenants.a, fence(epoch));
+    expect(ack.scopeAck).toEqual({ [before.id]: epoch });
+    await gateway(name!).deliverReplica(w.tenants.a, { ...payload, watermark: 100, sockets: { [before.id]: { ops: [["f", '{"type":"private-old-scope"}']], subscriptionEpoch: before.epoch } } });
+    await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === before.id) as any;
+      expect(session.record.replicaInstance).toBe("after");
+      expect(session.record.watermark ?? 0).toBe(0);
+    });
+    expect(c.frames.some((f) => f.type === "private-old-scope")).toBe(false);
+    c.ws.close(1000);
+  });
+
   it("registers each gateway once with the tenant and delivers each commit once per gateway", async () => {
     const w = await world({ a: ["ana", "ben"] });
     const clients = await Promise.all(Array.from({ length: 12 }, (_, i) => signedIn(w, i % 2 ? "ben" : "ana", "a")));

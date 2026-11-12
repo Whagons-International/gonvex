@@ -43,6 +43,27 @@ function fixture() {
 }
 
 describe("K22 session delivery scope", () => {
+  it("counts ControlOnly tenantControl connections without granting tenant-data dispatch", async () => {
+    const f = fixture();
+    const reported: unknown[] = [];
+    f.ports.control.connectionState = async (_id, state) => { reported.push(state); };
+    await f.session.receive('{"type":"auth","id":"control","token":"alice","project":"p","tenant":"t","controlOnly":true,"capabilities":{"tenantControl":1}}');
+    expect(f.session.record.tenant).toBeNull();
+    expect(reported.at(-1)).toMatchObject({ projectId: "p", tenantId: "t", authenticated: true });
+    await f.session.receive('{"type":"query.call","id":"private","path":"items.private","args":{}}');
+    expect(f.dispatches).toEqual([]);
+    expect(JSON.parse(f.sent.at(-1)!)).toMatchObject({ type: "query.error", id: "private" });
+  });
+
+  it("drops an already queued live result after unsubscribe at the holder", async () => {
+    const f = fixture(); await f.auth();
+    await f.session.receive('{"type":"query.subscribe","id":"q","path":"items.live","args":{}}');
+    await f.session.receive('{"type":"query.unsubscribe","id":"q"}');
+    const before = f.sent.length;
+    f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", '{"type":"query.result","id":"q","result":["late"]}'));
+    expect(f.sent.slice(before).some((text) => text.includes('"late"'))).toBe(false);
+  });
+
   it("rejects delayed work before instance, data or watermark changes across Member, tenant, reauth and deploy resets", async () => {
     const f = fixture();
     await f.auth();
@@ -96,6 +117,17 @@ describe("K22 session delivery scope", () => {
     expect(f.session.record.liveQueries?.q?.args).toEqual({ owner: "alice" });
     await f.auth("bob");
     expect(f.session.record.liveQueries).toEqual({});
+  });
+
+  it("keeps same-id initial replies correlated when multiple replacements precede delivery", async () => {
+    const f = fixture(); await f.auth();
+    for (const args of [{ first: true }, { invalid: true }]) await f.session.receive(JSON.stringify({ type: "query.subscribe", id: "q", path: "items.live", args }));
+    f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", '{"type":"query.result","id":"q","result":[]}'));
+    expect(f.session.record.liveQueries?.q?.args).toEqual({ first: true });
+    expect(f.session.record.pendingLiveQueries?.q).toHaveLength(1);
+    f.deliver(f.payload(f.session.record.subscriptionEpoch!, "I", '{"type":"query.error","id":"q","error":"invalid"}'));
+    expect(f.session.record.liveQueries?.q?.args).toEqual({ first: true });
+    expect(f.session.record.pendingLiveQueries?.q).toBeUndefined();
   });
 
   it("recovery waits for real LQ replies, includes pending opens, and rejects stale scope or a refused rebuild", async () => {

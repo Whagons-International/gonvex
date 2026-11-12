@@ -6,11 +6,14 @@ import type { SessionRecord } from "./session";
 
 const PREFIX = "session-recovery/";
 const MANIFESTS = "session-recovery-manifest/";
+const OWNERS = "session-recovery-owner/";
 const CHARS = 16_384; // <=64KiB UTF-8, including worst-case non-ASCII text.
 const GROUPS = ["liveQueries", "pendingLiveQueries", "controlQueries", "replicas", "pendingActions"] as const;
 type Group = typeof GROUPS[number];
-export interface RecoveryReference { v: 1; generation: string; scope: string; chunks: number; hash: string }
-interface Manifest extends RecoveryReference { owner: string; createdAt: number }
+export interface RecoveryReference { v: 2; socketOwner: string; generation: string; scope: string; chunks: number; hash: string }
+interface Manifest extends RecoveryReference { owner: string; createdAt: number; orphanedAt?: number }
+interface Owner { v: 2; connectionId: string; current?: string; pending?: string }
+const ORPHAN_GRACE_MS = 60_000;
 interface Chunk { text: string; end: boolean }
 export type AttachmentRecord = Omit<SessionRecord, "connection" | "tenant" | "service"> & Partial<Pick<SessionRecord, "connection" | "tenant" | "service">> & { privateIdentity?: 1 };
 
@@ -21,6 +24,7 @@ export function recoveryScope(record: SessionRecord): string {
 const base = (generation: string) => `${PREFIX}${generation}/`;
 const key = (generation: string, i: number) => `${base(generation)}c/${String(i).padStart(12, "0")}`;
 const manifestKey = (generation: string) => `${MANIFESTS}${generation}`;
+const ownerKey = (socketOwner: string) => `${OWNERS}${socketOwner}`;
 
 export function withoutRecovery(record: SessionRecord): SessionRecord {
   const { liveQueries: _live, pendingLiveQueries: _pending, controlQueries: _control, replicas: _replicas, pendingActions: _actions, ...attachment } = record;
@@ -38,11 +42,13 @@ export function attachmentRecord(record: SessionRecord): AttachmentRecord {
 export class HolderRecoveryStore {
   constructor(private readonly storage: Pick<DurableObjectStorage, "kv" | "transactionSync">) {}
 
-  write(record: SessionRecord): RecoveryReference {
+  write(record: SessionRecord, previous?: RecoveryReference, socketOwner = previous?.socketOwner ?? crypto.randomUUID()): RecoveryReference {
     const generation = crypto.randomUUID(), scope = recoveryScope(record);
     let chunks = 0, hash = "";
     // A failed partial write cannot publish a manifest or a usable attachment reference.
     this.storage.transactionSync(() => {
+      const owner = this.storage.kv.get<Owner>(ownerKey(socketOwner));
+      if (owner && (owner.connectionId !== record.connectionId || !previous || (owner.current !== previous.generation && owner.pending !== previous.generation))) throw new Error("holder recovery publication ownership changed");
       const append = (text: string) => {
         for (let offset = 0; offset < text.length; offset += CHARS) {
           const chunk = { text: text.slice(offset, offset + CHARS), end: offset + CHARS >= text.length };
@@ -53,7 +59,9 @@ export class HolderRecoveryStore {
       append(JSON.stringify(["identity", "", { connection: record.connection, tenant: record.tenant, service: record.service ?? null }]));
       for (const group of GROUPS) for (const [id, value] of Object.entries(record[group] ?? {})) {
         let semantic = value;
-        if (group === "liveQueries" || group === "pendingLiveQueries") {
+        if (group === "pendingLiveQueries") {
+          semantic = (value as Array<Record<string, unknown>>).map(({ windowRevision: _hash, ...request }) => request);
+        } else if (group === "liveQueries") {
           const { windowRevision: _hash, ...request } = value as Record<string, unknown>;
           semantic = request;
         } else if (group === "controlQueries") {
@@ -61,14 +69,31 @@ export class HolderRecoveryStore {
         }
         append(JSON.stringify([group, id, semantic]));
       }
-      this.storage.kv.put(manifestKey(generation), { v: 1, owner: record.connectionId, generation, scope, chunks, hash, createdAt: Date.now() } satisfies Manifest);
+      this.storage.kv.put(manifestKey(generation), { v: 2, socketOwner, owner: record.connectionId, generation, scope, chunks, hash, createdAt: Date.now() } satisfies Manifest);
+      // Protect both the old published generation and this uncertain transition
+      // BEFORE a socket attachment can reference the new one.
+      this.storage.kv.put(ownerKey(socketOwner), { v: 2, connectionId: record.connectionId, ...(previous ? { current: previous.generation } : {}), pending: generation } satisfies Owner);
     });
-    return { v: 1, generation, scope, chunks, hash };
+    return { v: 2, socketOwner, generation, scope, chunks, hash };
+  }
+
+  commit(ref: RecoveryReference): void {
+    const manifest = this.storage.kv.get<Manifest>(manifestKey(ref.generation));
+    const owner = this.storage.kv.get<Owner>(ownerKey(ref.socketOwner));
+    if (!manifest || !owner || owner.connectionId !== manifest.owner || (owner.current !== ref.generation && owner.pending !== ref.generation)) throw new Error("holder recovery publication ownership changed");
+    if (owner.current === ref.generation && owner.pending === undefined) return;
+    this.storage.kv.put(ownerKey(ref.socketOwner), { v: 2, connectionId: owner.connectionId, current: ref.generation } satisfies Owner);
+    for (const generation of [owner.current, owner.pending]) if (generation && generation !== ref.generation) {
+      const old = this.storage.kv.get<Manifest>(manifestKey(generation));
+      if (old) { try { this.discard(old); } catch { /* The unreferenced generation is reclaimed by orphan sweep. */ } }
+    }
   }
 
   restore(record: AttachmentRecord, ref: RecoveryReference): SessionRecord {
     const manifest = this.storage.kv.get<Manifest>(manifestKey(ref.generation));
-    if (ref.v !== 1 || !manifest || manifest.v !== 1 || manifest.owner !== record.connectionId
+    const owner = this.storage.kv.get<Owner>(ownerKey(ref.socketOwner));
+    if (ref.v !== 2 || !manifest || manifest.v !== 2 || manifest.owner !== record.connectionId
+      || manifest.socketOwner !== ref.socketOwner || !owner || owner.connectionId !== record.connectionId || (owner.current !== ref.generation && owner.pending !== ref.generation)
       || manifest.scope !== ref.scope || manifest.chunks !== ref.chunks || manifest.hash !== ref.hash) throw new Error("holder recovery metadata scope/manifest mismatch");
     const maps: Record<Group, Record<string, unknown>> = { liveQueries: Object.create(null), pendingLiveQueries: Object.create(null), controlQueries: Object.create(null), replicas: Object.create(null), pendingActions: Object.create(null) };
     let text = "", hash = "";
@@ -93,23 +118,54 @@ export class HolderRecoveryStore {
     if (recoveryScope(restored) !== ref.scope) throw new Error("holder recovery metadata scope/manifest mismatch");
     // Return only after the entire generation, identity and scope validated.
     delete (restored as AttachmentRecord).privateIdentity;
+    this.commit(ref); // Resolve a crash on either side of attachment publication.
     return restored;
   }
 
   discard(ref: RecoveryReference): void {
+    const owner = this.storage.kv.get<Owner>(ownerKey(ref.socketOwner));
+    if (owner?.current === ref.generation || owner?.pending === ref.generation) return;
+    this.storage.transactionSync(() => this.deleteGeneration(ref));
+  }
+
+  private deleteGeneration(ref: RecoveryReference): void {
+    for (const [name] of this.storage.kv.list({ prefix: base(ref.generation) })) this.storage.kv.delete(name);
+    this.storage.kv.delete(manifestKey(ref.generation));
+  }
+
+  /** The actual close/error callback owns this physical socket token. */
+  abandon(socketOwner: string): void {
+    const owner = this.storage.kv.get<Owner>(ownerKey(socketOwner));
+    if (!owner) return;
     this.storage.transactionSync(() => {
-      for (const [name] of this.storage.kv.list({ prefix: base(ref.generation) })) this.storage.kv.delete(name);
-      this.storage.kv.delete(manifestKey(ref.generation));
+      this.storage.kv.delete(ownerKey(socketOwner));
+      for (const generation of [owner.current, owner.pending]) if (generation) {
+        const ref = this.storage.kv.get<Manifest>(manifestKey(generation));
+        if (ref) this.deleteGeneration(ref);
+      }
     });
   }
 
-  /** On wake: abandoned prepublish generations and closed owners have no attachment. */
-  sweep(active: ReadonlySet<string>): void {
+  /** A closing socket is absent from getWebSockets before its close callback.
+   * Mark first, then reclaim on a later alarm; never erase its private identity
+   * before that callback can report presence/slots and abandon the generation. */
+  sweep(active: ReadonlySet<string>, now = Date.now()): number | null {
     const orphaned: string[] = [];
-    for (const [_name, value] of this.storage.kv.list<Manifest>({ prefix: MANIFESTS })) {
-      if (active.has(value.generation)) continue;
-      orphaned.push(value.generation);
+    let next: number | null = null;
+    for (const [name, value] of this.storage.kv.list<Manifest>({ prefix: MANIFESTS })) {
+      const owner = this.storage.kv.get<Owner>(ownerKey(value.socketOwner));
+      if (active.has(value.generation) || owner?.current === value.generation || owner?.pending === value.generation) {
+        if (value.orphanedAt !== undefined) { const { orphanedAt: _orphaned, ...live } = value; this.storage.kv.put(name, live); }
+        continue;
+      }
+      const first = value.orphanedAt ?? now;
+      if (first + ORPHAN_GRACE_MS <= now) orphaned.push(value.generation);
+      else {
+        if (value.orphanedAt === undefined) this.storage.kv.put(name, { ...value, orphanedAt: first });
+        next = Math.min(next ?? Infinity, first + ORPHAN_GRACE_MS);
+      }
     }
-    for (const generation of orphaned) this.discard({ v: 1, generation, chunks: 0, scope: "", hash: "" });
+    for (const generation of orphaned) { const ref = this.storage.kv.get<Manifest>(manifestKey(generation)); if (ref) this.discard(ref); }
+    return next;
   }
 }

@@ -38,7 +38,7 @@ export interface KernelTenantOptions {
   /** A Worker swap may carry a newer manifest than the previous object's KV. */
   readonly restoreManifest?: ((stored: StoredModule) => StoredModule) | undefined;
   readonly tenantOnly?: boolean | undefined;
-  readonly beforeInvoke?: ((call: TenantCall) => void) | undefined;
+  readonly beforeInvoke?: ((call: TenantCall) => void | Promise<void>) | undefined;
   readonly afterInvoke?: ((call: TenantCall) => void) | undefined;
   /**
    * Declared reference integrity: flush before finalize, and K02's
@@ -203,10 +203,10 @@ export class KernelTenant {
     this.active = module;
   }
 
-  recordOverrun(commandId: string): void { this.requireHost().quarantine.add(commandId); }
+  recordOverrun(commandId: string, path?: string): void { this.requireHost().quarantine.add(commandId, path, this.active?.artifactHash); }
 
   private async runHost(call: TenantCall) {
-    this.options.beforeInvoke?.(call);
+    await this.options.beforeInvoke?.(call);
     try { return await this.requireHost().run(call); } finally { this.options.afterInvoke?.(call); }
   }
   invoke(call: TenantCall) { return this.runHost(call); }
