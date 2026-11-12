@@ -4,6 +4,7 @@ import { mkdtemp,writeFile,rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { ids,runCheck,WriteGuard,CheckError } from '../checks/contract.mjs';
+import { RawIntegrityError } from '../checks/raw-result.mjs';
 import { replay,validateRaw } from '../reports/replay.mjs';
 
 const raw=(at,status='pass',extra={})=>({schema:'gonvex.monitor.v1',sourceSha:'source',deploy:'review-local',region:'local',executor:'node-local',configSha:'cfg',domain:'local-handler-fixture',environment:'local-synthetic',check:'sdk-task',scheduledAt:at,startedAt:at,finishedAt:at+5,deadlineMs:10,clockUncertaintyMs:0,attempt:0,...ids(),status,code:'fixture',durationMs:5,operations:[],...extra});
@@ -93,6 +94,9 @@ test('R3: accessors, custom serializers, arrays and non-string trace identities 
   assert.throws(()=>validateRaw(raw(0,'fail',{operations:[serializer]})));
   const array=[op()];Object.setPrototypeOf(array,{toJSON:()=>({private:'FAKE_PRIVATE_SENTINEL'})});assert.throws(()=>validateRaw(raw(0,'fail',{operations:array})));
   assert.throws(()=>validateRaw(raw(0,'fail',{traceId:{toString:()=> 'a'.repeat(32),private:'FAKE_PRIVATE_SENTINEL'}})));
+  const privateError=Object.assign(new RawIntegrityError('operation-schema'),{headers:{authorization:'FAKE_PRIVATE_SENTINEL'}});
+  const hostile=new Proxy(op(),{ownKeys(){throw privateError;}});
+  assert.throws(()=>validateRaw(raw(0,'fail',{operations:[hostile]})),error=>error!==privateError && !JSON.stringify(error).includes('SENTINEL'));
   const proxy=new Proxy(op(),{ownKeys(){throw new Error('FAKE_PRIVATE_SENTINEL');}});
   assert.throws(()=>validateRaw(raw(0,'fail',{operations:[proxy]})),error=>error.code==='raw-integrity' && !String(error).includes('SENTINEL'));
 });

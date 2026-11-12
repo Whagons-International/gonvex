@@ -57,7 +57,11 @@ export function validateRaw(value) {
   try { return validateRecord(value); }
   catch(error) {
     // Never echo input values, getter/proxy exceptions, provider errors, headers or bodies.
-    if(error instanceof RawIntegrityError) throw error;
-    throw new RawIntegrityError('raw-integrity');
+    let code='raw-integrity';
+    try {
+      const descriptor=error instanceof RawIntegrityError ? Object.getOwnPropertyDescriptor(error,'code') : null;
+      if (descriptor && Object.hasOwn(descriptor,'value') && integrityCodes.has(descriptor.value)) code=descriptor.value;
+    } catch {}
+    throw new RawIntegrityError(code);
   }
 }
