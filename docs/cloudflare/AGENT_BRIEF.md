@@ -107,3 +107,12 @@ bottleneck with bounded admitted sweeps, distinguish measurements/platform limit
 and publish raw artifacts and rerun commands. Evaluate X02 snapshot offload from storm evidence and pull it
 forward if required by the original gates. No staging/production cutover or load there is authorized.
 See decision 0053 and verification/V03-load-brief.md and V04-budgets-brief.md.
+
+## Uptime and tracing planning (0055, 2026-11-12)
+
+The canonical observability-uptime-plan.md adds independent external monitoring and explicit Gonvex
+WebSocket/async operation correlation, truthful regional/component/task-operation accounting and dev fault/
+alert/recovery proof. Preserve K15/R01/V02/V05/M05 original gates and real-duration soak/shadow requirements.
+Cadences and 99.9% monthly are owner proposals, not measured uptime/SLA. No new paid account/subscription,
+DNS/status publication, unsolicited alerts or live staging/production monitoring activation is authorized.
+Production R01 remains read-only single-user; warm monitoring never substitutes for cold-wake experiments.
