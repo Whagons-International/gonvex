@@ -353,3 +353,27 @@ before installing its deferred query was strengthened to exact0 while the holder
 No original package/Rust-vs-kernel scenario assertion changed. The retained Engine initial-reference lifecycle
 after an acknowledged Session rebuild remains a source follow-up: recoveryAck alone is not a0064 terminal
 completion receipt and is never used to bulk-clear refs.
+
+### Frozen77e source checkpoint: local suites and four named scenarios PASS; acceptance UNMET
+
+`77e63e5c1dfeec0640404ea5b1a22af1a7cdec07` passed the full combined package command:
+857 workerd cases /15 existing skips plus4 Node deploy cases;49 conformance unit cases; typecheck;
+all CI generators with no tracked drift; and runtime-cycle comparison1→1/0 added. The built serving
+bundle measured1,662,345 bytes /397,514 gzip bytes. The machine-readable checkpoint in
+`cloudflare/kernel/assembly/evidence/checkpoint-77e63e5c.json` pins its bundle/report hashes and all39
+formal scenario statuses. Source/config/commands/raw reports are under
+`/mnt/data/work/gonvex-k22/evidence/77e63e5c1dfeec0640404ea5b1a22af1a7cdec07/`.
+
+The unchanged thin-SDK, live-query-window, tenant-restart and telemetry scenarios passed4/4 in39.6s
+against ONE fresh local assembled runtime and the independently validated Rust reference. This campaign
+selected the approved controller-removed/static-one-holder baseline up front; it is not X01/default fleet
+proof. Every other scenario is explicitly unexecuted on this checkpoint, and all original failed campaigns
+remain retained. Native Gateway RPC positive ENQUEUED/obsolete/own-key receipts and all original Action S4
+assertions passed. Real unchanged-SDK fault/error/revision liveness remains unproven.
+
+Actual local SQL fixture column bytes were args300,012 +session2,000,229 =2,300,241 UTF-8 bytes.
+The encoded INPUT (path/args/session/provenance) manifest declares2,300,357 bytes /36 chunks; this is not
+metadata-row size. None of those sums include SQLite row headers/physical pages. Actual remote limits,
+isolate RAM/copies, Action legacy deployment preconditions, reference cleanup and terminal-owner lifetime
+remain open. No Cloudflare deploy/artifact/config id exists for this checkpoint; no credential or deployment
+was used. The resource receipt measures the WHOLE admitted unit, not a Worker isolate.

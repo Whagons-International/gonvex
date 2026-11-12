@@ -1,0 +1,233 @@
+{
+  "sourceHead": "77e63e5c1dfeec0640404ea5b1a22af1a7cdec07",
+  "sourceManifest": "/mnt/data/work/gonvex-k22/evidence/77e63e5c1dfeec0640404ea5b1a22af1a7cdec07/source.json",
+  "acceptance": "UNMET",
+  "classification": "Local author checkpoint; no independent review or deployment proof",
+  "checks": {
+    "workerdPassed": 857,
+    "workerdExistingSkipped": 15,
+    "nodeDeployPassed": 4,
+    "conformanceUnitPassed": 49,
+    "typecheck": "PASS",
+    "generators": "PASS/no tracked drift",
+    "runtimeCycles": {
+      "base": 1,
+      "candidate": 1,
+      "added": 0
+    },
+    "bundleBytes": 1662345,
+    "bundleSha256": "b077413b43eb622ebbe4543fc5bdc0d397194187fb7e154825914cab5c64f022",
+    "gzipBytes": 397514
+  },
+  "canonicalDomain": "UPFRONT static-one-holder: GATEWAY_CONTROLLER binding removed; GONVEX_GATEWAY_SHARDS=1; NOT automatic fleet/capacity proof",
+  "namedReport": "/mnt/data/work/gonvex-k22/evidence/77e63e5c1dfeec0640404ea5b1a22af1a7cdec07/named.json",
+  "namedReportSha256": "3615ff37db8c94524bc5f594e397c7cf1d2ecaeff5c6a03e7836a9645a657332",
+  "scenarios": [
+    {
+      "name": "thin-sdk-parity",
+      "localAtCheckpoint": "PASS",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "reducer-second-client",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "replica-resume",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "reducer-errors",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "presence",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "live-query-window",
+      "localAtCheckpoint": "PASS",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "control-auth",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "control-tenants",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "control-invitations",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "control-support",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "control-external-auth",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "control-native-auth",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "control-sessions",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "receipt-lost-reply",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "receipt-owner-switch",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "receipt-upgrade",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "receipt-crash",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "storage-sql",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "module-host",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "session-handshake",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "session-frames",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "change-capture",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "visibility-masks",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "receipt-expiry",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "scheduler",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "live-query-task-grid",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "operator-routes",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "presence-edges",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "actions",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "service-principals",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "replica-orphan-reveal",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "replica-windows",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "replica-reset",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "replica-tenant-restart",
+      "localAtCheckpoint": "PASS",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "replica-reconnect-wave",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "public-limits",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "public-calls",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "bridge-upstream",
+      "localAtCheckpoint": "UNEXECUTED at this checkpoint; original evidence retained separately",
+      "remote": "NOT RUN"
+    },
+    {
+      "name": "error-telemetry",
+      "localAtCheckpoint": "PASS",
+      "remote": "NOT RUN"
+    }
+  ],
+  "remoteArtifactAndConfigIds": null,
+  "open": [
+    "N6 terminal owner token/drain lifecycle and stranded OWNER",
+    "Engine initial refs after Session rebuild need exact terminal reconciliation",
+    "Real unchanged-SDK quiet initial fault plus immediate write/receipt/revision liveness",
+    "0057 local CPU enforcement blocked; private-platform CPU/quarantine/rollback/neighbor proof not run",
+    "Full current static and automatic campaigns; original failures retained",
+    "8 additional package comparison gaps; exact Container/file/application/bridge/device proof",
+    "Legacy Action reply deployment/drain/rollback precondition and evidence",
+    "128MB isolate fit, copy/aggregate costs, capacity V/R gates"
+  ]
+}

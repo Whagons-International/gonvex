@@ -51,6 +51,11 @@
           "path": "docs/cloudflare/contract-changes/0048-k10-k20-review-rulings.md",
           "line": 10,
           "excerpt": "- Rust vs kernel: thin-sdk-parity, reducer-second-client (G1), replica-resume, visibility-masks, replica-windows,"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0063-resume-checker-and-targeted-delivery.md",
+          "line": 38,
+          "excerpt": "The combined single-holder `thin-sdk-parity` campaign exposed a real source failure: the Gateway's"
         }
       ],
       "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
@@ -369,272 +374,272 @@
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 219,
+          "line": 225,
           "excerpt": "| Server Ping | Every 20 s (`GONVEX_PRESENCE_PING_SECONDS`), **only on sockets that negotiated `presence:1`** | `lib.rs:1710-1712,2424-2441`, `presence.rs:63-65,94` | replace: a Worker cannot send protocol pings. Liveness must come from the platform's close and error events, or from an application frame the SDK already sends. The SDK sends no periodic frame under presence v2. S3 decides |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 220,
+          "line": 226,
           "excerpt": "| Liveness timeout | 60 s with no inbound frame (Pong included). Server back-pressure and write progress count as activity. | Close **4000** \"presence liveness timeout\" | `lib.rs:2430-2437`, `presence.rs:66-69` | replace (S3). Without pings the server cannot detect a silent peer. Presence offline relies on `webSocketClose`/`webSocketError` plus the 10 s offline grace (`presence.rs:60-62`) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 226,
+          "line": 232,
           "excerpt": "| Hibernation state | All per-socket state is task-local in Rust: subscriptions, cursors, batch bindings, `sent_replica_revision`, row-patch dictionary, presence slot, contract and capabilities | `lib.rs:1688-1756` | adapt: DO WebSocket Hibernation (`acceptWebSocket`, `serializeAttachment`). The attachment is small (2 KiB in docs; verify), so only identity, capabilities, contract and a session id fit. Subscriptions must be rebuilt from SQLite or the object must stay awake while subscriptions exist. S3 decides. Nothing ephemeral goes to SQLite (brief) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 237,
+          "line": 243,
           "excerpt": "| 4000 | `presence liveness timeout` | Presence socket silent for 60 s | `lib.rs:2430-2437` | replace (A.1.8) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 265,
+          "line": 271,
           "excerpt": "| `presence.set` | `state: \"active\"\\|\"idle\"\\|\"offline\"` | none | no | ts:363; proto:527-528; lib.rs:3712-3726; presence.rs:105-111 | adapt: presence lives in the tenant object's memory (S3) | Rust trims, lowercases and accepts `gone` as offline. Invalid states, or no tenant Member session (anonymous, service, delegated), are silently ignored |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 266,
+          "line": 272,
           "excerpt": "| `presence.subscribe` | `id` | `presence.snapshot {id,serverTime,members}` or `presence.error {id,error}` | no | ts:364; proto:531-532; lib.rs:3727-3758 | adapt (as above) | Errors: \"presence requires an authenticated tenant member session\", \"presence v2 is disabled\" |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 267,
+          "line": 273,
           "excerpt": "| `presence.unsubscribe` | (none) | none | no | ts:365; proto:533-534; lib.rs:3759-3762 | adapt | Rust variant `PresenceUnsubscribe {}` |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 275,
+          "line": 281,
           "excerpt": "Public transport rate limits: 30 calls per connection and 120 per IP per 60 s window. A `*Many` frame costs `len`. When the limit is hit, a per-frame error is sent (`public_limit_errors`, error \"public call rate limit exceeded\"; every frame type other than `auth`, `query.call`/`query.subscribe(Many)`, `reducer.call(Many)`, `replica.open(Many)` and `action.call` (that is `query.unsubscribe`, `replica.close`, `error.*`, `presence.*`, `telemetry.*`, `replica.snapshotAck`) gets `auth.error {id:\"public-rate-limit\",code:\"transient\"}`; a rate-limited `auth` frame gets `auth.error` with its own id). Source: `lib.rs:2661-2687,4349-4410`, `public_functions.rs:52-60,153-175`. Disposition: **adapt**: per-object counters in the object that owns the socket (0012 R11)."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 317,
+          "line": 323,
           "excerpt": "| `presence.snapshot` | `id`, `serverTime: i64 ms`, `members: [{memberId,state,since}]` (online only, sorted by `memberId`) | `presence.subscribe`, or a resync after 32 pending batches | no | ts:441, ts:309-318; proto:915-921; presence.rs:795-801 | adapt (S3) | It can ride in `replica.batch` |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 318,
+          "line": 324,
           "excerpt": "| `presence.patch` | `serverTime`, `changes: PresenceMember[]` (`state` may be `offline`) | Coalesced transitions (250 ms window, leading edge) | no | ts:443; proto:923-928; presence.rs:569-602, 851 | adapt (S3) | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 319,
+          "line": 325,
           "excerpt": "| `presence.error` | `id`, `error` | `presence.subscribe` | no | ts:444; proto:929-930; lib.rs:3740-3749 | keep | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 333,
+          "line": 339,
           "excerpt": "| 6. Presence item | `presence.patch` or `presence.snapshot` JSON, appended to the open batch as data | Presence slot drained. Sent at once unless the batch already holds rows (leading edge) | `presence:1` plus batch frames | delivery.rs:969-983; lib.rs:2397-2423 | adapt (S3) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 338,
+          "line": 344,
           "excerpt": "| 11. Presence patch merge | Several pending patches merged per Member (last wins, first-seen order), `serverTime` of the last one | Presence drain | `presence:1` | presence.rs:569-602 | adapt (S3) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 361,
+          "line": 367,
           "excerpt": "| `presence.error.error` | `presence requires an authenticated tenant member session`; `presence v2 is disabled` | | lib.rs:3743-3746 |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 370,
+          "line": 376,
           "excerpt": "- **`query.result.reason` values outside the TS union:** Rust also emits `\"reconnect\"` (`live_query.rs:740`), `\"control-change\"` and `\"presence-change\"` (`lib.rs:2457, 2472, 3306, 3426, 3548`). Keep: the kernel sends the same strings."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 392,
+          "line": 398,
           "excerpt": "- `telemetry.kind`, `outcome` and `reason` and `presence.set.state` are free strings (`gone` is accepted)."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 450,
+          "line": 456,
           "excerpt": "| presence / ai | **none**: there is no presence or AI host call; AI goes through `fetch`, and presence is protocol-level | — |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 687,
+          "line": 693,
           "excerpt": "- **Live Control Queries.** `open_control_query` (control.rs:1947) refuses anonymous tenant sessions with `authentication is required` and non-live paths with `Control Plane query \"<p>\" is not subscribable`. It returns `query.result {path,result,reason:\"initial\"}`. `refresh_control_queries` (1978) re-runs **every** live Control subscription on the socket and sends one only if its JSON changed, with reason `control-change` or `presence-change`. Errors arrive as `query.error`. These events trigger a refresh:"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 744,
+          "line": 750,
           "excerpt": "| 44 | control.support.listTenants | Ql (also refreshed on presence-change) | {} | [{id,name,domain,status,timezone,seatLimit,createdAt,userCount,activeSessions}] | dev | none. Counts active members in each tenant DB (4 at a time) and adds the process-local connection count | — | control.rs:2082 (dispatch 155), def 4480 | 243 | adapt: control DO fanning out to tenant DOs; activeSessions from each DO's socket count | Reads O(tenants) per call and per refresh. `userCount` is null on error |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 745,
+          "line": 751,
           "excerpt": "| 45 | control.support.listSessions | Ql | {} | [{id,tenantId,accountId,release,environment,lastSeenAt}] (≤1000) | pAdmin | none | — | control.rs:2374, def 4485 | 244 | adapt: control DO plus presence from the socket-owning DOs | Live sessions show lastSeenAt = now (process-local presence) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 751,
+          "line": 757,
           "excerpt": "| 51 | control.support.heartbeat | R | {release, environment} | {sessionId:`support_<connectionId>`} | acct | gonvex_support_sessions upsert (last_seen_at); idempotency | — | control.rs:3185; in-memory short-circuit lib.rs:4899-4935; def 4504 | 250 | adapt: presence in the socket DO. Write only on change (DOD: nothing ephemeral in SQLite) | A repeat with identical attribution is answered from memory with no write |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 963,
+          "line": 969,
           "excerpt": "- **(a) From the feed.** A committed tenant transaction with revision > `admission_revision` changes a `members` row whose `account_id` or `id` belongs to this session, in one of the columns `account_id`, `status`, `role`, `permissions` or `membership_revision` (lib.rs:4270). The server then discards the tenant scope (replicas, live queries, Control subscriptions, feed and presence) and sends `auth.error{code:\"transient\",id:\"membership-changed\",error:\"tenant membership changed; authenticate again\"}` followed by that transaction's watermark (lib.rs:2185-2192, 4260). This covers role and permission changes, not only removal."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1335,
+          "line": 1341,
           "excerpt": "## E. SQL rules, scheduler, outbox, storage, presence v2"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1619,
+          "line": 1625,
           "excerpt": "Disposition: the 250 ms coalescing window and the `presence.*` frame shapes are **keep**; liveness numbers (ping interval, liveness timeout) are **open until S3** (0012 R22); the rest are tuning."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1623,
+          "line": 1629,
           "excerpt": "| Enabled | on | `GONVEX_PRESENCE_V2` | `R:presence.rs:48-50`, `R:presence.rs:87-101` | `D:performance/presence-v2.md:400-411` |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1624,
+          "line": 1630,
           "excerpt": "| Coalescing window | 250 ms | `GONVEX_PRESENCE_TICK_MS` | `R:presence.rs:51-55` | §3.4 (**DOC≠CODE** in §9 table: \"tick 1 s (default)\" is historical) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1625,
+          "line": 1631,
           "excerpt": "| Leading edge | on | `GONVEX_PRESENCE_LEADING_EDGE` | `R:presence.rs:56-59`, `R:lib.rs:1648-1669` | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1626,
+          "line": 1632,
           "excerpt": "| Offline grace | 10,000 ms (0 allowed) | `GONVEX_PRESENCE_OFFLINE_GRACE_MS` | `R:presence.rs:60-62`, `R:config.rs:712-716` | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1627,
+          "line": 1633,
           "excerpt": "| Server Ping interval | 20 s | `GONVEX_PRESENCE_PING_SECONDS` | `R:presence.rs:63-65` | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1628,
+          "line": 1634,
           "excerpt": "| Liveness timeout | 60 s, forced ≥ 2× ping | `GONVEX_PRESENCE_LIVENESS_SECONDS` | `R:presence.rs:66-69`, `R:config.rs:688-693` | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1629,
+          "line": 1635,
           "excerpt": "| Max pending publications per connection | 32 → resync snapshot | none | `R:presence.rs:156-169`, `R:presence.rs:97` | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1630,
+          "line": 1636,
           "excerpt": "| Support last-seen refresh | 300 s, first at random offset | `GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS` | `R:presence.rs:81-84`, `R:lib.rs:400-415` | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1633,
+          "line": 1639,
           "excerpt": "| Legacy beat / transition paths | empty | `GONVEX_PRESENCE_LEGACY_BEAT_PATHS`, `…_TRANSITION_PATHS` | `R:presence.rs:70-80` | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1639,
+          "line": 1645,
           "excerpt": "| Scope | `(project, tenant)`; Member id = tenant Member id | `R:presence.rs:112-125` | One tenant DO = one scope | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1641,
+          "line": 1647,
           "excerpt": "| Per-connection state | `active`/`idle`; `parse_state`: `active`, `idle`, `offline`, `gone`(=offline), case-insensitive, else ignored | `R:presence.rs:104-111` | In-memory → lost on hibernation | **adapt**: `ws.serializeAttachment` (≤2 KB) holds state, member, subscription id; rebuild on wake from `getWebSockets()` (nothing ephemeral in SQLite) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1642,
+          "line": 1648,
           "excerpt": "| Aggregate | any connection `active` → active; all `idle` → idle; none → offline (after grace) | `R:presence.rs:191-207` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1643,
+          "line": 1649,
           "excerpt": "| `presence.set` | Moves the connection if scope/member differs (no grace); `offline` removes this connection now, no grace; else upsert and clear grace; marks dirty | `R:presence.rs:414-474`, `R:lib.rs:3712-3726` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1644,
+          "line": 1650,
           "excerpt": "| Disconnect / re-auth | Socket close (guard drop) or re-auth: detach with grace; also unsubscribes; support sessions queued for last-seen flush | `R:presence.rs:541-567`, `R:presence.rs:760-775`, `R:presence.rs:871-893`, `R:lib.rs:2742` | `webSocketClose`/`webSocketError` | **adapt** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1645,
+          "line": 1651,
           "excerpt": "| Publication | Due = max(ready, last publication + window); ready = now or grace end; publish dirty Members whose aggregate differs from published; offline removes Member; one encoded patch shared by all subscribers; no per-connection timer; one scheduler sleeps to earliest due | `R:presence.rs:219-261`, `R:presence.rs:619-638`, `R:presence.rs:803-868`, `R:lib.rs:1648-1669` | | **adapt**: `setTimeout` while awake for the 250 ms window; grace end on the DO alarm (multiplexed) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1651,
+          "line": 1657,
           "excerpt": "| Capability | `session.ready.capabilities.presence=1`; client `auth.capabilities.presence=1` (per auth; re-auth without it turns Ping liveness off) | `D:performance/presence-v2.md:66-92`, `R:lib.rs:2817` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1652,
+          "line": 1658,
           "excerpt": "| `presence.set` | `{type,state}` fire-and-forget; ignored without eligible session | `P:protocol/src/index.ts:363`, `R:lib.rs:3712-3726` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1653,
+          "line": 1659,
           "excerpt": "| `presence.subscribe` | `{type,id}` → `presence.snapshot` (same id) of online Members sorted by id, then patches; ineligible → `presence.error` \"presence requires an authenticated tenant member session\" or \"presence v2 is disabled\" | `P:protocol/src/index.ts:364`, `R:presence.rs:491-522`, `R:presence.rs:777-801`, `R:lib.rs:3727-3758` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1654,
+          "line": 1660,
           "excerpt": "| `presence.unsubscribe` | `{type}` | `R:presence.rs:524-539`, `R:lib.rs:3759-3762` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1655,
+          "line": 1661,
           "excerpt": "| `presence.snapshot` | `{type,id,serverTime,members:[{memberId,state,since}]}` | `P:protocol/src/index.ts:441` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1656,
+          "line": 1662,
           "excerpt": "| `presence.patch` | `{type,serverTime,changes:[…]}`; `since` = publication wall time; lagging connection merges batches (last state per Member wins) | `P:protocol/src/index.ts:443`, `R:presence.rs:569-604` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1663,
+          "line": 1669,
           "excerpt": "| Server Ping | Every 20 s to connections with `presence_negotiated`: protocol Ping (opcode 0x9, empty) | `R:lib.rs:1710-1712`, `R:lib.rs:2424-2439` | **A Worker cannot send protocol pings** | **replace**: S3 decides |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1664,
+          "line": 1670,
           "excerpt": "| Alive signal | `max(last inbound frame, socket write/backpressure activity)`; ≥ liveness timeout at a Ping tick → Close `4000 \"presence liveness timeout\"` and drop; detection 60–80 s | `R:lib.rs:2424-2436` | Hibernation API reports close/error only; half-open sockets go undetected | **replace** options for S3: (1) client sends an app-level ping string, `setWebSocketAutoResponse` answers without waking the DO and `getWebSocketAutoResponseTimestamp(ws)` checked on the alarm (needs a client change → contract note; brief says clients must work unedited); (2) rely on edge TCP close events plus any existing periodic client frame; measure half-open detection time |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1671,
+          "line": 1677,
           "excerpt": "| Legacy beat | If path in beat list, non-control scope, connection already got a replica watermark (`sent_replica_revision>0`), eligible session: answer `reducer.result` with `result=now ms`, `committedRevision=last sent watermark`; no V8, no write; registers caller `active` only if not yet present | `R:lib.rs:4937-4956`, `R:presence.rs:476-488` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1672,
+          "line": 1678,
           "excerpt": "| Legacy transition | If path in transition list and connection has no `presence:1`: run Reducer normally; on success apply `args.state` to the feed | `R:lib.rs:4958-4995` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1673,
+          "line": 1679,
           "excerpt": "| `control.support.heartbeat` | First call per connection (or changed tenant/account/release/environment) upserts `gonvex_support_sessions` (`id=\"support_{connectionId}\"`); repeats answered from memory with same `{sessionId}` (no write, no idempotency row, no notify) | `R:lib.rs:4884-4935`, `R:presence.rs:656-726`, `R:control.rs:3185-3212` | **adapt**: support sessions live in the Control DO (0012 R7) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1674,
+          "line": 1680,
           "excerpt": "| `error.register`/`error.heartbeat` | Same dedupe; `error.ack` | `D:performance/presence-v2.md:323-326`, `R:lib.rs:3763-3770` | **adapt** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1680,
+          "line": 1686,
           "excerpt": "| Durability | None: restart → all offline until clients re-announce | `D:performance/presence-v2.md:353-362` | **keep** (DO eviction = restart) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1704,
+          "line": 1710,
           "excerpt": "Every periodic task in this section multiplexes onto the single DO alarm, set to the minimum of: next scheduled job `run_at`; next outbox `available_at` or lease expiry; change-feed prune (hourly); completed-job prune (600 s); receipt prune; membership projection backoff (2–10 s); presence grace end (when hibernating); support last-seen flush (5 s close batch, 300 s refresh); targeted-wake flush (5 s). DO alarms are at-least-once, so every handler must be idempotent (the Rust handlers already are: claims, revision guards, conditional deletes)."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1750,
+          "line": 1756,
           "excerpt": "| 0038 | K14 presence findings (dead-peer detection) | ruled in 0037 | K14, G3b |"
         },
         {
@@ -861,6 +866,16 @@
           "path": "docs/cloudflare/contract-changes/0049-batch-c-re-review.md",
           "line": 10,
           "excerpt": "| K15 (#369), note 0041 | approved | The live-session leak with presence off is fixed (`live` flag), `__proto__` keys are kept, and references are fixed. |"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0062-telemetry-parity-domains.md",
+          "line": 39,
+          "excerpt": "generation before its close callback, losing the expected presence offline alarm. Preserve"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0062-telemetry-parity-domains.md",
+          "line": 45,
+          "excerpt": "pending actions. Verify real close/error presence alarms and K16 release, closing sockets absent from"
         },
         {
           "path": "docs/cloudflare/spikes/S3-sockets.md",
@@ -1237,6 +1252,11 @@
           "path": "docs/cloudflare/contract-changes/0023-capture-of-columns-added-after-the-row.md",
           "line": 17,
           "excerpt": "`receipt-upgrade`). After `UPDATE board SET title = title WHERE id = 'old'`, Rust emits"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0060-assembly-evidence-boundaries.md",
+          "line": 25,
+          "excerpt": "`receipt-upgrade` timed out waiting for generation 2 on its existing raw socket; `session-handshake`"
         }
       ],
       "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
@@ -1324,17 +1344,17 @@
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 409,
+          "line": 415,
           "excerpt": "`RT` = `rust/crates/runtime/src`, `MH` = `rust/crates/module-host/src`, `ST` = `rust/crates/store/src`,"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1053,
+          "line": 1059,
           "excerpt": "| GET | `/healthz` | `health` | none. Full diagnostics need an `admin`-role, non-Local operator holding `admin:projects` | — | 200 or 503 `{ok}`. With diagnostics: `{ok,version,time,databaseSet,database,valkeySet:false,rowsCache:false,runtimeManifests{ready,failedProjects},moduleHost,s3Set,sandbox{enabled,ready,error}}`. Headers `cache-control:no-store`, `vary:Authorization` | `lib.rs:554`, `1499-1563` | adapt: RW answers `{ok}` from a CDO ping. Diagnostics are rebuilt from CDO and R2 state | `ok` = module host ready ∧ control plane present ∧ no failed project manifests ∧ sandbox binary present. `version` comes from `GONVEX_RUNTIME_VERSION`, and the deploy docs use `/healthz.version` (`apps/docs/content/docs/deployment.mdx:108`). Pool, module-host and sandbox fields have no Cloudflare equivalent and need new values |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1733,
+          "line": 1739,
           "excerpt": "| 0021 | K04 module-host interfaces and R25 (proposed by K04) | ruled in 0022 §3 | K01, K04, K19, S5 |"
         }
       ],
@@ -1386,6 +1406,11 @@
           "path": "docs/cloudflare/contract-changes/0020-session-layer-findings.md",
           "line": 6,
           "excerpt": "Measured against the Rust runtime at `0bf3ad13` (conformance scenarios `session-handshake` and"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0060-assembly-evidence-boundaries.md",
+          "line": 25,
+          "excerpt": "`receipt-upgrade` timed out waiting for generation 2 on its existing raw socket; `session-handshake`"
         }
       ],
       "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
@@ -1490,13 +1515,18 @@
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1738,
+          "line": 1744,
           "excerpt": "| 0026 | K03 change-capture differences (proposed by K03) | ruled in 0028 §2 | K03, K07, M02 |"
         },
         {
           "path": "docs/cloudflare/contract-changes/0026-change-capture-differences.md",
           "line": 5,
           "excerpt": "K03's parity check replays the conformance scenario `change-capture` (18 Reducer transactions) through the kernel's"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0060-assembly-evidence-boundaries.md",
+          "line": 8,
+          "excerpt": "The formal `change-capture` scenario may reuse that exact, unit-tested rule for both sides' `old_value`"
         }
       ],
       "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
@@ -1593,7 +1623,7 @@
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1698,
+          "line": 1704,
           "excerpt": "Disposition: **replace** (intended, IB3). Rule in `contract-changes/0009-receipt-expiry.md`: results expire after `offlineMaxAgeMs + 24 h` and leave a tombstone; a call that hits a tombstone gets `reducer.error{class:\"rejected\"}` instead of running again; a `null` window keeps receipts as in Rust; tombstones are deleted after 365 days."
         }
       ],
@@ -1655,17 +1685,17 @@
         },
         {
           "path": "cloudflare/actions/README.md",
-          "line": 84,
+          "line": 86,
           "excerpt": "| scheduler | `SchedulerPort.enqueue`, by default the tenant's `schedule` RPC (K11's `Scheduler.enqueue`); target checked against the generation | parity step 8; `runtime.test.ts` \"storage and scheduler\"; `handoff.test.ts` (a scheduled Action run end to end) |"
         },
         {
           "path": "cloudflare/actions/README.md",
-          "line": 85,
+          "line": 87,
           "excerpt": "| storage | `StoragePort.call` (K13); \"storage is not configured\" without it | parity step 9; `runtime.test.ts` \"storage and scheduler\" |"
         },
         {
           "path": "cloudflare/actions/README.md",
-          "line": 130,
+          "line": 132,
           "excerpt": "scheduler on the tenant alarm and handed to the Workflow, which renews K11's 5-minute claim every 100 s."
         },
         {
@@ -1830,207 +1860,207 @@
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 428,
+          "line": 434,
           "excerpt": "| public (anonymous) | `FunctionDefinition.public`; anon session disables outbox/scheduler, 60 s Action deadline | `RT/modules.rs:26`, `RT/execution.rs:585-586,859-869`, `RT/public_functions.rs:33` |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 432,
+          "line": 438,
           "excerpt": "| cron / scheduled | CronSpec must target reducer or action; runs with channel `scheduler`, lane Scheduled, 3 s slice for Q/R at depth 0 | `RT/modules.rs:212-228`, `V8/admission.rs:34-47`, `V8/lib.rs:718-732` |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 443,
+          "line": 449,
           "excerpt": "| scheduler (`scheduleAfter/At`) | N | Y | Y | R: `!anonymous`. A: declared `scheduler:true` and `!anonymous` (`RT/action_calls.rs:242-244`) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 475,
+          "line": 481,
           "excerpt": "| `actionEnqueue` | `function:string` (non-empty), `args?` (`undefined` -> `null`) | `string` action id | R | rejects `_gonvex.scheduler.enqueue`; opens the lazy writer | \"actions.enqueue requires an Action path\"; \"actions.enqueue cannot invoke a Gonvex system operation\"; aborted-tx | `BS:622-626`, `RT/host_calls.rs:782-815`, `ST/lib.rs:1659` | **replace** (IB2, 0001): outbox row in the same DO tx; a DO alarm dispatches it to the Action Worker; at most 8 attempts, then `dead` (today: exponential backoff 1 s to 15 min, forever, `ST/lib.rs:1343-1382`) | id = deterministic intent id (B.4) when commandId is present, else UUIDv4. Outbox hops are bounded by `MAX_DURABLE_HOPS=32` (`MR/lib.rs:25`, `RT/execution.rs:1200`). |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 478,
+          "line": 484,
           "excerpt": "| `scheduleAfter` | `delayMs:safe int ≥0`, `function`, `args?` | `\"job_<id>\"` | R, A | target must be a registered reducer/action of this module | \"scheduled function … is not a registered Reducer or Action\"; \"scheduler delayMs is outside the supported range\" | `BS:650-655`, `RT/host_calls.rs:816-828,889-927`, `RT/action_calls.rs:559-576` | adapt. R: outbox row `_gonvex.scheduler.enqueue` with payload `{jobId,function,args,runAtUnixMs,coalesce}` in the same tx. A: direct enqueue (`RT/scheduler.rs:792`). A DO alarm fires the earliest due job. | **runAt = host `Utc::now()` + delay at call time, not `ctx.now`** (`RT/host_calls.rs:824`). Local runtime uses `execution.now + delay` (`LR/portable.ts:481-482`). Divergence: keep the server behavior and flag it. |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 479,
+          "line": 485,
           "excerpt": "| `scheduleAt` | `atUnixMs:safe int ≥0`, `function`, `args?`, `coalesce?:bool` | `\"job_<id>\"` | R, A | as above | \"scheduler atUnixMs is outside the supported range\" | `BS:656-661`, `RT/host_calls.rs:829-844`, `RT/action_calls.rs:577-599` | adapt: as above | |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 544,
+          "line": 550,
           "excerpt": "Context object (`BS:549-734`): `kind, function, now, auth{account,developerSession}, tenant, member, invocation (frozen InvocationInfo), intentEntropy? (reducer only), invitationInviter? (reducer only), db?, permissions?, actions?, tools?, functions?, scheduler?, fetch?, secrets? (frozen copy of resolved env), storage?, sandbox?`. Unwrapping of the export: function, `runtimeRegistrations()` by path, `.handler`, `.run`, `.options.run`, `.default` (`BS:742-764`)."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1247,
+          "line": 1253,
           "excerpt": "9. **Crons.** `scheduler.sync_project` (`scheduler.rs:717-…`) deletes pending cron jobs and re-inserts the next run per spec and target route, with stagger. A project-scoped cron needs exactly one route. **A failure here returns 422, but the new generation is already live.**"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1335,
+          "line": 1341,
           "excerpt": "## E. SQL rules, scheduler, outbox, storage, presence v2"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1391,
+          "line": 1397,
           "excerpt": "| m6 | Query read-only | Query capability: head must be `select`/`with`/`values`/`explain`; and Query runs on a `read_only` connection | `R:host_calls.rs:1013-1015`, `R:host_calls.rs:1715-1727`, `R:scheduler.rs:510-513` | DO has no read-only connection: `WITH … DELETE` passes the head check | **adapt**: head check + reject when cursor `rowsWritten>0` (throw inside transactionSync to roll back); verify `EXPLAIN` is allowed |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1466,
+          "line": 1472,
           "excerpt": "`R:wake.rs` is not the scheduler: it is targeted feed wakeups (`GONVEX_FEED_TARGETED_WAKE` default on, flush delay `GONVEX_FEED_WAKE_FLUSH_MS` 5,000 ms, `MAX_MARKS` 1,024; `R:wake.rs:1-30`, `R:wake.rs:51-77`, `R:wake.rs:273`). **defer** to the delivery packages (not contract). `R:cron_profile.rs` is profiler attribution only (`R:cron_profile.rs:1-8`): **drop**."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1473,
+          "line": 1479,
           "excerpt": "| `ctx.scheduler.runAfter(delayMs, fn, args)` | Host call `scheduleAfter`; `run_at = now + delay` | `V8:gonvex_bootstrap.js:650-655` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1476,
+          "line": 1482,
           "excerpt": "| From a Reducer | Transactional: writes an outbox row `action_path=\"_gonvex.scheduler.enqueue\"`, payload `{jobId,function,args,runAtUnixMs,coalesce}`; `jobId=\"job_\"+` deterministic intent UUID (`sha256([\"gonvex.reducer.ids.v1\",tenant,account,command,\"deferred:schedule\",ordinal])`), random UUID if no intent command; target must be a registered Reducer or Action | `R:host_calls.rs:30`, `R:host_calls.rs:809-843`, `R:host_calls.rs:897-930`, `R:host_calls.rs:62-85`, `R:host_calls.rs:365-379` | | **keep** (transactional in the tenant DO; promotion step becomes a direct insert in the same transaction) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1477,
+          "line": 1483,
           "excerpt": "| Promotion | Drainer claims up to 100 schedule rows per turn, inserts job (no-op if id exists), deletes outbox row; failure → outbox retry backoff | `R:execution.rs:1146-1188`, `R:execution.rs:1299-1343`, `R:scheduler.rs:865-896` | | **replace**: insert job directly in the Reducer's transaction (same DB now) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1478,
+          "line": 1484,
           "excerpt": "| From an Action | Non-transactional direct insert into Control Plane; needs `scheduler` capability | `R:action_calls.rs:554-600`, `R:scheduler.rs:286-339` | Action Worker → tenant DO RPC | **adapt** (DO RPC) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1479,
+          "line": 1485,
           "excerpt": "| Kind check | Only `reducer`/`action` | `R:scheduler.rs:305-307` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1486,
+          "line": 1492,
           "excerpt": "| Expression | 5 fields → prefixed `\"0 \"` (seconds); else passed to `cron` crate as is | `R:scheduler.rs:1146-1156` | | **keep** (same semantics in TS) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1487,
+          "line": 1493,
           "excerpt": "| Sync | On start and on deploy: delete all pending cron rows of the project, insert next run per (cron, target tenant); project scope requires exactly 1 route | `R:scheduler.rs:681-787` | Deploy fans out to every tenant DO | **adapt** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1488,
+          "line": 1494,
           "excerpt": "| Stagger | On by default (`GONVEX_SCHEDULER_STAGGER=0\\|false\\|off` disables); key = first 8 bytes BE of `sha256(\"{project}\\0{tenant}\\0{cron}\")` | `R:scheduler.rs:80-133` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1489,
+          "line": 1495,
           "excerpt": "| Interval phase | `phase = key mod interval`; `next = after - ((after - phase) mod interval) + interval` | `R:scheduler.rs:1083-1090` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1490,
+          "line": 1496,
           "excerpt": "| Expression offset | `offset = key mod min(gap to next nominal, spread)`; spread `GONVEX_SCHEDULER_CRON_SPREAD_MS` default 600,000; latest nominal ≤ after is still due at its staggered time | `R:scheduler.rs:98-117`, `R:scheduler.rs:1091-1144` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1491,
+          "line": 1497,
           "excerpt": "| Missed runs | Skipped, never replayed (`next_cron_run`); one pending run per cron/tenant | `R:scheduler.rs:1039-1052`, `S:control_schema.sql:289-296` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1492,
+          "line": 1498,
           "excerpt": "| Job id | `cron_` + hex of first 16 bytes of `sha256(\"{project}\\0{tenant}\\0{name}\\0{rfc3339}\")` | `R:scheduler.rs:1173-1181` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1493,
+          "line": 1499,
           "excerpt": "| Next run | Inserted in `finish` after the run completes | `R:scheduler.rs:658-664` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1494,
+          "line": 1500,
           "excerpt": "| `dueWhen` | One admitted read statement (`select/with/values/explain`), run on a tenant read transaction, `$1` bound; runs V8 only if first column of first row is truthy (not NULL, 0, 0.0, '', '0'); errors fail open; skip still finishes the job | `R:modules.rs:111-116`, `R:modules.rs:372-378`, `R:scheduler.rs:493-534`, `R:scheduler.rs:1054-1071`, `R:scheduler.rs:443-448`. **DOC≠CODE**: comment says `$1` = run's due time; code binds `Utc::now()` (`R:scheduler.rs:520`) | | **keep** (bind now) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1500,
+          "line": 1506,
           "excerpt": "| Claim | `UPDATE … claim_sequence+1, claim_token=\"{owner}:{seq}\", lease_until=now+120000` for `pending ∧ run_at≤now ∧ (unclaimed ∨ lease expired)`, order one-shot before cron, then run_at, id; `LIMIT min(free permits,16)` | `R:scheduler.rs:44-60`, `R:scheduler.rs:26`, `R:scheduler.rs:256-268` | | **adapt**: in-DO claim; lease kept only for work handed to the Action Worker |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1501,
+          "line": 1507,
           "excerpt": "| Lease renewal | Every 30 s while running, guarded by claim_token | `R:scheduler.rs:422-434`, `R:scheduler.rs:467-491` | | **adapt** (alarm re-check) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1502,
+          "line": 1508,
           "excerpt": "| Idle | Sleep until next due, max 30 s (`MAX_IDLE_SLEEP`); woken by enqueue/sync/finish | `R:scheduler.rs:27-29`, `R:scheduler.rs:1027-1037` | | **adapt** (DO alarm = min next due) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1503,
+          "line": 1509,
           "excerpt": "| Concurrency | `GONVEX_SCHEDULER_CONCURRENCY` 2 process-wide; 1 per tenant; waits for user calls up to `GONVEX_SCHEDULER_YIELD_MS` 2,000 ms; thread nice 5 | `R:scheduled_lane.rs:1-22`, `R:scheduled_lane.rs:98-125`, `R:scheduler.rs:437-439` | | **drop** process caps (lane = not contract); **keep** one run per tenant at a time |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1504,
+          "line": 1510,
           "excerpt": "| Provenance | Stored provenance; empty root → fresh system provenance; `parent_command_id=command_id`, `command_id=job.id`, channel `Scheduler`; one durable hop | `R:scheduler.rs:571-590` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1505,
+          "line": 1511,
           "excerpt": "| Actor | `_gonvex_system` or absent → system session; else re-resolve Member (`tenant_session_for_account`) | `R:scheduler.rs:550-563` | | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1506,
+          "line": 1512,
           "excerpt": "| Retries | None. `finish` marks `completed` whether the run succeeded or failed (`_success` ignored); only a crash (lease expiry after 120 s) re-runs it, so at-least-once with no dedupe (scheduled Reducer runs without idempotency key) | `R:scheduler.rs:627-669`, `R:scheduler.rs:603-613` | | **replace** (IB2): still one attempt and no new retries, but a failed run ends `dead`, not `completed` (E.b.5) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1507,
+          "line": 1513,
           "excerpt": "| Retention | Completed rows deleted after 7 d; prune every 600 s, batches of 5,000, max 20 batches per pass | `R:scheduler.rs:21-25`, `R:scheduler.rs:385-415`, `R:scheduler.rs:999-1016` | | **adapt** (alarm, paged) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1508,
+          "line": 1514,
           "excerpt": "| Hop limit | `MAX_DURABLE_HOPS=32` (`GONVEX_MAX_DURABLE_HOPS` overrides, >0); `durable_hop` fails at ≥ max; scheduler: job error then completed | `MR:lib.rs:25`, `MR:lib.rs:243-251`, `R:execution.rs:1395-1408`, `R:scheduler.rs:586-590` | | **keep** the hop limit; a scheduled job that fails on it ends `dead`, not `completed` (IB2, E.b.5) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1514,
+          "line": 1520,
           "excerpt": "| Key | `wake_` + hex first 16 bytes of `sha256(\"{function}\\0\" + canonical args (object keys sorted, recursive))` | `R:scheduler.rs:898-938` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1515,
+          "line": 1521,
           "excerpt": "| Merge | `INSERT … WHERE NOT EXISTS(id) ON CONFLICT(project,tenant,wake_key) WHERE pending ∧ claim_token='' ∧ wake_key<>'' DO UPDATE run_at=min, scheduled_for=min`; returns surviving id | `R:scheduler.rs:860-896`, `S:control_schema.sql:297-301` | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1530,
+          "line": 1536,
           "excerpt": "| Enqueue | `ctx.actions.enqueue(fn,args)` (Reducers only; rejects empty path and `_gonvex.scheduler.enqueue`); `INSERT … (id, action_path, args, actor_user_id NULLIF '', actor_email NULLIF '', provenance)` in the Reducer's transaction; id = deterministic intent UUID (`deferred:action`); sets `outbox_written` | `V8:gonvex_bootstrap.js:624`, `R:host_calls.rs:782-808`, `S:lib.rs:1659-1688` | Same DO SQLite transaction | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1532,
+          "line": 1538,
           "excerpt": "| Safety sweep | Every 30 s all tenants queued (`OUTBOX_SWEEP_INTERVAL`) | `R:scheduler.rs:30-32`, `R:scheduler.rs:211-232`, `R:execution.rs:1345-1363` | Alarm per DO | **adapt** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1565,
+          "line": 1571,
           "excerpt": "| Owner | Anonymous → `''`; else request `ownerId` if non-empty, **else caller's account id**: any caller can assign another account as owner | `R:storage.rs:934-943` | | **replace** (IB1): owner = caller account; only a system principal (scheduler, migrations, no account) may set another owner |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1645,
+          "line": 1651,
           "excerpt": "| Publication | Due = max(ready, last publication + window); ready = now or grace end; publish dirty Members whose aggregate differs from published; offline removes Member; one encoded patch shared by all subscribers; no per-connection timer; one scheduler sleeps to earliest due | `R:presence.rs:219-261`, `R:presence.rs:619-638`, `R:presence.rs:803-868`, `R:lib.rs:1648-1669` | | **adapt**: `setTimeout` while awake for the 250 ms window; grace end on the DO alarm (multiplexed) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1746,
+          "line": 1752,
           "excerpt": "| 0034 | K11 scheduler findings | ruled in 0032 | K11, K12, R06 |"
         },
         {
@@ -2182,6 +2212,16 @@
           "path": "docs/cloudflare/spikes/S4-long-actions.md",
           "line": 45,
           "excerpt": "(`rust/crates/runtime/src/scheduler.rs`)."
+        },
+        {
+          "path": "docs/cloudflare/verification/K22-review-a957.md",
+          "line": 13,
+          "excerpt": "| N1, P1: anonymous nested Reducers gain scheduler/outbox | Preserve server-derived anonymity through every nested invocation. Prove absent surfaces/no jobs or outbox and uncaught nested rollback. A caught missing-surface JS TypeError may retain allowed writes; actual dispatched-host denial still latches. |"
+        },
+        {
+          "path": "docs/cloudflare/verification/K22-review-a957.md",
+          "line": 14,
+          "excerpt": "| N2, P1: nested/scheduled Reducers bypass migration gate | Guard the shared write entry across migration events before invocation/commit/ack; exercise paused migration with Action and scheduler callers. |"
         },
         {
           "path": "docs/cloudflare/verification/V04-budgets-brief.md",
@@ -2349,22 +2389,22 @@
         },
         {
           "path": "cloudflare/actions/README.md",
-          "line": 88,
+          "line": 90,
           "excerpt": "`test/parity.test.ts` runs the conformance scenario `actions` step by step through this runtime, against a real tenant"
         },
         {
           "path": "cloudflare/actions/README.md",
-          "line": 89,
+          "line": 91,
           "excerpt": "object, and compares every answer with what Rust answered (`test/golden/actions-rust.json`, Rust traces from 3 runs, unchanged on 2 more after each rebase). Three"
         },
         {
           "path": "cloudflare/actions/README.md",
-          "line": 124,
+          "line": 126,
           "excerpt": "node actions/dev/run-agent.mjs 1800 /tmp/k12-agent-1800s.json"
         },
         {
           "path": "cloudflare/actions/README.md",
-          "line": 153,
+          "line": 156,
           "excerpt": "| Wiring K07's tenant object as the kernel's tenant class with K11's `Scheduler` (`actions: WorkflowHandoff`), `ActionCalls` on its `TenantAlarm`, and `TenantActions`' methods by RPC (`test/worker.ts` shows the composition) | K19 (0037) |"
         },
         {
@@ -2589,92 +2629,92 @@
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 475,
+          "line": 481,
           "excerpt": "| `actionEnqueue` | `function:string` (non-empty), `args?` (`undefined` -> `null`) | `string` action id | R | rejects `_gonvex.scheduler.enqueue`; opens the lazy writer | \"actions.enqueue requires an Action path\"; \"actions.enqueue cannot invoke a Gonvex system operation\"; aborted-tx | `BS:622-626`, `RT/host_calls.rs:782-815`, `ST/lib.rs:1659` | **replace** (IB2, 0001): outbox row in the same DO tx; a DO alarm dispatches it to the Action Worker; at most 8 attempts, then `dead` (today: exponential backoff 1 s to 15 min, forever, `ST/lib.rs:1343-1382`) | id = deterministic intent id (B.4) when commandId is present, else UUIDv4. Outbox hops are bounded by `MAX_DURABLE_HOPS=32` (`MR/lib.rs:25`, `RT/execution.rs:1200`). |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 544,
+          "line": 550,
           "excerpt": "Context object (`BS:549-734`): `kind, function, now, auth{account,developerSession}, tenant, member, invocation (frozen InvocationInfo), intentEntropy? (reducer only), invitationInviter? (reducer only), db?, permissions?, actions?, tools?, functions?, scheduler?, fetch?, secrets? (frozen copy of resolved env), storage?, sandbox?`. Unwrapping of the export: function, `runtimeRegistrations()` by path, `.handler`, `.run`, `.options.run`, `.default` (`BS:742-764`)."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 633,
+          "line": 639,
           "excerpt": "### B.7 Transactions"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 794,
+          "line": 800,
           "excerpt": "| 16 | gonvex_auth_transactions | Native OAuth state, PKCE challenge and nonce. Expires in 10 min and is deleted when consumed | control DO (or DO storage with a TTL) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 823,
+          "line": 829,
           "excerpt": "**Nothing prunes these tables in Rust** (kernel: `gonvex_control_idempotency` rows expire after 24 h, 0012 R9; the others keep Rust's behavior): gonvex_auth_sessions, gonvex_auth_refresh_tokens, gonvex_auth_codes (used or expired), gonvex_impersonation_grants, gonvex_control_idempotency, gonvex_auth_identity_events. Only gonvex_auth_transactions rows are deleted, when consumed (native_auth.rs:321). This matters for growth against the 10 GB per-object limit."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 844,
+          "line": 850,
           "excerpt": "| Native OAuth state / nonce / code | `gvx_oauth_`, `gvx_nonce_`, `gvx_authcode_` | 10 min / – / 5 min | auth_transactions / auth_codes | native_auth.rs:36-37 |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1025,
+          "line": 1031,
           "excerpt": "- **Webhooks and HTTP actions have no route in the runtime.** `packages/module-sdk/README.md:260-263` says an external adapter verifies the webhook and then invokes an Action. Package K18 has no Rust reference."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1071,
+          "line": 1077,
           "excerpt": "| GET | `/auth/{provider}/authorize` | `authorize` | none. PKCE S256 and a 16-512 character state are required | `?project,redirect_uri,state,code_challenge,code_challenge_method=S256` | 307 to the provider: `client_id`, `redirect_uri=GONVEX_AUTH_URL/auth/{p}/callback`, `scope`, `state`, `nonce`. Microsoft adds `response_mode=query`, Apple adds `form_post` | `native_auth.rs:42`, `174-281` | adapt: CDO (K06) | Inserts `gonvex_auth_transactions` with a 10-minute TTL. The redirect URI is normalized and checked against the provider configuration |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1085,
+          "line": 1091,
           "excerpt": "#### Webhooks and HTTP actions"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1167,
+          "line": 1173,
           "excerpt": "| GET | `/dev/actions/dead` | new | op(`projects:read`)+access | query `project`, `tenant`, `limit`, `cursor` | `{items:[{id,function,args,attempts,lastError,deadAt}],cursor}` | none (IB2 has no Rust counterpart) | replace (IB2, 0001) | Lists outbox Actions and scheduled jobs in state `dead` |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1168,
+          "line": 1174,
           "excerpt": "| POST | `/dev/actions/dead/{id}/requeue` | new | op(`projects:update`)+manage | — | `{requeued:true}` | none | replace (IB2, 0001) | Resets attempts and makes the row pending again |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1232,
+          "line": 1238,
           "excerpt": "- The first failing migration rolls back and aborts that database. Migrations already applied in earlier transactions stay."
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1374,
+          "line": 1380,
           "excerpt": "| c4 | Finalize (pre-COMMIT) | `record_views::flush`; probe `revision IS NULL`; delete no-op updates; split `[old,new,changed]`; `UPDATE _gonvex_sync_clock SET revision=revision+1 RETURNING`; stamp revision/ordinal/command_id via `UPDATE … FROM (row_number() OVER …)`; `SELECT DISTINCT table_name … INDEXED BY`; insert `_gonvex_sync_transactions` | `S:feed.rs:262-401`, `S:lib.rs:1759-1774` | Standard SQL | **keep**; run at the end of the same `transactionSync` |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1379,
+          "line": 1385,
           "excerpt": "| c9 | Pruning | Hourly per tenant feed task: delete changes `created_at < now-30d` up to max such revision; delete orphan `_gonvex_sync_transactions`; raise `retained_revision`; one unbounded transaction | `R:change_feed.rs:317-322`, `R:change_feed.rs:327-373` | | **adapt**: DO alarm, paged deletes (design rule) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1425,
+          "line": 1431,
           "excerpt": "| `_gonvex_sync_transactions` | Provenance per revision: root/origin command, root/invocation channel, actor account/member, on-behalf-of, agent execution | `S:feed.rs:54-66`, `S:feed.rs:377-394` | With its changes |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1530,
+          "line": 1536,
           "excerpt": "| Enqueue | `ctx.actions.enqueue(fn,args)` (Reducers only; rejects empty path and `_gonvex.scheduler.enqueue`); `INSERT … (id, action_path, args, actor_user_id NULLIF '', actor_email NULLIF '', provenance)` in the Reducer's transaction; id = deterministic intent UUID (`deferred:action`); sets `outbox_written` | `V8:gonvex_bootstrap.js:624`, `R:host_calls.rs:782-808`, `S:lib.rs:1659-1688` | Same DO SQLite transaction | **keep** |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1548,
+          "line": 1554,
           "excerpt": "| Drain | Read up to 1,000 rows; per row: Control Plane upsert into `account_tenant_index` (revision-guarded), then delete row (`membership_revision<=rev`); one transaction per row; yield between batches | `R:membership_projector.rs:124-180` | Tenant DO → Control DO RPC | **adapt**: one batched RPC per alarm (per-row transactions violate the \"no SQL in a loop\" rule) |"
         },
         {
           "path": "docs/cloudflare/CONTRACT.md",
-          "line": 1718,
+          "line": 1724,
           "excerpt": "| 0006 | Module SQL that opens savepoints | decided in 0016 G0-3 (nested storage transactions) | K01, K04, K07 |"
         },
         {
@@ -2791,6 +2831,16 @@
           "path": "docs/cloudflare/contract-changes/0054-x01-placement-and-reconnect-drain.md",
           "line": 60,
           "excerpt": "retire a gateway while held sockets/actions still exist. Once empty, remove it safely and stop idle wakeups."
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0060-assembly-evidence-boundaries.md",
+          "line": 16,
+          "excerpt": "(such as `actions.toolsProbe`'s `result.duplicate`), as well as a field named `error`. The first line remains"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0062-telemetry-parity-domains.md",
+          "line": 45,
+          "excerpt": "pending actions. Verify real close/error presence alarms and K16 release, closing sockets absent from"
         },
         {
           "path": "docs/cloudflare/observability-uptime-plan.md",
@@ -3086,6 +3136,11 @@
           "path": "docs/cloudflare/contract-changes/0046-k10-replica-delivery.md",
           "line": 43,
           "excerpt": "`change-feed-reset` for each one, and the client resumes by cursor and digest (`replica-tenant-restart`, kernel"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0061-ordered-scope-bootstrap.md",
+          "line": 5,
+          "excerpt": "K22 must preserve the unchanged K10 `replica-tenant-restart` reset/resume test without applying unscoped"
         }
       ],
       "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
@@ -3359,6 +3414,11 @@
           "path": "docs/cloudflare/contract-changes/0045-batch-c-review-rulings.md",
           "line": 68,
           "excerpt": "- Golden replay is accepted for `done_when`. A live Rust-vs-kernel `error-telemetry` run is required once"
+        },
+        {
+          "path": "docs/cloudflare/contract-changes/0062-telemetry-parity-domains.md",
+          "line": 5,
+          "excerpt": "K22's fixed-nine local comparison reports seven passing scenarios and two failures. `error-telemetry`"
         }
       ],
       "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
