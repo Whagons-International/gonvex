@@ -307,7 +307,7 @@ async fn migrations_run_whole_scripts_once_in_both_transaction_modes() {
         migrations[0].name.clone(),
         migrations[0].scope,
         false,
-        format!("{} -- edited", migrations[0].sql),
+        format!("{} -- edited", migrations[0].sql().unwrap()),
     );
     let error = apply_migrations(
         &database.pools,

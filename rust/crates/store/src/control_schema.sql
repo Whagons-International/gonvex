@@ -356,3 +356,20 @@ CREATE TABLE IF NOT EXISTS gonvex_storage_uploads (
   file_id TEXT NOT NULL DEFAULT '',
   consumed_at INTEGER
 );
+-- The module artifact as boot loads it: the stored manifest without its
+-- migration bodies (`manifest_sha256` is the SHA-256 of `manifest`'s text),
+-- valid while `gonvex_runtime_manifests` still has `module_hash` and
+-- `manifest_updated_at`. Bodies live once per checksum in
+-- `gonvex_runtime_migration_bodies` (see `stored_artifact.rs`).
+CREATE TABLE IF NOT EXISTS gonvex_runtime_artifacts (
+  project_id TEXT PRIMARY KEY,
+  module_hash TEXT NOT NULL,
+  manifest_updated_at INTEGER NOT NULL,
+  manifest_sha256 TEXT NOT NULL,
+  manifest TEXT NOT NULL,
+  migrations TEXT NOT NULL CHECK(json_valid(migrations) AND json_type(migrations)='array')
+) STRICT;
+CREATE TABLE IF NOT EXISTS gonvex_runtime_migration_bodies (
+  checksum TEXT PRIMARY KEY,
+  sql TEXT NOT NULL
+) STRICT;

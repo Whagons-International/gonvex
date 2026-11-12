@@ -54,7 +54,8 @@ mod project_key_tests {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum MigrationScope {
     ControlPlane,
     Tenant,
@@ -63,26 +64,28 @@ pub enum MigrationScope {
 /// One migration file of a module artifact, decoded and checksummed once
 /// when the artifact is read. Every tenant's provisioning shares the body:
 /// cloning a migration list copies no SQL.
+///
+/// A migration loaded from the Control Plane's stored artifact
+/// ([`crate::StoredArtifact`]) carries no body: tenants that recorded it
+/// only compare checksums, and provisioning loads the body by checksum
+/// (verifying it) only for a tenant that has not applied it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqlMigration {
     pub name: String,
-    /// Lowercase hex SHA-256 of `sql`. A tenant compares it with the checksum
-    /// it recorded when it applied the migration; bodies already applied are
-    /// never executed or scanned again.
+    /// Lowercase hex SHA-256 of the body. A tenant compares it with the
+    /// checksum it recorded when it applied the migration; bodies already
+    /// applied are never executed or scanned again.
     pub checksum: String,
     pub scope: MigrationScope,
     pub no_transaction: bool,
-    pub sql: Arc<str>,
+    body: Option<Arc<str>>,
     /// Whether the body carries `-- gonvex:foreign-key-rebuild`.
     foreign_key_rebuild: bool,
 }
 
 impl SqlMigration {
     pub fn new(name: String, scope: MigrationScope, no_transaction: bool, sql: String) -> Self {
-        let checksum = Sha256::digest(sql.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let checksum = sql_checksum(&sql);
         let foreign_key_rebuild = sql
             .lines()
             .any(|line| line.trim() == "-- gonvex:foreign-key-rebuild");
@@ -91,10 +94,53 @@ impl SqlMigration {
             checksum,
             scope,
             no_transaction,
-            sql: sql.into(),
+            body: Some(sql.into()),
             foreign_key_rebuild,
         }
     }
+
+    /// A migration whose body stays in the Control Plane until a tenant
+    /// needs to apply it.
+    pub fn stored(
+        name: String,
+        scope: MigrationScope,
+        no_transaction: bool,
+        foreign_key_rebuild: bool,
+        checksum: String,
+    ) -> Self {
+        Self {
+            name,
+            checksum,
+            scope,
+            no_transaction,
+            body: None,
+            foreign_key_rebuild,
+        }
+    }
+
+    /// The SQL, when this copy holds it.
+    pub fn sql(&self) -> Option<&str> {
+        self.body.as_deref()
+    }
+
+    pub fn foreign_key_rebuild(&self) -> bool {
+        self.foreign_key_rebuild
+    }
+
+    /// This migration without its body (see [`SqlMigration::stored`]).
+    pub fn without_body(&self) -> Self {
+        Self {
+            body: None,
+            ..self.clone()
+        }
+    }
+}
+
+pub(crate) fn sql_checksum(sql: &str) -> String {
+    Sha256::digest(sql.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Columns added to Control Plane tables after the table first shipped.
@@ -865,6 +911,9 @@ impl ControlPlane {
             if crate::writer_schema::migrations_pending(&mut connection, &migrations).await? {
                 crate::writer_schema::restore(&mut connection).await?;
             }
+            let migrations = self
+                .load_pending_bodies(&mut connection, migrations, MigrationScope::Tenant)
+                .await?;
             let migrated =
                 apply_migrations_locked(&mut connection, &migrations, MigrationScope::Tenant).await;
             // A migration that rebuilds `members` drops the membership outbox
@@ -898,6 +947,11 @@ impl ControlPlane {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DatabaseError>> + Send + 'static>> {
         Box::pin(async move {
             let _admission = self.pools.admit(&self.database_url).await?;
+            let migrations = {
+                let mut ledger = self.reader.acquire().await?;
+                self.load_pending_bodies(&mut ledger, migrations, MigrationScope::ControlPlane)
+                    .await?
+            };
             apply_migrations(
                 &self.pools,
                 &self.database_url,
@@ -982,6 +1036,18 @@ pub(crate) fn apply_migrations<'a>(
 }
 
 type AppliedMigrations = (Vec<String>, Vec<CommitNotice>);
+
+/// The body of a migration about to be applied. Callers load stored bodies
+/// first ([`ControlPlane::load_pending_bodies`]); a missing one is a bug, never
+/// an empty migration.
+fn migration_sql(migration: &SqlMigration) -> Result<&str, DatabaseError> {
+    migration.sql().ok_or_else(|| {
+        protocol(format!(
+            "migration {} must be applied but its body was not loaded",
+            migration.name
+        ))
+    })
+}
 
 fn rebuilds_foreign_keys(migration: &SqlMigration) -> bool {
     migration.foreign_key_rebuild
@@ -1078,7 +1144,7 @@ fn apply_migrations_locked<'a>(
             let _key_changes = crate::capture::allow_key_changes(&mut *connection).await?;
             if migration.no_transaction {
                 // `-- gonvex:no-transaction`: each statement commits on its own.
-                crate::execute_script(&mut *connection, &migration.sql).await?;
+                crate::execute_script(&mut *connection, migration_sql(migration)?).await?;
             }
             if rebuild {
                 sqlx::query("PRAGMA foreign_keys=OFF")
@@ -1088,7 +1154,7 @@ fn apply_migrations_locked<'a>(
             let mut transaction = connection.begin().await?;
             let finished = async {
                 if !migration.no_transaction {
-                    crate::execute_script(&mut transaction, &migration.sql).await?;
+                    crate::execute_script(&mut transaction, migration_sql(migration)?).await?;
                 }
                 if scope == MigrationScope::Tenant {
                     super::reference_integrity::after_migration(&mut transaction).await?;
