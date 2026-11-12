@@ -1,0 +1,113 @@
+{
+  "source": "3d92e1339b2d65dbc47ac2f5713f56bd9e57d738",
+  "runtime": "18afb02a5cccde933c571f7448a930ebafe574a0",
+  "name": "gonvex-cf-dev-k22-3d92-platform",
+  "deploymentRecordedAt": "2026-11-12T16:37:07.558Z",
+  "status": "composition-deployed; module-deploy-blocked",
+  "workers": [
+    {
+      "kind": "kernel",
+      "name": "gonvex-cf-dev-k22-3d92-platform",
+      "deploymentId": "b57c6faa-f4d3-4147-a3da-20de1a955bfc",
+      "versions": [
+        {
+          "version_id": "7fa97c23-6c03-4714-8385-5319c2d561c6",
+          "percentage": 100
+        }
+      ],
+      "createdOn": "2026-11-12T16:37:02.132172Z",
+      "configSha256": "8269d99c7406f9d2ff46bc5d0bb7933753d9d2dda7a287cb35b9a5db05ea8268",
+      "apiLimits": {
+        "cpu_ms": 5000
+      }
+    },
+    {
+      "kind": "actions",
+      "name": "gonvex-cf-dev-k22-3d92-platform-actions",
+      "deploymentId": "63be5601-31c8-4bb8-b66c-81f572265743",
+      "versions": [
+        {
+          "version_id": "0e4e634f-8f5b-4973-a3bf-23b09be64503",
+          "percentage": 100
+        }
+      ],
+      "createdOn": "2026-11-12T16:36:56.691803Z",
+      "configSha256": "3d7d150285a130240e2b254131cfffcd4820e937948d076bf1b7a3a3da09622b",
+      "apiLimits": {
+        "cpu_ms": 300000
+      }
+    },
+    {
+      "kind": "sandbox",
+      "name": "gonvex-cf-dev-k22-3d92-platform-sandbox",
+      "deploymentId": "e48d765c-c18c-49a4-93c6-999c568cdcdb",
+      "versions": [
+        {
+          "version_id": "2d137db9-f7cb-4b47-85d9-17c8b4fd0e89",
+          "percentage": 100
+        }
+      ],
+      "createdOn": "2026-11-12T16:36:57.10516Z",
+      "configSha256": "59348a09c8d2f27e559a84d2c31ad23772a6f5c750d56f91007b190936e6dde9",
+      "apiLimits": {
+        "cpu_ms": 300000
+      }
+    },
+    {
+      "kind": "builder",
+      "name": "gonvex-cf-dev-k22-3d92-platform-builder",
+      "deploymentId": "8d370c69-d23b-48d9-9720-46d617b3fb21",
+      "versions": [
+        {
+          "version_id": "949a0d72-a354-4030-b843-4dd5b09ecf13",
+          "percentage": 100
+        }
+      ],
+      "createdOn": "2026-11-12T16:36:58.315891Z",
+      "configSha256": "872b2541d4af084fc46de176514a053c96eb821b7ee465cb14554bb0863ee9fb"
+    }
+  ],
+  "images": [
+    {
+      "kind": "sandbox",
+      "developmentImageName": "gonvex-cf-dev-artifact-pr400-sandbox",
+      "publishedImportManifest": "sha256:304864ae1880b67a696c8ac5edcfc6d2db11dec0656b7ce5901f9bdd8b24f903",
+      "configDigest": "sha256:9cfb3c63612b99c974a76cf4d805d4a6b96116e690390cfa4afdc6263db5fcb3"
+    },
+    {
+      "kind": "builder",
+      "developmentImageName": "gonvex-cf-dev-artifact-pr400-builder",
+      "publishedImportManifest": "sha256:dcf301c14329e3de0f6e177e01cdd937f47c5c3dbfaf55fa2e187c2d32da892f",
+      "configDigest": "sha256:2fcbfaa071ebfaf4cf05c062603d951bcb6252bbb99a42bde49212b863eb4a19"
+    }
+  ],
+  "cpuCampaign": {
+    "reportedStatus": "FAILED",
+    "classification": "FAILED_SETUP",
+    "stage": "backend-start",
+    "startedAt": "2026-11-12T16:39:27.077Z",
+    "finishedAt": "2026-11-12T16:40:29.269Z",
+    "errorsSpinExecuted": false,
+    "samples": 0,
+    "configuredCpuMs": 5000,
+    "enforcementProven": false,
+    "causeFromPrivateRootTail": "release builder /inspect failed (503): release builder did not start",
+    "httpStatus": 500,
+    "fixture": {
+      "hash": "c2a7094a25867e5d0882fe204f943443b23657799be38bbc54cb26dbd59c366a",
+      "sourceSha256": "9d7c0cca221f073d2e363eeacf54a53677ecbbb5a554e97b94b7fa070fbf29d9"
+    },
+    "project": "d50d7886-fadd-4051-904b-e7571c7d4887"
+  },
+  "evidenceHashes": {
+    "deployment/deployment.json": "94cdfefd002b09f2c67496e9c4ebf7cba79f133faf91f48e7bb59ee1e81c8875",
+    "cpu-proof/report.json": "01f5631596303a156a90c1baebd95b2ca28b7804a821ae27c65e4aff00c2ee1c",
+    "cpu-tail-private.jsonl": "8b23bf3ba065d357062a237218940f03572a36d6651559f8966597be88e9a823"
+  },
+  "limitations": [
+    "No CPU enforcement/quarantine/rollback/quiet-neighbor/SDK pass",
+    "No K22/X01 or lifecycle acceptance",
+    "Builder/Container startup diagnosis remains with implementation owner",
+    "Final owner-lifecycle changes require a new full-context build"
+  ]
+}
