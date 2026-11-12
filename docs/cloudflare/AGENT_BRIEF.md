@@ -161,6 +161,14 @@ verification/M05-recheck-1b.md. Foundation merge and full M05 acceptance remain 
 atomic GC; no witness resurrection, fresh terminal proof or success inference follows from absence.
 The fresha59 M05 recheck clears the exact1b cases but finds two failed-offset/expiry P2 defects; see
 verification/M05-recheck-a59.md. New bounded correction evidence still requires NEW independent review.
+0083 conditionally permits only the native ownerAdmissionIntent authority-result consumer after descriptor
+proof, with exact own data keys, unchanged primitive checks, disposal and current stored-binding/physical
+scope checks. It does not cover dispatchOwned/drainOwner or activate serving ownership. Local319 terminal
+review requires a bounded proof-domain correction under0084: tokenless closed cannot become HMAC-only
+retired evidence. Its qualified synthetic Proxy observation is separate from native exploitability.
+M05's finite disabled34b6 foundation passed fresh independent review and merged as c11b7740; full M05,
+original five-drill source definitions and all hosted/application/duration gates remain UNMET. The outside
+0077 adapter's4f7538 preparation still requires concrete cross-unit/wrapper integration before review/release.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
