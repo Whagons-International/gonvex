@@ -78,6 +78,29 @@ migration is required for project environment variables; the runtime creates or
 updates its control-plane tables during startup. Do not use `docker compose down -v`
 as part of this upgrade.
 
+### Brotli security backport
+
+`Dockerfile.runtime` upgrades Debian `libbrotli1` to at least
+`1.1.0-2+deb13u1` for CVE-2026-111497. DuckDB contains another decoder in
+its static Parquet library. The image build applies the upstream
+[DuckDB fix](https://github.com/duckdb/duckdb/pull/27791) to the pinned
+DuckDB 1.4.1 decoder, preserving its C API and persisted data format.
+
+`scripts/security/patch-duckdb-brotli.sh` verifies the original Go modules
+and the source archive checksum before replacing only `decode.cpp.o` in the
+target platform's module-cache archive. The image therefore intentionally
+contains a backported native artifact rather than the unmodified module zip;
+`go mod verify` after this step will report that native archive as modified.
+The builder and runtime share this patched cache and its absolute paths.
+Do not mount an older Go module-cache volume over the image's patched cache.
+Use a fresh cache volume for a replacement and retain the old one for rollback.
+
+The build checks the published malformed-stream regression, byte-at-a-time
+input, an invalid header, and valid decompression. The data-files package also
+tests a Brotli Parquet round trip. Updating the Go bindings requires reviewing
+and retiring or updating this version-specific backport; it fails on a
+different bindings version.
+
 ### Whagons Coolify deployments
 
 The `Runtime regression` GitHub workflow validates pull requests and pushes to
