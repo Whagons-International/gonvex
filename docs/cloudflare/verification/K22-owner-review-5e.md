@@ -42,9 +42,13 @@ test-file claim. An initial relative-path command ran ZERO tests and is retained
 
 Outside source archive SHA256 `4ca0061bcbdacd7323ab73845606eb5dfed5e6b9f50dd3a0216adf52de021de2` contains
 2,341 verified Git blobs; sealed receipt/raw commands are under
-`/mnt/data/work/gonvex-cloudflare-lead/0077-durable-record/`. This code is unpublished and UNREVIEWED.
-The same K22 implementation owner now refreshes the exact joint runtime/policy pins and runs the corrected
-source with the adapted helper. A NEW independent joint review follows that immutable artifact.
+`/mnt/data/work/gonvex-cloudflare-lead/0077-durable-record/`. Code remains unpublished. The refreshed joint
+47aa/ee package received a NEW independent review which supports the durable-record correction but requests
+two P2 changes: the wrapper command drops its file variable/mismatches authentication, and uploaded Worker
+source is not checked before start. A qualified P3 concerns per-frame contract coverage, without a proven
+account bypass. Report/receipt: `/mnt/data/work/gonvex-0077-joint-review-47aaaba5/`. The lead handles the small
+wrapper fix; the original outside implementation owner continues source attestation/contract work. Another
+immutable joint artifact and NEW recheck remain required. No75-test count is full bridge source clearance.
 
 No release JSON, arming, actual approved wrapper/operational units, Vault/account/Container/deadline or
 host-loss campaign occurred. Same-host fixtures do not prove machine-loss survival; no new infrastructure
