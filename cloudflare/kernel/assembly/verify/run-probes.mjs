@@ -8,14 +8,16 @@ import { runScenario } from '../../../conformance/src/runner.mjs';
 import { diffChecksums } from '../../../conformance/src/differ.mjs';
 import sdkDeploy from './sdk-deploy-scenario.mjs';
 import telemetryDomains from './telemetry-domains-scenario.mjs';
+import quietInitial from './quiet-initial-scenario.mjs';
 const {values} = parseArgs({options:{work:{type:'string'},backend:{type:'string',multiple:true},probe:{type:'string'}}});
 if(!values.work) throw new Error('owned --work directory required');
 const work = resolve(values.work); await mkdir(work,{recursive:true,mode:0o700});
 const fixtures = {1:await buildFixture(work,1),2:await buildFixture(work,2),3:await buildFixture(work,3)};
-const scenario=values.probe==='telemetry-domains'?telemetryDomains:sdkDeploy;
-if(values.probe&&!['telemetry-domains','sdk-deploy'].includes(values.probe)) throw new Error('unknown supplemental probe');
+const probes={'telemetry-domains':telemetryDomains,'sdk-deploy':sdkDeploy,'quiet-initial':quietInitial};
+const scenario=probes[values.probe??'sdk-deploy'];
+if(!scenario) throw new Error('unknown supplemental probe');
 const backends=[];
-for(const kind of values.backend??(values.probe==='telemetry-domains'?['cloudflare-assembly']:['rust','cloudflare-assembly'])) {
+for(const kind of values.backend??(values.probe&&values.probe!=='sdk-deploy'?['cloudflare-assembly']:['rust','cloudflare-assembly'])) {
  const Class = await backendClass(kind), directory=join(work,kind); await mkdir(directory,{recursive:true,mode:0o700});
  backends.push(new Class({name:kind,workDir:directory}));
 }

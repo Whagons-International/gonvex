@@ -15,6 +15,7 @@ export const manifest = { functions: {
  'probe.service':entry('action','service',{internal:true,actionProfile:'standard'}),
  'probe.serviceAgent':entry('action','service',{internal:true,actionProfile:'agent'}),
  'probe.resultSize':entry('action','resultSize',{internal:true,actionProfile:'standard'}),
+ 'probe.invite':entry('reducer','invite',{internal:true,interactive:false}),
  'probe.noop':entry('action','noop',{actionProfile:'standard'}),
  },schema:{tables:{},controlPlaneTables:{},tenantTables:{}}, module:{language:'typescript',hash:'assembly-boundary-fixture',generation:1,files:Object.fromEntries(Object.entries(files).map(([path,text])=>[path,btoa(text)]))}};
 export const exports = probe as Record<string, unknown>;

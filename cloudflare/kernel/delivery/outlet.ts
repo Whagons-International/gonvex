@@ -8,7 +8,7 @@
 // because snapshot pages are posted chunk by chunk (0020 §6, 0022 §4.4).
 
 import type { DeliveryOutlet } from "./engine.ts";
-import { initialDeliveryOnly, initialFailureOnly, type InitialRequestRef, type ReplicaDelivery, type ReplicaReceipt } from "./protocol.ts";
+import { initialRefBytes, validRecoveryInitialDelivery, initialDeliveryOnly, initialFailureOnly, type InitialRequestRef, type ReplicaDelivery, type ReplicaReceipt } from "./protocol.ts";
 
 const pressureCounts = { capacityRejections: 0, unsupportedRecoveries: 0 };
 export const DELIVERY_CAPACITY_CODE = "GONVEX_DELIVERY_CAPACITY";
@@ -95,6 +95,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
 
   send(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined> {
+    if (!validRecoveryInitialDelivery(payload)) return Promise.reject(new Error("invalid recovery initial offer"));
     if (payload.initialFailure && !initialFailureOnly(payload)) return Promise.reject(new Error("invalid initial-failure-only delivery"));
     if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length)&&!initialDeliveryOnly(payload))return Promise.reject(new Error("invalid initial-only delivery"));
     let queue: Queue;
@@ -119,6 +120,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
    * RPC failure keeps recoveryRequired; caller can explicitly retry reset, never a background retry.
    */
   reset(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined> {
+    if (!validRecoveryInitialDelivery(payload)) return Promise.reject(new Error("invalid recovery initial offer"));
     let queue: Queue;
     try { queue = this.queue(host); } catch (error) { return Promise.reject(error); }
     if (queue.recovery) return queue.recovery;
@@ -299,6 +301,10 @@ function retainedBytes(payload: ReplicaDelivery): number {
     }
   }
   if (payload.recovery) bytes += payload.recovery.reason.length * 8 + 64;
+  for (const [id,refs] of Object.entries(payload.recoveryInitials ?? {})) {
+    bytes += 128 + id.length * 8;
+    for (const ref of refs) bytes += 512 + initialRefBytes(ref);
+  }
   if (payload.membership) {
     bytes += 128;
     for (const id of payload.membership.members) bytes += id.length * 8 + 64;
@@ -308,6 +314,8 @@ function retainedBytes(payload: ReplicaDelivery): number {
   for (const [id, work] of Object.entries(payload.sockets)) {
     bytes += id.length * 8 + 256;
     if(work.initialScope)bytes+=256+initialRefBytes(work.initialScope);
+    if(work.recoveryInitials)bytes+=64;
+    for(const ref of work.recoveryInitials ?? [])bytes+=512+initialRefBytes(ref);
     for (const op of work.ops) {
       bytes += 64;
       for (const value of op) if (typeof value === "string") bytes += value.length * 8;
@@ -318,9 +326,4 @@ function retainedBytes(payload: ReplicaDelivery): number {
     for (const id of work.removed ?? []) bytes += id.length * 8 + 64;
   }
   return bytes;
-}
-
-/** Object keys, array slots, string/copy and safe-integer metadata allowance. */
-function initialRefBytes(ref: InitialRequestRef): number {
-  return 1024 + (ref.kind.length + ref.id.length + ref.path.length) * 8;
 }

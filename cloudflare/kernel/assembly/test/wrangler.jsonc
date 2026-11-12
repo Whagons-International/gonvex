@@ -3,9 +3,10 @@
  "main":"worker.ts",
  "compatibility_date":"2026-10-23",
  "compatibility_flags":["nodejs_als"],
- "durable_objects":{"bindings":[{"name":"TENANT","class_name":"CompositionTenant"},{"name":"GATEWAY","class_name":"CompositionGateway"},{"name":"CONTROL","class_name":"CompositionGateway"}]},
- "migrations":[{"tag":"v1","new_sqlite_classes":["CompositionTenant","CompositionGateway"]}],
+ "durable_objects":{"bindings":[{"name":"TENANT","class_name":"CompositionTenant"},{"name":"GATEWAY","class_name":"CompositionGateway"},{"name":"CONTROL","class_name":"CompositionGateway"},{"name":"REAL_CONTROL","class_name":"CompositionControl"}]},
+ "migrations":[{"tag":"v1","new_sqlite_classes":["CompositionTenant","CompositionGateway","CompositionControl"]}],
  "r2_buckets":[{"binding":"FILES","bucket_name":"gonvex-cf-dev-k22-composition-files"}],
  "services":[{"binding":"ACTIONS","service":"gonvex-cf-dev-k22-composition-test","entrypoint":"ActionWorker"}],
+ "rules":[{"type":"Text","globs":["**/*.sql"],"fallthrough":true}],
  "workflows":[{"binding":"ACTION_WORKFLOW","name":"gonvex-cf-dev-k22-composition-actions","class_name":"ActionWorkflow"}]
 }

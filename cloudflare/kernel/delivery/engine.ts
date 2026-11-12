@@ -11,6 +11,7 @@
 // that land while a task runs coalesce into the next wake, as Rust's feed
 // task does. Nothing here is written to SQLite (brief: nothing ephemeral).
 
+import { captureRecoveryInitials, recoveryInitialCleanup, type RecoveryInitialCapture } from "./recovery-initials";
 import { AuthorityAdmission } from "./authority";
 import { type RecoveryDelivery, type RecoveryReceipt, type ScopedSocketWork } from "./recovery";
 import type { LiveQueries } from "../query/live.ts";
@@ -158,6 +159,10 @@ export interface DeliveryStats {
   /** Reads of the commit feed (clock, change log, affected rows), across every connection. */
   commitStatements: number;
   commitRowsRead: number;
+  recoveryInitialsOffered: number;
+  recoveryInitialsOmitted: number;
+  recoveryInitialFactsRejected: number;
+  recoveryInitialsCleared: number;
 }
 
 const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -177,7 +182,7 @@ export function streamIdentity(path: string, argsText: string): string {
 export class ReplicaDeliveryEngine {
   readonly instance = crypto.randomUUID();
   readonly registry: VisibilityRegistry;
-  readonly stats: DeliveryStats = { opens: 0, commits: 0, payloads: 0, statements: 0, rowsRead: 0, resets: 0, commitStatements: 0, commitRowsRead: 0 };
+  readonly stats: DeliveryStats = { opens: 0, commits: 0, payloads: 0, statements: 0, rowsRead: 0, resets: 0, commitStatements: 0, commitRowsRead: 0, recoveryInitialsOffered:0, recoveryInitialsOmitted:0, recoveryInitialFactsRejected:0, recoveryInitialsCleared:0 };
   private readonly connections = new Map<string, Connection>();
   /** Reset fences also cover a request already in flight when its connection was dropped. */
   private readonly epochs = new Map<string, number>();
@@ -195,6 +200,12 @@ export class ReplicaDeliveryEngine {
 
   constructor(private readonly options: DeliveryOptions) {
     this.registry = options.registry ?? new VisibilityRegistry();
+  }
+
+  /** Bounded metadata count for explicit dev evidence, never progress authority. */
+  pendingInitialCount():number {
+    let count=0;for(const connection of this.connections.values())count+=connection.initials.size;
+    return count;
   }
 
   // ---- frames from sockets ---------------------------------------------------------------
@@ -796,6 +807,26 @@ export class ReplicaDeliveryEngine {
     }
   }
 
+  private captureRecoveryInitials(host:string,scopes?:Readonly<Record<string,number>>):RecoveryInitialCapture<Connection> {
+    const entries=[...this.connections.values()].filter(connection=>connection.host===host
+      &&(!scopes||(Object.hasOwn(scopes,connection.id)&&scopes[connection.id]===connection.epoch)))
+      .map(connection=>({id:connection.id,owner:connection,epoch:connection.epoch,refs:connection.initials}));
+    const capture=captureRecoveryInitials(entries);
+    this.stats.recoveryInitialsOffered+=capture.offered;
+    this.stats.recoveryInitialsOmitted+=capture.omitted;
+    return capture;
+  }
+  private applyRecoveryInitialFacts(capture:RecoveryInitialCapture<Connection>,receipt:ReplicaReceipt):void {
+    const cleanup=recoveryInitialCleanup(capture,receipt.initialCompletions,id=>{
+      const connection=this.connections.get(id);
+      return connection?{id,owner:connection,epoch:connection.epoch,refs:connection.initials}:undefined;
+    });
+    if(!cleanup){this.stats.recoveryInitialFactsRejected++;return;}
+    // One synchronous validated plan; these processing facts grant NO progress.
+    for(const {id,request} of cleanup)this.connections.get(id)!.initials.delete(request.generation);
+    this.stats.recoveryInitialsCleared+=cleanup.length;
+  }
+
   /** The challenge's authoritative epochs stamp EMPTY work only. */
   private requestScopeFence(host: string, supplied?: Readonly<Record<string, number>>): void {
     if (this.recovering.has(host) || this.fencing.get(host)?.pending) return;
@@ -809,15 +840,18 @@ export class ReplicaDeliveryEngine {
       const challenged = await challenge;
       const scopes = challenged?.scopeRequired;
       if (!scopes) throw new Error("delivery scope challenge was not understood");
+      const capture=this.captureRecoveryInitials(host,scopes);
       const sockets: Record<string, SocketWork> = {};
       for (const [id, epoch] of Object.entries(scopes)) {
         if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error("invalid delivery scope challenge");
-        sockets[id] = { ops: [], subscriptionEpoch: epoch } as ScopedSocketWork;
+        sockets[id] = { ops: [], subscriptionEpoch: epoch,
+          ...(capture.requests[id]?{recoveryInitials:capture.requests[id]}:{}) } as ScopedSocketWork;
       }
       const receipt = await this.options.outlet.send(host, this.payload([], sockets));
       if (!receipt || Object.keys(receipt.scopeRequired ?? {}).length) throw new Error("delivery scope fence was not applied");
       const missing = new Set(receipt.missing ?? []);
       for (const [id, epoch] of Object.entries(scopes)) if (!missing.has(id) && receipt.scopeAck?.[id] !== epoch) throw new Error("delivery scope fence was not acknowledged");
+      this.applyRecoveryInitialFacts(capture,receipt);
       await this.finishBarrier(host, state, this.fencing);
     }).catch(error => this.barrierFailed(host, state, this.fencing, error));
   }
@@ -879,13 +913,16 @@ export class ReplicaDeliveryEngine {
     this.recovering.set(host, state); // Suppress immediately, before the serialized reset job can run.
     void this.options.serial(async () => {
       this.dropHost(host);
-      const payload: RecoveryDelivery = { ...this.payload([], {}), recovery: { reason: "change-feed-lagged" } };
-      if (this.options.outlet.reset) return { recovery: this.options.outlet.reset(host, payload) };
+      const capture=this.captureRecoveryInitials(host);
+      const payload: RecoveryDelivery = { ...this.payload([], {}), recovery: { reason: "change-feed-lagged" },
+        ...(capture.offered?{recoveryInitials:capture.requests}:{}) };
+      if (this.options.outlet.reset) return { recovery: this.options.outlet.reset(host, payload),capture };
       this.options.outlet.discard(host);
-      return { recovery: this.options.outlet.send(host, payload) };
-    }).then(async ({ recovery }) => {
+      return { recovery: this.options.outlet.send(host, payload),capture };
+    }).then(async ({ recovery,capture }) => {
       const receipt = await recovery as RecoveryReceipt | undefined;
       if (receipt?.recoveryAck !== 1) throw new Error("GONVEX_DELIVERY_RECOVERY_UNSUPPORTED");
+      this.applyRecoveryInitialFacts(capture,receipt);
       await this.finishBarrier(host, state, this.recovering);
     }).catch(error => this.barrierFailed(host, state, this.recovering, error));
   }

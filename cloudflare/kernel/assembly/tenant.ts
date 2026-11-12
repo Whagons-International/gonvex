@@ -78,6 +78,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   private receiptRetry: number | null = null;
   private logRetry: number | null = null;
   private queryModule: { hash: string; module: QueryModule } | undefined;
+  private fixtureRecoveryFailure=false;
 
   protected bundle(hash: string): ModuleExports | undefined { return Object.values(releases).find((release) => release.hash === hash)?.exports; }
   protected plans(): PlanStore { return new R2PlanStore(this.env.RELEASES); }
@@ -169,6 +170,10 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       throw error;
     }
     if (!(socket as SocketView & { queryRecovery?: boolean }).queryRecovery && !["query.subscribe", "replica.open", "replica.openMany", "replica.close"].includes(frame.type)) this.delivery.externalEvent(socket.host);
+    if(this.env.GONVEX_ASSEMBLY_FIXTURE_KEY&&this.fixtureRecoveryFailure&&(socket as SocketView & {queryRecovery?:boolean}).queryRecovery
+      &&frame.type==="replica.openMany"&&!frame.opens.length){
+      this.fixtureRecoveryFailure=false;throw new Error("assembly fixture: scope registration fault");
+    }
     if (frame.type === "query.call" && frame.path === RECEIPT_QUERY) return super.dispatch(socket, frame);
     if (frame.type === "query.unsubscribe") {
       this.delivery.queryUnsubscribe(socket, frame.id);
@@ -407,6 +412,14 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     if (committed) return "committed";
     this.kernel.recordOverrun(commandId, path);
     return "quarantined";
+  }
+  async fixtureFailRecoveryOnce():Promise<void>{
+    if(!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY)throw new Error("assembly fixture control disabled");
+    this.fixtureRecoveryFailure=true;
+  }
+  async fixtureDeliveryState(){
+    if(!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY)throw new Error('assembly fixture control disabled');
+    return {...this.delivery.stats,pendingInitials:this.delivery.pendingInitialCount()};
   }
   async fixtureEpoch(epoch: string): Promise<void> {
     await this.kernel.reducers.serial(async () => { this.ctx.storage.sql.exec("UPDATE _gonvex_sync_clock SET epoch=? WHERE singleton=1", epoch); });

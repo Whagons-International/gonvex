@@ -25,12 +25,40 @@ export function validInitialRef(ref: unknown): ref is InitialRequestRef {
     && Number.isSafeInteger(r.epoch) && r.epoch >= 0 && Number.isSafeInteger(r.generation) && r.generation > 0;
 }
 
+/** Conservative own-key/ref/array/number/copy estimate, shared with outlet admission. */
+export const initialRefBytes = (ref: InitialRequestRef): number => 1024 + (ref.kind.length + ref.id.length + ref.path.length) * 8;
+export function validRecoveryInitialRefs(refs: unknown): refs is readonly InitialRequestRef[] {
+  if (!Array.isArray(refs)) return false;
+  const seen = new Set<number>();
+  return refs.every(ref => {
+    if (!validInitialRef(ref) || seen.has(ref.generation)) return false;
+    seen.add(ref.generation); return true;
+  });
+}
+/** Optional metadata is legal only on the two existing EMPTY recovery entries. */
+export function validRecoveryInitialDelivery(payload: ReplicaDelivery): boolean {
+  try {
+    const whole = payload.recoveryInitials;
+    const scoped = Object.values(payload.sockets).some(work=>work.recoveryInitials!==undefined);
+    if (whole===undefined&&!scoped) return true;
+    if (payload.v!==REPLICA_DELIVERY_VERSION) return false;
+    if (payload.shared.length || payload.watermark!==undefined || payload.membership || payload.initialFailure) return false;
+    if (whole!==undefined) return !scoped && !!payload.recovery && payload.recovery.reason==='change-feed-lagged'
+      && !Object.keys(payload.sockets).length && !!whole && typeof whole==='object' && !Array.isArray(whole)
+      && Object.values(whole).every(validRecoveryInitialRefs);
+    return !payload.recovery && payload.scopeFence===1 && Object.values(payload.sockets).every(work=>
+      !work.ops.length && work.watermark===undefined && work.opened===undefined && work.removed===undefined
+      && work.initialScope===undefined && work.initialCompletions===undefined
+      && (work.recoveryInitials===undefined||(validRecoveryInitialRefs(work.recoveryInitials)&&work.recoveryInitials.every(ref=>ref.epoch===work.subscriptionEpoch))));
+  } catch { return false; }
+}
+
 export function initialFailureOnly(payload: ReplicaDelivery): boolean {
   try {
     const marker = payload.initialFailure;
     return payload.v === REPLICA_DELIVERY_VERSION && !!marker && marker.v === 1 && marker.reason === "delivery-recovery-failed"
       && Array.isArray(payload.shared) && !payload.shared.length && !!payload.sockets && typeof payload.sockets === "object" && !Array.isArray(payload.sockets) && !Object.keys(payload.sockets).length && payload.watermark === undefined
-      && !payload.membership && !payload.recovery && payload.scopeFence === undefined
+      && !payload.membership && !payload.recovery && payload.recoveryInitials === undefined && payload.scopeFence === undefined
       && !!marker.requests && typeof marker.requests === "object" && !Array.isArray(marker.requests)
       && Object.values(marker.requests).every(refs => {
         const generations = new Set<number>();
@@ -119,9 +147,9 @@ export function sameInitialRef(a: InitialRequestRef,b: InitialRequestRef): boole
  * terminal/progress authority. Normal commits never use this receiver. */
 export function initialDeliveryOnly(payload:ReplicaDelivery):boolean {
  try {
-  if(payload.v!==REPLICA_DELIVERY_VERSION||payload.membership||payload.recovery||payload.initialFailure||payload.watermark!==undefined||!Object.keys(payload.sockets).length)return false;
+  if(payload.v!==REPLICA_DELIVERY_VERSION||payload.membership||payload.recovery||payload.recoveryInitials!==undefined||payload.initialFailure||payload.watermark!==undefined||!Object.keys(payload.sockets).length)return false;
   return Object.values(payload.sockets).every(work=>{
-    if(!validInitialCompletions(work))return false;
+    if(work.recoveryInitials!==undefined||!validInitialCompletions(work))return false;
     const scope=work.initialScope;
     if(!scope)return work.watermark===undefined&&!work.opened&&!work.removed&&work.ops.length>0&&work.ops.every((_,index)=>work.initialCompletions?.some(c=>c.opIndex===index&&c.outcome==='refused'));
     if(!validInitialRef(scope)||scope.epoch!==work.subscriptionEpoch||work.initialCompletions?.some(c=>!sameInitialRef(c.request,scope)))return false;
@@ -144,6 +172,8 @@ export function initialDeliveryOnly(payload:ReplicaDelivery):boolean {
 }
 
 export interface SocketWork {
+  /** 0070 original references, only on a genuine empty scoped bootstrap. */
+  readonly recoveryInitials?: readonly InitialRequestRef[];
   /** 0067 origin fence only, retained on every initial page/split. */
   readonly initialScope?: InitialRequestRef;
   readonly initialCompletions?: readonly InitialCompletion[];
@@ -159,6 +189,8 @@ export interface SocketWork {
 }
 
 export interface ReplicaDelivery {
+  /** 0070 bounded original references, only on universal whole-holder recovery. */
+  readonly recoveryInitials?: Readonly<Record<string, readonly InitialRequestRef[]>>;
   /** Processing only, sent exclusively to deliverInitialFailures on the same queue. */
   readonly initialFailure?: { readonly v: 1; readonly reason: "delivery-recovery-failed"; readonly requests: Readonly<Record<string, readonly InitialRequestRef[]>> };
   readonly v: number;

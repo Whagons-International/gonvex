@@ -1,7 +1,8 @@
 // K22: authoritative control-plane membership operations on K07's captured storage.
 // SQL follows runtime control.rs; no test-support implementation is imported.
+import { writeAdmissionError } from "../reducer/admission";
 import type { KernelTenant } from "../reducer/tenant";
-import { ensureReceipts, readReceipt, storeReceipt } from "../reducer/receipts";
+import { ensureReceipts, receiptTables, storeReceipt } from "../reducer/receipts";
 import { identityOf } from "../../actions/src/session";
 import type { InvitationAcceptance, InvitationAcceptanceResult } from "../../control/src/tenant-port";
 import { invokeCaptured, directSql } from "../capture/index";
@@ -35,6 +36,8 @@ export class TenantMemberships {
   private get sql() { return this.current ?? this.direct; }
   private commit<T>(commandId: string, body: () => T): Promise<T> {
     return this.kernel.reducers.serial(async () => {
+      const admission=writeAdmissionError(()=>this.kernel.migrator.gateClosed());
+      if(admission)throw new Error(admission.message);
       const result = await invokeCaptured(this.kernel.storage, "reducer", { commandId, channel: "system" }, async (db) => {
         this.current = sessionSql(db);
         try { return body(); } finally { this.current = undefined; }
@@ -191,6 +194,21 @@ export class TenantMemberships {
     class Refusal extends Error { constructor(text: string, readonly release: boolean) { super(`invalid arguments: ${text}`); } }
     return this.kernel.reducers.serial(async () => {
       try {
+        const admission=writeAdmissionError(()=>this.kernel.migrator.gateClosed());
+        if(admission){
+          // A valid already-committed invitation may replay read-only. Do not
+          // create/rename receipt tables while a schema unit is partly applied.
+          const tables=receiptTables(directSql(this.storage.sql));
+          const table=tables.current&&!tables.legacy?"_gonvex_reducer_idempotency":tables.legacy&&!tables.current?"_gonvex_mutation_idempotency":undefined;
+          const receipt=table?this.direct.get(`SELECT path,result FROM ${table} WHERE subject=$1 AND idempotency_key=$2`,a.accountId,a.idempotencyKey):undefined;
+          if(receipt?.path==="$system.invitation.accept"&&receipt.result!=null){
+            const memberId=this.direct.value<string>("SELECT id FROM members WHERE account_id=$1 ORDER BY updated_at DESC LIMIT 1",a.accountId)??`member_${a.invitationId}`;
+            return {ok:true as const,memberId};
+          }
+          // Throwing retains the Control handoff claim for the same-key retry;
+          // tenantCall maps the failure to its existing transient database error.
+          throw new Error(admission.message);
+        }
         // Ensure the normal K07 receipt schema; never create a parallel invitation receipt store.
         ensureReceipts(directSql(this.storage.sql));
         const receipt = this.direct.get("SELECT path,result FROM _gonvex_reducer_idempotency WHERE subject=$1 AND idempotency_key=$2", a.accountId, a.idempotencyKey);

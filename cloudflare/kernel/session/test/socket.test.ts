@@ -293,6 +293,34 @@ describe("gateway placement", () => {
     }finally{c.ws.close(1000);await c.closed();}
   });
 
+  it("0070 returns processing facts through the real ordered outlet and native recovery RPC",async()=>{
+    const w=await world({a:["ana"]}),c=await signedIn(w,"ana","a");
+    const [name]=await stub("GET",`gateways?tenant=${w.tenants.a}`) as string[];
+    try{
+      await inGateway(name!,instance=>{
+        const session=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+        const actual=session.ports.tenants.dispatch;
+        session.ports.tenants.dispatch=(view:any,frame:any)=>frame.type==="query.subscribe"?Promise.resolve(view.queryRecovery?[JSON.stringify({type:'query.progress',id:frame.id,path:frame.path,throughRevision:{epoch:'e',sequence:2}})]:[]):actual(view,frame);
+      });
+      c.send({type:'query.subscribe',id:'q',path:'items.live',args:{}});let origin:any;
+      for(let i=0;i<50&&!origin;i++){
+        origin=await inGateway(name!,instance=>{const s=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+          const ref=Object.values(s.record.initialRequests??{}).find((r:any)=>r.id==='q');return ref?{id:s.record.connectionId,ref}:null;});
+        if(!origin)await new Promise(r=>setTimeout(r,1));
+      }
+      expect(origin).toBeTruthy();
+      const {GatewayOutlet}=await import('../../delivery/outlet');
+      const outlet=new GatewayOutlet(w.tenants.a!,()=>gateway(name!),async()=>[name!]);
+      const receipt=await outlet.reset(name!,{v:1,instance:'recovered',shared:[],sockets:{},recovery:{reason:'change-feed-lagged'},recoveryInitials:{[origin.id]:[origin.ref,{...origin.ref,generation:777,id:'unknown'}]}});
+      expect(receipt?.recoveryAck).toBe(1);
+      expect(receipt?.initialCompletions).toEqual({[origin.id]:[{generation:origin.ref.generation,status:'enqueued'}]});
+      expect(Object.getPrototypeOf(receipt!.initialCompletions)).toBe(Object.prototype);
+      await c.next(f=>f.type==='query.progress'&&f.id==='q');
+      const old=await outlet.reset(name!,{v:1,instance:'without-offer',shared:[],sockets:{},recovery:{reason:'change-feed-lagged'}});
+      expect(old?.recoveryAck).toBe(1);expect(old?.initialCompletions).toBeUndefined();
+    }finally{c.ws.close(1000);await c.closed();}
+  });
+
   it("0061 challenges a restarted sender without mutation, rejects a stale Member fence, then acknowledges only real empty bootstrap", async () => {
     const w = await world({ a: ["ana", "ben"] });
     const c = await signedIn(w, "ana", "a");

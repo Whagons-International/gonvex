@@ -178,3 +178,17 @@ it('initial data/completion skew never invokes an old ordinary receiver',async()
  const p:ReplicaDelivery={v:1,instance:'must-not-apply',shared:[],sockets:{c:{subscriptionEpoch:1,initialScope:request,ops:[['f',frame]],initialCompletions:[{request,opIndex:0,outcome:'accepted'}]}}};
  await expect(outlet.send('old',p)).rejects.toThrow('GONVEX_INITIAL_DELIVERY_UNSUPPORTED');expect(ordinary).toBe(0);
 });
+
+it('0070 recovery offers share the existing reserve across owners and cannot use oversized-singleton admission',async()=>{
+ let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+ const receiver={async deliverReplica(_tenant:string,p:ReplicaDelivery){if(p.instance==='held-recovery')await gate;return {v:1,sockets:0,recoveryAck:1 as const};}};
+ const a=new GatewayOutlet('recovery-facts-a',()=>receiver,async()=>[]),b=new GatewayOutlet('recovery-facts-b',()=>receiver,async()=>[]);
+ const refs=(n:number)=>Array.from({length:n},(_,i)=>({kind:'query' as const,id:'q'+i,path:'p',epoch:1,generation:i+1}));
+ const first=a.reset('a',{...recovery(),instance:'held-recovery',recoveryInitials:{connection:refs(4000)}});
+ try{
+  expect(deliveryPressure().recovery).toBeGreaterThan(6_000_000);
+  await expect(b.reset('b',{...recovery(),recoveryInitials:{connection:refs(2000)}})).rejects.toMatchObject({code:DELIVERY_CAPACITY_CODE});
+  await expect(b.reset('oversized',{...recovery(),recoveryInitials:{connection:[{...refs(1)[0]!,path:'x'.repeat(2_000_000)}]}})).rejects.toMatchObject({code:DELIVERY_CAPACITY_CODE});
+ }finally{release();await first;await b.reset('b',recovery());await b.reset('oversized',recovery());}
+ expect(deliveryPressure().recovery).toBe(0);
+});

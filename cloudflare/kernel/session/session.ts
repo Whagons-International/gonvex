@@ -30,7 +30,7 @@ import { SocketDelivery, type TrackedReplicas } from "../delivery/socket";
 import { recoveryOf, type RecoverySocketView, type ScopedSocketWork } from "../delivery/recovery";
 import { assertInitialState } from "./initial-state";
 import { InitialAdmission } from "./initial-admission";
-import { sameInitialRef, initialCompletion, validInitialCompletions, validInitialRef, type InitialCompletion, type InitialCompletionStatus, type InitialRequestRef, type ReplicaDelivery, type SocketOp, type SocketWork } from "../delivery/protocol";
+import { validRecoveryInitialRefs, sameInitialRef, initialCompletion, validInitialCompletions, validInitialRef, type InitialCompletion, type InitialCompletionStatus, type InitialRequestRef, type ReplicaDelivery, type SocketOp, type SocketWork } from "../delivery/protocol";
 import { ADMISSION_MAX_AGE_MS } from "../public/config";
 import { UNKNOWN_ADDRESS } from "../public/address";
 import { ADMISSION_ERROR, frameCost, publicAdmissionErrors, publicLimitErrors, runsTenantCode } from "../public/frames";
@@ -189,6 +189,7 @@ export class Session {
   readonly delivery: SocketDelivery;
   private readonly initialAdmission = new InitialAdmission();
   private sinkSequence = 0;
+  private recoveryInitialFacts: {offered:ReadonlyMap<number,InitialRequestRef>; facts:Map<number,InitialCompletionStatus>} | undefined;
   private readonly timers: SessionTimers;
   private readonly publicGuard: PublicGuard | undefined;
   /** `GONVEX_PUBLIC_MAX_PAYLOAD_BYTES`. */
@@ -645,6 +646,7 @@ export class Session {
 
   /** K10: one replica delivery from the tenant object. Applied at once, ahead of frames still being handled. */
   replicaDelivery(payload: ReplicaDelivery, work: SocketWork | undefined): readonly InitialCompletionStatus[] {
+    if (work?.recoveryInitials!==undefined) throw new Error("recovery initial offers require empty bootstrap");
     if (work && !validInitialCompletions(work)) throw new Error("invalid initial completion metadata");
     const obsolete = () => (work?.initialCompletions ?? []).map(c => ({ generation: c.request.generation, status: "obsolete" as const }));
     if (this.closed || !this.record.tenant || this.record.tenant.anonymous) return obsolete();
@@ -733,7 +735,7 @@ export class Session {
   }
 
   /** 0056: resolves only after reset frames and real live-query rebuilds completed on this socket. */
-  recoverReplica(tenantId: string, payload: ReplicaDelivery): Promise<void> {
+  recoverReplica(tenantId: string, payload: ReplicaDelivery): Promise<readonly InitialCompletionStatus[] | undefined> {
     const epoch = this.record.subscriptionEpoch ?? 0;
     return this.serial(async () => {
       if (this.closed || epoch !== (this.record.subscriptionEpoch ?? 0) || this.record.tenant?.route.tenantId !== tenantId) throw new Error("delivery recovery scope changed");
@@ -741,15 +743,17 @@ export class Session {
       if (!recovery) throw new Error("recovery marker is required");
       await this.verifyRecoveryAuth(tenantId, epoch);
       await this.observeRecoveryScope(tenantId, epoch);
-      this.delivery.recover(payload.instance, recovery.reason);
-      await this.rebuildLiveQueries(tenantId, epoch);
-      await this.verifyRecoveryAuth(tenantId, epoch);
-      this.hooks.persist?.();
+      return this.collectRecoveryInitials(payload.recoveryInitials?.[this.record.connectionId],async()=>{
+        this.delivery.recover(payload.instance, recovery.reason);
+        await this.rebuildLiveQueries(tenantId, epoch);
+        await this.verifyRecoveryAuth(tenantId, epoch);
+        this.hooks.persist?.();
+      });
     });
   }
 
   /** 0061: a returned epoch can authorize only this EMPTY bootstrap, never retained data. */
-  bootstrapReplica(tenantId: string, payload: ReplicaDelivery, work: SocketWork): Promise<void> {
+  bootstrapReplica(tenantId: string, payload: ReplicaDelivery, work: SocketWork): Promise<readonly InitialCompletionStatus[] | undefined> {
     const epoch = (work as ScopedSocketWork).subscriptionEpoch;
     if (payload.scopeFence !== 1 || epoch === undefined || work.ops.length || work.watermark !== undefined || work.opened || work.removed
       || payload.shared.length || payload.watermark !== undefined || payload.membership || work.initialCompletions?.length || work.initialScope) return Promise.reject(new Error("delivery bootstrap must contain only empty scoped work"));
@@ -757,12 +761,26 @@ export class Session {
       this.requireRecoveryScope(tenantId, epoch);
       await this.verifyRecoveryAuth(tenantId, epoch);
       await this.observeRecoveryScope(tenantId, epoch);
-      this.delivery.recover(payload.instance, "change-feed-reset");
-      await this.rebuildLiveQueries(tenantId, epoch);
-      await this.verifyRecoveryAuth(tenantId, epoch);
-      this.requireRecoveryScope(tenantId, epoch);
-      this.hooks.persist?.();
+      return this.collectRecoveryInitials(work.recoveryInitials,async()=>{
+        this.delivery.recover(payload.instance, "change-feed-reset");
+        await this.rebuildLiveQueries(tenantId, epoch);
+        await this.verifyRecoveryAuth(tenantId, epoch);
+        this.requireRecoveryScope(tenantId, epoch);
+        this.hooks.persist?.();
+      });
     });
+  }
+
+  /** Facts come only from the existing accepted terminal send callback below.
+   * Absent active history and unrebuilt replicas remain omitted/UNKNOWN. */
+  private async collectRecoveryInitials(refs:readonly InitialRequestRef[]|undefined,run:()=>Promise<void>):Promise<readonly InitialCompletionStatus[]|undefined> {
+    if(refs===undefined){await run();return undefined;}
+    if(!validRecoveryInitialRefs(refs)||this.recoveryInitialFacts)throw new Error("invalid/concurrent recovery initial offer");
+    const offered=new Map(refs.filter(ref=>this.currentInitial(ref)).map(ref=>[ref.generation,Object.freeze({...ref})]));
+    const collector={offered,facts:new Map<number,InitialCompletionStatus>()};
+    this.recoveryInitialFacts=collector;
+    try {await run();return [...collector.facts.values()];}
+    finally {if(this.recoveryInitialFacts===collector)this.recoveryInitialFacts=undefined;}
   }
 
   private requireRecoveryScope(tenantId: string, epoch: number): void {
@@ -1174,14 +1192,14 @@ export class Session {
   }
 
   /** Runs `fn` after the frames already queued, in the socket's order. */
-  private serial(fn: () => void | Promise<void>): Promise<void> {
+  private serial<T>(fn: () => T | Promise<T>): Promise<T> {
     this.queueDepth++;
     const run = async () => {
       this.queueActive = true;
-      try { await fn(); } finally { this.queueActive = false; this.queueDepth--; }
+      try { return await fn(); } finally { this.queueActive = false; this.queueDepth--; }
     };
     const next = this.queue.then(run, run);
-    this.queue = next.catch(() => {});
+    this.queue = next.then(() => {}, () => {});
     return next;
   }
 
@@ -1378,6 +1396,10 @@ export class Session {
         delete this.record.initialRequests![String(initial.generation)];
         this.initialAdmission.release(initial.generation);
         this.hooks.recoveryChanged?.(); this.hooks.persist?.();
+        const collector=this.recoveryInitialFacts,offered=collector?.offered.get(initial.generation);
+        if(offered&&sameInitialRef(offered,initial)&&!this.closed&&initial.epoch===(this.record.subscriptionEpoch??0)) {
+          collector!.facts.set(initial.generation,{generation:initial.generation,status:"enqueued"});
+        }
       }
     }
     const request = this.record.liveQueries?.[id];

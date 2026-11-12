@@ -99,3 +99,101 @@ it('rejects stale real SocketViews rather than acknowledging an empty registrati
  await expect(object.dispatch(socket,{type:'replica.openMany',opens:[]})).rejects.toThrow('stale tenant subscription scope');
  expect(object.delivery.subscriptions(socket.connectionId).size).toBe(0);
 }));
+
+it('R1 every Control membership writer and both invitation branches refuse between real migration chunks, then retry normally',async()=>fixture(async(object,state)=>{
+ const owner=await object.writeMembership({kind:'provision',commandId:'owner',accountId:'owner',displayName:'Owner',role:'owner',permissions:{}});
+ for(const accountId of ['developerRemove','demoDelete'])await object.writeMembership({kind:'provision',commandId:'seed-'+accountId,accountId,displayName:accountId,role:'member',permissions:{}});
+ const writes:import('../../../control/src/tenant-port').MembershipWrite[]=[
+  {kind:'provision',commandId:'provision',accountId:'provision',displayName:'P',role:'member',permissions:{}},
+  {kind:'developerProvision',commandId:'developerProvision',accountId:'developerProvision',displayName:'D',avatarUrl:''},
+  {kind:'developerRemove',commandId:'developerRemove',accountId:'developerRemove'},
+  {kind:'tenantOwner',commandId:'tenantOwner',accountId:'tenantOwner',displayName:'O',avatarUrl:''},
+  {kind:'demoCreate',commandId:'demoCreate',accountId:'demoCreate',displayName:'Demo'},
+  {kind:'demoDelete',commandId:'demoDelete',accountId:'demoDelete'},
+  {kind:'e2eMember',commandId:'e2eMember',accountId:'e2eMember',displayName:'E',avatarUrl:''},
+ ];
+ const invitation=(id:string,internal:boolean):import('../../../control/src/tenant-port').InvitationAcceptance=>({
+  commandId:'invitation:'+id,invitationId:id,accountId:'account-'+id,accountEmail:id+'@fixture.invalid',accountName:id,accountAvatarUrl:'',idempotencyKey:'key-'+id,
+  role:'member',permissions:{},teamIds:[],payload:{},inviterAccountId:'owner',inviterMemberId:owner.memberId,moduleAvailable:true,
+  reducerPath:internal?'probe.invite':'',reducerDefinition:internal?{kind:'reducer',internal:true}:null,artifactHash:manifest.module.hash,
+ });
+ const replay=invitation('prior',true),prior=await object.acceptInvitation(replay);
+ expect(prior.ok).toBe(true);
+ const upgrade=await buildReleasePlan(await migrationsFromFiles({...files,'migrations/0002_membership_gate.sql':'-- gonvex:scope tenant\n'+Array.from({length:40},(_,i)=>`INSERT INTO board (id,title,position,bumps) VALUES ('membership-migration-${i}','migration',0,0);`).join('\n')}),{chunk:{maxStatements:1}});
+ plans.add(upgrade);let status=await object.kernel.migrator.applyRelease(upgrade.id);
+ for(let n=0;n<20&&!(status.phase==='migrations'&&status.chunk>0);n++)status=await object.kernel.migrator.alarm();
+ expect(status).toMatchObject({state:'running',phase:'migrations',gateClosed:true});
+ const members=state.storage.sql.exec('SELECT * FROM members ORDER BY id').toArray();
+ const transactions=state.storage.sql.exec('SELECT count(*) n FROM _gonvex_sync_transactions').one();
+ const outbox=state.storage.sql.exec('SELECT * FROM _gonvex_control_plane_membership_outbox ORDER BY account_id').toArray();
+ for(const write of writes)await expect(object.writeMembership(write)).rejects.toThrow('tenant schema migration in progress; retry');
+ for(const internal of [false,true])await expect(object.acceptInvitation(invitation(internal?'internal':'captured',internal))).rejects.toThrow('tenant schema migration in progress; retry');
+ expect(await object.acceptInvitation(replay)).toEqual(prior); // stored result; no application invocation or mutation
+ expect(state.storage.sql.exec('SELECT * FROM members ORDER BY id').toArray()).toEqual(members);
+ expect(state.storage.sql.exec('SELECT count(*) n FROM _gonvex_sync_transactions').one()).toEqual(transactions);
+ expect(state.storage.sql.exec('SELECT * FROM _gonvex_control_plane_membership_outbox ORDER BY account_id').toArray()).toEqual(outbox);
+ expect(state.storage.sql.exec("SELECT count(*) n FROM board WHERE id IN ('invite-internal','invite-captured')").one().n).toBe(0);
+ expect(state.storage.sql.exec("SELECT count(*) n FROM _gonvex_reducer_idempotency WHERE idempotency_key IN ('key-internal','key-captured')").one().n).toBe(0);
+ for(let n=0;n<200&&object.kernel.migrator.gateClosed();n++)await object.kernel.migrator.alarm();
+ expect(object.kernel.migrator.gateClosed()).toBe(false);
+ for(const write of writes)expect((await object.writeMembership(write)).updated).toBe(true);
+ for(const internal of [false,true]){
+  const request=invitation(internal?'internal':'captured',internal),accepted=await object.acceptInvitation(request);
+  expect(accepted.ok).toBe(true);expect(await object.acceptInvitation(request)).toEqual(accepted);
+ }
+ const failed=invitation('rollback',true);failed.payload={fail:true};
+ expect(await object.acceptInvitation(failed)).toMatchObject({ok:false,release:true});
+ expect(state.storage.sql.exec("SELECT count(*) n FROM members WHERE account_id='account-rollback'").one().n).toBe(0);
+ expect(state.storage.sql.exec("SELECT count(*) n FROM board WHERE id='invite-rollback'").one().n).toBe(0);
+ expect(state.storage.sql.exec("SELECT count(*) n FROM _gonvex_reducer_idempotency WHERE idempotency_key='key-rollback'").one().n).toBe(0);
+ expect(await object.acceptInvitation({...failed,payload:{}})).toMatchObject({ok:true});
+}));
+
+it('R1 real Control-to-Tenant RPC retains the invitation claim without acceptance/index effects, then same-key retry completes',async()=>{
+ for(const internal of [false,true]){
+  const control=(env as unknown as {REAL_CONTROL:DurableObjectNamespace}).REAL_CONTROL.getByName('claim-'+crypto.randomUUID()) as unknown as import('../../../control/src/control-object').ControlObject;
+  await control.devCreateProject({id:'p',name:'Membership gate fixture'});
+  await control.devSaveManifest('p',{...manifest,module:{...manifest.module,invitationAcceptanceReducer:internal?'probe.invite':''}});
+  const owner=await control.devE2eMember({projectId:'p',email:'owner@fixture.invalid',password:'synthetic-test-password',accountOnly:true});
+  const invitee=await control.devE2eMember({projectId:'p',email:'invitee@fixture.invalid',password:'synthetic-test-password',accountOnly:true});
+  const ownerId=owner.accountId,inviteeId=invitee.accountId;
+  if(!ownerId||!inviteeId)throw new Error('synthetic accounts were not created');
+  let tenantId='';
+  await fixture(async(object,state)=>{
+    tenantId=state.id.name!;
+    await object.writeMembership({kind:'provision',commandId:'seed-owner',accountId:ownerId,displayName:'Owner',role:'owner',permissions:{}});
+    const upgrade=await buildReleasePlan(await migrationsFromFiles({...files,'migrations/0002_control_gate.sql':'-- gonvex:scope tenant\n'+Array.from({length:40},(_,i)=>`INSERT INTO board (id,title,position,bumps) VALUES ('control-migration-${i}','migration',0,0);`).join('\n')}),{chunk:{maxStatements:1}});
+    plans.add(upgrade);let status=await object.kernel.migrator.applyRelease(upgrade.id);
+    for(let n=0;n<20&&!(status.phase==='migrations'&&status.chunk>0);n++)status=await object.kernel.migrator.alarm();
+    expect(status).toMatchObject({state:'running',phase:'migrations',gateClosed:true});
+  });
+  const token='synthetic-invitation-'+crypto.randomUUID(),invitationId='gate-invitation';
+  const {sha256Hex}=await import('../../capture/digest');
+  await runInDurableObject(control as never,(_object,state)=>{
+    state.storage.sql.exec("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_name,database_url,status,description,provisioned,runtime_created) VALUES (?,'p',?,'Fixture','fixture',?,'active','synthetic',1,1)",tenantId,tenantId,'do://tenant/'+tenantId);
+    state.storage.sql.exec("INSERT INTO gonvex_auth_membership_invitations(project_id,tenant_id,email,role,invited_by,id,token_hash) VALUES ('p',?,'invitee@fixture.invalid','member',?,?,?)",tenantId,owner.accountId,invitationId,sha256Hex(token));
+  });
+  const connection:import('../../../control/src/types').ControlConnection={connectionId:'fixture-recipient',projectId:'p',identity:{projectId:'p',account:{id:inviteeId,email:'invitee@fixture.invalid',emailVerified:true,name:'Invitee',avatarUrl:'',provider:'password'}},tenant:null,impersonationId:'',authToken:''};
+  const refused=await control.write(connection,'control.invitations.accept',{token},'same-key','reducer');
+  expect(refused).toMatchObject({ok:false,errorClass:'transient',error:expect.stringContaining('tenant schema migration in progress; retry')});
+  await runInDurableObject(control as never,(_object,state)=>{
+    expect(state.storage.sql.exec('SELECT handoff_state,accepted_at,completed_at,accepted_account_id,accepted_idempotency_key FROM gonvex_auth_membership_invitations WHERE id=?',invitationId).one()).toEqual({handoff_state:'claimed',accepted_at:null,completed_at:null,accepted_account_id:invitee.accountId,accepted_idempotency_key:'same-key'});
+    expect(state.storage.sql.exec('SELECT count(*) n FROM account_tenant_index WHERE account_id=?',invitee.accountId).one().n).toBe(0);
+  });
+  const tenant=bindings.TENANT.getByName(tenantId);
+  await runInDurableObject(tenant,async(object,state)=>{
+    const actual=object as CompositionTenant;
+    expect(state.storage.sql.exec('SELECT count(*) n FROM members WHERE account_id=?',invitee.accountId).one().n).toBe(0);
+    expect(state.storage.sql.exec("SELECT count(*) n FROM board WHERE id='invite-gate-invitation'").one().n).toBe(0);
+    expect(actual.kernel.migrator.gateClosed()).toBe(true);
+    for(let n=0;n<200&&actual.kernel.migrator.gateClosed();n++)await actual.kernel.migrator.alarm();
+    expect(actual.kernel.migrator.gateClosed()).toBe(false);
+  });
+  const accepted=await control.write(connection,'control.invitations.accept',{token},'same-key','reducer');
+  expect(accepted.ok).toBe(true);expect(await control.write(connection,'control.invitations.accept',{token},'same-key','reducer')).toEqual(accepted);
+  await runInDurableObject(control as never,(_object,state)=>{
+    expect(state.storage.sql.exec('SELECT handoff_state,accepted_at IS NOT NULL accepted,completed_at IS NOT NULL completed FROM gonvex_auth_membership_invitations WHERE id=?',invitationId).one()).toEqual({handoff_state:'completed',accepted:1,completed:1});
+    expect(state.storage.sql.exec('SELECT count(*) n FROM account_tenant_index WHERE account_id=? AND tenant_id=?',invitee.accountId,tenantId).one().n).toBe(1);
+  });
+ }
+});

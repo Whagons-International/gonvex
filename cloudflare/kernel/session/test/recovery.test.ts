@@ -15,6 +15,7 @@ function tenant(name: string, id = "t"): TenantSession {
   };
 }
 function fixture() {
+  const fail={send:false};
   const sent: string[] = [], closes: Array<{ code: number; reason: string }> = [];
   const dispatches: RecoverySocketView[] = [];
   const ports: Ports = {
@@ -30,7 +31,7 @@ function fixture() {
     tenants: { dispatch: async (socket) => { dispatches.push(socket as RecoverySocketView); return []; }, connectionReset: async () => {} },
   };
   const session = Session.open({ ports, host: "holder", connectionId: "c", publicTransport: false,
-    ready: { runtimeVersion: "test", presence: false }, sink: { send: (text) => sent.push(text), close: (frame) => closes.push(frame) },
+    ready: { runtimeVersion: "test", presence: false }, sink: { send: (text) => { if(fail.send)throw new Error("sink unavailable"); sent.push(text); }, close: (frame) => closes.push(frame) },
     timers: { later: () => () => {} },
   });
   const auth = (name = "alice", id = "t") => session.receive(JSON.stringify({ type: "auth", id: "auth", project: "p", tenant: id, token: name }));
@@ -46,7 +47,7 @@ function fixture() {
     if (!completion) throw new Error("fixture frame is not a terminal initial operation");
     deliver({ ...p, sockets: { c: { ...work, initialCompletions: [completion] } } });
   };
-  return { session, ports, sent, closes, dispatches, auth, payload, deliver, complete };
+  return { session, ports, sent, closes, dispatches, auth, payload, deliver, complete,fail };
 }
 
 describe("K22 session delivery scope", () => {
@@ -185,6 +186,42 @@ describe("K22 session delivery scope", () => {
     await f.session.failReplicaInitials("t", [old]);
     expect(f.session.record.pendingLiveQueries?.q).toBeUndefined();
     expect(f.closes).toEqual([]);
+  });
+
+  it("0070 returns only offered exact terminal sink facts; unrebuilt/unknown/omitted refs grant no authority",async()=>{
+    const f=fixture();await f.auth();
+    for(const id of ['q1','q2'])await f.session.receive(JSON.stringify({type:'query.subscribe',id,path:'items.live',args:{id}}));
+    await f.session.receive(JSON.stringify({type:'replica.open',id:'r',path:'items.all',args:{}}));
+    const refs=Object.values(f.session.record.initialRequests!);
+    const q1=refs.find(r=>r.id==='q1')!,replica=refs.find(r=>r.id==='r')!;
+    f.ports.tenants.dispatch=async(_view,frame)=>frame.type==='query.subscribe'?[JSON.stringify({type:'query.progress',id:frame.id,path:frame.path,throughRevision:{epoch:'e',sequence:999}})]:[];
+    const watermark=f.session.record.watermark,sentRevision=f.session.record.sentRevision;
+    const facts=await f.session.recoverReplica('t',{v:1,instance:'recovered',shared:[],sockets:{},recovery:{reason:'change-feed-lagged'},recoveryInitials:{c:[q1,replica,{...q1,generation:777,id:'unknown'}]}});
+    expect(facts).toEqual([{generation:q1.generation,status:'enqueued'}]);
+    expect(f.session.record.liveQueries?.q1?.args).toEqual({id:'q1'});expect(f.session.record.liveQueries?.q2?.args).toEqual({id:'q2'});
+    expect(f.session.record.initialRequests?.[String(replica.generation)]).toEqual(replica);
+    expect(f.session.record.watermark).toBe(watermark);expect(f.session.record.sentRevision).toBe(sentRevision);
+  });
+
+  it("0070 sink failure yields no completion fact and preserves the exact pending book for a fresh retry",async()=>{
+    const f=fixture();await f.auth();await f.session.receive('{"type":"query.subscribe","id":"q","path":"items.live","args":{}}');
+    const ref=Object.values(f.session.record.initialRequests!)[0]!;
+    f.ports.tenants.dispatch=async(_view,frame)=>frame.type==='query.subscribe'?[JSON.stringify({type:'query.result',id:frame.id,path:frame.path,reason:'initial',result:[]})]:[];
+    const payload:ReplicaDelivery={v:1,instance:'recovered',shared:[],sockets:{},recovery:{reason:'change-feed-lagged'},recoveryInitials:{c:[ref]}};
+    f.fail.send=true;await expect(f.session.recoverReplica('t',payload)).rejects.toThrow('sink unavailable');
+    expect(f.session.record.initialRequests?.[String(ref.generation)]).toEqual(ref);expect(f.session.record.pendingLiveQueries?.q).toHaveLength(1);
+    f.fail.send=false;expect(await f.session.recoverReplica('t',payload)).toEqual([{generation:ref.generation,status:'enqueued'}]);
+    expect(f.session.record.initialRequests?.[String(ref.generation)]).toBeUndefined();
+  });
+
+  it("0070 empty bootstrap retains original refs and ordinary old ACKs contain no terminal facts",async()=>{
+    const f=fixture();await f.auth();await f.session.receive('{"type":"query.subscribe","id":"q","path":"items.live","args":{"value":"B"}}');
+    const ref=Object.values(f.session.record.initialRequests!)[0]!;
+    f.ports.tenants.dispatch=async(_view,frame)=>frame.type==='query.subscribe'?[JSON.stringify({type:'query.progress',id:frame.id,path:frame.path,throughRevision:{epoch:'e',sequence:2}})]:[];
+    const work={ops:[] as const,subscriptionEpoch:ref.epoch,recoveryInitials:[ref]};
+    expect(await f.session.bootstrapReplica('t',{v:1,scopeFence:1,instance:'new',shared:[],sockets:{c:work}},work)).toEqual([{generation:ref.generation,status:'enqueued'}]);
+    expect(f.session.record.liveQueries?.q?.args).toEqual({value:'B'});
+    expect(await f.session.recoverReplica('t',{v:1,instance:'newer',shared:[],sockets:{},recovery:{reason:'change-feed-lagged'}})).toBeUndefined();
   });
 
   it("recovery waits for real LQ replies, includes pending opens, and rejects stale scope or a refused rebuild", async () => {

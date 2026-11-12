@@ -28,3 +28,9 @@ export async function service(ctx, args) {
 export async function noop() { return null; }
 
 export async function resultSize(_ctx,args){return "x".repeat(args.bytes);}
+
+export async function invite(ctx,args){
+  await ctx.db.query('INSERT INTO board (id,title,position,bumps) VALUES ($1,$1,0,0)',['invite-'+args.invitationId]);
+  if(args.payload?.fail)throw new Error('invitation hook refused');
+  return {memberId:args.memberId};
+}
