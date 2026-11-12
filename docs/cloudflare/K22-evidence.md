@@ -87,7 +87,7 @@ change-capture, live-query-task-grid, actions, replica-tenant-restart (unchanged
 raw reset/resume assertions) and public-limits. The receipt-expiry adapter now
 calls the real existing prune handler; fresh proof is pending. Scheduler private
 durable-hop provenance and the original K19 1500 ms defer default were restored;
-fresh comparison is pending. Original raw receipt-upgrade/session-handshake
+fresh comparison passed as recorded below. Original raw receipt-upgrade/session-handshake
 socket continuity failures remain failed. An additional unchanged SDK recovery
 probe across the actual deployment boundary is required by 0060.
 
@@ -136,3 +136,34 @@ CPU enforcement as passing.
   needed; image tag/time alone is insufficient.
 - Direct Workflow reply fault/large-result delivery, aggregate isolate memory
   with legal large frames and full generation lifecycle bounds still need proof.
+
+## Frozen combined candidate ad2c6078
+
+Exact source: `ad2c6078aa27d9261fc3a76ac4ffb45b216de263` (parent `26d7261b`).
+The full Cloudflare suite completed successfully on this frozen serving source:
+820 workerd passes, 15 existing skips, plus four Node deploy checks. The 15 skips
+are five external-emulator/public cases and ten Rust-only sandbox cases; they
+remain coverage gaps, not parity passes. Typecheck and all generators passed.
+Runtime import cycles compared with integration c97: one existing cycle on each
+side, zero added (type-only imports excluded, matching package source inputs).
+An initial comparison with missing base package inputs was invalid and retained.
+Dry-run serving bundle: 1,607,447 bytes; gzip 385,156 bytes. These are bundle
+measurements, not deployed CPU/memory/wake measurements.
+
+Fresh assembled comparisons on separate owned fixtures:
+
+- Explicit controller-removed/static-one-holder: receipt-expiry, scheduler and
+  unchanged error-telemetry **3 pass / 0 fail / 0 skip**, 27.5 s. Actual holder
+  inspection was not collected in this run, so the canonical-domain evidence
+  still needs its authoritative holder/window receipt.
+- Default controller-enabled automatic placement: live-query-window, Actions,
+  replica-tenant-restart and public-calls **4 pass / 0 fail / 0 skip**, 29.8 s.
+  This is semantic subset proof, not V03 capacity or full X01 acceptance.
+
+Logs, reports, source hashes and commands: `evidence/ad2c6078/`,
+`named-merged.sh`, `automatic-merged.sh`, `full-tests.sh`, `bundle-cycles.sh`.
+The later optional diagnostic collector records actual holder/config identities
+outside compared transcripts. Its 32 controller-status reads and holder RPCs
+wake objects: it must be disabled for true cold/hibernation/cost fixtures, or its
+overhead attributed explicitly. It neither drives a different serving handler
+nor changes an assertion/normalizer. Diagnostic failures fail the scenario.

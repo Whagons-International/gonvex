@@ -4,6 +4,9 @@
 import { RustBackend, CONFORMANCE_SECRETS, firebaseEmulatorEnv } from './rust.mjs';
 import { startLocalAssembly } from '../../../kernel/assembly/local.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 export class CloudflareAssemblyBackend extends RustBackend {
   constructor(options) { super({ ...options, binary: process.execPath }); }
   get capabilities() { return { ...super.capabilities, orphanReveal: true, tenantRestart: true, receiptExpiry: true }; }
@@ -23,6 +26,21 @@ export class CloudflareAssemblyBackend extends RustBackend {
     this.wsUrl = this.httpUrl.replace(/^http/, 'ws') + '/ws';
   }
   async stop() { await this.runtime?.stop(); this.runtime = undefined; }
+  inspectHolders(project) { return this.request('GET', `/__assembly/holders?${new URLSearchParams({project})}`); }
+  async captureEvidence({ scenario, project }) {
+    const holders = await this.inspectHolders(project), identity = await this.request('GET', '/__assembly/version');
+    const configs = [];
+    if (this.runtime) for (const kind of ['kernel', 'actions', 'sandbox']) {
+      const bytes = await readFile(join(this.workDir, `${kind}.json`)), config = JSON.parse(bytes);
+      configs.push({kind, sha256:createHash('sha256').update(bytes).digest('hex'), name:config.name, compatibilityDate:config.compatibility_date,
+        bindings:config.durable_objects?.bindings, services:config.services, limits:config.limits, shards:config.vars.GONVEX_GATEWAY_SHARDS ?? null});
+    }
+    const directory = join(this.workDir, 'evidence'); await mkdir(directory, {recursive:true,mode:0o700});
+    await writeFile(join(directory, `${scenario}.json`), JSON.stringify({scenario, project, identity, configs, ...holders}, null, 2), {mode:0o600});
+    if (process.env.GONVEX_ASSEMBLY_PLACEMENT === 'static-one-holder' && scenario === 'error-telemetry') {
+      if (holders.placement !== 'static' || holders.holders.length !== 1 || holders.holders[0].holder !== 'gw-0') throw new Error('canonical telemetry did not use exactly the actual static gw-0 holder');
+    }
+  }
   async restart() {
     if (process.env.GONVEX_ASSEMBLY_URL) throw new Error('remote assembly restart must deploy a recorded real Worker version');
     await this.stop(); this.restarts++; await this.start();

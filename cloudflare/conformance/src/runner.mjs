@@ -198,6 +198,10 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
   } catch (error) {
     trace.failures.push(`scenario aborted: ${error?.stack ?? error}`);
   } finally {
+    // Optional read-only deployment diagnostics. They never replace a serving
+    // handler or normalize the compared transcript; a failed check is a failure.
+    try { await backend.captureEvidence?.({ scenario: scenario.name, project: projectId }); }
+    catch (error) { trace.failures.push(`runtime evidence failed: ${error?.message ?? error}`); }
     for (const c of clients) { try { c.close(); } catch {} }
     await quiesce();
   }

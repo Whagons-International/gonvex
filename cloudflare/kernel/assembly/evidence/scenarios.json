@@ -77,6 +77,13 @@
         "runtime_commit": "b9b7a727",
         "failures": [],
         "diff_count": 6
+      },
+      "local_combined_subset": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-automatic-merged-1.json",
+        "runtime_commit": "ad2c6078aa27d9261fc3a76ac4ffb45b216de263",
+        "placement": "controller-enabled/automatic",
+        "scope": "named semantic subset; no full parity/capacity claim"
       }
     },
     {
@@ -337,6 +344,13 @@
         "runtime_commit": "b9b7a727",
         "failures": [],
         "diff_count": 0
+      },
+      "local_combined_subset": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-named-merged-1.json",
+        "runtime_commit": "ad2c6078aa27d9261fc3a76ac4ffb45b216de263",
+        "placement": "controller-removed/static-one-holder",
+        "scope": "named semantic subset; no full parity/capacity claim"
       }
     },
     {
@@ -353,6 +367,13 @@
           "[kernel] step \"scheduled work runs\": expectation failed: expected two bumps, one coalesced wake and a 32-hop chain, got [{\"id\":\"chain\",\"title\":\"chain\",\"position\":259,\"bumps\":259},{\"id\":\"sched\",\"title\":\"planned+wake\",\"position\":100,\"bumps\":2}]"
         ],
         "diff_count": 11
+      },
+      "local_combined_subset": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-named-merged-1.json",
+        "runtime_commit": "ad2c6078aa27d9261fc3a76ac4ffb45b216de263",
+        "placement": "controller-removed/static-one-holder",
+        "scope": "named semantic subset; no full parity/capacity claim"
       }
     },
     {
@@ -409,6 +430,13 @@
         "runtime_commit": "b9b7a727",
         "failures": [],
         "diff_count": 5
+      },
+      "local_combined_subset": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-automatic-merged-1.json",
+        "runtime_commit": "ad2c6078aa27d9261fc3a76ac4ffb45b216de263",
+        "placement": "controller-enabled/automatic",
+        "scope": "named semantic subset; no full parity/capacity claim"
       }
     },
     {
@@ -482,6 +510,13 @@
           "[kernel] step \"the restarted object serves the resumed collections\": raw socket closed while waiting for delta after the resume"
         ],
         "diff_count": 0
+      },
+      "local_combined_subset": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-automatic-merged-1.json",
+        "runtime_commit": "ad2c6078aa27d9261fc3a76ac4ffb45b216de263",
+        "placement": "controller-enabled/automatic",
+        "scope": "named semantic subset; no full parity/capacity claim"
       }
     },
     {
@@ -526,6 +561,13 @@
         "runtime_commit": "b9b7a727",
         "failures": [],
         "diff_count": 0
+      },
+      "local_combined_subset": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-automatic-merged-1.json",
+        "runtime_commit": "ad2c6078aa27d9261fc3a76ac4ffb45b216de263",
+        "placement": "controller-enabled/automatic",
+        "scope": "named semantic subset; no full parity/capacity claim"
       }
     },
     {
@@ -556,6 +598,13 @@
           "[kernel] setup failed: POST /dev/sync -> 503: Your worker restarted mid-request. Please try sending the request again. Only GET or HEAD requests are retried automatically."
         ],
         "diff_count": 19
+      },
+      "local_combined_subset": {
+        "status": "PASS",
+        "evidence": "/mnt/data/work/gonvex-k22/assembly-named-merged-1.json",
+        "runtime_commit": "ad2c6078aa27d9261fc3a76ac4ffb45b216de263",
+        "placement": "controller-removed/static-one-holder",
+        "scope": "named semantic subset; no full parity/capacity claim"
       }
     }
   ]
