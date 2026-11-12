@@ -42,3 +42,19 @@ state of a live holder to regain credits. Do not rely on timely GC/finalizers as
 Test hibernation/collection/restart, repeat resets/failures, epoch races, interrupted opens and live-query
 catch-up under writes. Report credit pressure and unavailable recovery explicitly. K22/X01 do not edit each
 other's engine/session/outlet regions; shared GatewayObjectBase recovery method is a narrow coordinated patch.
+
+## K22 ordered query snapshots and scope fencing follow-up
+
+K22 owns normal initial K08 query snapshots through ReplicaDelivery as well as commit updates; returning
+initial data on the independent dispatch RPC could reorder it behind a newer commit. It adds synchronous
+LiveQueries.subscribeSnapshot, engine.queryReply and pending-live-query holder tracking. Universal recovery
+reuses the real handler with server-only RecoverySocketView.queryRecovery=true, then catch-up/ack. That
+internal flag must not be accepted from client frame content or bypass auth/visibility checks.
+
+X01 adds only readonly subscriptionEpoch?:number to SocketWork in its protocol patch. K22 owns stamping
+EVERY normal/split work part and rejecting stale epoch work in Session BEFORE data, instance or watermark
+application. Delayed same-tenant old-Member snapshots are an authorization fence, not merely a UI race.
+Test Member/tenant switches, reauth/reset and deploy interleavings; specify missing-epoch older-sender
+behavior explicitly and recover rather than apply unverifiable scoped data. K22 retains splitPayload,
+Session and engine ownership; no competing placement/router/outlet edits. These source changes remain
+subject to fresh independent exact-artifact review and regression/platform evidence.
