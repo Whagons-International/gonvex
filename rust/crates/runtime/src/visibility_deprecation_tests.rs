@@ -45,7 +45,7 @@ fn legacy_admission_warns_and_version_two_does_not() {
             manifest,
         };
         tracing::subscriber::with_default(subscriber, || {
-            artifact_from_manifest(&record)
+            artifact_from_manifest(&record, true)
                 .expect("both legacy and mask manifests remain admissible");
         });
         let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
