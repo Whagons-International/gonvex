@@ -377,3 +377,108 @@ metadata-row size. None of those sums include SQLite row headers/physical pages.
 isolate RAM/copies, Action legacy deployment preconditions, reference cleanup and terminal-owner lifetime
 remain open. No Cloudflare deploy/artifact/config id exists for this checkpoint; no credential or deployment
 was used. The resource receipt measures the WHOLE admitted unit, not a Worker isolate.
+
+### 18afb R1 / 0070 checkpoint: source follow-up; acceptance UNMET
+
+Runtime/tests are frozen at `18afb02a5cccde933c571f7448a930ebafe574a0`. An ordinary merge of
+integration `f4f78519f1d201d640498067011ed4890c4ebffb` produced `22a8e1da`; there were no conflicts.
+The independent57a recheck remained CHANGES_REQUIRED. This follow-up needs a NEW independent review;
+its author results do not change that verdict or establish platform acceptance.
+
+R1 closes the migration gate inside each serialized membership write entry, before captured mutation or
+application invocation. Real workerd tests pause a40-statement migration with maxStatements1, refuse all7
+Control membership variants and both invitation implementations, retain the same-key invitation claim without
+acceptance/index effects, then succeed after migration. Existing invitation-hook rollback/retry and exact
+read-only valid receipt replay pass. The9-case native Control-to-Tenant fixture has a separately unavailable
+membership-projector sink; it does not prove that sink, deployed Control or SDK behavior. Logs are under
+`/mnt/data/work/gonvex-k22/review-fixes/composition-13.*`.
+The closed-gate read-only exception requires the stored `$system.invitation.accept` path and a non-null result.
+Outside-gate key-only replay is unchanged; passing that path into Rust claim_reducer does not prove path conflict
+enforcement. A separate collision investigation is described below, without changing receipt semantics.
+
+0070 offers immutable original initial references, captured Connection identity and epoch only on real empty
+scope bootstrap or whole-holder recovery. Selection is at most64KiB of estimated metadata, examining at most256
+references; oversized/unselected references are explicitly omitted, not truncated or removed. All offered
+metadata/copies and bounded status receipts use the same existing outlet credits and8MiB recovery reserve.
+Actual existing Session terminal sink callbacks alone produce processing facts. The Engine validates the ENTIRE
+returned subset and current exact owner/book before clearing any matching correlation. Missing, foreign,
+duplicate, stale or malformed facts certify no cleanup. These facts grant no watermark, instance, scope,
+accepted outcome or delivered revision. Recovery/scope acknowledgments keep their separate meanings.
+
+`pnpm test` at exact18afb passed869 workerd cases /15 existing skips plus4 Node deploy cases; typecheck and49
+conformance unit cases passed. The command sets `GONVEX_SANDBOX_TEST_STUB=1`; its10 existing skipped Rust/Container
+cases remain unproven. Commands/results/source hashes are in
+`/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/` (`checks.sh`, `result`,
+`tests.log`, `typecheck.log`, `conformance.log`, `source.json`). Generators (schema-options, both app codegens,
+docs metadata) passed without tracked drift. Runtime cycles stay1→1/0 new against matching integration inputs.
+Dry bundle:1,678,656 bytes /401,105 gzip bytes, SHA256 recorded in `checkpoint-18afb02a.json`.
+
+The unchanged SDK controlled-fault probe passed12 digest checks on ONE local assembled static holder.
+A private key-gated fixture holds the actual ordered bootstrap RPC and throws once at real Tenant registration;
+it never supplies a protocol reply or substitutes an implementation. The SDK receives a genuine correlated
+query.error, sends exactly ONE durable Reducer invocation, finds the receipt as that same principal, retires
+its intent and completes the real watermark/revision wait. A fresh Live Query succeeds. Two additional cycles
+hold the next real challenge before offer capture: each observed1 pending Engine reference,1 exact offered/
+cleared processing fact,0 rejected facts and0 remaining pending references, followed by a successful SDK write.
+Each cycle restarts the Tenant first: this is bounded local recovery evidence, not indefinite same-instance
+churn or UNKNOWN-owner cleanup. Unrebuilt replicas and unknown/oversized/omitted refs remain explicit gaps.
+The selected counters report3 commit-feed statements,9/11 commit rows read respectively, and1 snapshot statement/
+3 snapshot rows; these are Delivery counters, not total auth/KV/SQLite costs. Isolate heap, full write/wake costs
+and128MiB aggregate fit are not measured by them.
+Raw probe evidence: `/mnt/data/work/gonvex-k22/quiet-initial-4/`; its source hashes match18afb runtime/tests
+(`quiet-4-source-comparison.json`). Earlier failures stay retained: probe1 queried Bob's receipt as Alice;
+probe3 wrongly assumed no coalesced owed external retry. Probe2 passed the basic error/write/receipt case.
+The phase-handoff fixture correction arms the next genuine RPC before releasing the first; it mints no retry
+credit. Native RPC/sink, partial/foreign/duplicate facts, auth/owner/book replacement, missing history,
+shared two-outlet credits and oversized admission have separate focused regressions. Synthetic-port cases
+are wiring evidence; the SDK probe is local actual-handler evidence, neither is private-platform proof.
+
+### Exact18afb full comparison: FAILED,34 PASS /4 FAIL /0 whole-scenario SKIP
+
+The unchanged38-scenario campaign took526.0 seconds on a fresh real Firebase Auth Emulator15.35.0 with synthetic
+users and the declared controller-removed/static-one-holder configuration. It contains31 two-backend passes
+and3 kernel-only passes (receipt-expiry, replica-orphan-reveal, replica-tenant-restart; explicit Rust skips).
+`reducer-errors` remains the separate0057 BLOCKED/FAILED local enforcement row and was not rerun.
+The39-row catalog retains original failed evidence and adds exact per-backend18afb statuses. All remote rows
+remain NOT RUN. The eight additional package-comparison gaps remain OPEN.
+
+- receipt-upgrade: actual gen2 raw connected-socket activation/closure and v1 SDK row wait still fail.
+- session-handshake: raw Control socket continuity across real baked deployment still differs.
+- session-frames: the never-sent-message pending client remains open instead of observing1008.
+- public-limits: kernel SETUP FAILED when real POST /dev/sync returned503 “worker restarted mid-request”.
+  Its kernel guard assertions were UNEXECUTED; Rust executed them. A fresh unchanged isolated run passed both
+  backends (14.1s scenario /17.0s campaign). It does not relabel the full campaign or hide the deployment race.
+
+Full report/raw/config/commands: `full38.json`, `full38.log`, `full38.result`, `run-full38.sh`, `raw/` under the
+18afb evidence directory; isolated public-limits evidence is in its `public-limits-isolated/` subdirectory.
+The machine-readable checkpoint pins report/bundle hashes. Config files contain private synthetic fixture keys
+and stay outside Git; exact hashes/bindings/service versions are retained in scenario evidence. Full-cgroup
+interim measurements (including Firebase, Node, builder and workerd) peaked at2,643,460,096 bytes at the recorded
+sample with257,279,494,000 CPU ns so far. That is an INTERIM whole-job sample, not final usage, a Worker isolate,
+a CPU-per-call enforcement measurement or an enforced per-job cap. Final isolate/RPC copy/wake costs remain gaps.
+
+Separate native pending-auth diagnostics (`/mnt/data/work/gonvex-k22/idle-deadline-diagnostic-{1,2}/`) observe no
+client close for13s using BOTH Node WHATWG WebSocket and ws8.21.0; controlOnly observes1008 at about10s.
+Post-window actual holder inspection shows0 native sockets/sessions and no alarm. Inspection can wake the holder;
+the unobserved deadline window precedes inspection. Those observations do not establish terminal-callback
+reliability, owner release or an emulator-wide explanation. No absence/TTL purge or synthetic timer response was
+introduced. The original session-frames failure remains.
+
+### Separate invitation receipt-collision investigation; preserved Rust behavior
+
+`/mnt/data/work/gonvex-k22/invitation-collision-2/` runs actual unchanged Rust and assembled handlers with the
+same synthetic sequence: Bob commits board.add under key `k22-invitation-collision-0001`; Alice creates an invitation
+for Bob with role member; Bob accepts using that SAME key. BOTH backends return successful invitation acceptance,
+show the invitation accepted, preserve the original board.add receipt, and freshly authenticate Bob still as
+admin rather than the invitation's member role. The original app result is the foreign-receipt board row.
+This establishes the observed reference quirk; it is not a K22 parity defect or authorization to harden one side.
+A first probe's protected `/dev/data/.../members` read returned404 on both backends and remains failed evidence;
+the second uses real fresh admission and the declared principals.whoami module to observe role. No protected
+operator access, module, Rust source or outside-gate replay behavior changed. Any strict-path policy needs a
+separate explicit contract/hardening decision.
+
+No Cloudflare deployment/artifact/config version or Container digest is claimed: none was deployed by K22.
+Enabled K13 configuration/file ownership, K20 exact-input provenance and real Rust+DuckDB Container scenarios,
+actual CPU5000/quarantine/rollback/neighbors, legacy Action rollout/drain conditions, UNKNOWN/stranded OWNER
+lifetime and0069/0071 owner authority remain open. The static campaign is not automatic placement/capacity proof;
+new final automatic-fleet, application/device, V01–V06/R01–R06 and actual-duration soak gates remain required.

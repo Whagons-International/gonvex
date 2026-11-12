@@ -26,7 +26,8 @@
     {
       "name": "thin-sdk-parity",
       "localAtCheckpoint": "PASS",
-      "remote": "NOT RUN"
+      "remote": "NOT RUN",
+      "backendDomain": "Rust+kernel comparison"
     },
     {
       "name": "reducer-second-client",
@@ -51,7 +52,8 @@
     {
       "name": "live-query-window",
       "localAtCheckpoint": "PASS",
-      "remote": "NOT RUN"
+      "remote": "NOT RUN",
+      "backendDomain": "Rust+kernel comparison"
     },
     {
       "name": "control-auth",
@@ -191,7 +193,8 @@
     {
       "name": "replica-tenant-restart",
       "localAtCheckpoint": "PASS",
-      "remote": "NOT RUN"
+      "remote": "NOT RUN",
+      "backendDomain": "kernel-only; explicit Rust capability skip"
     },
     {
       "name": "replica-reconnect-wave",
@@ -216,7 +219,8 @@
     {
       "name": "error-telemetry",
       "localAtCheckpoint": "PASS",
-      "remote": "NOT RUN"
+      "remote": "NOT RUN",
+      "backendDomain": "Rust+kernel comparison"
     }
   ],
   "remoteArtifactAndConfigIds": null,
@@ -229,5 +233,6 @@
     "8 additional package comparison gaps; exact Container/file/application/bridge/device proof",
     "Legacy Action reply deployment/drain/rollback precondition and evidence",
     "128MB isolate fit, copy/aggregate costs, capacity V/R gates"
-  ]
+  ],
+  "namedDomainPrecision": "4/4 =3 two-backend comparisons +1 kernel-only tenant restart; Rust explicitly skips tenant restart"
 }

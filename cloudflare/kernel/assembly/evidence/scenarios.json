@@ -1,6 +1,6 @@
 {
   "base": "e72d3a437b65bea5a8524064e3e04904fc4a1f7b",
-  "status": "INCOMPLETE/FAILED: frozen local comparison 24 passed,12 failed,2 skipped of38; reducer-errors separately blocked; no remote proof",
+  "status": "INCOMPLETE/FAILED: frozen18afb local34PASS/4FAIL of38 (31 two-backend +3 kernel-only); local0057 excluded/blocked; no remote proof",
   "scenarios": [
     {
       "scenario": "thin-sdk-parity",
@@ -58,7 +58,32 @@
           "excerpt": "The combined single-holder `thin-sdk-parity` campaign exposed a real source failure: the Gateway's"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 48,
+            "watermarksChecked": 35
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 46,
+            "watermarksChecked": 32
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "reducer-second-client",
@@ -106,7 +131,32 @@
           "excerpt": "- Rust vs kernel: thin-sdk-parity, reducer-second-client (G1), replica-resume, visibility-masks, replica-windows,"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 39,
+            "watermarksChecked": 17
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 39,
+            "watermarksChecked": 17
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "replica-resume",
@@ -154,7 +204,32 @@
           "excerpt": "- Rust vs kernel: thin-sdk-parity, reducer-second-client (G1), replica-resume, visibility-masks, replica-windows,"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 35,
+            "watermarksChecked": 11
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 35,
+            "watermarksChecked": 11
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "reducer-errors",
@@ -190,7 +265,12 @@
           "excerpt": "5. The actual assembled gonvex-cf-dev-* runtime must run the UNCHANGED reducer-errors scenario with real"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "BLOCKED/FAILED 0057; unsupported local loop configuration NOT rerun",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "remote": "NOT RUN"
+      }
     },
     {
       "scenario": "presence",
@@ -898,7 +978,32 @@
           "excerpt": "user per day, 1 app frame per user per minute plus presence transitions every 101 s, and 1 commit per second on"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "live-query-window",
@@ -928,7 +1033,32 @@
           "excerpt": "| `live-query-window` | Window initial result, a row entering and pushing one out, updates outside and inside the window, a delete inside, moving the window, the limit cap, unsubscribe | |"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 13
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 9
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "control-auth",
@@ -956,7 +1086,32 @@
           "excerpt": "--scenario control-auth --scenario control-sessions --scenario control-tenants \\"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "control-tenants",
@@ -984,7 +1139,32 @@
           "excerpt": "--scenario control-auth --scenario control-sessions --scenario control-tenants \\"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "control-invitations",
@@ -1017,7 +1197,32 @@
           "excerpt": "5. **`ControlChanged` echo.** Rust sends every `ControlChanged` locally and again through its database listener, so a live Control Query can refresh a second time shortly after a write. That only shows state that changed without a notification, such as the claim a failed `invitations.accept` leaves. The control object notifies once per write (contract-changes 0025). `control-invitations` reads the list on demand around failed acceptances instead of racing the echo."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "control-support",
@@ -1045,7 +1250,32 @@
           "excerpt": "--scenario control-invitations --scenario control-support --scenario control-external-auth \\"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "control-external-auth",
@@ -1093,7 +1323,32 @@
           "excerpt": "| Sign-in grant fields the bridge reads (`accessToken`, `refreshToken`, `expiresAt`, `accountId`) | **same** | **same** (stand-in) | The bridge's own call, `exchangeExternalToken` with Firebase, is covered by `control-external-auth` |"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "control-native-auth",
@@ -1121,7 +1376,32 @@
           "excerpt": "--scenario control-native-auth"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "control-sessions",
@@ -1149,7 +1429,32 @@
           "excerpt": "--scenario control-auth --scenario control-sessions --scenario control-tenants \\"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "receipt-lost-reply",
@@ -1192,7 +1497,32 @@
           "excerpt": "| 2 | Rust claims the receipt at the Reducer's first database call. A module that throws before touching the database therefore reports its own error, even when its key is already committed. That is only possible when the same key comes back with different arguments. | The kernel serializes the Reducer path per object, so it reads the receipt before the module runs and replays. **Accept** this as the one difference. Every scenario in `receipt-*` is unaffected (`receipt-lost-reply` step 5 sends other arguments to a module that reads the database first). |"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "receipt-owner-switch",
@@ -1220,7 +1550,32 @@
           "excerpt": "- **Stream bindings outlive a re-auth.** When one socket re-authenticates without `subscriptionsPreserved`, for example on a tenant switch, Rust drops every subscription. But the delivery v2 stream token can be the same in the new auth, and `expandReplicaBatch` (used by the SDK, the thin client and this harness) keeps a socket's bindings across auths. So Rust's next `replica.delta` and `replica.ready` for that stream also expand to the dropped subscription id (`receipt-owner-switch`, step \"tenant switch A -> B\"). The SDK ignores the unknown id, and the digest self-check skips subscriptions dropped by a re-auth. Those phantom frames are still in the normalized trace, so a kernel that unbinds or renames its streams at auth shows a diff there. It needs a ruling: either the client clears its bindings at `auth.result`, or the server must unbind."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 18,
+            "watermarksChecked": 13
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 18,
+            "watermarksChecked": 13
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "receipt-upgrade",
@@ -1259,7 +1614,42 @@
           "excerpt": "`receipt-upgrade` timed out waiting for generation 2 on its existing raw socket; `session-handshake`"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "FAIL",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 8,
+            "watermarksChecked": 6
+          },
+          {
+            "name": "kernel",
+            "status": "failed",
+            "skipped": null,
+            "failures": [
+              "step \"the connected socket runs generation 2\": timed out waiting for generation 2 active",
+              "step \"a call pinned to the generation 1 artifact\": raw socket closed while waiting for board.rename reply",
+              "step \"generation 1 receipts survive the upgrade\": raw socket closed while waiting for __gonvex.reducerReceipt reply",
+              "step \"SDK clients on v1 and v2 definitions converge\": timed out waiting for v1 SDK sees the new row"
+            ],
+            "digestsChecked": 3,
+            "watermarksChecked": 4
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [
+          "[kernel] step \"the connected socket runs generation 2\": timed out waiting for generation 2 active",
+          "[kernel] step \"a call pinned to the generation 1 artifact\": raw socket closed while waiting for board.rename reply",
+          "[kernel] step \"generation 1 receipts survive the upgrade\": raw socket closed while waiting for __gonvex.reducerReceipt reply",
+          "[kernel] step \"SDK clients on v1 and v2 definitions converge\": timed out waiting for v1 SDK sees the new row"
+        ],
+        "diffCount": 103
+      }
     },
     {
       "scenario": "receipt-crash",
@@ -1282,7 +1672,32 @@
           "excerpt": "| `receipt-crash` | A client process killed with SIGKILL after sending a keyed call; the backend killed after a commit (receipt, rows and SDK recovery intact) and right after a keyed send (exactly-once replay) | `sdk_process_crash`, `check_restart` |"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 7,
+            "watermarksChecked": 5
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 7,
+            "watermarksChecked": 5
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "storage-sql",
@@ -1320,7 +1735,32 @@
           "excerpt": "review, this PR renames the storage-layer one to `storage.sqlSavepoints` and updates `storage-sql`."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "module-host",
@@ -1358,7 +1798,32 @@
           "excerpt": "| 0021 | K04 module-host interfaces and R25 (proposed by K04) | ruled in 0022 §3 | K01, K04, K19, S5 |"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "session-handshake",
@@ -1413,7 +1878,32 @@
           "excerpt": "`receipt-upgrade` timed out waiting for generation 2 on its existing raw socket; `session-handshake`"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "FAIL",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 3
+      }
     },
     {
       "scenario": "session-frames",
@@ -1466,7 +1956,32 @@
           "excerpt": "- `session-frames` step 6 fails against local `wrangler dev` on the integration base too, from before this PR."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "FAIL",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 3
+      }
     },
     {
       "scenario": "change-capture",
@@ -1529,7 +2044,32 @@
           "excerpt": "The formal `change-capture` scenario may reuse that exact, unit-tested rule for both sides' `old_value`"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "visibility-masks",
@@ -1587,7 +2127,32 @@
           "excerpt": "- Rust vs kernel: thin-sdk-parity, reducer-second-client (G1), replica-resume, visibility-masks, replica-windows,"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 68,
+            "watermarksChecked": 38
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 68,
+            "watermarksChecked": 47
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "receipt-expiry",
@@ -1627,7 +2192,32 @@
           "excerpt": "Disposition: **replace** (intended, IB3). Rule in `contract-changes/0009-receipt-expiry.md`: results expire after `offlineMaxAgeMs + 24 h` and leave a tombstone; a call that hits a tombstone gets `reducer.error{class:\"rejected\"}` instead of running again; a `null` window keeps receipts as in Rust; tombstones are deleted after 365 days."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "skipped",
+            "skipped": "backend lacks receiptExpiry",
+            "failures": [],
+            "digestsChecked": null,
+            "watermarksChecked": null
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "scheduler",
@@ -2154,6 +2744,11 @@
           "excerpt": "`_gonvex_st_action_runs`. The 30-minute agent Action completes through K11's scheduler."
         },
         {
+          "path": "docs/cloudflare/contract-changes/0069-owner-authority-lifecycle.md",
+          "line": 36,
+          "excerpt": "scheduler and nested Action adapters retain their separate existing server-principal rules."
+        },
+        {
           "path": "docs/cloudflare/observability-uptime-plan.md",
           "line": 41,
           "excerpt": "Correlate a task operation across client intent, edge routing, gateway admission, tenant queue, authorization, Reducer execution, SQLite transaction, durable commit/receipt, ordered delivery, and second-client application. Include background Action/Workflow and scheduler hand-offs where relevant. Distinguish queued time, execution time, storage/commit time and receiver delay. Use local monotonic durations and document clock uncertainty for cross-region measurements."
@@ -2229,7 +2824,32 @@
           "excerpt": "30-second revalidation cohorts, limiter buckets, ingress/cache lookups, builder/deploy, scheduler/Workflow,"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "live-query-task-grid",
@@ -2267,7 +2887,32 @@
           "excerpt": "the new scenario `live-query-task-grid` (Whagons' real `tasks.grid` plan) and matches every step's normalized frames"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 46
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 32
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "operator-routes",
@@ -2310,7 +2955,32 @@
           "excerpt": "| 3 | Refusing a wrong project key before storing the body is accepted. When the body is also malformed, the error the caller sees can differ from Rust's. That is accepted as a security improvement, and `operator-routes` asserts the kernel's order. |"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "presence-edges",
@@ -2348,7 +3018,32 @@
           "excerpt": "`presence-edges`. Rust against Rust flaked on this before the rule (2 runs in 4)."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "actions",
@@ -2893,7 +3588,32 @@
           "excerpt": "nested transactions, the deferred-FK guard, pinned clock and seeded random."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "service-principals",
@@ -2961,7 +3681,32 @@
           "excerpt": "2. **Load-dependent flakes.** K16 saw one `service-principals` failure while the machine was shared by several"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "replica-orphan-reveal",
@@ -3004,7 +3749,32 @@
           "excerpt": "| 0032 IB5: deliver the row a parent's appearance reveals; kernel-only scenario | `feed.ts` `mask_step` (parents that appear or disappear re-decide their children); `replica-orphan-reveal` (Rust skips it, so it is outside the Rust-vs-kernel comparison) |"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "skipped",
+            "skipped": "backend lacks orphanReveal",
+            "failures": [],
+            "digestsChecked": null,
+            "watermarksChecked": null
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 14,
+            "watermarksChecked": 8
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "replica-windows",
@@ -3047,7 +3817,32 @@
           "excerpt": "- Rust vs kernel: thin-sdk-parity, reducer-second-client (G1), replica-resume, visibility-masks, replica-windows,"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 23,
+            "watermarksChecked": 20
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 23,
+            "watermarksChecked": 20
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "replica-reset",
@@ -3090,7 +3885,32 @@
           "excerpt": "replica-reset and replica-reconnect-wave;"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 15,
+            "watermarksChecked": 10
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 15,
+            "watermarksChecked": 10
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "replica-tenant-restart",
@@ -3143,7 +3963,32 @@
           "excerpt": "K22 must preserve the unchanged K10 `replica-tenant-restart` reset/resume test without applying unscoped"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "skipped",
+            "skipped": "backend lacks tenantRestart",
+            "failures": [],
+            "digestsChecked": null,
+            "watermarksChecked": null
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 9,
+            "watermarksChecked": 6
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "replica-reconnect-wave",
@@ -3191,7 +4036,32 @@
           "excerpt": "replica-reset and replica-reconnect-wave;"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 78,
+            "watermarksChecked": 53
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 78,
+            "watermarksChecked": 54
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "public-limits",
@@ -3236,7 +4106,36 @@
           "excerpt": "- Rust versus `cloudflare-public`: public-calls and public-limits both pass, confirming the full-path harness override."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "FAIL",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "failed",
+            "skipped": null,
+            "failures": [
+              "setup failed: POST /dev/sync -> 503: Your worker restarted mid-request. Please try sending the request again. Only GET or HEAD requests are retried automatically."
+            ],
+            "digestsChecked": null,
+            "watermarksChecked": null
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [
+          "[kernel] setup failed: POST /dev/sync -> 503: Your worker restarted mid-request. Please try sending the request again. Only GET or HEAD requests are retried automatically."
+        ],
+        "diffCount": 10
+      }
     },
     {
       "scenario": "public-calls",
@@ -3291,7 +4190,32 @@
           "excerpt": "- Rust versus `cloudflare-public`: public-calls and public-limits both pass, confirming the full-path harness override."
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "bridge-upstream",
@@ -3349,7 +4273,32 @@
           "excerpt": "| K21 (#366), note 0040 | merged as **part 1** | The kernel run is reproducible from committed files. `bridge-upstream` matches Rust through sign-in, tenant auth, keyed reducer replay, refresh, re-auth and ping. `TestBridgeE2E` needs a Firebase-mode project, a seeded Whagons tenant and K10: **V02**. The package stays open. |"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 5,
+            "watermarksChecked": 6
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 5,
+            "watermarksChecked": 5
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     },
     {
       "scenario": "error-telemetry",
@@ -3421,7 +4370,33 @@
           "excerpt": "K22's fixed-nine local comparison reports seven passing scenarios and two failures. `error-telemetry`"
         }
       ],
-      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run"
+      "evidenceClassification": "Formal real fixture-module/SDK/raw-socket scenario through backend HTTP+WS; documentation references are attribution, not proof of a passing prior run",
+      "localAt18afb": {
+        "status": "PASS",
+        "runtimeHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+        "backendDomains": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "evidence": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/full38.json",
+        "failures": [],
+        "diffCount": 0
+      }
     }
-  ]
+  ],
+  "originalStatus": "INCOMPLETE/FAILED: frozen local comparison 24 passed,12 failed,2 skipped of38; reducer-errors separately blocked; no remote proof"
 }
