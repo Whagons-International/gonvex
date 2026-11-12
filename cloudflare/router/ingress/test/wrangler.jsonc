@@ -1,0 +1,27 @@
+// Test-only Worker for the Ingress Worker (K18): `vitest run --root router/ingress`.
+// Never deployed; the name keeps the gonvex-cf-dev- prefix anyway.
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-k18-ingress-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // K06 (PBKDF2, AES-GCM) and K04 (AsyncLocalStorage for the active invocation).
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONTROL", "class_name": "TestControlObject" },
+      { "name": "TENANT", "class_name": "TestTenant" },
+      { "name": "INGRESS", "class_name": "IngressObject" },
+      { "name": "RECORDER", "class_name": "Recorder" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestControlObject", "TestTenant", "IngressObject", "Recorder"] }],
+  "vars": {
+    "GONVEX_RUNTIME_VERSION": "development",
+    "GONVEX_INGRESS_PROJECTS": "proj-fixture,proj-whagons,proj-elsewhere",
+    "GONVEX_SHARE_WEB_URL": "https://{tenant}.app.example.test",
+    // Small, so the lookup-budget test reaches it.
+    "GONVEX_INGRESS_LOOKUP_RATE": "1/10"
+  }
+}
