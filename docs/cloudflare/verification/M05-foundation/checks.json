@@ -1,0 +1,53 @@
+{
+  "sourceCommit": "f58d75f9850acce5ac854fa34f1052d8a005c0fa",
+  "node24": {
+    "foundation": 0,
+    "ciUnitCommands": 0,
+    "cycles": 0,
+    "generatorFreshness": 0,
+    "replay": 0,
+    "localHandler": 0
+  },
+  "docsPostRelocationNode22": {
+    "relocation": 0,
+    "mdx": 0,
+    "nextTypegen": 0,
+    "tsc": 0
+  },
+  "foundationTests": {
+    "passed": 31,
+    "failed": 0,
+    "skipped": 0
+  },
+  "existingConformanceTests": {
+    "passed": 29,
+    "failed": 0
+  },
+  "resources": {
+    "node24Phase": "gonvex-m05-foundation-20261112-phase-a988bc3d6d1a.service",
+    "memoryPeakBytes": 665346048,
+    "cpuUsec": 9710667,
+    "wallSeconds": 9.667,
+    "containedOomKills": 0
+  },
+  "workflowCommands": {
+    "cwd": "cloudflare/conformance",
+    "node": "24.13.1",
+    "commands": [
+      "node --test test/*.test.mjs",
+      "node --test ../observability/test/*.test.mjs"
+    ],
+    "bothPassed": true,
+    "shellFailurePropagation": "GitHub run step retains default fail-on-error shell behavior"
+  },
+  "notExecuted": [
+    "Cloudflare typecheck/workerd full package tests/bundle measurements locally",
+    "browser/actual SDK/Whagons login and mutations",
+    "3 hosted regions/independent heartbeat",
+    "original P1-P5 drills",
+    "real test notification delivery",
+    "serving spans/trace continuity",
+    "production metrics/SQL rows/CPU/memory/overhead/billing",
+    "14d/30d observation"
+  ]
+}
