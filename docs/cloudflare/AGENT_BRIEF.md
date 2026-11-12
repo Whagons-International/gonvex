@@ -131,6 +131,10 @@ unresolved review findings.
 never automatically replayed. The original first-writer restart test and owner-lifecycle gates remain.
 0072 records the both-backend invitation receipt collision quirk; preserve outside-gate behavior in K22.
 Generic receipt path validation and the separate migration-gate read-only exception remain unchanged.
+0073 permits explicit confirmed owner admission inside genuine ordered holder rebuilds so quiet readers
+can recover; no client retry credit, ambiguous-call replay or owner-lifetime acceptance follows.
+0074 binds those rebuilds to a bounded producer/sequence, strict control-only challenge and pre-application
+support/ACK. Actual owner confirmation, durable attempt/UNKNOWN rules and original gates remain mandatory.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
