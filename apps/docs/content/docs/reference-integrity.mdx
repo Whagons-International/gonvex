@@ -3,11 +3,20 @@ title: Declared reference integrity
 description: Enforce application references across SQL writers and soft deletion.
 ---
 
-Tenant migrations can declare relationships with
-`SELECT gonvex_declare_references(catalog)`, where `catalog` is JSON text. Gonvex installs the generic
-helpers before applying application migrations. Applications own table names,
+Tenant migrations can insert JSON declarations into
+`_gonvex_reference_requests`. The Rust migration runner processes them inside
+the migration transaction. Gonvex installs the generic ledger tables before
+applying application migrations. Applications own table names,
 selection paths, lifecycle predicates and deletion policy; the runtime contains
 no application-specific relationship list.
+
+The Rust runner installs and enforces this capability. The current Node local
+schema compiler does not bootstrap or execute the ledger installer; a migration
+that writes the request table cannot yet pass that compiler unchanged. This is
+an authoring/local-execution integration gap, not a reason to claim that catalog
+metadata enforces relationships. The diagnostic can inspect existing request or
+catalog tables when present. Do not enable a declaration broadly without testing
+the actual app's codegen, local replay and authoritative runtime path.
 
 A version 1 declaration contains `tables` and `references`. Each table declares
 its single primary `key` and a JSONPath `live` predicate. Each reference declares
@@ -15,7 +24,7 @@ its unique `name`, `source`, storage `column`, selection `path`, `target`, and
 target `state` (`live` or `exists`). For example:
 
 ```sql
-SELECT gonvex_declare_references('{
+INSERT INTO _gonvex_reference_requests(declaration) VALUES('{
   "version": 1,
   "tables": [
     {"name":"teams","key":"_id","live":"$.deletedAt == null"},
@@ -32,8 +41,11 @@ New selected IDs must resolve. Deleting the final target, changing its key, or
 making it non-live fails if incoming references would remain. A transaction can
 explicitly remove or reassign all incoming references and then delete the
 target. There is no automatic cascade that could silently change access.
-Ordinary SQL, reducers and bulk row operations share this enforcement.
-`TRUNCATE` is rejected on declared tables.
+Reducers and bulk row operations use the same `TenantTransaction::commit` path.
+The installed staging triggers leave a deferred guard FK pending until the
+shared runtime flush runs; an ordinary SQLite writer that omits that flush
+cannot commit a declared-table write. Metadata without these guards and the
+runtime commit path is not enforcement.
 
 Enforcement uses transactionally maintained target tokens and reference edges
 with a deferred foreign key checked at commit. Each tenant database has one
@@ -43,7 +55,7 @@ transaction leaves the application state unchanged.
 Installation inventories existing references without repairing application
 rows. Existing violations are recorded rather than rejected: they remain visible,
 unchanged legacy edges survive unrelated edits, and new edges are enforced.
-`SELECT * FROM gonvex_reference_violations()` returns violations for an operator
+`SELECT * FROM gonvex_reference_violations` returns violations for an operator
 to review. Its results contain application identifiers and need the same access
 controls as application data. Repair and eventual constraint validation are
 separate operational decisions.
@@ -74,3 +86,11 @@ disable triggers or replace these constraints; privileged DDL is outside the
 ordinary-writer guarantee. Installation runs in the single writer transaction and
 backfills the ledger, so measure its cost on a disposable representative snapshot before
 rolling out a large catalog.
+
+This implementation installs staging triggers per declared table and loads the
+catalog when flushing pending rows. It is opt-in, not an automatic replacement
+for every application's native FKs or JSON references. Prefer native constraints
+for simple relationships and verify the cost of large declarations. A future
+implementation consuming existing change capture is a design direction, not a
+capability this page promises. Keep any remaining application enforcement gaps
+explicit; do not treat a clean offline report as write-time protection.

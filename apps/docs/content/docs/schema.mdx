@@ -9,6 +9,74 @@ Gonvex application schemas are versioned SQL migrations in the app's
 `migrations/` directory. TypeScript module declarations describe function
 arguments and results; they do not replace the database schema.
 
+The target authoring model is a declarative application schema from which
+Gonvex generates storage, migrations and types. That compiler is not implemented
+by the current migration/codegen path. Domain declarations belong to the
+application; generic discovery, enforcement and diagnostics belong to Gonvex.
+
+## Model policy
+
+Store each fact once. Keep a derived copy only for a concrete read, index or
+compatibility path, with an owner that maintains it and a documented rebuild.
+Distinguish current relationships from external identities and historical
+snapshots; snapshots must not silently follow later edits to their source.
+
+Declare each relationship's target, optionality, cardinality/uniqueness, ownership
+and delete behavior. Use native SQL constraints when they are simple and cheap.
+Shared Gonvex validation in the same transaction is also valid; avoid per-Reducer
+copies and expensive generated SQL. Test valid and invalid writes, target updates
+and deletes, concurrent commit orders and atomic rollback. JSON and polymorphic
+references need the same explicit semantics. Metadata describes a contract;
+an offline audit detects violations. Neither proves write-time enforcement.
+
+Discover relationships from actual foreign keys and explicit application
+metadata. A name such as `ownerId` can suggest a missing declaration, but must
+not silently establish its target, ownership or deletion policy.
+
+Advisory diagnostics should identify a source location, the concrete concern,
+the change against the PR base and an actionable simplification. Likely duplicate
+representations, overlapping indexes, generated machinery growth and broad
+validation for small edits are warnings. Address a warning or explain the
+domain/workload reason for keeping the design. Do not gate PRs on arbitrary
+counts, a single complexity score or the unchanged warning backlog. Genuine
+integrity failures remain errors. Keep heuristic cost concerns distinct from
+benchmark measurements of reads, writes, startup, memory and upgrades.
+
+## Advisory schema check
+
+`gonvex schema check --project . --base origin/staging --json` reports design
+deltas. Codegen and dev print the same advisories. They reuse local schema
+compilation's SQLite connection and cache: no second schema registry or extra
+replay of historical migrations. The derived
+`gonvex/_generated/schema-inspection.json` is owned by codegen, has no runtime
+consumer, and can be rebuilt by rerunning codegen. Commit it so CI can inspect
+the exact PR base without executing its migrations. For codegen/dev in CI, set
+`BASE_SHA` to the fetched PR base; the local default is `HEAD`.
+
+The report covers added scalar/list pairs, identity-like names without native
+FKs or explicit runtime declarations, overlapping indexes, trigger/view SQL
+growth and unguarded update triggers that perform SELECT work. It preserves
+unique, partial, expression, collation and sort-direction distinctions. Source
+locations are best-effort migration DDL locations; SQLite determines the schema.
+ID names do not infer a target. SQL bytes/counts are inspection measurements;
+cost warnings are heuristics, not a benchmark or an integrity proof.
+
+On first adoption, or when the base inspection is missing/incompatible, the
+report states the coverage gap and emits no old backlog. Commit a codegen
+inspection on the base to enable later PR deltas. Advisory findings exit zero;
+invalid SQL or failed schema compilation remains an error. This command does
+not replace migration checks, application contract tests, or runtime probes.
+
+Application CI can retain the report as an artifact:
+
+```sh
+gonvex schema check --base "$BASE_SHA" --json > schema-advisories.json
+```
+
+The framework's CLI integration suite exercises codegen and the command against
+a real Git base; Runtime regression CI retains that transcript. Address a
+warning or explain the domain/workload reason for retaining the representation.
+
 ```txt
 my-app/
   gonvex/
@@ -25,8 +93,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+  updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
 );
 
 CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks (status);

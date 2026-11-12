@@ -27,7 +27,7 @@ async function loadSqlite(): Promise<SqliteModule> {
 
 /** Compile schema using SQLite itself, the engine tenants run on: apply the
  * migrations to an in-memory database and read the declared columns back. */
-export async function compileLocalSchema(migrations: readonly { name: string; sql: string }[]): Promise<LocalSchema> {
+export async function compileLocalSchema(migrations: readonly { name: string; sql: string }[], observe?: (db: InstanceType<SqliteModule['DatabaseSync']>, schema: LocalSchema) => void): Promise<LocalSchema> {
   const { DatabaseSync } = await loadSqlite();
   const db = new DatabaseSync(":memory:");
   try {
@@ -97,6 +97,7 @@ export async function compileLocalSchema(migrations: readonly { name: string; sq
       }
       if(keys.size)table.foreignKeys=[...keys.values()];
     }
+    observe?.(db, schema);
     return schema;
   } finally { db.close(); }
 }

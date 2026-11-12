@@ -96,6 +96,15 @@ jobs:
         run: node --test scripts/*.test.mjs
       - name: Test JavaScript workspace
         run: pnpm -r test
+        env:
+          GONVEX_SCHEMA_REPORT_DIR: ${{ runner.temp }}/schema-advisories
+      - name: Retain schema advisory CLI integration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-advisories
+          path: ${{ runner.temp }}/schema-advisories
+          if-no-files-found: ignore
       - name: Require post-storage watermark and readiness ownership and reject compiled stale completion controls
         run: node verification/typescript/check-watermark-publication-runtime.mjs --output "${{ runner.temp }}/watermark-publication-runtime"
       - name: Retain watermark ownership execution evidence

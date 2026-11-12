@@ -6,6 +6,7 @@ import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import type { LocalSchema } from "@gonvex/local-runtime/schema";
 import { compileLocalSchema } from "./local-schema.js";
+import { inspectSchemaDesign, type SchemaInspection } from './schema-inspection.js';
 import type { Manifest } from "./manifest-types.js";
 
 const runtimeGlobals = {
@@ -20,20 +21,26 @@ const runtimeWrapper = `import { withReducerRuntimeGlobals } from "@gonvex/modul
 const bindRuntimeGlobals = definition => Object.freeze({ ...definition, handler: (context, args) => withReducerRuntimeGlobals(context, () => definition.handler(context, args)) });`;
 
 export async function projectLocalSchema(root: string): Promise<LocalSchema> {
+  return (await projectSchemaInspection(root)).schema;
+}
+
+export async function projectSchemaInspection(root: string): Promise<{schema:LocalSchema;inspection:SchemaInspection}> {
   const migrationDirectory = join(root, "migrations");
   const names = (await readdir(migrationDirectory).catch(() => [] as string[])).filter((name) => name.endsWith(".sql")).sort();
   const migrations = await Promise.all(names.map(async (name) => ({ name, sql: await readFile(join(migrationDirectory, name), "utf8") })));
   const tenantMigrations = migrations.filter(({ sql }) => !/gonvex:scope\s+(control|landlord)/.test(sql));
-  const digest = createHash("sha256").update("local-schema-v4-record-views").update(JSON.stringify(tenantMigrations)).digest("hex");
+  const digest = createHash("sha256").update("local-schema-v5-inspection").update(JSON.stringify(tenantMigrations)).digest("hex");
   const cacheFile = join(root, "gonvex", "_build", `local-schema-${digest}.json`);
-  let schema: LocalSchema;
-  try { schema = JSON.parse(await readFile(cacheFile, "utf8")) as LocalSchema; }
+  let result: {schema:LocalSchema;inspection:SchemaInspection};
+  try { result = JSON.parse(await readFile(cacheFile, "utf8")) as typeof result; }
   catch {
-    schema = await compileLocalSchema(tenantMigrations);
+    let inspection!:SchemaInspection;
+    const schema = await compileLocalSchema(tenantMigrations,(db,local)=>{inspection=inspectSchemaDesign(db,local,tenantMigrations);});
+    result={schema,inspection};
     await mkdir(dirname(cacheFile), { recursive: true });
-    await writeFile(cacheFile, JSON.stringify(schema));
+    await writeFile(cacheFile, JSON.stringify(result));
   }
-  return schema;
+  return result;
 }
 
 /**
