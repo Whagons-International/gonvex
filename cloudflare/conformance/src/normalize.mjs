@@ -7,8 +7,9 @@
  *
  *  - Containers are expanded: `replica.batch` (delivery v2 stream bindings,
  *    exactly as `expandReplicaBatch` in @gonvex/protocol), `replica.readyMany`,
- *    `query.batch`, `query.fanout` and outbound `reducer.callMany`. Whether a
- *    backend batches is a transport choice, not behaviour.
+ *    `query.batch`, `query.fanout` and outbound `reducer.callMany`, and outbound
+ *    `replica.openMany` becomes one frame per open. Whether a backend batches is
+ *    a transport choice, not behaviour.
  *  - Snapshot pages are merged into one logical `replica.snapshot` per
  *    (subscription, snapshotId), rows sorted by key. Page size is tuning.
  *  - Client-minted identifiers become `<id#n>` / `<uuid#n>`, numbered by first
@@ -139,7 +140,7 @@ function dropUncomparedCapabilities(frame) {
 /** Expands container frames into the frames they stand for. `state.bindings` is per socket. */
 export function expand(frame, state) {
   // Malformed frames a scenario sends on purpose (decoder vectors) stay as they are.
-  const list = { 'replica.batch': 'items', 'replica.readyMany': 'ready', 'query.batch': 'messages', 'query.fanout': 'ids', 'reducer.callMany': 'calls' }[frame?.type];
+  const list = { 'replica.batch': 'items', 'replica.readyMany': 'ready', 'query.batch': 'messages', 'query.fanout': 'ids', 'reducer.callMany': 'calls', 'replica.openMany': 'opens' }[frame?.type];
   if (list && !Array.isArray(frame[list])) return [frame];
   switch (frame?.type) {
     case 'replica.batch': return expandReplicaBatch(frame, state.bindings).flatMap(f => expand(f, state));
@@ -147,6 +148,9 @@ export function expand(frame, state) {
     case 'query.batch': return frame.messages.flatMap(f => expand(f, state));
     case 'query.fanout': { const { queryType, ids, ...rest } = frame; return ids.map(id => ({ ...rest, type: queryType, id })); }
     case 'reducer.callMany': return frame.calls.map(c => ({ type: 'reducer.call', ...c }));
+    // One frame per open, in path and args order: how many opens the SDK groups depends on when the frames that
+    // prompted them arrived (two `needHashes` in one tick or two), not on the backend.
+    case 'replica.openMany': return canonicalOrder(frame).opens.map(o => ({ type: 'replica.openMany', opens: [o] }));
     default: return [frame];
   }
 }
@@ -242,24 +246,45 @@ export function normalizeSession(records) {
  * depending on timing. When the client's integrity reopen comes back with no
  * row change, the episode changed nothing the client can observe, and is
  * dropped. Episodes that move rows are kept and compared.
+ *
+ * The SDK reopens every collection it was asked about in the same tick in one
+ * `replica.openMany`, so whether two `needHashes` give one frame of two opens
+ * or two frames of one depends on when they arrive. A reopen frame is dropped
+ * with its episodes when every open in it answers a `needHashes` and none of
+ * them moves a row (K10: Rust and the kernel batch the same episode either way).
  */
 function dropNoopReconciles(list) {
   const drop = new Set();
+  const asked = new Map(); // socket -> id -> index of its unanswered needHashes
   for (let i = 0; i < list.length; i++) {
     const e = list[i];
-    if (e.dir !== 'in' || e.frame?.type !== 'replica.needHashes') continue;
-    const id = e.frame.id, episode = [i];
-    let reopened = false, noop = false;
-    for (let j = i + 1; j < list.length; j++) {
-      const f = list[j];
-      if (f.socket !== e.socket) continue;
-      const open = f.frame?.type === 'replica.openMany' && f.frame.opens?.length === 1 ? f.frame.opens[0] : undefined;
-      if (f.dir === 'out' && open?.id === id && open.fullIntegrity) { episode.push(j); reopened = true; continue; }
-      if (f.dir !== 'in' || f.frame?.id !== id) continue;
-      if (!reopened) break;
-      if (f.frame.type === 'replica.delta' && !f.frame.upserts?.length && !f.frame.deleted?.length) { episode.push(j); continue; }
-      if (f.frame.type === 'replica.ready') { episode.push(j); noop = true; }
-      break;
+    if (e.dir === 'in' && e.frame?.type === 'replica.needHashes') {
+      (asked.get(e.socket) ?? asked.set(e.socket, new Map()).get(e.socket)).set(e.frame.id, i);
+      continue;
+    }
+    const f = e.frame;
+    const opens = e.dir === 'out' && (f?.type === 'replica.openMany' ? f.opens : f?.type === 'replica.open' ? [f] : null);
+    if (!Array.isArray(opens) || !opens.length) continue;
+    const pending = asked.get(e.socket);
+    if (!opens.every(o => o?.fullIntegrity && pending?.has(o.id))) {
+      for (const o of opens) pending?.delete(o?.id);
+      continue;
+    }
+    // Each reopened id: an optional row-less delta, then its ready.
+    const episode = [i];
+    let noop = true;
+    for (const open of opens) {
+      episode.push(pending.get(open.id));
+      pending.delete(open.id);
+      let answered = false;
+      for (let j = i + 1; j < list.length; j++) {
+        const g = list[j];
+        if (g.socket !== e.socket || g.dir !== 'in' || g.frame?.id !== open.id) continue;
+        if (g.frame.type === 'replica.delta' && !g.frame.upserts?.length && !g.frame.deleted?.length) { episode.push(j); continue; }
+        if (g.frame.type === 'replica.ready') { episode.push(j); answered = true; }
+        break;
+      }
+      if (!answered) noop = false;
     }
     if (noop) for (const k of episode) drop.add(k);
   }

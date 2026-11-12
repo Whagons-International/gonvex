@@ -125,6 +125,10 @@ export interface SocketView {
   host: string;
   /** K14: the socket's presence before a presence event (rebuild of a tenant object that lost its memory). */
   presencePrevious?: ConnectionReport | null;
+  /** K10: the replica directive's scopes sent at auth (snapshot metadata). */
+  replica?: { scope: string; visibilityScope: string } | null;
+  /** K10: bumped whenever the socket's subscriptions are dropped. */
+  subscriptionEpoch?: number;
 }
 
 /** K17: a `gvx_svc_` credential's admission (`authenticate_service_principal`). */
@@ -176,6 +180,8 @@ export interface TenantPort {
   serviceCall?(grant: ServiceGrant, call: ServiceTenantCall): Promise<ServiceTenantOutcome>;
   /** K14: the socket closed or changed session; the tenant removes its presence with grace. */
   presenceLeave?(route: TenantRoute, connectionId: string, host: string, previous?: ConnectionReport | null): Promise<void>;
+  /** K10: the socket's subscriptions were dropped (`epoch` is its new subscription epoch). */
+  connectionReset?(route: TenantRoute, connectionId: string, epoch: number): Promise<void>;
 }
 
 export interface Ports {

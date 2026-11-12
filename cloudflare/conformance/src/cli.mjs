@@ -70,7 +70,7 @@ try {
     const ok = failures.length === 0 && diffs.length === 0 && ran.length > 0;
     const status = ran.length === 0 ? 'SKIP' : ok ? 'PASS' : 'FAIL';
     if (status === 'PASS') report.passed++; else if (status === 'SKIP') report.skipped++; else { report.failed++; exitCode = 1; }
-    console.log(`${status} ${scenario.name} (${((Date.now() - at) / 1000).toFixed(1)} s, ${ran[0]?.steps.length ?? 0} steps, digests verified ${ran.map(t => t.digestsChecked ?? 0).join('/')})`);
+    console.log(`${status} ${scenario.name} (${((Date.now() - at) / 1000).toFixed(1)} s, ${ran[0]?.steps.length ?? 0} steps, digests verified ${ran.map(t => t.digestsChecked ?? 0).join('/')}, watermarks ${ran.map(t => t.watermarksChecked ?? 0).join('/')})`);
     for (const line of [...failures, ...diffs]) console.log('  ' + line);
     for (const line of skipped) console.log('  skipped on ' + line);
     report.scenarios.push({ name: scenario.name, status, failures, diffs, skipped, traces });

@@ -32,6 +32,11 @@ import operatorRoutes from './operator-routes.mjs';
 import presenceEdges from './presence-edges.mjs';
 import actions from './actions.mjs';
 import servicePrincipals from './service-principals.mjs';
+import replicaOrphanReveal from './replica-orphan-reveal.mjs';
+import replicaWindows from './replica-windows.mjs';
+import replicaReset from './replica-reset.mjs';
+import replicaTenantRestart from './replica-tenant-restart.mjs';
+import replicaReconnectWave from './replica-reconnect-wave.mjs';
 import publicLimits from './public-limits.mjs';
 import publicCalls from './public-calls.mjs';
 import bridgeUpstream from './bridge-upstream.mjs';
@@ -67,6 +72,13 @@ export const SCENARIOS = [
   operatorRoutes,
   presenceEdges,
   actions,
+  // K10: budgets, truncated windows, pages, filters; IB5 and a tenant restart (kernel only).
+  replicaWindows,
+  replicaReset,
+  replicaOrphanReveal,
+  replicaTenantRestart,
+  // K10: restarts the backend under six clients.
+  replicaReconnectWave,
   // K21: the Go mobile bridge's upstream frames.
   bridgeUpstream,
   // K17: restarts the backend once, with its principals configured.

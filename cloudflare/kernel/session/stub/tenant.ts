@@ -58,6 +58,9 @@ export class TenantStubObject extends DurableObject<TenantStubEnv> implements Te
   /** K14: a socket closed or changed session; its presence leaves with grace. */
   async presenceLeave(connectionId: string, host: string, previous?: ConnectionReport | null): Promise<void> { await this.presence.leave(connectionId, host, previous ?? null); }
 
+  /** K10's subscription reset: this stand-in holds no subscriptions. */
+  async connectionReset(_connectionId: string, _epoch: number): Promise<void> {}
+
   /** Test seam: the tenant's published Members. */
   async presencePublished(projectId: string): Promise<PresenceMember[]> { return this.presence.published(projectId); }
 

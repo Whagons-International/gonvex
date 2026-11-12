@@ -168,6 +168,37 @@ test('a no-op integrity reconcile is dropped; one that moves rows is kept', () =
   assert.equal(normalizeSession(episode([{ id: 'n1' }])).length, 4);
 });
 
+test('no-op integrity reconciles batched into one reopen frame are dropped together; a moving one keeps them all', () => {
+  const a = '66666666-6666-4666-8666-666666666666', b = '77777777-7777-4777-8777-777777777777';
+  const cursor = { epoch: 'e', revision: 6 };
+  const open = (id) => ({ id, path: `p.${id}`, args: {}, cursor, keys: [], hashes: {}, digest: 'x', fullIntegrity: true });
+  const batched = (upserts) => [
+    rec('in', { type: 'replica.needHashes', id: a, path: `p.${a}` }),
+    rec('in', { type: 'replica.needHashes', id: b, path: `p.${b}` }),
+    rec('out', { type: 'replica.openMany', opens: [open(a), open(b)] }),
+    rec('in', { type: 'replica.delta', id: a, cursor, upserts: [], deleted: [] }),
+    rec('in', { type: 'replica.ready', id: a, cursor }),
+    rec('in', { type: 'replica.delta', id: b, cursor, upserts, deleted: [] }),
+    rec('in', { type: 'replica.ready', id: b, cursor }),
+  ];
+  const split = [
+    rec('in', { type: 'replica.needHashes', id: a, path: `p.${a}` }),
+    rec('out', { type: 'replica.openMany', opens: [open(a)] }),
+    rec('in', { type: 'replica.ready', id: a, cursor }),
+    rec('in', { type: 'replica.needHashes', id: b, path: `p.${b}` }),
+    rec('out', { type: 'replica.openMany', opens: [open(b)] }),
+    rec('in', { type: 'replica.ready', id: b, cursor }),
+  ];
+  assert.deepEqual(normalizeSession(batched([])), []);
+  assert.deepEqual(normalizeSession(split), []);
+  // The reopen is split into one frame per open: the no-op episode goes, the moving one stays whole.
+  const moving = normalizeSession(batched([{ id: 'n1' }]));
+  assert.deepEqual(moving.map((r) => r.frame.type), ['replica.needHashes', 'replica.openMany', 'replica.delta', 'replica.ready']);
+  assert.equal(moving[1].frame.opens.length, 1);
+  // A reopen the client sends on its own (never asked about) is kept with its answer.
+  assert.equal(normalizeSession(batched([]).filter((r) => !(r.frame.type === 'replica.needHashes' && r.frame.id === b))).length, 3);
+});
+
 test('0012 R20: session.ready drops replicaNativeRows, replicaSetDigest and replicaFieldPatches', () => {
   const ready = (capabilities) => normalizeSession([rec('in', { type: 'session.ready', capabilities })])[0].frame;
   const rust = ready({ presence: 1, replicaBatchFrames: 1, replicaNativeRows: 1, replicaSetDigest: 1, replicaFieldPatches: 1 });

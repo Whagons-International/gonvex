@@ -1,0 +1,20 @@
+// The K10 conformance Worker (`cloudflare-delivery` backend in
+// cloudflare/conformance): the K05 socket path with the K10 tenant object (K07's
+// Reducer path plus replica delivery) and the fixture bundles of the run.
+// Local only; never deployed.
+{
+  "name": "gonvex-cf-dev-k10-conformance",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // AsyncLocalStorage carries the active invocation across awaits (K04 globals.ts).
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "GATEWAY", "class_name": "GatewayObject" },
+      { "name": "CONTROL_STUB", "class_name": "KernelControlStub" },
+      { "name": "TENANT_STUB", "class_name": "ConformanceTenant" }
+    ]
+  },
+  "vars": { "GONVEX_RUNTIME_VERSION": "development", "GONVEX_GATEWAY_SHARDS": "8", "GONVEX_PRESENCE": "1" },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GatewayObject", "KernelControlStub", "ConformanceTenant"] }]
+}

@@ -39,6 +39,9 @@ const freePort = () => new Promise((resolve, reject) => {
 });
 
 export class CloudflareReducerBackend extends CloudflareBackend {
+  /** The harness directory whose `wrangler.jsonc` this adapter runs (K10 points it at its own). */
+  get harness() { return HARNESS; }
+
   /** `receiptExpiry`: receipts expire after the offline window (0009); Rust keeps them forever. */
   get capabilities() { return { restart: true, crash: true, receiptExpiry: true }; }
 
@@ -57,7 +60,7 @@ export class CloudflareReducerBackend extends CloudflareBackend {
   }
 
   /** The Worker config `wrangler dev` runs (K16's `cloudflare-public` runs its own harness on the same bundles). */
-  get harnessConfig() { return join(HARNESS, 'wrangler.jsonc'); }
+  get harnessConfig() { return join(this.harness, 'wrangler.jsonc'); }
 
   async start() {
     const fixtures = join(this.workDir, 'k07-fixtures');

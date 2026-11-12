@@ -22,6 +22,7 @@ import { Recorder, sdkClient, thinClient, RawSocket, control } from './sessions.
 import { normalizeSession, normalizeValue, Names } from './normalize.mjs';
 import { checksumRows } from './checksum.mjs';
 import { checkDigests } from './digest-check.mjs';
+import { checkWatermarks } from './watermark-check.mjs';
 
 export const PASSWORD = 'conformance-password-1';
 /** Client contract both SDKs announce (the fixture generates no local executor). */
@@ -217,6 +218,14 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
     trace.digestsChecked += checked;
     for (const p of [...new Set(problems)].slice(0, 5)) trace.failures.push(`digest self-check, session ${tag}: ${p}`);
     if (new Set(problems).size > 5) trace.failures.push(`digest self-check, session ${tag}: ${new Set(problems).size - 5} more mismatches`);
+  }
+
+  // ---- watermark self-check (0024 §2: values, which the diff compares only as sent or not) ----
+  {
+    const { checked, problems } = checkWatermarks(recorder.records);
+    trace.watermarksChecked = checked;
+    for (const p of [...new Set(problems)].slice(0, 5)) trace.failures.push(`watermark self-check: ${p}`);
+    if (new Set(problems).size > 5) trace.failures.push(`watermark self-check: ${new Set(problems).size - 5} more problems`);
   }
 
   // ---- normalize ----------------------------------------------------------------
