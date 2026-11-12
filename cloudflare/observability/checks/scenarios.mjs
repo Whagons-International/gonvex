@@ -25,8 +25,8 @@ export async function taskScenario(c, a) {
     for (const kind of ['create','update']) {
       c.assertDeadline();
       requireCheck(!c.signal.aborted && !c.guard.state.paused,'writes-paused','unknown');
-      const operation = ids(), begin = performance.now();
-      const record = { operationId:operation.operationId, kind, attempted:true, attemptedAt:Date.now(), deadlineMs:c.deadlineMs, status:'fail' };
+      const operation = ids(), attemptedAfterMs=c.elapsedMs(), begin = performance.now();
+      const record = { operationId:operation.operationId, kind, attempted:true, attemptedAt:Date.now(), attemptedAfterMs, deadlineMs:c.deadlineMs, status:'fail' };
       operations.push(record);
       const receipt = await a.mutate(c.identities.writer, { kind, fixtureId, ...operation, signal: c.signal });
       requireCheck(receipt?.durable === true && receipt?.operationId === operation.operationId && Number.isSafeInteger(receipt.revision) && receipt.revision > 0, 'durable-confirmation');

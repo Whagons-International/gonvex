@@ -1,42 +1,32 @@
 import { requireCheck, finite } from '../checks/contract.mjs';
-const keys = ['schema','sourceSha','deploy','region','executor','configSha','domain','environment','check','scheduledAt','startedAt','finishedAt','deadlineMs','clockUncertaintyMs','attempt','operationId','traceId','idempotencyKey','status','code','durationMs','operations','settlement','settledElapsedMs','cleanupState','deadlineExceeded','observedStatus','observedCode'];
-/** Strict ingress: arbitrary provider bodies/errors/headers cannot enter retained raw records. */
-export function validateRaw(r) {
-  requireCheck(r && Object.keys(r).every(k=>keys.includes(k)) && r.schema === 'gonvex.monitor.v1','raw-schema');
-  requireCheck(['sourceSha','deploy','region','executor','configSha','domain','environment','check','code'].every(k=>typeof r[k]==='string' && /^[a-zA-Z0-9._-]{1,128}$/.test(r[k])),'raw-provenance');
-  requireCheck(['pass','fail','unknown','blocked','export-failed','paused'].includes(r.status) && [0,1].includes(r.attempt),'raw-outcome');
-  requireCheck(['scheduledAt','startedAt','finishedAt','deadlineMs','clockUncertaintyMs','durationMs'].every(k=>finite(r[k])) && r.deadlineMs>0 && r.finishedAt>=r.startedAt,'raw-timing');
-  requireCheck(/^[a-f0-9]{32}$/.test(r.traceId) && [r.operationId,r.idempotencyKey].every(x=>typeof x==='string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(x)),'raw-ids');
-  if (r.settlement !== undefined) requireCheck(['fulfilled','rejected','unsettled'].includes(r.settlement),'raw-settlement');
-  if (r.settledElapsedMs !== undefined) requireCheck(finite(r.settledElapsedMs) && r.settlement !== 'unsettled','raw-settlement-timing');
-  if (r.cleanupState !== undefined) requireCheck(['not-applicable','unknown','failed','retained','ledger-clear'].includes(r.cleanupState),'raw-cleanup');
-  if (r.deadlineExceeded !== undefined) requireCheck(typeof r.deadlineExceeded === 'boolean','raw-deadline');
-  if (r.observedStatus !== undefined) requireCheck(['pass','fail','unknown','blocked'].includes(r.observedStatus),'raw-observed-status');
-  if (r.observedCode !== undefined) requireCheck(typeof r.observedCode==='string' && /^[a-z-]{1,64}$/.test(r.observedCode),'raw-observed-code');
-  requireCheck(Array.isArray(r.operations) && r.operations.length<=2,'operation-cap');
-  for (const o of r.operations) {
-    requireCheck(Object.keys(o).every(k=>['operationId','kind','attempted','durableMs','appliedMs','deadlineMs','status','attemptedAt'].includes(k)) && ['create','update'].includes(o.kind) && o.attempted === true && ['pass','fail'].includes(o.status),'operation-schema');
-    requireCheck(typeof o.operationId==='string' && /^[a-f0-9-]{36}$/.test(o.operationId) && finite(o.deadlineMs,1),'operation-id');
-    if (o.attemptedAt !== undefined) requireCheck(finite(o.attemptedAt) && o.attemptedAt>=r.startedAt-r.clockUncertaintyMs && o.attemptedAt<=r.finishedAt+r.clockUncertaintyMs,'operation-timing');
-    if (o.status==='pass') requireCheck(finite(o.durableMs) && finite(o.appliedMs) && o.durableMs<=o.appliedMs && o.appliedMs<=o.deadlineMs && o.appliedMs<=r.durationMs,'operation-success-proof');
-  }
-  return r;
-}
+import { validateRaw } from '../checks/raw-result.mjs';
+export { validateRaw } from '../checks/raw-result.mjs';
 const inside = (t, windows) => windows.some(w=>t>=w.start && t<w.end);
 /** One check/component/region/deploy per call. Scheduled slots use the explicit piecewise-constant
  * estimator, NOT continuous-health proof. Missing, late, provider-heartbeat loss are UNKNOWN.
  * Retries corroborate but never replace the first attempt. No cross-region quorum.
  */
 export function replay({ schedule, records, heartbeat = [], maintenance = [], asOf }) {
+  requireCheck(schedule && typeof schedule==='object','schedule');
   const { start,end,intervalMs,deadlineMs,lagMs,clockUncertaintyMs,check,region,deploy,component } = schedule;
-  requireCheck([start,end,intervalMs,deadlineMs,lagMs,clockUncertaintyMs,asOf].every(x=>finite(x)) && end<=asOf && end>start && intervalMs>0 && deadlineMs>0 && (end-start)/intervalMs<=100000, 'schedule');
+  requireCheck([start,end,intervalMs,deadlineMs,lagMs,clockUncertaintyMs,asOf].every(x=>finite(x) && x<=Number.MAX_SAFE_INTEGER) && end<=asOf && end>start && intervalMs>0 && deadlineMs>0 && (end-start)/intervalMs<=100000, 'schedule');
+  requireCheck(['Web','API','Sync','Files','Background','Monitoring'].includes(component) && [check,region,deploy].every(x=>typeof x==='string' && /^[a-zA-Z0-9._-]{1,128}$/.test(x)),'schedule-labels');
+  if (schedule.retryBackoffMs!==undefined) requireCheck(finite(schedule.retryBackoffMs) && schedule.retryBackoffMs<=Number.MAX_SAFE_INTEGER,'schedule-backoff');
   for (const m of maintenance) requireCheck(finite(m.start) && finite(m.end) && finite(m.declaredAt) && m.start<m.end && m.declaredAt<=m.start,'maintenance-not-predeclared');
   requireCheck(Array.isArray(records) && records.length<=200000,'record-cap');
   const scoped = records.map(validateRaw).filter(r=>r.check===check && r.region===region && r.deploy===deploy);
   const overlaps = r => r.startedAt < end && r.finishedAt >= start;
   const scheduledInside = r => r.scheduledAt >= start && r.scheduledAt < end;
   const onGrid = r => scheduledInside(r) && Number.isInteger((r.scheduledAt-start)/intervalMs);
-  const relevant = scoped.filter(r=>scheduledInside(r) || overlaps(r));
+  const candidates=new Map(scoped.map(r=>[r,r.operations.map(o=>{
+    const uncertainty=Math.max(clockUncertaintyMs,r.clockUncertaintyMs);
+    const from=(o.attemptedAt ?? r.startedAt)-uncertainty;
+    const to=(o.attemptedAt ?? r.finishedAt)+uncertainty;
+    return { o,from,to,eligible:from<end && to>=start && from<=asOf,
+      windowUncertain:from<start || to>=end };
+  })]));
+  // Inspect operation timestamps on ALL scoped records before selecting check observations.
+  const relevant=scoped.filter(r=>scheduledInside(r) || overlaps(r) || candidates.get(r).some(c=>c.eligible));
   for (const key of ['sourceSha','configSha','environment','domain']) requireCheck(new Set(relevant.map(r=>r[key])).size<=1,'mixed-provenance');
   const bySlot = new Map(), operations = new Map(), observations = [];
   const recordAccounting = { scoped:scoped.length, eligible:relevant.length, outsideWindow:scoped.length-relevant.length,
@@ -45,14 +35,15 @@ export function replay({ schedule, records, heartbeat = [], maintenance = [], as
     operationsPending:0, operationsUnknown:0 };
   const slotCount = Math.ceil((end-start)/intervalMs), issueDeltas = new Map();
   // Range deltas bound work to records + slots, even if an anomalous check spans many slots.
-  const affectCoverage = (r, reason) => {
-    if (!overlaps(r)) return;
-    const first = Math.max(0, Math.floor((r.startedAt-start)/intervalMs));
-    const last = Math.min(slotCount-1, Math.max(first, Math.ceil((r.finishedAt-start)/intervalMs)-1));
+  const affectRange = (from,to,reason) => {
+    if (!(from<end && to>=start)) return;
+    const first=Math.max(0,Math.floor((from-start)/intervalMs));
+    const last=Math.min(slotCount-1,Math.max(first,Math.floor((to-start)/intervalMs)));
     let delta = issueDeltas.get(reason);
     if (!delta) { delta = new Int32Array(slotCount+1); issueDeltas.set(reason,delta); }
     delta[first]++; delta[last+1]--;
   };
+  const affectCoverage=(r,reason)=>affectRange(r.startedAt,r.finishedAt,reason);
   for (const r of relevant) {
     const grid = onGrid(r), observed = r.finishedAt<=asOf;
     const uncertainty = Math.max(clockUncertaintyMs,r.clockUncertaintyMs);
@@ -68,28 +59,26 @@ export function replay({ schedule, records, heartbeat = [], maintenance = [], as
     if (r.attempt===1) recordAccounting.retries++;
     if (observed && r.attempt===0 && r.status==='fail') recordAccounting.firstFail++;
     if (observed && r.attempt===0 && r.status==='pass') recordAccounting.firstPass++;
-    // Operation eligibility comes from ACTUAL attempt time, independently of scheduled slots.
-    // Legacy v1 records lack per-operation timestamps: retain every attempt in an overlapping
-    // check, flag boundary ambiguity, and never infer a successful boundary-straddling attempt.
-    for (const o of r.operations) {
-      requireCheck(o.deadlineMs<=deadlineMs && o.deadlineMs<=r.deadlineMs,'operation-deadline-contract');
-      const exactTime = o.attemptedAt !== undefined;
-      const eligible = exactTime ? o.attemptedAt>=start && o.attemptedAt<end && o.attemptedAt<=asOf : overlaps(r) && r.startedAt<=asOf;
-      if (!eligible) { recordAccounting.operationsOutsideWindow++; continue; }
-      requireCheck(!operations.has(o.operationId),'duplicate-operation');
-      if (!exactTime) recordAccounting.operationTimeFallback++;
-      const windowUncertain = !exactTime && (r.startedAt<start || r.finishedAt>end);
-      if (windowUncertain) { recordAccounting.operationWindowUncertain++; affectCoverage(r,'operation-window-uncertain'); }
-      if (!observed) recordAccounting.operationsUnconfirmedAtAsOf++;
-      const expired = asOf>=(o.attemptedAt ?? r.startedAt)+o.deadlineMs+r.clockUncertaintyMs;
-      const status = !observed ? expired?'fail':'pending' : o.status==='fail'?'fail':windowUncertain?'unknown':'pass';
-      if (status==='pending') recordAccounting.operationsPending++;
-      if (status==='unknown') recordAccounting.operationsUnknown++;
-      operations.set(o.operationId,{ ...o,status });
-      if (status!=='pass') affectCoverage(r,status==='fail'?'failed-operation':'unconfirmed-operation');
-    }
     observations.push({ operationId:r.operationId,scheduledAt:r.scheduledAt,startedAt:r.startedAt,finishedAt:r.finishedAt,
       attempt:r.attempt,status:r.status,onGrid:grid,late,observedAtAsOf:observed,settlement:r.settlement ?? 'unrecorded' });
+  }
+  for (const r of scoped) for (const {o,from,to,eligible,windowUncertain} of candidates.get(r)) {
+    if (!eligible) { recordAccounting.operationsOutsideWindow++; continue; }
+    requireCheck(o.deadlineMs<=deadlineMs && o.deadlineMs<=r.deadlineMs,'operation-deadline-contract');
+    requireCheck(!operations.has(o.operationId),'duplicate-operation');
+    const exactTime=o.attemptedAt!==undefined, observed=r.finishedAt<=asOf;
+    if (!exactTime) recordAccounting.operationTimeFallback++;
+    if (windowUncertain) { recordAccounting.operationWindowUncertain++; affectRange(from,to,'operation-window-uncertain'); }
+    if (!observed) recordAccounting.operationsUnconfirmedAtAsOf++;
+    const expired=asOf>=(o.attemptedAt ?? r.startedAt)+Math.max(clockUncertaintyMs,r.clockUncertaintyMs)+o.deadlineMs;
+    // Monotonic offsets bind new producers; legacy v1 uses its declared wall-clock tolerance.
+    const appliedUpper=exactTime ? o.attemptedAt+(o.appliedMs ?? 0)+r.clockUncertaintyMs : r.finishedAt+r.clockUncertaintyMs;
+    const proofByCutoff=observed && appliedUpper<=asOf;
+    const status=!observed ? expired?'fail':'pending' : o.status==='fail'?'fail':windowUncertain||!proofByCutoff?'unknown':'pass';
+    if (status==='pending') recordAccounting.operationsPending++;
+    if (status==='unknown') recordAccounting.operationsUnknown++;
+    operations.set(o.operationId,{status});
+    if (status!=='pass') affectRange(from,Math.max(to,Math.min(r.finishedAt,end)),status==='fail'?'failed-operation':'unconfirmed-operation');
   }
   const ordered = [...maintenance].sort((a,b)=>a.start-b.start);
   requireCheck(ordered.every((m,i)=>i===0 || m.start>=ordered[i-1].end),'maintenance-overlap');

@@ -181,3 +181,43 @@ Independent prior-slot heartbeat matching is unchanged by these fixes; its exist
 window is an unrated input-contract diagnostic in the 445 review, not new heartbeat/hosted proof. Actual
 independent scheduling, grace policy and outage drills remain activation dependencies. No reviewed-source
 clearance is inferred from author regression tests; lead must arrange a NEW independent review of the pin.
+
+## Revision after the 49399492 recheck
+
+The original445 and corrected493 evidence and both older test files remain immutable. New evidence is
+appended under `verification/M05-foundation/revision-r2/`; it is author validation, not independent clearance.
+
+Operation eligibility is computed from **all scoped operations before check-record selection**, using the
+actual attempted timestamp and declared clock uncertainty. A potentially in-window attempt at a coarse/
+uncertain boundary stays in the denominator even when its enclosing check starts outside the window.
+Affected coverage is UNKNOWN rather than an invented full-slot outage; known failed attempts remain failed.
+An uncertain boundary cannot certify successful operation membership in the window. Exact out-of-window
+attempts remain explicitly outside. Original legacy check-start deadline fallback remains labeled as such.
+
+Raw validation now lives in the dependency-free `checks/raw-result.mjs`, re-exported by replay and used by
+`runCheck` **before returning anything eligible for retention/export**. Every present timing field, for
+both failed and successful operations, must be a finite nonnegative number bounded by the representable
+millisecond domain and its enclosing observation. Missing failure timing remains absent; malformed values
+are not silently stripped into a successful/empty report. A malformed producer outcome aborts/pauses new
+writes and rejects the entire raw output with a fixed UNKNOWN integrity error. It does not claim cleanup
+settlement or manufacture a zero-attempt healthy result. Provider wrappers must preserve that rejection as
+UNKNOWN/failed coverage, just as for invalid replay input.
+
+Validation snapshots own data descriptors and returns independent plain records. Accessors, custom
+serializers/prototypes, unknown fields and nonnumeric nested timing data cannot survive the boundary.
+No raw operation spread is retained by producer or reporting. CLI errors emit only a fixed integrity code,
+without parser context, input values, arbitrary provider errors, headers, contents or paths. Consumers
+must never serialize rejected input or convert rejection to an empty healthy report.
+
+Every present elapsed value fits within the enclosing monotonic duration. With `attemptedAt`, its relative
+proof must also fit the remaining observation, allowing **only the declared clock tolerance**. Contradictory
+future application raises integrity UNKNOWN and returns no availability object. Clock-consistent evidence
+whose latest possible applied time is beyond `asOf` remains UNKNOWN, not premature success. Legacy v1
+records without attempt timestamps still use the explicitly counted enclosing-check fallback. New task
+records additionally carry monotonic `attemptedAfterMs`; offset+elapsed must fit the observation exactly.
+The producer declares Date.now's one-millisecond quantization plus measured alignment-read time, in addition
+to configured clock uncertainty, rather than claiming unsynchronized sub-millisecond wall-clock precision.
+
+All full M05/real application/hosted/trace/drill/status/security/capacity/cost/actual-duration holds remain.
+No provider, sender, account, resource or serving instrumentation was activated. A NEW independent recheck
+of the resulting pin belongs to lead; completed reviewers are never reused by this implementation.
