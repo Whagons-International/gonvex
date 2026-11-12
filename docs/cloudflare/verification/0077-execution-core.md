@@ -41,3 +41,13 @@ header/range4); the older README's two-slot statement is drift. No helper, cap o
 New phases use the unchanged wrapper inside headroom/coach-resources/kernel-v1. The first19b focused
 phase and earlier lead generator phases lacked an explicit wrapper; their compile-slot coverage is
 UNVERIFIED, not retroactively certified. Tests/hashes remain scoped results, not a historical two-slot claim.
+
+Subsequent separate local topology fixture passes: an actual guardian unit survived SIGKILL of an exact
+owned operator unit and real Node descendant; original process identities disappeared and its cgroup was
+removed. The later stop command returned unit-not-loaded, which was not used as settlement proof. Both
+finite units settled and fixture temp data was removed. Receipt/source/raw logs are under the lead root's
+`0077-execution-lane/topology-test/`; normal resource gates and the unchanged wrapper were used.
+This proves ONE local process topology, not the production Vault/Wrangler bridge, Container stop, API
+cleanup,70s/10min bounds or host loss. A concrete three-handoff typed proposal now exists at
+`0077-execution-lane/bridge-proposal.md`; trusted transport, actual durable API handoffs/watchdog and an
+independent recovery executor remain unimplemented/unarmed. Frozen19b/core archive remain unchanged.
