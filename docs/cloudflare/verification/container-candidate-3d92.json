@@ -1,0 +1,271 @@
+{
+  "status": "verified-and-published-development-images",
+  "source": "3d92e1339b2d65dbc47ac2f5713f56bd9e57d738",
+  "runtime": "18afb02a5cccde933c571f7448a930ebafe574a0",
+  "runId": 43251641388,
+  "jobId": 131298712493,
+  "artifact": {
+    "runId": 43251641388,
+    "source": "3d92e1339b2d65dbc47ac2f5713f56bd9e57d738",
+    "artifactId": 13962905071,
+    "zipBytes": 323327347,
+    "apiZipDigest": "sha256:949c39e703692fdf21fcf5a77c6acbdc638d9452aed96aa3e4c8223cd773c01e",
+    "zipDigestVerified": true,
+    "entries": [
+      "builder.Dockerfile",
+      "builder.archive.json",
+      "builder.docker.tar",
+      "builder.metadata.json",
+      "images.json",
+      "inputs.json",
+      "sandbox.Dockerfile",
+      "sandbox.archive.json",
+      "sandbox.docker.tar",
+      "sandbox.metadata.json"
+    ],
+    "extractedBytes": 323326053
+  },
+  "trackedAndEffectiveInputs": 2303,
+  "context": {
+    "source": "3d92e1339b2d65dbc47ac2f5713f56bd9e57d738",
+    "archiveSha256": "d18d051aadfc0b9a16376968613eb170662406d60d43f00d113bbb8f36e42909",
+    "contextManifestSha256": "7cdb45b646a731d0a78a6dcd24a905371d2bb7eedc414274bca9dc8adb26b938"
+  },
+  "buildStartedAt": "2026-11-12T15:47:52.230Z",
+  "buildFinishedAt": "2026-11-12T16:18:53.376Z",
+  "archiveBytes": 322401280,
+  "tools": {
+    "docker": "29.4.2",
+    "buildx": "github.com/docker/buildx v0.38.2 3c4cbd35852fc1a476923627a780a7836c28b654"
+  },
+  "pinnedDaemonlessClient": {
+    "name": "crane",
+    "version": "v0.20.6",
+    "binarySha256": "d34b66d2ed234bd3d7d956b48c77e29e367db538912826d7b3f1ac7309e6caf0"
+  },
+  "images": [
+    {
+      "kind": "sandbox",
+      "developmentImageName": "gonvex-cf-dev-artifact-pr400-sandbox",
+      "archive": {
+        "format": "docker-save-v1",
+        "file": "sandbox.docker.tar",
+        "bytes": 129944576,
+        "sha256": "d6661258aa0423b2c0abdb5d969ce8bb5f7f4243c3f0caea432cbf421ee3c8bd",
+        "tag": "gonvex-cf-dev-artifact-pr400-sandbox:3d92e1339b2d65dbc47ac2f5713f56bd9e57d738"
+      },
+      "recipe": "cloudflare/sandbox/container/Dockerfile",
+      "pinnedRecipeSha256": "0b560193fb2c57c7b96886d4faf3745a8482b6e2b98195c34d3aeb2519bf1c4d",
+      "bases": [
+        {
+          "original": "docker/dockerfile:1",
+          "pinned": "docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e"
+        },
+        {
+          "original": "rust:1.94-bookworm",
+          "pinned": "rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55"
+        },
+        {
+          "original": "node:22.18-bookworm-slim",
+          "pinned": "node:22.18-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e"
+        }
+      ],
+      "builtIndex": "sha256:4d6273af77c5717de0f27d9d85a001f2894cc21c5d4c1f71d17b8df7f60ccf8f",
+      "builtPlatform": "sha256:adfa740af3ae24a2bd3a573fb69373a3e03418f63d1bb0c309cbeed7fdb3a039",
+      "configDigest": "sha256:9cfb3c63612b99c974a76cf4d805d4a6b96116e690390cfa4afdc6263db5fcb3",
+      "publishedImportManifest": "sha256:304864ae1880b67a696c8ac5edcfc6d2db11dec0656b7ce5901f9bdd8b24f903",
+      "publishedAt": "2026-11-12T16:28:40.050027+00:00",
+      "layers": [
+        {
+          "compressedDigest": "sha256:b1badc6e50664185acfaa0ca255d8076061c2a9d881cecaaad281ae11af000ce",
+          "compressedBytes": 28230255,
+          "diffId": "sha256:eb5f13bce9936c760b9fa73aeb1b608787daa36106cc888104132e353ed37252",
+          "uncompressedBytes": 77875200
+        },
+        {
+          "compressedDigest": "sha256:7d0731002e5f78a5a17484bce03c29cb6e053875de4a31ff3244b6e5e7880e68",
+          "compressedBytes": 3313,
+          "diffId": "sha256:5e63d79d36027aac3b9fffcdd79aec007ba39bac1fbb918dcd6db5aa41f9c19a",
+          "uncompressedBytes": 21504
+        },
+        {
+          "compressedDigest": "sha256:e27ae6f53ba4439325ee069de45f39b873e39a177c8116f2e317adfc666f0a4e",
+          "compressedBytes": 48967524,
+          "diffId": "sha256:06769c9c802b79461910d4a68119c97dce29b4e1d1d47039c760aba60e084629",
+          "uncompressedBytes": 144616448
+        },
+        {
+          "compressedDigest": "sha256:9ebb4f79935d9398dc2bf52eb9dd2d2898be4ae2f19428dcfd200ee4b0c59387",
+          "compressedBytes": 1712539,
+          "diffId": "sha256:4f5fd88901b05e59a3cd054b22447a2ad4b13fb964da9489f023ffea11683856",
+          "uncompressedBytes": 7211520
+        },
+        {
+          "compressedDigest": "sha256:3d741e5a2c15f09f73507900c996aa5bacf9d2ea2811bc5222075fefa6217431",
+          "compressedBytes": 446,
+          "diffId": "sha256:b54dd33191f2b56314b0cb0e39066c22ec5a18f11f1fcc7a279f319d3da8a49a",
+          "uncompressedBytes": 3584
+        },
+        {
+          "compressedDigest": "sha256:c51349f20cbd5db02c32f678c72fefc93a1e7ad403215940ac183c2027ce6072",
+          "compressedBytes": 36491918,
+          "diffId": "sha256:103caf3cbf024a4b7a241bde0de582bfc0a3f3c78849387811224065b009d94f",
+          "uncompressedBytes": 111736320
+        },
+        {
+          "compressedDigest": "sha256:f2c846523f066ecb6be02e301719af62ba80fe524b354155f7fdc9bfdbe09dd8",
+          "compressedBytes": 14484617,
+          "diffId": "sha256:4e218bc7d682a0516d91048f7f3ac3954c40d02d03ff17cfa89da1c2350deb12",
+          "uncompressedBytes": 44278784
+        },
+        {
+          "compressedDigest": "sha256:902f1f71eb558575aef871d1c4d66043f2774a71ccf828289ad69fd85eb2c70b",
+          "compressedBytes": 6226,
+          "diffId": "sha256:b60543e1485863f1ce9168b6ec7b483630f64c04c5d58004f49d5be57b92d7ec",
+          "uncompressedBytes": 21504
+        }
+      ],
+      "attestations": [
+        {
+          "digest": "sha256:b01e4a8d00b3e6dd143e99c3372c77a165e23ff25a1df175cd730b7db293eaa3",
+          "predicateType": "https://slsa.dev/provenance/v1",
+          "subjectVerified": true
+        }
+      ]
+    },
+    {
+      "kind": "builder",
+      "developmentImageName": "gonvex-cf-dev-artifact-pr400-builder",
+      "archive": {
+        "format": "docker-save-v1",
+        "file": "builder.docker.tar",
+        "bytes": 192456704,
+        "sha256": "d1c762358087551d84c395ec44553608e2d188c846e8de918921886dbde5abff",
+        "tag": "gonvex-cf-dev-artifact-pr400-builder:3d92e1339b2d65dbc47ac2f5713f56bd9e57d738"
+      },
+      "recipe": "cloudflare/control/operator/builder/Dockerfile",
+      "pinnedRecipeSha256": "f23399a084a44555b3d14e0507c8f2a2b9113a9f5ca594d2fa2469f69f2cd227",
+      "bases": [
+        {
+          "original": "node:22.18-bookworm-slim",
+          "pinned": "node:22.18-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e"
+        }
+      ],
+      "builtIndex": "sha256:4838e359580bf22f4d1878cfc85c4b2fd22f07fd77b9ec1631a95fccc0e8f510",
+      "builtPlatform": "sha256:84c96b2bf3baf07a7dcbc61c925575d062f05ad44cca6e42f562655e16e3a351",
+      "configDigest": "sha256:2fcbfaa071ebfaf4cf05c062603d951bcb6252bbb99a42bde49212b863eb4a19",
+      "publishedImportManifest": "sha256:dcf301c14329e3de0f6e177e01cdd937f47c5c3dbfaf55fa2e187c2d32da892f",
+      "publishedAt": "2026-11-12T16:29:04.860046+00:00",
+      "layers": [
+        {
+          "compressedDigest": "sha256:b1badc6e50664185acfaa0ca255d8076061c2a9d881cecaaad281ae11af000ce",
+          "compressedBytes": 28230255,
+          "diffId": "sha256:eb5f13bce9936c760b9fa73aeb1b608787daa36106cc888104132e353ed37252",
+          "uncompressedBytes": 77875200
+        },
+        {
+          "compressedDigest": "sha256:7d0731002e5f78a5a17484bce03c29cb6e053875de4a31ff3244b6e5e7880e68",
+          "compressedBytes": 3313,
+          "diffId": "sha256:5e63d79d36027aac3b9fffcdd79aec007ba39bac1fbb918dcd6db5aa41f9c19a",
+          "uncompressedBytes": 21504
+        },
+        {
+          "compressedDigest": "sha256:e27ae6f53ba4439325ee069de45f39b873e39a177c8116f2e317adfc666f0a4e",
+          "compressedBytes": 48967524,
+          "diffId": "sha256:06769c9c802b79461910d4a68119c97dce29b4e1d1d47039c760aba60e084629",
+          "uncompressedBytes": 144616448
+        },
+        {
+          "compressedDigest": "sha256:9ebb4f79935d9398dc2bf52eb9dd2d2898be4ae2f19428dcfd200ee4b0c59387",
+          "compressedBytes": 1712539,
+          "diffId": "sha256:4f5fd88901b05e59a3cd054b22447a2ad4b13fb964da9489f023ffea11683856",
+          "uncompressedBytes": 7211520
+        },
+        {
+          "compressedDigest": "sha256:3d741e5a2c15f09f73507900c996aa5bacf9d2ea2811bc5222075fefa6217431",
+          "compressedBytes": 446,
+          "diffId": "sha256:b54dd33191f2b56314b0cb0e39066c22ec5a18f11f1fcc7a279f319d3da8a49a",
+          "uncompressedBytes": 3584
+        },
+        {
+          "compressedDigest": "sha256:0aa7398654ea8f53d7a0db19e796c60d6068433141e31ff04663c4057ab4e2ee",
+          "compressedBytes": 96,
+          "diffId": "sha256:6ef7b903ff2becc55118e81410a79b23b4082dd38860301dc60002c8113097f6",
+          "uncompressedBytes": 1536
+        },
+        {
+          "compressedDigest": "sha256:a509c883991287175eab7514b80728c160674fd86cffc371ab96b2a6195e73ed",
+          "compressedBytes": 4310860,
+          "diffId": "sha256:6f76c1d40a9eb70cf423108dbbec5a3af7ec43ea0ac11f8bd000001156f70a48",
+          "uncompressedBytes": 17924096
+        },
+        {
+          "compressedDigest": "sha256:b2300eee40e1465df52781514943e0c3d8b82325eb4886f046b1f1b4ac345e15",
+          "compressedBytes": 81485,
+          "diffId": "sha256:3eb806bb15cbf0d1d5dcc24b29d444564b5785a954a006afd1002be6adbc2907",
+          "uncompressedBytes": 296960
+        },
+        {
+          "compressedDigest": "sha256:460c9ee3333a3c5e301208a277ea35bb9b7066f5a3d9f8424c93d4ebeb423fe4",
+          "compressedBytes": 759,
+          "diffId": "sha256:e155966d663a20b5eb208fe45d722e94f848225d13885e1c532f5048c10ece67",
+          "uncompressedBytes": 4608
+        },
+        {
+          "compressedDigest": "sha256:99f8866d81f4d66d15ddb19a33782450a3992a65e485ffd82316350afcc953a8",
+          "compressedBytes": 106757094,
+          "diffId": "sha256:92fe19b7116ca8abe6be7897dea10d76dd7282a63e6366c5b3f52888ead4a630",
+          "uncompressedBytes": 381816320
+        },
+        {
+          "compressedDigest": "sha256:5f41096b14b57109637e9e59ffec85ece4107e08cc626f56d12bb90da45f2b21",
+          "compressedBytes": 4136,
+          "diffId": "sha256:1b9aea820a813c502d51f6ba26215ce22454cbfa3c03003665792820c634cb2d",
+          "uncompressedBytes": 27136
+        },
+        {
+          "compressedDigest": "sha256:975ae8301158b186f2cd2d6a9937e7843346811c8567f36cf43a30e7503623ea",
+          "compressedBytes": 2320828,
+          "diffId": "sha256:600ba908ad8988f8517f32a07771c5f0261bf49cace3ca824770bf984b9c41db",
+          "uncompressedBytes": 10309120
+        },
+        {
+          "compressedDigest": "sha256:d771a2f823d94553742a599fa9ae03f1bb87d5483f54bb56b38ec4389dcc503c",
+          "compressedBytes": 10217,
+          "diffId": "sha256:5b8b2047c05356b2c8907e88f5d6662f3fb6745193ca4b7ec8da523f463474e4",
+          "uncompressedBytes": 37376
+        }
+      ],
+      "attestations": [
+        {
+          "digest": "sha256:b7560a9658454d940eff15075e3d6f5187ea8d2bfa06385e5f617d403fdb9990",
+          "predicateType": "https://slsa.dev/provenance/v1",
+          "subjectVerified": true
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "sourceContextRecipeBaseMetadataArchive": true,
+    "allBlobCompressedUncompressedConfigDiffIds": true,
+    "slsaV1SubjectMaterials": true,
+    "fullImportValidation": true,
+    "remoteFullValidationConfigRootfsLayers": true,
+    "authStoreRemoved": true
+  },
+  "servingDeployment": null,
+  "proofScope": "frozen18afb candidate; not future owner-lifecycle source, full acceptance or platform CPU proof",
+  "limitations": [
+    "Full local38 campaign remains FAILED34PASS/4FAIL",
+    "Owner lifecycle/N6/stranded OWNER remains open",
+    "Final full-cloudflare COPY changes require fresh builder source campaign",
+    "No Worker/Container deployment or deployment/config IDs yet",
+    "Original K22/X01/V01-V06/capacity/security/actual-duration gates remain unchanged"
+  ],
+  "validatorHashes": {
+    "download.sh": "b0b3aa79eeecd53c8fc8da9aa3503769f3ff16e43c3b186a56df261e6c617697",
+    "verify.mjs": "a7650d0f2a169a54f9c7c46da1ff9ad9464080a03a35b1dee1842b31af0acedd",
+    "verify-layers.py": "4eb086ef92a29c2dc75360f6927e697eefa5a6340fb2a8f2756db60d9726e53d",
+    "publish-dev.py": "fa959715f8f41c4c52e2612523d1702ff4398c9e6085d7232be3a9684ec8b8ad"
+  }
+}

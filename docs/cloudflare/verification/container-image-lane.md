@@ -82,3 +82,7 @@ trees match. This closes the source-image build/publication unblock, not the run
 contains the integration scaffold, not K22. A final K22 full-context build is still mandatory; sandbox reuse
 also requires exact relevant-input comparison. Upload success proves this artifact was accepted, not account
 quota headroom or measured billing. No serving deployment, CPU enforcement or assembled capacity is claimed.
+
+The next exact K22 source campaign and verified development publication are recorded separately in
+[container-candidate-3d92.md](container-candidate-3d92.md) and its machine receipt. That builder contains
+frozen18afb runtime, not the later owner-lifecycle prototype. Final-source rebuild and serving proof remain.
