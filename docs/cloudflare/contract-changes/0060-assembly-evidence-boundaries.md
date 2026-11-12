@@ -59,3 +59,12 @@ credentials in approved wrappers/CI secrets; no untrusted PR-controlled credenti
 `gonvex-cf-dev-*`, with immutable digest provenance. No staging or production action follows from this ruling.
 
 0057's failed local `errors.spin` and the actual private-platform CPU reset/caller quarantine proof remain open.
+
+## Interruption fixture must reach its injected fault
+
+PR399's unchanged-runtime CI exposed a migration test assuming its first 1.5-second event reaches a
+particular R2 fetch failure. It can legitimately yield first, returning running/error-null. The fixture now
+uses one chunk per event and a bounded actual-alarm drive until that injected failure occurs. It requires
+the failure count to reach zero, keeps the exact retry-error/gate assertions and all final schema/recovery
+checks, and leaves the test timeout and runtime event budget unchanged. This is a test-fixture correction;
+the failed original CI receipt stays recorded. It is not a runtime migration change or a red-check waiver.
