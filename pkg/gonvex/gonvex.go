@@ -329,6 +329,14 @@ func Writes(tables ...string) *writeOption {
 	return option
 }
 
+// Columns lists the columns a write can change. Tenant-table writes are
+// observed precisely by database triggers, so this is documentation there. A
+// landlord table's writes are invisible to the tenant trigger stream, so the
+// runtime trusts this list instead: it treats the write as an update of only
+// these columns and skips reactive reads of that table whose declared columns,
+// filters and ordering do not include any of them. Omit Columns for a landlord
+// table the function can insert into or delete from; the write then
+// invalidates every read of that table.
 func (o *writeOption) Columns(columns ...string) *writeOption {
 	for index := range o.dependencies {
 		o.dependencies[index].Columns = cleanDependencyNames(columns)

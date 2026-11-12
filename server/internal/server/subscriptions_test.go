@@ -1312,3 +1312,98 @@ func TestListenerRecoveryRefreshIsPacedAndSkipsIdleGroups(t *testing.T) {
 		t.Fatalf("recovery groups metric = %d, want 6", got)
 	}
 }
+
+func TestLandlordWriteSurvivesObservedTenantWriteInSameCommit(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: "project-a",
+		Schema: manifest.Schema{
+			LandlordTables: map[string]manifest.Table{"users": {}},
+			TenantTables:   map[string]manifest.Table{"fcmTokens": {}},
+		},
+		Functions: map[string]manifest.FunctionEntry{
+			"users.setActive": {Kind: manifest.FunctionKindMutation, Dependencies: manifest.FunctionDependencies{
+				Writes: []manifest.WriteDependency{{Table: "users"}, {Table: "fcmTokens"}},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("sync manifest: %v", err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	var userExecutions, tokenExecutions atomic.Int32
+	manager.execute = func(_ context.Context, group *sharedSubscription, _ querySubscription, _ string, _ float64) (any, error) {
+		if group.key == "users.list" {
+			userExecutions.Add(1)
+		} else {
+			tokenExecutions.Add(1)
+		}
+		return []map[string]any{{"id": "row-1"}}, nil
+	}
+	indexedTestGroup(manager, "users.list", "users", &userExecutions)
+	indexedTestGroup(manager, "fcmTokens.list", "fcmTokens", &tokenExecutions)
+
+	const commitID = "set-active-commit"
+	server.broadcastMutationInvalidationsForCommitAt("project-a", "tenant-a", "users.setActive", commitID, time.UnixMilli(10))
+	// The tenant LISTEN connection observes only the tenant-side write.
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "fcmTokens",
+		operation: "delete", rowIDs: map[string]bool{"token-1": true}, triggerObserved: true, changedAtMS: 11,
+	})
+
+	eventually(t, time.Second, func() bool { return tokenExecutions.Load() == 1 })
+	eventually(t, time.Second, func() bool { return userExecutions.Load() == 1 })
+}
+
+func TestDeclaredLandlordWriteColumnsSkipUnrelatedColumnScopedReads(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: "project-a",
+		Schema:  manifest.Schema{LandlordTables: map[string]manifest.Table{"users": {}}},
+		Functions: map[string]manifest.FunctionEntry{
+			"users.updateMe": {Kind: manifest.FunctionKindMutation, Dependencies: manifest.FunctionDependencies{
+				Writes: []manifest.WriteDependency{{Table: "users", Columns: []string{"availabilityStatus", "updatedAt"}}},
+			}},
+			"users.rename": {Kind: manifest.FunctionKindMutation, Dependencies: manifest.FunctionDependencies{
+				Writes: []manifest.WriteDependency{{Table: "users"}},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("sync manifest: %v", err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	executions := map[string]*atomic.Int32{}
+	reads := map[string]manifest.ReadDependency{
+		"spots":        {Table: "users", Columns: []string{"id", "spots", "seeAllSpots"}},
+		"availability": {Table: "users", Columns: []string{"id", "availabilityStatus"}},
+		"filtered":     {Table: "users", Columns: []string{"id", "name"}, Filters: []string{"availabilityStatus"}},
+		"unscoped":     {Table: "users"},
+	}
+	for key, read := range reads {
+		executions[key] = &atomic.Int32{}
+		group := indexedTestGroup(manager, key, read.Table, executions[key])
+		manager.mu.Lock()
+		manager.unindexGroupLocked(group)
+		group.reads = []manifest.ReadDependency{read}
+		manager.indexGroupLocked(group)
+		manager.mu.Unlock()
+	}
+	manager.execute = func(_ context.Context, group *sharedSubscription, _ querySubscription, _ string, _ float64) (any, error) {
+		executions[group.key].Add(1)
+		return []map[string]any{{"id": "user-1"}}, nil
+	}
+
+	server.broadcastMutationInvalidationsForCommitAt("project-a", "tenant-a", "users.updateMe", "update-me", time.UnixMilli(10))
+	for _, key := range []string{"availability", "filtered", "unscoped"} {
+		eventually(t, time.Second, func() bool { return executions[key].Load() == 1 })
+	}
+	time.Sleep(tableChangeDebounce + subscriptionRerunCooldown + 25*time.Millisecond)
+	if got := executions["spots"].Load(); got != 0 {
+		t.Fatalf("a read of unrelated users columns ran %d times after a declared column write", got)
+	}
+
+	// Without declared columns the landlord write stays broad for the table.
+	server.broadcastMutationInvalidationsForCommitAt("project-a", "tenant-a", "users.rename", "rename", time.UnixMilli(20))
+	eventually(t, time.Second, func() bool { return executions["spots"].Load() == 1 })
+}
