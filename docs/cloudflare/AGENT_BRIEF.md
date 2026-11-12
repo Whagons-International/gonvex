@@ -157,6 +157,10 @@ validators, all string/nested fields, disposal in finally and no authority/termi
 processing-only cleanup still needs the exact local witness and durable denial of future old confirmations.
 The fresh1b M05 recheck clears the493 cases but reports two further P2 sanitizer/timing defects; see
 verification/M05-recheck-1b.md. Foundation merge and full M05 acceptance remain held.
+0082 separates unknown drain authorization from a lost final cleanup-sync ACK after matched authorized
+atomic GC; no witness resurrection, fresh terminal proof or success inference follows from absence.
+The fresha59 M05 recheck clears the exact1b cases but finds two failed-offset/expiry P2 defects; see
+verification/M05-recheck-a59.md. New bounded correction evidence still requires NEW independent review.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
