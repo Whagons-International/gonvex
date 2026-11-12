@@ -303,15 +303,12 @@ async fn migrations_run_whole_scripts_once_in_both_transaction_modes() {
 
     // A changed artifact is refused; a failing script leaves no partial effect
     // and no ledger row.
-    let mut changed = migrations[0].clone();
-    changed.sql.push_str(" -- edited");
-    changed.checksum = SqlMigration::new(
-        changed.name.clone(),
-        changed.scope,
+    let changed = SqlMigration::new(
+        migrations[0].name.clone(),
+        migrations[0].scope,
         false,
-        changed.sql.clone(),
-    )
-    .checksum;
+        format!("{} -- edited", migrations[0].sql),
+    );
     let error = apply_migrations(
         &database.pools,
         &database.url,
