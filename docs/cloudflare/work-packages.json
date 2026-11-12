@@ -594,7 +594,9 @@
    "reference": [
     "rust/crates/runtime/src/telemetry.rs",
     "rust/crates/runtime/src/metrics.rs"
-   ]
+   ],
+   "observability_plan": "docs/cloudflare/observability-uptime-plan.md",
+   "observability_additions": "Preserve existing error grouping, scrubbing, rates and retention; verify explicit async correlation separately per observability-uptime-plan.md."
   },
   {
    "id": "K16",
@@ -809,7 +811,9 @@
     "cloudflare/conformance/"
    ],
    "done_when": "The app's Playwright suite, module suites and compatibility CI pass against a preview deploy",
-   "reference": []
+   "reference": [],
+   "observability_plan": "docs/cloudflare/observability-uptime-plan.md",
+   "observability_additions": "Add portable real browser/SDK durable task plus second authorized client checks on exact assembled dev artifact; hosted vendor suite compatibility must be proved."
   },
   {
    "id": "V03",
@@ -832,13 +836,19 @@
     "K19",
     "K20",
     "K21",
-    "K22"
+    "K22",
+    "X01"
    ],
    "owns": [
     "cloudflare/conformance/"
    ],
    "done_when": "26-tenant mixed run passes; 1,000 users on one tenant pass: p95 <500 ms, p99 <1 s, errors <1%, all connected, including a reconnect wave",
-   "reference": []
+   "reference": [],
+   "acceptance_additions": [
+    "Capacity sweeps on the single assembled exact dev deployment: tenant writes/query mix, connected vs active users, schema/data size, visibility/recipient fan-out, snapshot/reconnect storms, and simultaneous tenants.",
+    "Locate first backend or load-generator bottleneck with bounded resource-admitted sweeps. Preserve original 26-tenant/1k-user gate and execute it during automatic scale out/in; publish raw evidence, curves and runnable commands.",
+    "Audit the shared pre-auth gateway pool, Control/auth/revalidation, limiter, routing and deploy services. Distinguish observed results, published limits, account-specific quota evidence and estimates."
+   ]
   },
   {
    "id": "V04",
@@ -867,7 +877,11 @@
     "cloudflare/budgets/"
    ],
    "done_when": "SQL statements, rows read, rows written and CPU recorded per function; peak memory and wake time recorded",
-   "reference": []
+   "reference": [],
+   "acceptance_additions": [
+    "Pair V03 cells with offered/achieved rates, p50/p95/p99 durable confirmation AND receiver delay, backlog/errors/disconnects, digests, SQL/rows, CPU/isolate memory, bandwidth and cost attribution.",
+    "Verify actual account plan/quotas separately; keep R2 files separate from tenant SQLite bytes; measure supported row/blob limit drift before any contract change; include shared-service and generator budgets."
+   ]
   },
   {
    "id": "V05",
@@ -896,7 +910,9 @@
     "cloudflare/conformance/"
    ],
    "done_when": "Deploy under load, eviction during a snapshot, failed alarm, R2 unavailable and control object unavailable each end with no lost or duplicated write",
-   "reference": []
+   "reference": [],
+   "observability_plan": "docs/cloudflare/observability-uptime-plan.md",
+   "observability_additions": "Retain every original fault drill; add scoped dev route/auth/SQLite-write/stalled-sync/job/file/monitor outages and actual authorized test-alert/recovery timing."
   },
   {
    "id": "V06",
@@ -939,7 +955,14 @@
     "cloudflare/kernel/gateway/"
    ],
    "done_when": "V03 passes at 1,000 users; tier changes without a deploy and steps down with a delay",
-   "reference": []
+   "reference": [],
+   "required_for_initial_staging_candidate": true,
+   "acceptance_additions": [
+    "Automatically scale gateway fleet out for aggregate cross-tenant demand and hot-tenant delivery load, without deploy/env/manual shard changes; delayed draining scale-in with measured hysteresis/cooldown.",
+    "Use bounded sockets, outbound frames/bytes, delivery lag, queue age and RPC-delay telemetry, not CPU alone. Preserve stable connection ownership, ordered query/replica commits, routing epochs/restart recovery, bounded queues and idle hibernation.",
+    "V03 26-tenant and 1,000-user gates pass while autoscaling occurs; record exact deploy, scaling timeline, instances, offered/achieved rates, durable-confirmation and receiver p50/p95/p99, correctness, errors, CPU/memory and cost.",
+    "Explicit fleet/resource/cost envelope, cross-tenant quiet-neighbor protection and controller/auth/limiter bottleneck analysis. Gateway scaling does not repartition tenant SQLite or remove its serialized-writer ceiling."
+   ]
   },
   {
    "id": "X02",
@@ -955,7 +978,8 @@
    "done_when": "Cold-boot storm of 1,000 clients keeps writer confirmation p95 under 150 ms",
    "reference": [
     "rust/crates/runtime/src/snapshot_cache.rs"
-   ]
+   ],
+   "evaluation_required_before_staging_candidate": "Evaluate against assembled snapshot-storm curves; pull forward if necessary to satisfy original gates. Preserve original done_when and dependency on X01."
   },
   {
    "id": "R01",
@@ -971,7 +995,9 @@
    "done_when": "Two weeks of probe numbers per environment exist for cold and warm boot, confirmation time, feed delay and reconnect, from at least two Americas locations, on a test tenant only; the same probe runs unchanged against a kernel preview",
    "reference": [
     "docs/cloudflare/contract-changes/0019-stage-1b-responsiveness.md"
-   ]
+   ],
+   "observability_plan": "docs/cloudflare/observability-uptime-plan.md",
+   "observability_additions": "Keep production read-only single-user and actual two-week Americas evidence; warm uptime monitors use separate fixtures from cold-wake/hibernation proof."
   },
   {
    "id": "R02",
@@ -1133,7 +1159,9 @@
     "cloudflare/observability/"
    ],
    "done_when": "Each of the five paging conditions fires in a drill",
-   "reference": []
+   "reference": [],
+   "observability_plan": "docs/cloudflare/observability-uptime-plan.md",
+   "observability_additions": "Retain original five source-linked paging drills; add external independent 3-region checks, missing-heartbeat unknown state, correlation/reporting/runbooks/status activation and rollback plan. No live activation from planning scope."
   },
   {
    "id": "M06",
