@@ -28,3 +28,20 @@ Original CPU/quarantine, SDK deploy/recovery, lifecycle, parity and autoscaling/
 
 Tool references: [Docker build metadata/load](https://docs.docker.com/reference/cli/docker/buildx/build/)
 and [GitHub runner/source variables](https://docs.github.com/en/actions/reference/workflows-and-actions/variables).
+
+## First hosted failure and identity correction
+
+Run43229865575 at093338e426641fdae93a2e18c719e032989704e3 built/exported sandbox but failed validation:
+`archive config differs from built image`. The retained failure artifact13952610217 has verified API ZIP
+digest5811d9d6121af0674db43a42259067d06205ad4b36dcc2807786b70c1aa3bb83. Docker29.4.2/Buildx0.38.2
+reported inspect.Id equal to the OCI **index** digest (049e99ad0f87 prefix), also equal to Buildx's descriptor;
+it was not a config digest. The producer's original Id=config equality was invalid for this image store.
+
+The corrected verifier preserves classic config-Id validation and, for index/image Ids, requires a verified
+archive descriptor chain from the exact built digest to one platform manifest and the exact archive config.
+It validates descriptor bytes/sizes, platform, rootfs diff ids and config integrity; tag/source-label equality
+cannot substitute. Index, platform-manifest and config digests are recorded separately. Bounded archive
+identity diagnostics survive failures. Synthetic but real-format OCI/Docker-save positive/negative fixtures
+cover index/attestation layouts and foreign/tampered configs; pinned crane independently reads the fixture.
+Actual hosted rerun/archives remain required. Layer-content verification by the daemonless importer and
+registry mapping must finish before publication; do not equate a published platform digest with the index.

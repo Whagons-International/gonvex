@@ -49,6 +49,7 @@ jobs:
             ${{ runner.temp }}/gonvex-container-export/images.json
             ${{ runner.temp }}/gonvex-container-export/*.Dockerfile
             ${{ runner.temp }}/gonvex-container-export/*.metadata.json
+            ${{ runner.temp }}/gonvex-container-export/*.archive.json
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
@@ -62,6 +63,7 @@ jobs:
             ${{ runner.temp }}/gonvex-container-export/inputs.json
             ${{ runner.temp }}/gonvex-container-export/*.Dockerfile
             ${{ runner.temp }}/gonvex-container-export/*.metadata.json
+            ${{ runner.temp }}/gonvex-container-export/*.archive.json
             ${{ runner.temp }}/gonvex-container-export/*.log
           retention-days: 7
           if-no-files-found: ignore

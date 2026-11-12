@@ -77,16 +77,89 @@ export function archiveBudget(bytes, accumulated) {
   return accumulated + bytes;
 }
 
-export async function verifyArchive(path, tag, expectedConfig) {
+export async function verifyArchive(path, tag, expected, report = async () => {}) {
+  expected = typeof expected === 'string' ? { id: expected } : expected;
   const manifest = JSON.parse(await output('tar', ['-xOf', path, 'manifest.json']));
   if (!Array.isArray(manifest) || manifest.length !== 1 || !manifest[0].RepoTags?.includes(tag)) throw new Error('unexpected archive image/tag');
   const config = manifest[0].Config;
   if (!/^(?:[a-f0-9]{64}\.json|blobs\/sha256\/[a-f0-9]{64})$/.test(config)) throw new Error('invalid archive config path');
-  const bytes = await output('tar', ['-xOf', path, config]);
-  if (`sha256:${sha(bytes)}` !== expectedConfig) throw new Error('archive config differs from built image');
-  const parsed = JSON.parse(bytes);
+  const read = async name => (await exec('tar', ['-xOf', path, name], { maxBuffer: 4 * 1024 * 1024, encoding: 'buffer' })).stdout;
+  const decode = bytes => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  const bytes = await read(config), configDigest = `sha256:${sha(bytes)}`, parsed = decode(bytes);
+  const audit = { verified: false, builtId: expected.id, builtDescriptor: expected.descriptor,
+    configDigest, configBytes: bytes.length, archiveConfigPath: config, graph: [] };
+  await report(audit);
+  if (!config.includes(configDigest.slice(7))) throw new Error('archive config filename differs from its bytes');
   if (parsed.os !== 'linux' || parsed.architecture !== 'amd64') throw new Error('unexpected image platform');
-  return parsed;
+  if (expected.configDigest && expected.configDigest !== configDigest) throw new Error('build config digest differs from archive');
+  if (expected.diffIds && JSON.stringify(expected.diffIds) !== JSON.stringify(parsed.rootfs?.diff_ids)) throw new Error('built rootfs differs from archive config');
+  if (expected.id === configDigest) {
+    // Classic Docker stores use the config digest as Id. Containerd stores
+    // may instead return an image/index digest, so never equate these blindly.
+    audit.mapping = 'built-config';
+  } else {
+    const indexTypes = new Set(['application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json']);
+    const imageTypes = new Set(['application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json']);
+    const descriptor = expected.descriptor;
+    if (!descriptor || descriptor.digest !== expected.id || !indexTypes.has(descriptor.mediaType) && !imageTypes.has(descriptor.mediaType)) {
+      throw new Error('archive config differs from built image and no matching built descriptor exists');
+    }
+    let consumed = 0;
+    const cache = new Map();
+    const blob = async desc => {
+      if (!/^sha256:[a-f0-9]{64}$/.test(desc.digest) || !Number.isSafeInteger(desc.size) || desc.size <= 0 || desc.size > 4 * 1024 * 1024) throw new Error('invalid image descriptor');
+      if (cache.has(desc.digest)) {
+        const value = cache.get(desc.digest);
+        if (value.size !== desc.size || value.type !== desc.mediaType) throw new Error('conflicting image descriptor');
+        return value.body;
+      }
+      if (cache.size >= 128 || consumed + desc.size > 16 * 1024 * 1024) throw new Error('image metadata graph budget exceeded');
+      const raw = await read(`blobs/sha256/${desc.digest.slice(7)}`); consumed += raw.length;
+      if (raw.length !== desc.size || `sha256:${sha(raw)}` !== desc.digest) throw new Error('archive descriptor bytes differ');
+      const body = decode(raw); cache.set(desc.digest, { size: desc.size, type: desc.mediaType, body });
+      audit.graph.push({ digest: desc.digest, size: desc.size, mediaType: desc.mediaType });
+      return body;
+    };
+    const outerBytes = await read('index.json'), outer = decode(outerBytes);
+    const find = async (index, depth = 0) => {
+      if (depth > 8 || index.schemaVersion !== 2 || !Array.isArray(index.manifests) || index.manifests.length > 128) throw new Error('invalid archive index');
+      const matches = [];
+      for (const desc of index.manifests) {
+        if (desc.digest === descriptor.digest) {
+          if (desc.mediaType !== descriptor.mediaType || desc.size !== descriptor.size) throw new Error('built descriptor metadata differs');
+          matches.push({ desc, body: await blob(desc) });
+        } else if (indexTypes.has(desc.mediaType)) matches.push(...await find(await blob(desc), depth + 1));
+      }
+      return matches;
+    };
+    const roots = `sha256:${sha(outerBytes)}` === descriptor.digest
+      ? [{ desc: descriptor, body: outer }] : await find(outer);
+    if (roots.length !== 1) throw new Error('built descriptor absent or ambiguous in archive');
+    if (`sha256:${sha(outerBytes)}` === descriptor.digest && outerBytes.length !== descriptor.size) throw new Error('built index size differs');
+    const leaves = async (desc, body, depth = 0) => {
+      if (depth > 8 || body.schemaVersion !== 2) throw new Error('invalid platform manifest graph');
+      if (imageTypes.has(desc.mediaType)) return [{ desc, body }];
+      if (!indexTypes.has(desc.mediaType) || !Array.isArray(body.manifests) || body.manifests.length > 128) throw new Error('invalid platform index');
+      const result = [];
+      for (const next of body.manifests) result.push(...await leaves(next, await blob(next), depth + 1));
+      return result;
+    };
+    const candidates = (await leaves(roots[0].desc, roots[0].body)).filter(value => value.body.config?.digest === configDigest);
+    if (candidates.length !== 1) throw new Error('built image does not identify exactly one archive config');
+    const selected = candidates[0];
+    if (selected.body.config.size !== bytes.length) throw new Error('platform config size differs');
+    if (!Array.isArray(selected.body.layers) || selected.body.layers.length !== manifest[0].Layers?.length) throw new Error('platform layers differ from Docker-save view');
+    audit.layers = selected.body.layers.map((layer, i) => {
+      if (!/^sha256:[a-f0-9]{64}$/.test(layer.digest) || !Number.isSafeInteger(layer.size) || layer.size < 0
+        || typeof manifest[0].Layers[i] !== 'string' || manifest[0].Layers[i].startsWith('/') || manifest[0].Layers[i].split('/').includes('..')) throw new Error('invalid archive layer mapping');
+      return { descriptor: layer, dockerSavePath: manifest[0].Layers[i], diffId: parsed.rootfs?.diff_ids?.[i] };
+    });
+    audit.mapping = 'built-descriptor-to-platform-config';
+    audit.archiveRootDigest = descriptor.digest;
+    audit.platformManifestDigest = selected.desc.digest;
+  }
+  audit.verified = true; await report(audit);
+  return { config: parsed, configDigest, identity: audit };
 }
 
 async function docker(args, env, log, capture = false) {
@@ -134,10 +207,13 @@ export async function exportImages(name, directory) {
       const file = `${kind}.docker.tar`, archive = join(directory, file);
       await docker(['image', 'save', '--output', archive, tag], env, join(directory, `${kind}-export.log`));
       const bytes = (await stat(archive)).size; total = archiveBudget(bytes, total);
-      const config = await verifyArchive(archive, tag, image.Id);
-      if (config.config?.Labels?.['org.opencontainers.image.revision'] !== context.source) throw new Error('image source label differs');
+      const build = JSON.parse(await readFile(metadata, 'utf8'));
+      if (image.Descriptor && build['containerimage.descriptor'] && ['digest', 'mediaType', 'size'].some(key => image.Descriptor[key] !== build['containerimage.descriptor'][key])) throw new Error('built/inspected descriptors differ');
+      const verified = await verifyArchive(archive, tag, { id: image.Id, descriptor: image.Descriptor ?? build['containerimage.descriptor'],
+        configDigest: build['containerimage.config.digest'], diffIds: image.RootFS?.Layers }, audit => json(join(directory, `${kind}.archive.json`), audit));
+      if (verified.config.config?.Labels?.['org.opencontainers.image.revision'] !== context.source) throw new Error('image source label differs');
       receipts.push({ kind, source: context.source, dockerfile: path, pinnedDockerfileSha256: sha(pinned.recipe), bases: pinned.bases,
-        imageId: image.Id, configDigest: image.Id, buildMetadataSha256: await fileHash(metadata),
+        imageId: image.Id, configDigest: verified.configDigest, identity: verified.identity, buildMetadataSha256: await fileHash(metadata),
         archive: { format: 'docker-save-v1', file, bytes, sha256: await fileHash(archive), tag } });
     }
     const after = await statfs(directory);
