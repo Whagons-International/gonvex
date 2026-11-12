@@ -24,6 +24,8 @@ import {
 import { DEFAULT_PRESENCE_CONFIG, type PresenceConfig } from "../presence/hub";
 import { type PresenceRecord, SocketPresence, type SupportRecord } from "../presence/socket";
 import { type PresenceDelivery, resyncFrame } from "../presence/tenant";
+import { handleServiceFrame, type ServiceCalls } from "../principals/frames";
+import { serviceAuthResult, type ServiceGrant } from "../principals/grant";
 
 export const SERVICE_TOKEN_PREFIX = "gvx_svc_";
 
@@ -55,6 +57,8 @@ export interface SessionRecord {
   support?: SupportRecord | null;
   /** K14: last replica watermark sent since auth (Rust `sent_replica_revision`; 0 or absent: none). */
   watermark?: number;
+  /** K17: set while the socket is a service-principal socket (`service_grant`); it then has no tenant session. */
+  service?: ServiceGrant | null;
 }
 
 /** Where frames go. The host maps it onto a hibernatable WebSocket. */
@@ -209,6 +213,8 @@ export class Session {
     const decoded = decodeClientFrame(text);
     if (!decoded.ok) return this.close(CLOSE.invalidFrame);
     const frame = decoded.frame;
+    // K17: a service socket accepts only its narrow set; `auth` takes the normal path (lib.rs:2570-2592).
+    if (this.record.service && frame.type !== "auth") return this.serviceFrame(this.record.service, frame);
     if (frame.type === "auth" && frame.public !== this.record.publicTransport) {
       this.send(frames.authError(frame.id, AUTH_ERRORS.publicTransport, "transient"));
       return this.close(CLOSE.ended);
@@ -217,7 +223,7 @@ export class Session {
   }
 
   private unscopedOrAnonymous(): boolean {
-    const unscoped = this.record.tenant === null && this.record.connection.identity === null;
+    const unscoped = this.record.tenant === null && this.record.connection.identity === null && !this.record.service;
     return unscoped || this.record.tenant?.anonymous === true;
   }
 
@@ -239,9 +245,10 @@ export class Session {
     const toTenant = async (f: ClientFrame) => { await this.forward(this.ports.tenants.dispatch(this.view(), f)); };
     switch (frame.type) {
       case "auth":
-        return frame.token !== undefined && !frame.public && frame.token.trim().startsWith(SERVICE_TOKEN_PREFIX)
-          ? this.serviceAuth(frame)
-          : this.auth(frame);
+        if (frame.token !== undefined && !frame.public && frame.token.trim().startsWith(SERVICE_TOKEN_PREFIX)) return this.serviceAuth(frame);
+        // Any other auth ends a service grant first, whatever its outcome (lib.rs:2797).
+        this.record.service = null;
+        return this.auth(frame);
       case "query.call":
         if (frame.scope === "control") return control(frame);
         if (tenant) return toTenant(frame);
@@ -354,14 +361,62 @@ export class Session {
 
   // ---- auth ----------------------------------------------------------------------
 
-  /** `gvx_svc_` tokens (K17). Until K17 lands every service credential is refused, with Rust's reset. */
+  /**
+   * `gvx_svc_` tokens (K17, lib.rs:2730-2790). The socket drops whatever
+   * session it had; with a grant it is bound to one project and tenant, its
+   * pending deadline clears and it has no tenant session or change feed.
+   * Every refusal is `auth.error` code `transient`; a refused socket stays
+   * pending. A control port without `authenticateService` refuses every
+   * service credential.
+   */
   private async serviceAuth(frame: AuthFrame): Promise<void> {
+    const port = this.ports.control;
+    let grant: ServiceGrant | null = null;
+    let error: string = AUTH_ERRORS.serviceInvalid;
+    if (port.authenticateService) {
+      const deadline = this.record.pendingUntil ?? this.now() + LIMITS.authTimeoutMs;
+      try {
+        const outcome = await withDeadline(port.authenticateService(frame.token!, frame.project, frame.tenant), deadline - this.now());
+        if (outcome.ok) grant = outcome.grant;
+        else error = outcome.error;
+      } catch (failure) {
+        if (!(failure instanceof AuthTimeout)) console.error("session: service auth failed", failure);
+        return this.close(CLOSE.failed);
+      }
+      if (this.closed) return;
+    }
     this.leavePresence();
     this.discardScope();
     this.record.clientContract = null;
-    this.record.connection = NO_CONNECTION;
+    this.record.connection = grant ? { ...NO_CONNECTION, projectId: grant.route.projectId } : NO_CONNECTION;
+    this.record.service = grant;
+    if (grant) this.record.pendingUntil = null;
     this.hooks.persist?.();
-    this.send(frames.authError(frame.id, AUTH_ERRORS.serviceInvalid, "transient"));
+    this.send(grant ? frames.authResult(frame.id, serviceAuthResult(grant) as Json) : frames.authError(frame.id, error, "transient"));
+  }
+
+  /** One frame on a service socket (`handle_service_frame`); a failed port call closes the socket, as `forward` does. */
+  private async serviceFrame(grant: ServiceGrant, frame: ClientFrame): Promise<void> {
+    let out: string[] | null;
+    try {
+      out = await handleServiceFrame(this.serviceCalls(), grant, frame);
+    } catch (error) {
+      console.error("session: service call failed", error);
+      return this.close(CLOSE.failed);
+    }
+    for (const text of out ?? []) this.send(text);
+  }
+
+  private serviceCalls(): ServiceCalls {
+    const { control, tenants } = this.ports;
+    return {
+      control: (grant, path, args) => control.serviceCall
+        ? control.serviceCall(grant, path, args)
+        : Promise.resolve({ ok: false, error: AUTH_ERRORS.storeUnavailable }),
+      tenant: (grant, call) => tenants.serviceCall
+        ? tenants.serviceCall(grant, call)
+        : Promise.resolve({ ok: false, error: `project ${JSON.stringify(grant.route.projectId)} has no active TypeScript module` }),
+    };
   }
 
   private async auth(frame: AuthFrame): Promise<void> {

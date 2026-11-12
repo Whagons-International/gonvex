@@ -229,6 +229,40 @@ describe("T5 capture without custom functions", () => {
     });
   });
 
+  it("a wide table's update image nests its chains only past the depth limit", async () => {
+    const wide = (n: number) => {
+      const columns = Array.from({ length: n }, (_, i) => ({ name: i === 0 ? "id" : `c${i}`, declared: i === 0 ? "TEXT" : "INTEGER", pk: i === 0 ? 1 : 0 }));
+      const table = `w${n}`;
+      const ddl = `CREATE TABLE ${table}(${columns.map((c) => `${c.name} ${c.declared}${c.pk ? " PRIMARY KEY" : ""}`).join(", ")});
+CREATE TRIGGER "_gonvex_sync_${table}_update" AFTER UPDATE ON "${table}" BEGIN
+  INSERT INTO _gonvex_sync_changes (table_name, row_id, operation, new_value)
+  VALUES ('${table}', CAST(NEW."id" AS TEXT), 'update', gonvex_capture('${table}', NEW.rowid, 1));
+END;`;
+      return { table, ddl, shape: { name: table, columns } };
+    };
+    const changes = `CREATE TABLE _gonvex_sync_changes(event_id INTEGER PRIMARY KEY, table_name TEXT, row_id TEXT, operation TEXT, new_value JSON);`;
+    // 40 columns stay a flat chain (byte-identical to before); 60 nest as balanced trees.
+    const narrow = wide(40), broad = wide(60);
+    const narrowOut = new SchemaTransform().runtime("narrow", `${changes} ${narrow.ddl}`, { tables: [narrow.shape] });
+    const broadOut = new SchemaTransform().runtime("broad", `${changes} ${broad.ddl}`, { tables: [broad.shape] });
+    const trigger = (statements: string[]) => statements.find((s) => /CREATE TRIGGER/i.test(s))!;
+    expect(trigger(narrowOut.statements)).not.toMatch(/\)\s*OR\s*\(\(/);
+    expect(trigger(broadOut.statements)).toMatch(/\)\)\s*OR\s*\(\(/);
+    await withObject((sql) => {
+      exec(sql, broadOut.statements);
+      const values = broad.shape.columns.map((c, i) => (i === 0 ? "'w1'" : String(i)));
+      sql.exec(`INSERT INTO ${broad.table} VALUES (${values.join(", ")})`);
+      sql.exec(`UPDATE ${broad.table} SET c7 = 70, c59 = 590 WHERE id = 'w1'`);
+      sql.exec(`UPDATE ${broad.table} SET c7 = 70 WHERE id = 'w1'`); // no change: NULL
+      const rowsOut = rows<{ new_value: string | null }>(sql, "SELECT new_value FROM _gonvex_sync_changes ORDER BY event_id");
+      expect(rowsOut.length).toBe(2);
+      const [before, after, changed] = JSON.parse(rowsOut[0]!.new_value!) as [Record<string, unknown>, Record<string, unknown>, string[]];
+      expect([before.c7, after.c7, before.c59, after.c59, changed]).toEqual([7, 70, 59, 590, ["c7", "c59"]]);
+      expect(Object.keys(after)).toEqual(broad.shape.columns.map((c) => c.name));
+      expect(rowsOut[1]!.new_value).toBeNull();
+    });
+  });
+
   it("fails loudly without the catalog entry", () => {
     expect(() => new SchemaTransform().runtime("records", RECORD_SCHEMA)).toThrow(/catalog: gonvex_record_value\(\): record view items is not in the catalog/);
   });

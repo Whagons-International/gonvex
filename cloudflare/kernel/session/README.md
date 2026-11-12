@@ -61,7 +61,7 @@ client ──/ws──▶ router Worker ──▶ gateway object (gw-N) ──RP
 | Presence frames | K14 | `kernel/presence/`: per-socket state in the session record, frames to the tenant port, deliveries through `GatewayObject.presence`, leave on auth / discard / close |
 | `error.*`, `telemetry.*` | K15 | forwarded to the tenant port, no reply |
 | Per-address 429 limits, the 30 s public admission recheck, public rate limits | K16 | not enforced |
-| `gvx_svc_` service principals | K17 | every service credential gets Rust's refusal |
+| `gvx_svc_` service principals | K17 | `kernel/principals`: `Session.serviceAuth` / `serviceFrame`, `SessionRecord.service`; refused when the control port has no `authenticateService` (the stand-in) |
 
 ## Run
 

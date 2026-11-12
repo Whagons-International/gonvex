@@ -23,5 +23,6 @@
   // originals these files are run by the test runner, not type-checked here.
   // kernel/host (K04) has its own tsconfig, vitest config and test Worker.
   // kernel/files (K13) too, and checks router/storage with it.
-  "exclude": ["kernel/storage/test/sdk", "kernel/host", "kernel/files"]
+  // kernel/principals (K17): its harness imports K06 (Node types); kernel/principals/tsconfig.json checks it.
+  "exclude": ["kernel/storage/test/sdk", "kernel/host", "kernel/files", "kernel/principals/harness", "kernel/principals/test"]
 }

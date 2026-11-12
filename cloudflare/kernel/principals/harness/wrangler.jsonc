@@ -1,0 +1,24 @@
+// The K17 conformance Worker (`cloudflare-principals` backend in
+// cloudflare/conformance): K05's socket path in front of K06's control object
+// and K07's tenant object, with service principals wired through. The fixture
+// bundles are generated into kernel/reducer/harness/.generated/ before
+// `wrangler dev`. Local only; never deployed (the name keeps the prefix anyway).
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-k17-conformance",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  // node:crypto (K06 PBKDF2, tokens) and AsyncLocalStorage (K04).
+  "compatibility_flags": ["nodejs_compat"],
+  // The control schema is imported from rust/crates/store/src/control_schema.sql, unchanged.
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "GATEWAY", "class_name": "PrincipalsGateway" },
+      { "name": "CONTROL", "class_name": "PrincipalsControlObject" },
+      { "name": "TENANT", "class_name": "ConformancePrincipalsTenant" }
+    ]
+  },
+  "vars": { "GONVEX_RUNTIME_VERSION": "development", "GONVEX_GATEWAY_SHARDS": "8", "GONVEX_PRESENCE": "1" },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PrincipalsGateway", "PrincipalsControlObject", "ConformancePrincipalsTenant"] }]
+}

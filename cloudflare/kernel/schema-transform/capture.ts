@@ -10,6 +10,7 @@
 // non-finite REAL as null), in column order (serde_json preserve_order).
 
 import { closingParen, isNameToken, quoteIdent, quoteString, significant } from "./lexer.ts";
+import { expressionDepth, LIMITS } from "./limits.ts";
 
 export type JsonKind = "json" | "boolean" | "integer" | "real" | "text";
 
@@ -115,8 +116,20 @@ export interface CaptureCatalog {
 
 export class CaptureError extends Error {}
 
-/** Replaces every gonvex_record_value / gonvex_capture call in a trigger statement. */
+/**
+ * Replaces every gonvex_record_value / gonvex_capture call in a trigger statement.
+ *
+ * An update image chains one `OR` and one `||` per column, so a wide table
+ * (about 48 columns and up) passes SQLite's expression depth of 100. Only
+ * then are those chains nested as balanced trees (same value, depth log2 n);
+ * every statement within the limit is rewritten exactly as before.
+ */
 export function rewriteCaptureCalls(sql: string, catalog: CaptureCatalog, inTrigger: boolean): string {
+  const flat = rewriteCaptureCallsWith(sql, catalog, inTrigger, false);
+  return expressionDepth(flat) > LIMITS.expressionDepth ? rewriteCaptureCallsWith(sql, catalog, inTrigger, true) : flat;
+}
+
+function rewriteCaptureCallsWith(sql: string, catalog: CaptureCatalog, inTrigger: boolean, balanced: boolean): string {
   const toks = significant(sql);
   let out = "";
   let last = 0;
@@ -157,7 +170,7 @@ export function rewriteCaptureCalls(sql: string, catalog: CaptureCatalog, inTrig
       const row = args[1]!.trim();
       const expected = op === "2" ? "OLD.rowid" : "NEW.rowid";
       if (row.toLowerCase() !== expected.toLowerCase()) throw new CaptureError(`gonvex_capture(): expected ${expected}, found ${row}`);
-      replacement = captureValueSql(shape, Number(op) as 0 | 1 | 2);
+      replacement = captureValueSql(shape, Number(op) as 0 | 1 | 2, balanced);
     }
     out += sql.slice(last, t.start) + replacement;
     last = toks[close]!.end;
@@ -177,13 +190,21 @@ export function rowImage(shape: TableShape, row: "NEW" | "OLD"): string {
  * for an update that changed no column. A column changed when its storage
  * class or its bytes differ (Rust compares Cell values).
  */
-export function captureValueSql(shape: TableShape, op: 0 | 1 | 2): string {
+export function captureValueSql(shape: TableShape, op: 0 | 1 | 2, balanced = false): string {
   if (op === 0) return `json_array(NULL, ${rowImage(shape, "NEW")}, json('[]'))`;
   if (op === 2) return `json_array(${rowImage(shape, "OLD")}, NULL, json('[]'))`;
   const changed = (c: string) => `(OLD.${quoteIdent(c)} IS NOT NEW.${quoteIdent(c)} COLLATE BINARY OR typeof(OLD.${quoteIdent(c)}) IS NOT typeof(NEW.${quoteIdent(c)}))`;
-  const any = shape.columns.map((c) => changed(c.name)).join(" OR ");
-  const list = shape.columns.map((c) => `iif(${changed(c.name)}, ${quoteString(`,${JSON.stringify(c.name)}`)}, '')`).join(" || ");
+  const join = (parts: string[], op: string) => (balanced ? balancedChain(parts, op) : parts.join(op));
+  const any = join(shape.columns.map((c) => changed(c.name)), " OR ");
+  const list = join(shape.columns.map((c) => `iif(${changed(c.name)}, ${quoteString(`,${JSON.stringify(c.name)}`)}, '')`), " || ");
   return `CASE WHEN ${any} THEN json_array(${rowImage(shape, "OLD")}, ${rowImage(shape, "NEW")}, json('[' || substr(${list}, 2) || ']')) END`;
+}
+
+/** `a op b op c ...` as a balanced tree of parenthesized halves (`OR` and `||` are associative). */
+function balancedChain(parts: string[], op: string): string {
+  if (parts.length <= 2) return parts.join(op);
+  const mid = Math.ceil(parts.length / 2);
+  return `(${balancedChain(parts.slice(0, mid), op)})${op}(${balancedChain(parts.slice(mid), op)})`;
 }
 
 /** Whether a statement calls one of the runtime's custom functions. */

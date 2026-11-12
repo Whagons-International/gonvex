@@ -66,7 +66,7 @@ export class RustBackend extends Backend {
     this.restarts = 0;
   }
 
-  get capabilities() { return { restart: true, crash: true, changeLog: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
+  get capabilities() { return { restart: true, crash: true, changeLog: true, servicePrincipals: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
 
   async start() {
     await mkdir(this.dataDir, { recursive: true });
@@ -91,6 +91,7 @@ export class RustBackend extends Backend {
         GONVEX_AUTH_URL: this.httpUrl,
         ...CONFORMANCE_SECRETS,
         ...firebaseEmulatorEnv(),
+        ...(this.servicePrincipals ? { GONVEX_SERVICE_PRINCIPALS: this.servicePrincipals } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -111,6 +112,17 @@ export class RustBackend extends Backend {
     this.child.kill('SIGTERM');
     const done = await Promise.race([this.exited, delay(10_000).then(() => undefined)]);
     if (!done) { this.child.kill('SIGKILL'); await this.exited; }
+  }
+
+  /**
+   * Optional (`capabilities.servicePrincipals`): restarts the runtime with
+   * `GONVEX_SERVICE_PRINCIPALS` (read once at startup), keeping its data.
+   * Project ids are minted at runtime, so a scenario configures its
+   * principals after its project exists.
+   */
+  async configureServicePrincipals(principals) {
+    this.servicePrincipals = JSON.stringify(principals);
+    await this.restart();
   }
 
   async restart({ crash = false } = {}) {

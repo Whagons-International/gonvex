@@ -5,9 +5,9 @@
   "type": "module",
   "description": "Gonvex backend on Cloudflare Workers and Durable Objects (one SQLite-backed object per tenant).",
   "scripts": {
-    "typecheck": "wrangler types --include-runtime=false --check && tsc -p tsconfig.json --noEmit && tsc -p kernel/host/tsconfig.json --noEmit && (cd control && wrangler types --include-runtime=false --check && tsc -p tsconfig.json --noEmit) && tsc -p router/dev/tsconfig.json --noEmit && tsc -p actions/tsconfig.json --noEmit && tsc -p kernel/files/tsconfig.json --noEmit",
+    "typecheck": "wrangler types --include-runtime=false --check && tsc -p tsconfig.json --noEmit && tsc -p kernel/host/tsconfig.json --noEmit && (cd control && wrangler types --include-runtime=false --check && tsc -p tsconfig.json --noEmit) && tsc -p router/dev/tsconfig.json --noEmit && tsc -p actions/tsconfig.json --noEmit && tsc -p kernel/files/tsconfig.json --noEmit && tsc -p kernel/principals/tsconfig.json --noEmit",
     "types": "wrangler types --include-runtime=false",
-    "test": "vitest run && vitest run --root kernel/host && vitest run --root control && node --test scripts/deploy-preview.test.mjs && vitest run --root kernel/reducer && vitest run --root router/dev && vitest run --root actions && vitest run --root kernel/files",
+    "test": "vitest run && vitest run --root kernel/host && vitest run --root control && node --test scripts/deploy-preview.test.mjs && vitest run --root kernel/reducer && vitest run --root router/dev && vitest run --root actions && vitest run --root kernel/files && vitest run --root kernel/principals",
     "test:watch": "vitest",
     "dev": "wrangler dev",
     "bundle": "wrangler deploy --dry-run --outdir dist",

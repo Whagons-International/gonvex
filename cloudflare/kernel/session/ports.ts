@@ -18,6 +18,8 @@
 import type { ClientFrame, Json } from "./decode";
 import type { Negotiated } from "./capabilities";
 import type { ConnectionReport } from "../presence/hub";
+import type { ServiceControlOutcome, ServiceTenantCall, ServiceTenantOutcome } from "../principals/frames";
+import type { ServiceGrant } from "../principals/grant";
 
 export interface Account {
   id: string;
@@ -122,6 +124,9 @@ export interface SocketView {
   presencePrevious?: ConnectionReport | null;
 }
 
+/** K17: a `gvx_svc_` credential's admission (`authenticate_service_principal`). */
+export type ServiceAuthOutcome = { ok: true; grant: ServiceGrant } | { ok: false; error: string };
+
 export interface ControlPort {
   /** `ControlPlane::project`: Ok when the project exists and is active. */
   project(projectId: string): Promise<Outcome<null>>;
@@ -137,6 +142,13 @@ export interface ControlPort {
   revalidate(items: RevalidationItem[]): Promise<boolean[]>;
   /** Every `scope:"control"` frame (and `query.unsubscribe` of a control subscription). */
   dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]>;
+  /**
+   * K17 (optional): admits a `gvx_svc_` credential for one project and tenant.
+   * Without it every service credential is refused with Rust's text.
+   */
+  authenticateService?(token: string, projectId: string | undefined, tenant: string | undefined): Promise<ServiceAuthOutcome>;
+  /** K17 (optional): `control.servicePrincipals.delegate` / `revokeDelegation` from a service socket. */
+  serviceCall?(grant: ServiceGrant, path: string, args: Json): Promise<ServiceControlOutcome>;
   /** K06 `connectionState` (optional): live support sessions and the close-time last-seen write (K14). */
   connectionState?(connectionId: string, state: { projectId: string; tenantId: string; authenticated: boolean; supportSessionId?: string } | null): Promise<void>;
 }
@@ -157,6 +169,8 @@ export interface ModulePort {
 export interface TenantPort {
   /** Tenant-scoped frames of a socket with a tenant session. Returns the frames to send, in order. */
   dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]>;
+  /** K17 (optional): a service principal's allowlisted call, run as its system identity. */
+  serviceCall?(grant: ServiceGrant, call: ServiceTenantCall): Promise<ServiceTenantOutcome>;
   /** K14: the socket closed or changed session; the tenant removes its presence with grace. */
   presenceLeave?(route: TenantRoute, connectionId: string, host: string, previous?: ConnectionReport | null): Promise<void>;
 }

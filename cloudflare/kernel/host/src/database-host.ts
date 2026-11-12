@@ -270,6 +270,8 @@ export class DatabaseHost implements ModuleHost {
     return {
       commandId: i.commandId ?? null, rootCommandId: i.rootCommandId ?? null, rootChannel: i.rootChannel ?? null, channel: i.channel ?? null,
       actorAccountId: i.actorAccountId ?? null, actorMemberId: i.actorMemberId ?? null, onBehalfOfMemberId: i.onBehalfOfMemberId ?? null, agentExecutionId: null,
+      // K17: a delegated session's durable work keeps its delegation (`InvocationProvenance.delegation`, omitted when absent).
+      ...(i.delegation !== undefined && i.delegation !== null ? { delegation: i.delegation } : {}),
     };
   }
 
