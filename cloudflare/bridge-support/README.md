@@ -80,8 +80,9 @@ Deploy:
    `LEGACY_BRIDGE_TENANT_DATABASE`; while `LEGACY_BRIDGE_DATABASE_URL` is set, the bridge only logs that it is
    ignored.
 
-The change works against today's Rust runtime, so it does not have to wait for cutover. The alternative is to
-drop the fallback (0040 §2), because the Postgres path already does not work against a SQLite runtime.
+The patch lands only at cutover, applied by Gabriel (brief rule 5); nothing from it goes to whagons5-client
+before then. Gabriel decides at cutover between the patch and dropping the fallback (0040 §2, ruled in 0045); the
+Postgres path already does not work against a SQLite runtime.
 
 ### What the patch changes
 

@@ -63,8 +63,9 @@ Release CI never sets `LEGACY_BRIDGE_DATABASE_URL`, so CI never exercised the pa
   idempotency key derive from the phone's write intent.
 - `LEGACY_BRIDGE_SERVICE_TOKEN` replaces `LEGACY_BRIDGE_DATABASE_URL` and `LEGACY_BRIDGE_TENANT_DATABASE`. The
   pgx dependency is removed.
-- This works against the Rust reference now (`verify/service-principal.mjs`, 11 of 11 checks, including the
-  patched bridge's own writer), so it can land before cutover.
+- It is verified against the Rust reference (`verify/service-principal.mjs`, 11 of 11 checks, including the
+  patched bridge's own writer). Like every app-repo change from this work, it lands only at cutover, applied by
+  Gabriel (brief rule 5).
 
 **What K17 must provide for K21** (from `docs/service-principals.md` and `service_principal.rs`; nothing beyond
 Rust):

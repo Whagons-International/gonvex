@@ -174,7 +174,7 @@ Two receipt checks stay in `verification/backend-receipts/`, because they inject
 | --- | --- |
 | `ctx.sdk(tag, { member, tenant, options, authenticate, fresh })` | A `GonvexClient`. A Member's first client logs in with `control.auth.passwordLogin` on its own socket. Later clients reuse that session, unless `fresh` is set. `options` go to the SDK constructor. |
 | `ctx.thin(tag, { member, tenant, options, fresh })` | A `ThinClient`. Pass `options: { presenceV2: true }` for presence. |
-| `ctx.raw(tag, { public })` and `ctx.rawLogin(socket, member)` | A `RawSocket` with `send(frame)`, `sendRaw(textOrBytes)`, `next(match)`, `auth({ project, tenant, token, capabilities })`, `whenClosed(ms)`, `closeEvent` (`{ code, reason, at }`), `close()` and `drop()`. `public: true` connects with `?public=1`. `query: { … }` adds URL parameters (the Go bridge's `?project=&tenant=`). |
+| `ctx.raw(tag, { public })` and `ctx.rawLogin(socket, member)` | A `RawSocket` with `send(frame)`, `sendRaw(textOrBytes)`, `next(match)`, `auth({ project, tenant, token, capabilities })`, `whenClosed(ms)`, `closeEvent` (`{ code, reason, at }`), `close()` and `drop()`. `public: true` connects with `?public=1`. `query: { … }` adds URL parameters (the Go bridge's `?project=&tenant=`); an additive harness option, accepted in 0045. |
 | `ctx.step(name, fn)` | Groups frames and observations. A throw is recorded, and the next step still runs. |
 | `ctx.observe(label, value)` | Records a value that every backend must reproduce. |
 | `ctx.expect(cond, msg)` | Asserts a fact that must hold on every backend. |

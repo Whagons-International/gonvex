@@ -15,8 +15,8 @@ runtime that path is already dead.
 - LEGACY_BRIDGE_SERVICE_TOKEN replaces LEGACY_BRIDGE_DATABASE_URL and
   LEGACY_BRIDGE_TENANT_DATABASE; the pgx dependency is gone.
 
-Prepared by Gonvex package K21 (cloudflare/bridge-support/). Lands at the
-Cloudflare cutover, or earlier against the Rust runtime.
+Prepared by Gonvex package K21 (cloudflare/bridge-support/). Lands only at
+the Cloudflare cutover, applied by Gabriel.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
