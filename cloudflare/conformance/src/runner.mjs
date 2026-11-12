@@ -132,8 +132,11 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
       return c;
     },
     /** Raw frame socket (opened, not authenticated). `public: true` uses the `?public=1` transport. */
-    async raw(tag, { public: publicTransport = false } = {}) {
-      const s = await new RawSocket(publicTransport ? `${backend.wsUrl}?public=1` : backend.wsUrl, tag, recorder).open();
+    async raw(tag, { public: publicTransport = false, query } = {}) {
+      // `query` (K21): extra URL parameters, e.g. the Go bridge's `?project=&tenant=`.
+      const params = new URLSearchParams(query ?? {});
+      if (publicTransport) params.set('public', '1');
+      const s = await new RawSocket(params.size ? `${backend.wsUrl}?${params}` : backend.wsUrl, tag, recorder).open();
       clients.push(s);
       return s;
     },
