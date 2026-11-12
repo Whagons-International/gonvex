@@ -44,3 +44,20 @@ The author measured a healthy small completion increasing from two to nine SQLit
 workerd. Record exact frozen source/configuration, chunk bytes and failure-path costs before attributing
 capacity or billing impact. This author-reported number is not deployed cost evidence or an independent
 approval. Original K12/K22, lifecycle, platform, parity and capacity gates remain unchanged.
+
+## Input representation and observed row-limit drift
+
+The same private chunking approach may hold exact args/session/provenance inputs: atomically publish
+bounded 64-KiB chunks and count/byte/digest manifest with the run, verify complete reconstruction before
+claim/invocation, and atomically transfer required reply correlation before deleting old inputs. Missing,
+corrupt or partial generations fail closed. Legacy inline reads do not invent a reply generation. Preserve
+argument/result contents and existing caps; no new RPC, Action replay or per-frame persistence follows.
+
+The author reports local SqlStorage accepted over 2.3 million aggregate UTF-8 column bytes, so the new
+supplemental expectation of a 2-MB rejection failed. Preserve raw calls-6 evidence and record exact source,
+workerd/config and per-column counts separately from physical row/page overhead. The current official
+[limits page](https://developers.cloudflare.com/durable-objects/platform/limits/) lists 8 MB for SQLite
+strings, blobs and rows; the brief's 2-MB assumption remains recorded as drift, not measured enforcement.
+Neither a local acceptance nor this doc changes a public contract or proves the remote ceiling. Verify
+chunk bounds/integrity/atomicity independently; actual K04 maxResultBytes and inbound wire limits are
+separate boundaries. Correcting this new fixture assumption does not waive any original scenario.
