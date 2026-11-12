@@ -143,6 +143,9 @@ recovered or minted, and no owner-lifetime acceptance follows.
 0077 records completed startup forensics with cause UNKNOWN and permits K22 to prepare one bounded,
 observable builder-only diagnostic. Lead reviews its exact artifact/manifest before releasing a live dev
 attempt; no causal fix, CPU proof or original gate is inferred from this plan.
+0078 clarifies versioned exact-echo owner-intent callback replies before activation; leaf/model tests do
+not establish durable Host/Registry/SDK lifecycle proof. The4731 diagnostic review requires fixes for CI
+scratch/preparation portability and captured-ID cleanup; see verification/builder-startup-review-4731.md.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 

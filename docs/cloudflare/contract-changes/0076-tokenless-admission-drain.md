@@ -18,7 +18,7 @@ interface AdmissionBinding {
   nonce: string;
 }
 ownerAdmissionIntent(view, claim, intent: AdmissionIntent, expectedProducer?): Promise<OwnerAuthority>;
-confirmOwnerAdmission(view, binding: AdmissionBinding): Promise<boolean>;
+confirmOwnerAdmission(view, binding: AdmissionBinding): Promise<OwnerAdmissionConfirmation>; // 0078
 drainAdmissionIntent(binding: AdmissionBinding): Promise<{
   v: 1; status: 'closed'; binding: AdmissionBinding;
 }>;
@@ -29,6 +29,8 @@ BEFORE its one admission RPC. Its id is distinct from a client-event nonce, rebu
 idempotency key. The tenant generates the instance/nonce binding and indexes exact pending/issued state by
 intent. The holder callback accepts only an ALREADY existing exact pending caller intent and current
 physical Session/tag/issuer/epoch/auth scope; an unknown callback cannot create an intent.
+Decision0078 defines the versioned exact-echo admission and terminal confirmation replies; a bare boolean
+is not the activated interface. All publication, terminal witness and quiescence requirements below remain.
 
 Before confirming true, the holder durably publishes that exact binding through 0058's verified generation
 mechanism and rechecks scope after the await. The tenant still requires the same current pending state and
