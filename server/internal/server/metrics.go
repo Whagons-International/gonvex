@@ -291,6 +291,8 @@ type reactiveMetricState struct {
 	ListenerReconnects                 uint64
 	ListenerFailures                   uint64
 	ListenerLimitRefusals              uint64
+	RecoveryRefreshes                  uint64
+	RecoveryGroups                     uint64
 	SharedSubscriptions                int
 	SubscriptionListeners              int
 }
@@ -335,6 +337,8 @@ type reactiveMetricSnapshot struct {
 	ListenerReconnects                 uint64  `json:"listenerReconnects"`
 	ListenerFailures                   uint64  `json:"listenerFailures"`
 	ListenerLimitRefusals              uint64  `json:"listenerLimitRefusals"`
+	RecoveryRefreshes                  uint64  `json:"recoveryRefreshes"`
+	RecoveryGroups                     uint64  `json:"recoveryGroups"`
 	SharedSubscriptions                int     `json:"sharedSubscriptions"`
 	SubscriptionListeners              int     `json:"subscriptionListeners"`
 }
@@ -471,6 +475,8 @@ func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
 		ListenerReconnects:                 state.ListenerReconnects,
 		ListenerFailures:                   state.ListenerFailures,
 		ListenerLimitRefusals:              state.ListenerLimitRefusals,
+		RecoveryRefreshes:                  state.RecoveryRefreshes,
+		RecoveryGroups:                     state.RecoveryGroups,
 		SharedSubscriptions:                state.SharedSubscriptions,
 		SubscriptionListeners:              state.SubscriptionListeners,
 	}

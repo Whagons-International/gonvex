@@ -57,6 +57,9 @@ type subscriptionManager struct {
 	visibilityMu     sync.Mutex
 	visibilityRuns   map[string]*visibilityExecution
 	visibilityAttach map[string]visibilityAttachEntry
+	// recoveryGenerations lets a newer listener recovery of a tenant stop an
+	// older paced one.
+	recoveryGenerations map[subscriptionScope]uint64
 }
 
 type visibilityAttachEntry struct {
@@ -444,8 +447,30 @@ func (m *subscriptionManager) requestChange(change tableChange) {
 	}
 }
 
+// Listener recovery reruns every live query in a tenant. Requesting them all at
+// once queued the whole tenant ahead of fresh invalidations in the reactive
+// admission queue and opened a burst of connections right after PostgreSQL had
+// just dropped one, which could drop the LISTEN session again. Recovery is
+// requested in batches instead; with these defaults 1,000 groups recover in
+// about 1.5 s.
+var (
+	recoveryRefreshBatch    = 64
+	recoveryRefreshInterval = 100 * time.Millisecond
+)
+
+// refreshTenant reruns every subscription group of a tenant after its LISTEN
+// connection recovered, in paced batches. A newer refresh of the same tenant
+// supersedes an unfinished one; its snapshot covers every remaining group.
+// Groups in their idle grace window are not executed: their retained snapshot
+// is marked stale so a joining listener gets a fresh execution.
 func (m *subscriptionManager) refreshTenant(project, tenant string) {
+	scope := subscriptionScope{project: project, tenant: tenant}
 	m.mu.Lock()
+	if m.recoveryGenerations == nil {
+		m.recoveryGenerations = map[subscriptionScope]uint64{}
+	}
+	m.recoveryGenerations[scope]++
+	generation := m.recoveryGenerations[scope]
 	groups := make([]*sharedSubscription, 0)
 	for _, group := range m.groups {
 		if group.project == project && group.tenant == tenant {
@@ -453,10 +478,46 @@ func (m *subscriptionManager) refreshTenant(project, tenant string) {
 		}
 	}
 	m.mu.Unlock()
+	m.server.metrics.recordReactive(func(metric *reactiveMetricState) {
+		metric.RecoveryRefreshes++
+		metric.RecoveryGroups += uint64(len(groups))
+	})
 	changedAt := epochMillis(time.Now().UTC())
-	for _, group := range groups {
-		group.request("recover", changedAt)
+	batch := max(recoveryRefreshBatch, 1)
+	first := min(batch, len(groups))
+	for _, group := range groups[:first] {
+		group.recover(changedAt)
 	}
+	if first == len(groups) {
+		return
+	}
+	go func() {
+		for start := first; start < len(groups); start += batch {
+			time.Sleep(recoveryRefreshInterval)
+			m.mu.Lock()
+			superseded := m.recoveryGenerations[scope] != generation
+			m.mu.Unlock()
+			if superseded {
+				return
+			}
+			for _, group := range groups[start:min(start+batch, len(groups))] {
+				group.recover(changedAt)
+			}
+		}
+	}()
+}
+
+func (group *sharedSubscription) recover(changedAtMS float64) {
+	group.mu.Lock()
+	if len(group.listeners) == 0 {
+		// No listener can receive a rerun. The retained snapshot may predate a
+		// notification lost while LISTEN was down, so it must not be replayed.
+		group.staleWhileIdle = true
+		group.mu.Unlock()
+		return
+	}
+	group.mu.Unlock()
+	group.request("recover", changedAtMS)
 }
 
 func (m *subscriptionManager) rebindProject(subs []querySubscription) {

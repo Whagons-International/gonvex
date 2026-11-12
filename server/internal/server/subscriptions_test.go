@@ -1265,3 +1265,47 @@ func TestGraceIdleInvalidationMarksRetainedSnapshotUnservable(t *testing.T) {
 		t.Fatal("a stale snapshot must not be servable to a joining listener")
 	}
 }
+
+func TestListenerRecoveryRefreshIsPacedAndSkipsIdleGroups(t *testing.T) {
+	oldBatch, oldInterval := recoveryRefreshBatch, recoveryRefreshInterval
+	recoveryRefreshBatch, recoveryRefreshInterval = 2, 200*time.Millisecond
+	t.Cleanup(func() { recoveryRefreshBatch, recoveryRefreshInterval = oldBatch, oldInterval })
+
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	manager := server.subscriptions
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"id": "row-1"}}, nil
+	}
+	for index := range 5 {
+		indexedTestGroup(manager, fmt.Sprintf("query.%d", index), "tasks", &executions)
+	}
+	idle := indexedTestGroup(manager, "query.idle", "tasks", &executions)
+	idle.mu.Lock()
+	idle.listeners = map[*subscriptionToken]querySubscription{}
+	idle.lastResult = json.RawMessage(`[{"id":"before-outage"}]`)
+	idle.mu.Unlock()
+
+	manager.refreshTenant("project-a", "tenant-a")
+	// The first batch of two may include the idle group, which does not run.
+	eventually(t, time.Second, func() bool { return executions.Load() >= 1 })
+	time.Sleep(100 * time.Millisecond)
+	if got := executions.Load(); got > 2 {
+		t.Fatalf("recovery executed %d groups before the first pacing interval, want at most one batch of 2", got)
+	}
+	eventually(t, 2*time.Second, func() bool { return executions.Load() == 5 })
+	time.Sleep(recoveryRefreshInterval + 50*time.Millisecond)
+	if got := executions.Load(); got != 5 {
+		t.Fatalf("recovery executed %d times, want 5 (the idle group must not run)", got)
+	}
+	idle.mu.Lock()
+	stale := idle.staleWhileIdle
+	idle.mu.Unlock()
+	if !stale {
+		t.Fatal("recovery must mark an idle group's retained snapshot stale")
+	}
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.RecoveryGroups; got != 6 {
+		t.Fatalf("recovery groups metric = %d, want 6", got)
+	}
+}
