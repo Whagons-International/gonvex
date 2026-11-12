@@ -91,13 +91,13 @@ func TestCallerIDPredicateSelectsOnlyAffectedUser(t *testing.T) {
 	detail := tableChangeDetail{precise: true, userIDs: map[string]bool{"user-a": true}}
 	callerA := callerContext{user: &gonvex.User{ID: "user-a"}}
 	callerB := callerContext{user: &gonvex.User{ID: "user-b"}}
-	if !readPredicateMatches("callerIdColumn:userId", nil, callerA, detail, nil) {
+	if !readPredicateMatches("notifications", "callerIdColumn:userId", nil, callerA, detail, nil) {
 		t.Fatal("affected caller did not match committed userId")
 	}
-	if readPredicateMatches("callerIdColumn:userId", nil, callerB, detail, nil) {
+	if readPredicateMatches("notifications", "callerIdColumn:userId", nil, callerB, detail, nil) {
 		t.Fatal("unaffected caller matched committed userId")
 	}
-	if !readPredicateMatches("callerIdColumn:userId", nil, callerB, tableChangeDetail{precise: true}, nil) {
+	if !readPredicateMatches("notifications", "callerIdColumn:userId", nil, callerB, tableChangeDetail{precise: true}, nil) {
 		t.Fatal("missing userId metadata must fail open")
 	}
 }
@@ -106,14 +106,14 @@ func TestColumnArgumentPredicateSelectsOldAndNewWorkspace(t *testing.T) {
 	detail := tableChangeDetail{precise: true, workspaceIDs: map[string]bool{"ws-old": true, "ws-new": true}}
 	for _, workspace := range []string{"ws-old", "ws-new"} {
 		args := json.RawMessage(fmt.Sprintf(`{"workspaceId":%q}`, workspace))
-		if !readPredicateMatches("columnArg:workspaceId", args, callerContext{}, detail, nil) {
+		if !readPredicateMatches("tasks", "columnArg:workspaceId", args, callerContext{}, detail, nil) {
 			t.Fatalf("affected workspace %q did not match", workspace)
 		}
 	}
-	if readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"ws-other"}`), callerContext{}, detail, nil) {
+	if readPredicateMatches("tasks", "columnArg:workspaceId", json.RawMessage(`{"workspaceId":"ws-other"}`), callerContext{}, detail, nil) {
 		t.Fatal("unaffected workspace matched committed workspace IDs")
 	}
-	if !readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"all"}`), callerContext{}, detail, nil) {
+	if !readPredicateMatches("tasks", "columnArg:workspaceId", json.RawMessage(`{"workspaceId":"all"}`), callerContext{}, detail, nil) {
 		t.Fatal("all-workspaces query must fail open")
 	}
 }
@@ -201,7 +201,7 @@ func TestTaskIDsArgPredicateRerunsOnlyForListedTasks(t *testing.T) {
 			}
 			// The memoized group form and the stateless form agree.
 			detail := test.change.details[test.change.table]
-			if got := readPredicateMatches("taskIdsArg:taskIdsJson,taskId", group.args, callerContext{}, detail, nil); got != test.want && detail.precise {
+			if got := readPredicateMatches(test.change.table, "taskIdsArg:taskIdsJson,taskId", group.args, callerContext{}, detail, nil); got != test.want && detail.precise {
 				t.Fatalf("readPredicateMatches = %v, want %v", got, test.want)
 			}
 		})
@@ -1527,19 +1527,19 @@ func TestCallerUserIDPredicateUsesHandlerReportedIDs(t *testing.T) {
 	reported := callerContext{user: &gonvex.User{ID: "firebase-uid"}, referenceIDs: map[string]bool{"landlord-7": true}}
 	other := callerContext{user: &gonvex.User{ID: "firebase-uid-2"}, referenceIDs: map[string]bool{"landlord-8": true}}
 	unknown := callerContext{user: &gonvex.User{ID: "landlord-7"}}
-	if !readPredicateMatches("callerUserIdColumn:userId", nil, reported, detail, nil) {
+	if !readPredicateMatches("notifications", "callerUserIdColumn:userId", nil, reported, detail, nil) {
 		t.Fatal("a change addressed to the reported landlord id must rerun")
 	}
-	if readPredicateMatches("callerUserIdColumn:userId", nil, other, detail, nil) {
+	if readPredicateMatches("notifications", "callerUserIdColumn:userId", nil, other, detail, nil) {
 		t.Fatal("a change addressed to another user must not rerun")
 	}
-	if !readPredicateMatches("callerUserIdColumn:userId", nil, unknown, detail, nil) {
+	if !readPredicateMatches("notifications", "callerUserIdColumn:userId", nil, unknown, detail, nil) {
 		t.Fatal("unreported caller ids must rerun, never compare the auth subject")
 	}
-	if !readPredicateMatches("callerUserIdColumn:userId", nil, other, tableChangeDetail{precise: true}, nil) {
+	if !readPredicateMatches("notifications", "callerUserIdColumn:userId", nil, other, tableChangeDetail{precise: true}, nil) {
 		t.Fatal("a change without userIds must rerun")
 	}
-	if !readPredicateMatches("callerUserIdColumn:recipientId", nil, other, detail, nil) {
+	if !readPredicateMatches("notifications", "callerUserIdColumn:recipientId", nil, other, detail, nil) {
 		t.Fatal("an unsupported column must rerun")
 	}
 }

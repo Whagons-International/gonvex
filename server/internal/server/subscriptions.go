@@ -705,10 +705,15 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 		}
 		intersected = true
 		detail := tableDetail(change, read.Table)
-		if detail.precise && !group.readPredicateMatches(read.Predicate, caller, detail, rowIDs) {
+		// Broad changes may retain IDs from their precise siblings after a
+		// merge. Those IDs cannot prove the rest of the change is unrelated.
+		if !detail.precise || detail.broad {
+			return true, false
+		}
+		if !group.readPredicateMatches(read.Table, read.Predicate, caller, detail, rowIDs) {
 			continue
 		}
-		if !detail.precise || detail.broad || detail.operation == "insert" || detail.operation == "delete" {
+		if detail.operation == "insert" || detail.operation == "delete" {
 			return true, false
 		}
 		if detail.operation == "update" && len(detail.changedColumns) > 0 {
@@ -738,7 +743,7 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 
 // readPredicateMatches is the group form of readPredicateMatches: it parses a
 // taskIdsArg list once per group instead of once per change.
-func (group *sharedSubscription) readPredicateMatches(predicate string, caller callerContext, detail tableChangeDetail, rowIDs map[string]bool) bool {
+func (group *sharedSubscription) readPredicateMatches(table, predicate string, caller callerContext, detail tableChangeDetail, rowIDs map[string]bool) bool {
 	if names, ok := strings.CutPrefix(strings.TrimSpace(predicate), "taskIdsArg:"); ok {
 		group.mu.Lock()
 		requested, cached := group.taskIDArgs[names]
@@ -750,9 +755,9 @@ func (group *sharedSubscription) readPredicateMatches(predicate string, caller c
 			group.taskIDArgs[names] = requested
 		}
 		group.mu.Unlock()
-		return taskIDsArgMatches(requested, detail)
+		return taskIDsArgMatches(requested, table, detail)
 	}
-	return readPredicateMatches(predicate, group.args, caller, detail, rowIDs)
+	return readPredicateMatches(table, predicate, group.args, caller, detail, rowIDs)
 }
 
 // requestedTaskIDs reads the task ids a subscription names explicitly in the
@@ -805,11 +810,11 @@ func requestedTaskIDs(names string, args json.RawMessage) map[string]bool {
 // taskIDsArgMatches implements taskIdsArg:<arg>[,<arg>...]: a change to a
 // task-linked table (or to tasks itself) can only affect a subscription that
 // lists its task ids explicitly when one of the changed tasks is listed. The
-// changed ids are the trigger's taskId metadata plus the row ids (for the
-// tasks table the row id is the task id; other tables' row ids never collide
-// with task ids). A change without ids, or an unknown requested set, matches.
-func taskIDsArgMatches(requested map[string]bool, detail tableChangeDetail) bool {
-	if requested == nil || len(detail.taskIDs)+len(detail.rowIDs) == 0 {
+// changed ids are the trigger's taskId metadata plus row ids for tasks itself.
+// A child row ID does not identify its parent task. Unknown metadata, a broad
+// change, or an unknown requested set must invalidate conservatively.
+func taskIDsArgMatches(requested map[string]bool, table string, detail tableChangeDetail) bool {
+	if !detail.precise || detail.broad || requested == nil || (len(detail.taskIDs) == 0 && (table != "tasks" || len(detail.rowIDs) == 0)) {
 		return true
 	}
 	for id := range detail.taskIDs {
@@ -817,9 +822,11 @@ func taskIDsArgMatches(requested map[string]bool, detail tableChangeDetail) bool
 			return true
 		}
 	}
-	for id := range detail.rowIDs {
-		if requested[id] {
-			return true
+	if table == "tasks" {
+		for id := range detail.rowIDs {
+			if requested[id] {
+				return true
+			}
 		}
 	}
 	return false
@@ -830,13 +837,16 @@ func taskIDsArgMatches(requested map[string]bool, detail tableChangeDetail) bool
 // resultTaskIds scopes a task-linked table to tasks already in the result;
 // resultTaskIdsOrColumnArg:workspaceId also admits changes that can move a task
 // into the subscribed workspace. Unknown predicates remain conservative.
-func readPredicateMatches(predicate string, args json.RawMessage, caller callerContext, detail tableChangeDetail, resultRowIDs map[string]bool) bool {
+func readPredicateMatches(table, predicate string, args json.RawMessage, caller callerContext, detail tableChangeDetail, resultRowIDs map[string]bool) bool {
+	if !detail.precise || detail.broad {
+		return true
+	}
 	predicate = strings.TrimSpace(predicate)
 	if predicate == "" {
 		return true
 	}
 	if names, ok := strings.CutPrefix(predicate, "taskIdsArg:"); ok {
-		return taskIDsArgMatches(requestedTaskIDs(names, args), detail)
+		return taskIDsArgMatches(requestedTaskIDs(names, args), table, detail)
 	}
 	resultTaskIDsMatch := func() (bool, bool) {
 		if len(detail.taskIDs) == 0 {
@@ -868,7 +878,7 @@ func readPredicateMatches(predicate string, args json.RawMessage, caller callerC
 		if !known {
 			return true
 		}
-		return readPredicateMatches("columnArg:"+column, args, caller, detail, resultRowIDs)
+		return readPredicateMatches(table, "columnArg:"+column, args, caller, detail, resultRowIDs)
 	}
 	if strings.HasPrefix(predicate, "callerUserIdColumn:") {
 		// The trigger reports userIds only for a physical "userId" column. Any
