@@ -5,7 +5,7 @@
  * and 3 pending sockets per address, 512-byte public payloads. Each test uses
  * its own client address (`CF-Connecting-IP`), so budgets never leak between tests.
  */
-import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { AddressBudget } from "../limiter";
@@ -148,6 +148,25 @@ describe("connection budgets at the upgrade", () => {
     c.ws.close();
     failed.ws.close();
     await expect.poll(() => counts(address)).toEqual({ pending: 0, public: 0 });
+  });
+
+  it("keeps the caps across an eviction of the limiter object (slots are persisted)", async () => {
+    const address = freshAddress();
+    const a = await Client.open(address, "?public=1");
+    const b = await Client.open(address, "?public=1");
+    await evictDurableObject(limiter(address));
+    expect(await counts(address)).toEqual({ pending: 2, public: 2 });
+    const refused = await upgrade(address, "?public=1");
+    expect(refused.status).toBe(429);
+    expect(await refused.text()).toBe("public connection limit exceeded");
+    a.ws.close();
+    await expect.poll(() => counts(address)).toEqual({ pending: 1, public: 1 });
+    await evictDurableObject(limiter(address));
+    expect(await counts(address)).toEqual({ pending: 1, public: 1 });
+    b.ws.close();
+    await expect.poll(() => counts(address)).toEqual({ pending: 0, public: 0 });
+    await evictDurableObject(limiter(address));
+    expect(await counts(address)).toEqual({ pending: 0, public: 0 });
   });
 
   it("shares one bucket for callers without a usable CF-Connecting-IP", async () => {

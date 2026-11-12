@@ -21,7 +21,7 @@ export interface PublicLimits {
   connectionsPerAddress: number;
   /** `GONVEX_PENDING_CONNECTIONS_PER_IP`: unauthenticated sockets per address, both transports. */
   pendingPerAddress: number;
-  /** `GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS`, in ms: an anonymous Action's deadline. */
+  /** `GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS`, in ms: K12's `ActionRuntime` applies it to anonymous Actions (`publicActionTimeoutMs`). */
   actionTimeoutMs: number;
 }
 
@@ -40,8 +40,6 @@ export const CALL_WINDOW_MS = 60_000;
 export const ADMISSION_MAX_AGE_MS = 30_000;
 /** `validate_public_scope`'s timeout on the Control Plane read (lib.rs:3871-3880). */
 export const ADMISSION_VALIDATE_TIMEOUT_MS = 5_000;
-/** The normal Action deadline (CONTRACT.md B.6): a public Action's deadline never exceeds it. */
-export const ACTION_TIMEOUT_MS = 15 * 60_000;
 
 export interface PublicLimitsEnv {
   GONVEX_PUBLIC_CALLS_PER_CONNECTION?: string;
@@ -79,15 +77,4 @@ export function publicLimits(env: PublicLimitsEnv): PublicLimits {
   };
   cache.set(env, limits);
   return limits;
-}
-
-/**
- * The deadline of an anonymous Action (execution.rs:904-915): the earlier of
- * the normal execution deadline and now + `GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS`.
- * An agent Action has no normal deadline, but an anonymous one still gets this
- * one. The Action runtime (K12) applies it; this is the one place it is computed.
- */
-export function publicActionDeadline(now: number, executionDeadline: number | null, limits: Pick<PublicLimits, "actionTimeoutMs">): number {
-  const limit = now + limits.actionTimeoutMs;
-  return executionDeadline === null ? limit : Math.min(executionDeadline, limit);
 }

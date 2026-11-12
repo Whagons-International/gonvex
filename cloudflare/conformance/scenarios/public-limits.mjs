@@ -16,7 +16,7 @@
  * Every step uses its own client address through `CF-Connecting-IP`, so no
  * budget carries over from another step or scenario. The Rust backend trusts
  * that header from 127.0.0.1 (`GONVEX_TRUSTED_PROXY_CIDRS`); on Cloudflare the
- * edge sets it (contract-changes 0040).
+ * edge sets it (contract-changes 0042).
  */
 import WebSocket from 'ws';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -60,8 +60,9 @@ export const shut = (socket) => { try { socket.ws.close(); } catch {} };
 /** What is compared of a reply: no backend-assigned ids. */
 export const shape = (m) => {
   const out = { type: m.type };
-  for (const k of ['id', 'path', 'error', 'code', 'class', 'retryable']) if (m[k] !== undefined) out[k] = m[k];
+  for (const k of ['id', 'path', 'reason', 'error', 'code', 'class', 'retryable', 'committedRevision']) if (m[k] !== undefined) out[k] = m[k];
   if (m.type === 'auth.result') out.result = { accountId: m.result.accountId, public: m.result.public };
+  else if (m.result !== undefined) out.result = m.result;
   return out;
 };
 

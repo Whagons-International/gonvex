@@ -1,5 +1,5 @@
 /**
- * Per-address budgets across isolates (contract-changes 0040).
+ * Per-address budgets across isolates (contract-changes 0042, accepted in 0045).
  *
  * Rust keeps three process-local maps per client address
  * (`PublicLimiter`, public_functions.rs:81-176): pending sockets, public
@@ -10,17 +10,21 @@
  * isolate and gateway asks the same object, so a limit trips at exactly the
  * configured count however the sockets are spread.
  *
- * - **Memory only** (design rule: nothing ephemeral in SQLite). If the object
- *   is evicted while idle, its counters restart at zero, which can only admit,
- *   never refuse, a client. Slots are held per connection id, so a release
- *   that arrives after a restart is a no-op.
+ * - **Slots are persisted** (0045): one small KV entry per held connection,
+ *   written when a slot is taken or freed and read back when the object
+ *   wakes, so an evicted limiter cannot reset the 20-socket and 100-pending
+ *   caps while public sockets hibernate. At most `pending` entries per bucket
+ *   (100 by default); a bucket with no socket stores nothing.
+ * - **The call window stays in memory.** It is 60 s of ephemeral state (design
+ *   rule: nothing ephemeral in SQLite), and an idle object only restarts it.
  * - **Leaked slots.** A slot is released when its socket closes, and a pending
  *   slot also when the socket authenticates. A gateway that is reset loses its
  *   sockets without running its close handlers; their slots would then stay
  *   held. So when a bucket is at its limit, the object asks each gateway
  *   holding its older slots which of those connections are still open
- *   (`liveConnections`), drops the rest, and decides again. Refusal is the
- *   only path that pays for this, at most once per 10 s per bucket.
+ *   (`liveConnections`), drops the rest, and decides again (at most once per
+ *   10 s per kind). An hourly alarm runs the same audit over every stored slot
+ *   while any remain, so a leak in a bucket that never fills is not kept forever.
  */
 import { DurableObject } from "cloudflare:workers";
 import { allowCalls, type CallWindow, newWindow } from "./window";
@@ -32,6 +36,8 @@ export const PUBLIC_LIMIT_ERROR = "public connection limit exceeded";
 export const AUDIT_GRACE_MS = 10_000;
 /** At most one audit per kind per this interval (refusals under attack stay cheap). */
 export const AUDIT_INTERVAL_MS = 10_000;
+/** While slots are stored, the object audits all of them this often (alarm). */
+export const SWEEP_INTERVAL_MS = 60 * 60_000;
 
 export type SlotKind = "pending" | "public";
 
@@ -51,6 +57,34 @@ export interface AllowRequest { v: 1; cost: number; limit: number }
 
 interface Slot { gateway: string; at: number }
 
+/** One held connection as stored: its gateway, when it was admitted, and the kinds it still holds. */
+export interface StoredSlot { gateway: string; at: number; kinds: SlotKind[] }
+
+/** Where the slots live across evictions: the object's KV storage, or memory in unit tests. */
+export interface SlotStore {
+  load(): Iterable<[string, StoredSlot]>;
+  put(connectionId: string, slot: StoredSlot): void;
+  delete(connectionId: string): void;
+}
+
+export class MemorySlotStore implements SlotStore {
+  readonly entries = new Map<string, StoredSlot>();
+  load() { return [...this.entries].map(([k, v]) => [k, { ...v, kinds: [...v.kinds] }] as [string, StoredSlot]); }
+  put(id: string, slot: StoredSlot) { this.entries.set(id, { ...slot, kinds: [...slot.kinds] }); }
+  delete(id: string) { this.entries.delete(id); }
+}
+
+const SLOT_PREFIX = "slot:";
+
+/** The object's synchronous KV storage (SQLite-backed): one entry per held connection. */
+export function kvSlotStore(kv: SyncKvStorage): SlotStore {
+  return {
+    *load() { for (const [key, value] of kv.list<StoredSlot>({ prefix: SLOT_PREFIX })) yield [key.slice(SLOT_PREFIX.length), value]; },
+    put: (id, slot) => { kv.put(SLOT_PREFIX + id, slot); },
+    delete: (id) => { kv.delete(SLOT_PREFIX + id); },
+  };
+}
+
 /** What the object asks a gateway during an audit. */
 export interface LiveConnections {
   liveConnections(connectionIds: string[]): Promise<string[]>;
@@ -62,7 +96,27 @@ export class AddressBudget {
   private window: CallWindow | null = null;
   private audited: Record<SlotKind, number> = { pending: -Infinity, public: -Infinity };
 
-  constructor(private readonly gateway: (name: string) => LiveConnections, private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly gateway: (name: string) => LiveConnections,
+    private readonly now: () => number = Date.now,
+    private readonly store: SlotStore = new MemorySlotStore(),
+  ) {
+    for (const [id, stored] of store.load()) {
+      const slot = { gateway: stored.gateway, at: stored.at };
+      for (const kind of stored.kinds) this.slots[kind].set(id, slot);
+    }
+  }
+
+  /** Whether any slot is held (the object keeps its sweep alarm while one is). */
+  get holding(): boolean { return this.slots.pending.size > 0 || this.slots.public.size > 0; }
+
+  /** Writes one connection's entry as it now stands (deleted when it holds nothing). */
+  private save(id: string): void {
+    const slot = this.slots.pending.get(id) ?? this.slots.public.get(id);
+    const kinds = (["pending", "public"] as const).filter(k => this.slots[k].has(id));
+    if (!slot || !kinds.length) this.store.delete(id);
+    else this.store.put(id, { gateway: slot.gateway, at: slot.at, kinds });
+  }
 
   /**
    * `admit_pending`, then `admit` for the public transport (lib.rs:1590-1617):
@@ -78,11 +132,21 @@ export class AddressBudget {
     const slot = { gateway: request.gateway, at: this.now() };
     this.slots.pending.set(request.connectionId, slot);
     if (request.publicTransport) this.slots.public.set(request.connectionId, slot);
+    this.save(request.connectionId);
     return { ok: true };
   }
 
   release(request: ReleaseRequest): void {
-    for (const kind of request.kinds) this.slots[kind].delete(request.connectionId);
+    let changed = false;
+    for (const kind of request.kinds) changed = this.slots[kind].delete(request.connectionId) || changed;
+    if (changed) this.save(request.connectionId);
+  }
+
+  /** The alarm's sweep: audits every slot past the grace, whatever the bucket's fill. */
+  async sweep(): Promise<void> {
+    this.audited = { pending: -Infinity, public: -Infinity };
+    await this.audit("pending");
+    await this.audit("public");
   }
 
   /** The per-address half of `PublicLimiter::allow` (the window starts at the first call, as `windows.entry(ip).or_default()`). */
@@ -130,6 +194,7 @@ export class AddressBudget {
         if (live.has(id)) continue;
         this.slots.pending.delete(id);
         this.slots.public.delete(id);
+        this.store.delete(id);
       }
     }));
   }
@@ -146,14 +211,28 @@ export class PublicLimiterObject extends DurableObject<PublicLimiterEnv> {
   constructor(ctx: DurableObjectState, env: PublicLimiterEnv) {
     super(ctx, env);
     const gateways = env.GATEWAY as unknown as { getByName(name: string): LiveConnections };
-    this.budget = new AddressBudget((name) => gateways.getByName(name));
+    this.budget = new AddressBudget((name) => gateways.getByName(name), Date.now, kvSlotStore(ctx.storage.kv));
   }
 
-  async admit(request: AdmitRequest): Promise<AdmitResult> { return this.budget.admit(request); }
+  async admit(request: AdmitRequest): Promise<AdmitResult> {
+    const result = await this.budget.admit(request);
+    if (result.ok) await this.armSweep();
+    return result;
+  }
   async release(request: ReleaseRequest): Promise<void> { this.budget.release(request); }
   async allow(request: AllowRequest): Promise<boolean> { return this.budget.allow(request); }
   /** Test and operator seam: held slots per kind. */
   async counts(): Promise<Record<SlotKind, number>> { return { pending: this.budget.count("pending"), public: this.budget.count("public") }; }
+
+  override async alarm(): Promise<void> {
+    await this.budget.sweep();
+    if (this.budget.holding) await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+  }
+
+  /** One alarm while any slot is held; never moved once set. */
+  private async armSweep(): Promise<void> {
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+  }
 }
 
 export const limiterName = (bucket: string) => `addr:${bucket}`;

@@ -5,9 +5,10 @@
  */
 import { describe, expect, it } from "vitest";
 import { addressBucket, clientAddress, UNKNOWN_ADDRESS } from "../address";
-import { DEFAULT_PUBLIC_LIMITS, PublicConfigError, publicActionDeadline, publicLimits } from "../config";
+import { DEFAULT_PUBLIC_LIMITS, PublicConfigError, publicLimits } from "../config";
 import { frameCost, publicAdmissionErrors, publicLimitErrors, runsTenantCode } from "../frames";
-import { AddressBudget, AUDIT_GRACE_MS, AUDIT_INTERVAL_MS, type AdmitRequest, PENDING_LIMIT_ERROR, PUBLIC_LIMIT_ERROR } from "../limiter";
+import { AddressBudget, AUDIT_GRACE_MS, AUDIT_INTERVAL_MS, type AdmitRequest, MemorySlotStore, PENDING_LIMIT_ERROR, PUBLIC_LIMIT_ERROR } from "../limiter";
+import { admitUpgrade, LIMITER_UNAVAILABLE, publicGuard } from "../guard";
 import { allowCalls, newWindow } from "../window";
 import type { ClientFrame } from "../../session/decode";
 
@@ -46,12 +47,6 @@ describe("configuration", () => {
     expect(publicLimits({ GONVEX_PUBLIC_CALLS_PER_IP: "", GONVEX_PUBLIC_CALLS_PER_CONNECTION: " 7 " })).toMatchObject({ addressCalls: 120, connectionCalls: 7 });
     expect(publicLimits({ GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS: "5" }).actionTimeoutMs).toBe(5_000);
     for (const bad of ["0", "-1", "1.5", "ten", "1e3"]) expect(() => publicLimits({ GONVEX_PUBLIC_CONNECTIONS_PER_IP: bad }), bad).toThrow(PublicConfigError);
-  });
-
-  it("caps an anonymous Action at the earlier of its deadline and the public timeout", () => {
-    expect(publicActionDeadline(1_000, 1_000 + 15 * 60_000, { actionTimeoutMs: 60_000 })).toBe(61_000);
-    expect(publicActionDeadline(1_000, 5_000, { actionTimeoutMs: 60_000 })).toBe(5_000);
-    expect(publicActionDeadline(1_000, null, { actionTimeoutMs: 60_000 })).toBe(61_000);
   });
 });
 
@@ -119,6 +114,44 @@ describe("address budget", () => {
     expect(budget.count("public")).toBe(2);
   });
 
+  it("persists its slots: a budget rebuilt from the store (an evicted object) keeps the caps", async () => {
+    const store = new MemorySlotStore();
+    const live = { liveConnections: async (ids: string[]) => ids };
+    const first = new AddressBudget(() => live, () => 0, store);
+    await first.admit(request("a", true, "gw-1"));
+    await first.admit(request("b", true, "gw-2"));
+    await first.admit(request("m", false, "gw-3"));
+    expect([...store.entries]).toEqual([
+      ["a", { gateway: "gw-1", at: 0, kinds: ["pending", "public"] }],
+      ["b", { gateway: "gw-2", at: 0, kinds: ["pending", "public"] }],
+      ["m", { gateway: "gw-3", at: 0, kinds: ["pending"] }],
+    ]);
+    first.release({ v: 1, connectionId: "a", kinds: ["pending"] });
+    expect(store.entries.get("a")).toEqual({ gateway: "gw-1", at: 0, kinds: ["public"] });
+    const woken = new AddressBudget(() => live, () => 0, store);
+    expect([woken.count("pending"), woken.count("public")]).toEqual([2, 2]);
+    expect(await woken.admit(request("c", true))).toEqual({ ok: false, error: PUBLIC_LIMIT_ERROR });
+    woken.release({ v: 1, connectionId: "a", kinds: ["public"] });
+    expect(store.entries.has("a")).toBe(false);
+    expect(await woken.admit(request("c", true))).toEqual({ ok: true });
+  });
+
+  it("the sweep drops leaked slots past the grace whatever the fill, and the store with them", async () => {
+    let now = 0;
+    const store = new MemorySlotStore();
+    const budget = new AddressBudget(() => ({ liveConnections: async () => ["kept"] }), () => now, store);
+    await budget.admit(request("kept", false));
+    await budget.admit(request("leaked", true));
+    now = AUDIT_GRACE_MS - 1;
+    await budget.sweep();
+    expect(budget.count("pending")).toBe(2);
+    now = AUDIT_GRACE_MS;
+    await budget.sweep();
+    expect([budget.count("pending"), budget.count("public")]).toEqual([1, 0]);
+    expect([...store.entries.keys()]).toEqual(["kept"]);
+    expect(budget.holding).toBe(true);
+  });
+
   it("charges the address window from the first call", () => {
     let now = 5_000;
     const budget = new AddressBudget(() => ({ liveConnections: async (ids) => ids }), () => now);
@@ -163,5 +196,22 @@ describe("refused frames", () => {
     const other = ["auth", "query.unsubscribe", "replica.close", "reducer.callMany", "presence.set", "telemetry.batch"];
     for (const type of tenantCode) expect(runsTenantCode({ type } as ClientFrame), type).toBe(true);
     for (const type of other) expect(runsTenantCode({ type } as ClientFrame), type).toBe(false);
+  });
+});
+
+describe("limiter failure modes (0045)", () => {
+  const unreachable = { getByName: () => ({ admit: async () => { throw new Error("object unreachable"); }, allow: async () => { throw new Error("object unreachable"); }, release: async () => { throw new Error("object unreachable"); } }) };
+  const env = { PUBLIC_LIMITER: unreachable as unknown as DurableObjectNamespace };
+
+  it("refuses an upgrade with 503 when the limiter cannot be reached", async () => {
+    const response = await admitUpgrade(env, { address: "198.51.100.9", connectionId: "c", gateway: "gw-0", publicTransport: true });
+    expect(response?.status).toBe(503);
+    expect(await response?.text()).toBe(LIMITER_UNAVAILABLE);
+  });
+
+  it("keeps charging calls fail-open, and a failed release does not throw", async () => {
+    const guard = publicGuard(env);
+    expect(await guard.allowAddress("198.51.100.9", 1)).toBe(true);
+    await expect(guard.release("198.51.100.9", "c", ["pending"])).resolves.toBeUndefined();
   });
 });

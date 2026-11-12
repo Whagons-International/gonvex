@@ -38,8 +38,8 @@ export function publicGuard(env: PublicGuardEnv): PublicGuard {
       try {
         return await limiterFor(namespace, address).allow({ v: 1, cost, limit: limits.addressCalls });
       } catch (error) {
-        // The connection budget still applies. Refusing every public call while one object is unreachable would
-        // turn a platform hiccup into an outage of every public page.
+        // Fail-open by ruling (0045): the connection budget still applies, and refusing every public call while one
+        // object is unreachable would turn a platform hiccup into an outage of every public page.
         console.error("public guard: address budget unavailable; allowing", error);
         return true;
       }
@@ -56,10 +56,16 @@ export function publicGuard(env: PublicGuardEnv): PublicGuard {
   };
 }
 
+/** The answer when the address limiter cannot be reached: the upgrade is refused (0045), not admitted unchecked. */
+export const LIMITER_UNAVAILABLE = "connection limiter is unavailable";
+
 /**
  * The router's reservation before the upgrade (`websocket_upgrade`,
  * lib.rs:1590-1617). Null when admitted; otherwise the 429 response Rust sends
- * (axum's `(StatusCode, &str)`: a text/plain body).
+ * (axum's `(StatusCode, &str)`: a text/plain body). When the limiter cannot be
+ * reached the upgrade is refused with 503 (0045): admitting it would let a
+ * limiter outage lift the socket caps. The SDK retries a refused upgrade as any
+ * failed connect.
  */
 export async function admitUpgrade(
   env: PublicGuardEnv,
@@ -74,9 +80,8 @@ export async function admitUpgrade(
       pendingLimit: limits.pendingPerAddress, publicLimit: limits.connectionsPerAddress,
     });
   } catch (error) {
-    // Same reasoning as `allowAddress`: the auth deadline still bounds a pending socket.
-    console.error("public guard: connection budget unavailable; admitting", error);
-    return null;
+    console.error("public guard: connection limiter unavailable; refusing the upgrade", error);
+    return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } });
   }
   if (result.ok) return null;
   return new Response(result.error, { status: 429, headers: { "content-type": "text/plain; charset=utf-8" } });
