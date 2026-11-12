@@ -2,6 +2,8 @@
 
 Date: 2026-11-12. Status: bounded implementation permitted under 0056/0061/0069; acceptance remains UNMET.
 This clarifies the internal recovery path. It does not expand 0071's fresh-client continuation.
+0074 specifies producer/sequence binding, strict challenge/bootstrap/recovery shapes, pre-application
+version support and durable attempt handling; none of those markers is auth or a fresh client event.
 
 ## Quiet readers do not require a new client call to rebuild
 
