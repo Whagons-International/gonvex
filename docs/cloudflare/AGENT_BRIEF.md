@@ -89,3 +89,21 @@ These come from whagons-lite's `docs/DOD.md` and cost nothing to follow now.
 - Every loop over rows works in pages and yields between pages.
 - Nothing ephemeral is written to SQLite.
 - Write delivery against one interface with two placements, in the tenant object or in a gateway object, so fan-out shards are a routing change.
+
+## Initial staging-candidate capacity requirement (Gabriel, 2026-11-12)
+
+X01 automatic gateway scaling is required before an initial staging candidate is ready. It must scale out
+with cross-tenant and hot-tenant delivery demand without deployments or manual shard-count changes, and
+scale in safely with drain, measured hysteresis/cooldown and resumable recovery. Sockets, outbound frames
+and bytes, delivery lag, queue age and RPC delay drive bounded telemetry; CPU alone is insufficient.
+Keep stable existing-connection ownership and ordered live-query/replica delivery, bounded buffers and
+control work, idle hibernation and an explicit resource/cost envelope. Audit shared Control/auth,
+revalidation, limiters, routing and deployment capacity too. Gateway scaling does not repartition a
+tenant database: each tenant still has one serialized SQLite writer whose ceiling must be measured.
+
+V03/V04 keep every original gate and add reproducible capacity curves on the exact assembled dev deployment,
+including 26 tenants and 1,000 users while autoscaling occurs. Locate the first backend or load-generator
+bottleneck with bounded admitted sweeps, distinguish measurements/platform limits/account quotas/estimates,
+and publish raw artifacts and rerun commands. Evaluate X02 snapshot offload from storm evidence and pull it
+forward if required by the original gates. No staging/production cutover or load there is authorized.
+See decision 0053 and verification/V03-load-brief.md and V04-budgets-brief.md.
