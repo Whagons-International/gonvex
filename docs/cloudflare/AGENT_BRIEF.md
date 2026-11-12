@@ -118,6 +118,11 @@ verification. It does not introduce a global account budget or weaken K16's per-
 0063 permits digest-only resume checker reuse only from a verified same-socket/scope window, preserving
 all digest assertions. It also requires unrelated targeted delivery to leave other sockets untouched,
 while preserving genuine whole-holder/global scope barriers. Frozen failing campaigns remain evidence.
+0064 defines server-only operation-bound initial completion and fail-closed ordered terminal errors.
+0065 permits explicit provisional pending/authority admission with honest refusals and no false quiescence.
+0066 separates credential-free hosted image builds from Vault-only daemonless publication; skipped preview
+steps are not deployment proof. [K22 review evidence](verification/K22-review-a957.md) records the six
+unresolved review findings.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
