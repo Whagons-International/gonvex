@@ -35,7 +35,7 @@ that the assembled autoscaling runtime passed while using static placement.
 ## Approve bounded 1012 rebalancing, with safety conditions
 
 Persistent saturation of already-connected hot holders is not an acceptable substitute for the required
-hot-tenant elasticity. Authorize deliberate close 1012, reason `gateway placement rebalance`, as a resumable
+hot-tenant elasticity. Authorize deliberate close 1012, reason `gateway capacity rebalance`, as a resumable
 placement adaptation. The SDK source reconnects on every close (packages/client/src/index.ts:2170), reauthenticates,
 resubscribes and drains its durable outbox on reopening. It also rejects pending tenant calls as potentially
 applied, and NEVER blindly replays non-idempotent calls. That behavior is preserved, not waived by this ruling.
