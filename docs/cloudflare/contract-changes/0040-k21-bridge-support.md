@@ -1,6 +1,8 @@
 # 0040: Bridge support findings (K21)
 
-Date: 2026-11-11. Status: **proposed** by K21. Items 1, 3 and 5 need a lead ruling. Item 4 needs Gabriel.
+Date: 2026-11-11. Status: proposed by K21; **ruled in 0045**. K21 merges as part 1, and the package stays open
+until assembly. `depends_on` gains K10, K15 and K17, and the final `done_when` run is V02, through the real bridge.
+Items 2 (patch or fallback), 4 and 5 go to Gabriel at cutover. Item 3 is accepted.
 Affects: K06 (assembly), K08, K10, K15, K17, M01, M07, V02; the app repository's bridge at cutover.
 
 Released Whagons mobile apps from 5.1.31 use the Gonvex 0.1.x SDK. They talk only to the Go bridge in
@@ -11,35 +13,62 @@ kernel must do for these phones is what that upstream client sends. Evidence is 
 ## 1. The bridge's upstream protocol, run against the kernel
 
 The conformance scenario `bridge-upstream` replays the upstream client's frames, with line references to the
-bridge source, on the fixture app. Results:
+bridge source, on the fixture app. All runs below are from committed files on `cloudflare/integration` 39066008
+(K17), whose A01 `capture.ts` change fixes the fixture depth break.
 
 - Rust against Rust: passes 3 of 3 runs.
-- Rust against the kernel: `cloudflare-reducer` backend, which has K05 sockets, K07 Reducers and the K05 control
-  stand-in. Step results:
+- Rust against `cloudflare-principals`: K05 sockets in front of K06's real control object and K07's tenant object
+  (the K17 harness).
+- Rust against `cloudflare-reducer`: K05 sockets, the K05 control stand-in and K07 Reducers.
 
-| Step (bridge source) | Kernel | Owner and planned fix |
-|---|---|---|
-| Dial with `?project=&tenant=`, `session.ready` first | **same as Rust** | — |
-| Public Control Plane auth (`controlOnly`, `clientContract: 3`, no capabilities) | **same** | — |
-| Sign-in grant fields the bridge reads (`accessToken`, `refreshToken`, `expiresAt`, `accountId`) | **same** (through the stand-in) | K06 has the real call. The bridge's own call, `exchangeExternalToken` with Firebase, is covered by `control-external-auth`. |
-| Tenant auth on the same socket | **same** | — |
-| Keyed `reducer.call` and its exact replay: one row | **same** | — |
-| WebSocket protocol ping gets a pong (the bridge drops an upstream after 2.5 silent 25 s windows) | **same** (workerd answers pings) | Confirm on the platform in V02 |
-| `control.auth.publicSettings` (`query.call`, `scope:"control"`) | `unknown Control Plane function` | K06 implements it in `cloudflare/control/`, but it is not yet behind K05's `ControlPort`: kernel assembly |
-| `control.tenants.mine` (`query.subscribe`, `scope:"control"`) | same error | same |
-| `control.auth.refreshSession` (`action.call`), re-auth in place, reopen under the old id | same error | same. Re-auth and reopen are K05 and K10. |
-| `replica.open` with no paging capability gives one legacy `replica.snapshot`; then `replica.delta` with `upserts`/`deleted` | `replica.error` "not implemented by the kernel tenant object yet" | **K10**. The bridge reads only `replica.snapshot` (never `snapshotPage`, since it negotiates nothing), `replica.delta`, `replica.reset`/`needHashes` (reopen) and `replica.error`. |
-| Live Query through `query.subscribe` follows a write | `query.error` "not implemented…" | K08's engine is merged, but it is not wired to the tenant object: K10 or assembly |
-| `error.register` and `error.envelope` answered with `error.ack` | no reply (forwarded, unanswered) | **K15.** The bridge waits for the ack with its 30 s operation timeout. Without the ack, every released app's `techSupport.recordHeartbeat` and `recordClientError` call fails after 30 s. The heartbeat is also how the bridge learns the app version for forced updates (README "Forced updates"). |
+| Step (bridge source) | `cloudflare-principals` | `cloudflare-reducer` | Owner and planned fix |
+|---|---|---|---|
+| Dial with `?project=&tenant=`, `session.ready` first | **same as Rust** | **same** | — |
+| Public Control Plane auth (`controlOnly`, `clientContract: 3`, no capabilities) | **same** | **same** | — |
+| `control.auth.publicSettings` (`query.call`, `scope:"control"`) | **same** | `unknown Control Plane function` | K06 (already in K17's harness) |
+| Sign-in grant fields the bridge reads (`accessToken`, `refreshToken`, `expiresAt`, `accountId`) | **same** | **same** (stand-in) | The bridge's own call, `exchangeExternalToken` with Firebase, is covered by `control-external-auth` |
+| Tenant auth on the same socket | **same** | **same** | — |
+| `control.tenants.mine` (`query.subscribe`, `scope:"control"`) | **same** | `unknown Control Plane function` | K06 |
+| `replica.open` with no paging capability gives one legacy `replica.snapshot`; then `replica.delta` with `upserts`/`deleted` | `replica.error` "not implemented by the kernel tenant object yet" | same | **K10**. The bridge reads only `replica.snapshot` (never `snapshotPage`, since it negotiates nothing), `replica.delta`, `replica.reset`/`needHashes` (reopen) and `replica.error`. |
+| Keyed `reducer.call` and its exact replay: one row | **same** (the reply; the delta is K10) | **same** | — |
+| Live Query through `query.subscribe` follows a write | `query.error` "not implemented…" | same | K08's engine is merged, but it is not wired to the tenant object: K10 or assembly |
+| `control.auth.refreshSession` (`action.call`), re-auth in place | **same** | `unknown Control Plane function` | K06 |
+| Reopen the collection under the old id after re-auth | `replica.error` | — | K10 |
+| `error.register` and `error.envelope` answered with `error.ack` | no reply (forwarded, unanswered) | same | **K15.** The bridge waits for the ack with its 30 s operation timeout. Without the ack, every released app's `techSupport.recordHeartbeat` and `recordClientError` call fails after 30 s. The heartbeat is also how the bridge learns the app version for forced updates (README "Forced updates"). |
+| WebSocket protocol ping gets a pong (the bridge drops an upstream after 2.5 silent 25 s windows) | **same** (workerd answers pings) | **same** | Confirm on the platform in V02 |
 
 `committedRevision` shows `r1` on the kernel against Rust's `r2`. That is only rank numbering: Rust's session had
 already compared a snapshot cursor. It goes away with K10.
 
-**Pre-existing break found on the base:** the `cloudflare-reducer` backend cannot provision any tenant on
-`cloudflare/integration` (c8210864). K08 added the fixture table `tasks`, and the transform refuses its update
-capture: `_gonvex_sync_tasks_update: expression-depth: expression depth about 111`. `receipt-lost-reply` fails the
-same way. The kernel run above used a local, uncommitted copy of the fixture without `tasks`. **Proposed:** A01 or
-K08 owns the fix. This note does not change the fixture.
+What is left is K10 (replicas and the Live Query wiring) and K15 (`error.ack`).
+
+### The bridge's own live tests (`TestBridgeE2E*`)
+
+`verify/bridge-e2e.mjs` starts a backend, deploys fixture generation 1, creates a tenant and a Member, and runs
+`go test -run '^TestBridgeE2E' -v` in the bridge with `BRIDGE_E2E_REQUIRED=1`. The bridge signs in only by
+exchanging a Firebase ID token. No Firebase project or token exists here, so the run used a JWT-shaped placeholder.
+Result, identical on `rust` and `cloudflare-principals`:
+
+```text
+--- FAIL: TestBridgeE2ELegacyProtocolAgainstLiveGonvex
+    bridge_e2e_test.go:238: message type = AuthError, want Transition; message={..."error":"exchange Firebase token:
+    invalid arguments: project auth mode \"gonvex-native\" does not allow provider \"firebase\"","type":"AuthError"}
+--- FAIL: TestBridgeE2EDisconnectDuringAuthResubscribeKeepsBridgeAlive   (same error, bridge_e2e_test.go:406)
+--- FAIL: TestBridgeE2EReleasedFindingRetry
+    finding_retry_e2e_test.go:15: isolated finding and destination team fixtures are required
+```
+
+They cannot pass here, on either backend, for three reasons:
+
+1. They need a Firebase-mode project and a real Firebase ID token for a Member: the Firebase Auth Emulator, with a
+   runtime that accepts it.
+2. They are Whagons tests: they read `tasks:list` (a seeded task with a numeric `pgId`) and
+   `settings:listNotifications` (a seeded notification). The finding test needs `BRIDGE_E2E_FINDING_ID` and
+   `BRIDGE_E2E_TEAM_ID`. Running them on the kernel needs the Whagons bundle deployed through K19, the A01-transformed
+   Whagons schema, and seeded data.
+3. Past sign-in they open Replica Collections, which is K10.
+
+They are the V02 run (0045).
 
 ## 2. The bridge's direct database access is already dead, and its replacement
 

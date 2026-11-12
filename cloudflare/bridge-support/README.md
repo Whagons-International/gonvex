@@ -18,41 +18,49 @@ phone (0.1.x SDK) ──/ws──▶ Go bridge ──/ws (Rust-era protocol)─�
 | `patches/whagons5-client-bridge-service-principal.patch` | The app-side change: bridge writer, Whagons internal Reducer, tests, docs (source only; see "Apply") |
 | `patches/COMMIT_MSG.txt` | Commit message for the patch |
 | `verify/service-principal.mjs`, `verify/app/` | Proves the replacement against a runtime with service principals; runs the patched bridge's writer |
+| `verify/bridge-e2e.mjs` | Runs the bridge's own live Go tests (`TestBridgeE2E*`) against a local backend and reports where each stops |
 
 ## What the bridge needs from the kernel
 
 | Upstream use | Contract | Owner | State on `cloudflare/integration` |
 | --- | --- | --- | --- |
 | `/ws?project=&tenant=`, `session.ready` first, `auth` with `clientContract: 3` and no capabilities | A.1 | K05 | passes |
-| Public `auth` (`controlOnly`), `control.auth.publicSettings` and `control.tenants.mine` with `scope:"control"` | C.1 | K06 | implemented in `control/`, not yet behind K05 |
-| `control.auth.exchangeExternalToken` (Firebase) and `control.auth.refreshSession` as `action.call` | C.3 | K06 | as above |
+| Public `auth` (`controlOnly`), `control.auth.publicSettings` and `control.tenants.mine` with `scope:"control"` | C.1 | K06 | passes on `cloudflare-principals` |
+| `control.auth.exchangeExternalToken` (Firebase) and `control.auth.refreshSession` as `action.call` | C.3 | K06 | refresh and re-auth pass on `cloudflare-principals`; Firebase is covered by `control-external-auth` |
 | Unsolicited `auth.error` `session-expired` / `membership-changed` | C.3.8 | K05, K06 | covered by `session-handshake` |
 | `replica.open` / `replica.close`, legacy `replica.snapshot`, `replica.delta`, `replica.reset`, `replica.needHashes` | A.2-A.4 | K10 | not yet |
 | `query.subscribe` / `query.unsubscribe` (Live Queries) | A.2 | K08 + K10 wiring | engine merged, not wired |
 | `reducer.call` with `idempotencyKey`; `action.call` | A.2, B | K07, K12 | Reducers pass |
 | `error.register`, `error.envelope` answered with `error.ack` | A.2 | K15 | no ack yet |
 | WebSocket protocol ping and pong (25 s keepalive) | A.1.8 | platform | passes locally |
-| `gvx_svc_` socket, internal allowlisted Reducer, keyed replay | A.2 service row | K17 | not yet (`verify/` is its acceptance) |
-| `GET/PUT/OPTIONS /storage/{*key}` on the same host as the bridge's `LEGACY_BRIDGE_GONVEX_HTTP_URL` | D.1 | K13 | open PR |
+| `gvx_svc_` socket, internal allowlisted Reducer, keyed replay | A.2 service row | K17 | merged (#370); `verify/service-principal.mjs` checks it against Rust |
+| `GET/PUT/OPTIONS /storage/{*key}` on the same host as the bridge's `LEGACY_BRIDGE_GONVEX_HTTP_URL` | D.1 | K13 | merged; signed URLs use the router's public host (0045) |
 | A route for released apps' `/ws` to the bridge | — | M01, M07 | cutover |
 
 ## Run
 
 ```sh
-# The bridge's upstream protocol: Rust against Rust (passes), then Rust against the kernel
+# The bridge's upstream protocol: Rust against Rust (passes), then Rust against the most assembled kernel
 cd cloudflare/conformance
 node src/cli.mjs --scenario bridge-upstream
-node src/cli.mjs --backend rust=rust --backend cf=cloudflare-reducer --scenario bridge-upstream
+node src/cli.mjs --backend rust=rust --backend cf=cloudflare-principals --scenario bridge-upstream
 
 # The service-principal replacement against the Rust reference (11 checks). With --bridge, it also runs
 # the patched bridge's own writer (TestServicePrincipalE2E) against that runtime.
 node cloudflare/bridge-support/verify/service-principal.mjs --runtime <gonvex-runtime> \
   --bridge <whagons5-client with the patch>/compatibility/legacy-convex-v5.1.29-bridge
+
+# The bridge's own live tests against a local backend (cloudflare-principals by default, or rust).
+# Without --token <Firebase ID token> they stop at the Firebase sign-in; see 0040 §1 for why they need V02.
+node cloudflare/bridge-support/verify/bridge-e2e.mjs --bridge <whagons5-client>/compatibility/legacy-convex-v5.1.29-bridge
 ```
 
-On `cloudflare/integration` at c8210864, the `cloudflare-reducer` backend cannot provision any tenant. The
-fixture's `tasks` table makes the transform refuse its capture trigger (0040 §1). Until that is fixed, the
-kernel run needs a local copy of the fixture without `tasks`.
+Results on `cloudflare/integration` 39066008, all from committed files (0040 §1):
+
+- `bridge-upstream` on `cloudflare-principals` matches Rust in every step except replicas and the Live Query (K10)
+  and `error.ack` (K15).
+- `TestBridgeE2E*` stops at the same Firebase sign-in error on Rust and on the kernel. These tests need a Firebase
+  project, a seeded Whagons tenant and K10; they are the V02 run.
 
 ## Apply the patch (Gabriel, in whagons5-client)
 
