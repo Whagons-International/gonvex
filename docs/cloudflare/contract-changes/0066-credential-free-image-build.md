@@ -40,3 +40,7 @@ pushed to an ephemeral local registry, checked for digest/config preservation, a
 without using the Docker daemon or Cloudflare credentials. This proves local transport mechanics only.
 Evidence: `/mnt/data/work/gonvex-cloudflare-lead/oci-tools/`; actual registry publishing and deployed images
 remain pending real immutable CI artifacts. The original K20 image input-provenance gap is not erased.
+
+The lead-owned standalone implementation is `.github/workflows/cloudflare-images.yml` and
+`cloudflare/scripts/export-container-images.mjs`; see `verification/container-image-lane.md`. K22's duplicate
+unpublished image job is deferred. Initial integration-source archives are not final K22 runtime images.
