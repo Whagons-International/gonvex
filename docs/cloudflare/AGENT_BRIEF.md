@@ -123,6 +123,8 @@ while preserving genuine whole-holder/global scope barriers. Frozen failing camp
 0066 separates credential-free hosted image builds from Vault-only daemonless publication; skipped preview
 steps are not deployment proof. [K22 review evidence](verification/K22-review-a957.md) records the six
 unresolved review findings.
+0067 fences intermediate initial pages and strips unbound split progress without changing normal commits.
+0068 keeps Action reply generations and legacy deployment-skew gaps explicit; no lost history is fabricated.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 

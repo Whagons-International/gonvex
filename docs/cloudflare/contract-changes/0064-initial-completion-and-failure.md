@@ -70,6 +70,7 @@ watermark must be accepted and enqueued; otherwise that initial progress stays z
 across mixed, split and batched work. Normal independently scoped commit acceptance remains unchanged.
 Count receipt metadata as well as request metadata. Test mixed enqueued/obsolete, refused/enqueued,
 missing/duplicate/foreign statuses, reverse arrival, sink/batch failure and auth change during acknowledgment.
+See 0067 for the provenance-only intermediate-page fence and conservative split-watermark handling.
 
 ## Ordered terminal failures
 
