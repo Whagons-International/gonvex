@@ -108,6 +108,17 @@ and publish raw artifacts and rerun commands. Evaluate X02 snapshot offload from
 forward if required by the original gates. No staging/production cutover or load there is authorized.
 See decision 0053 and verification/V03-load-brief.md and V04-budgets-brief.md.
 
+Assembly evidence precision: 0060 applies the existing 0028 JSON-number comparison, retains real-deploy raw
+socket failures and defines separate unchanged-SDK recovery proof; original gates remain. Existing K20 image
+metadata alone does not close its local-source provenance gap. 0061 permits an explicitly acknowledged empty
+server-epoch bootstrap after tenant restart, preserving the unchanged restart test and all scope fences.
+0062 records the existing per-holder telemetry limiter domain: one-holder canonical parity keeps exact
+assertions, with separate real multi-holder evidence and mandatory final X01-enabled capacity/security
+verification. It does not introduce a global account budget or weaken K16's per-address enforcement.
+0063 permits digest-only resume checker reuse only from a verified same-socket/scope window, preserving
+all digest assertions. It also requires unrelated targeted delivery to leave other sockets untouched,
+while preserving genuine whole-holder/global scope barriers. Frozen failing campaigns remain evidence.
+
 ## Uptime and tracing planning (0055, 2026-11-12)
 
 The canonical observability-uptime-plan.md adds independent external monitoring and explicit Gonvex

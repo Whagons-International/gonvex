@@ -195,8 +195,15 @@ describe("resume after interruption", () => {
           return store.chunk(id, unit, index);
         },
       };
-      const { m } = migrator(state, flaky, { budget: { maxChunksPerEvent: 100 } });
-      const s = await m.applyRelease(release.id);
+      // An event can yield at its time/chunk budget before it reaches the injected fetch failure.
+      // Drive the real alarm slices to that fault; require it to occur, then keep the exact retry assertion.
+      const { m } = migrator(state, flaky, { budget: { maxChunksPerEvent: 1 } });
+      let s = await m.applyRelease(release.id);
+      for (let i = 0; failures > 0 && s.state === "running" && i < 200; i += 1) {
+        expect(s.error).toBeNull();
+        s = await m.alarm();
+      }
+      expect(failures).toBe(0);
       expect(s).toMatchObject({ state: "running", gateClosed: true, error: "retrying: R2 unavailable" });
       const done = await drain(m);
       expect(done).toMatchObject({ state: "done", error: null });

@@ -181,6 +181,12 @@ Disposition for auth overall: **adapt**. The 10 s deadline and the 30 s revalida
 - `reducer.call.artifactHash` and `reducer.call.clientContract` are checked per call. A mismatch returns `reducer.error class:"update_required"` with `STALE_REDUCER_ARTIFACT: ...` or `CLIENT_UPDATE_REQUIRED: ...` (`execution.rs:57-60`, `error_class.rs:123-125`). The SDK regex-matches these prefixes for legacy errors without a class (`sdk:5992`).
 - Disposition: **adapt**. The deploy flow (`POST /dev/sync`) must notify every live tenant or gateway object of the project, through a project registry and RPC fan-out, to emit `system.reload` and `client.updateRequired`. Hibernated objects must be woken to do so. Frame shapes are **keep**.
 
+Stage-1 baked deployment has the active-socket reconnect adaptation already accepted in 0016 G0-2;
+0028 §1 defers Facets. Decision 0060 preserves raw same-socket failures separately from actual unchanged-SDK
+upgrade recovery evidence. Neither a local Wrangler reload nor a unit suite proves platform upgrade recovery.
+Decision 0061 permits only an empty, explicitly acknowledged, server-epoch bootstrap on the ordered delivery
+channel after tenant restart; unscoped data never becomes authorized by retagging it with a returned epoch.
+
 #### A.1.6 Compression
 
 | Item | Rust | Source | Disposition |
