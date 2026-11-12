@@ -98,3 +98,55 @@ func (testConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSki
 func (testConn) Close() error                        { return nil }
 func (testConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
 func (testConn) Ping(context.Context) error          { return nil }
+
+func TestBudgetedPoolHonorsExplicitMaxIdleEnvironment(t *testing.T) {
+	t.Setenv("GONVEX_DB_MAX_OPEN_CONNS", "")
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "2")
+	if got := retainedIdleConnections(t, configureBudgeted); got != 2 {
+		t.Fatalf("idle connections with GONVEX_DB_MAX_IDLE_CONNS=2 = %d, want 2", got)
+	}
+
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "")
+	if got := retainedIdleConnections(t, configureBudgeted); got != budgetedMaxIdle {
+		t.Fatalf("idle connections without an override = %d, want budgeted default %d", got, budgetedMaxIdle)
+	}
+}
+
+func TestSecondaryPoolMaxIdleNeverExceedsOperatorLimit(t *testing.T) {
+	t.Setenv("GONVEX_DB_MAX_OPEN_CONNS", "")
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "")
+	if got := boundedMaxIdle(1); got != 1 {
+		t.Fatalf("boundedMaxIdle(1) = %d, want 1", got)
+	}
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "0")
+	if got := boundedMaxIdle(1); got != 0 {
+		t.Fatalf("boundedMaxIdle(1) with GONVEX_DB_MAX_IDLE_CONNS=0 = %d, want 0", got)
+	}
+	configure := func(db *sql.DB) { configureBudgetedWithMaxIdle(db, boundedMaxIdle(1)) }
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "")
+	if got := retainedIdleConnections(t, configure); got != 1 {
+		t.Fatalf("secondary pool idle connections = %d, want 1", got)
+	}
+}
+
+// retainedIdleConnections opens five concurrent connections through a
+// configured budgeted pool, releases them, and reports how many stay warm.
+func retainedIdleConnections(t *testing.T, configure func(*sql.DB)) int {
+	t.Helper()
+	budget := &connectionBudget{limit: func() int { return 10 }}
+	db := sql.OpenDB(&limitedConnector{connector: testConnector{}, budget: budget})
+	configure(db)
+	defer db.Close()
+	connections := make([]*sql.Conn, 0, 5)
+	for range 5 {
+		connection, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, connection)
+	}
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	return db.Stats().Idle
+}

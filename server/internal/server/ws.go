@@ -329,6 +329,10 @@ type tableChange struct {
 	// mutation caller with the precise PostgreSQL notifications emitted by the
 	// same transaction. It is the mutation ID stored in gonvex.mutation_id.
 	commitID string
+	// landlordDetails describes the commit's declared writes to landlord
+	// tables. The tenant LISTEN connection cannot observe them, so they are
+	// delivered alongside the observed tenant tables.
+	landlordDetails map[string]tableChangeDetail
 }
 
 type tableChangeDetail struct {
@@ -352,6 +356,7 @@ type pendingTableChange struct {
 	observedDetails        map[string]tableChangeDetail
 	cacheInvalidatedTables map[string]bool
 	otherDetails           map[string]tableChangeDetail
+	landlordDetails        map[string]tableChangeDetail
 	changedAtMS            float64
 }
 
@@ -413,6 +418,10 @@ const queryResultMaxBatchDelay = 50 * time.Millisecond
 type callerContext struct {
 	user        *gonvex.User
 	permissions map[string]any
+	// referenceIDs are the caller's application user ids as reported by the
+	// subscription's last execution (gonvex.ReportCallerUserIDs). Only set on
+	// the copy matchResult evaluates predicates with.
+	referenceIDs map[string]bool
 }
 
 // subject is the authenticated identity that idempotency claims are scoped
@@ -1509,14 +1518,59 @@ func (s *Server) broadcastMutationInvalidationsForCommitAt(projectID string, ten
 	for _, table := range tables {
 		changedTables[table] = true
 	}
-	s.scheduleTableChange(tableChange{
+	change := tableChange{
 		project:     projectID,
 		tenant:      tenantIDFromRequest(projectID, tenantID),
 		tables:      changedTables,
 		broad:       true,
 		changedAtMS: epochMillis(changedAt),
 		commitID:    strings.TrimSpace(commitID),
-	})
+	}
+	if change.commitID != "" {
+		change.landlordDetails = s.landlordWriteDetails(projectID, path, tables)
+	}
+	s.scheduleTableChange(change)
+}
+
+// landlordWriteDetails describes a function's writes to landlord tables, which
+// no tenant trigger reports. A landlord write declared with
+// gonvex.Writes(table).Columns(...) is an update of only those columns, so
+// column-scoped reads of other columns need not rerun. Anything else (no
+// declared columns, or a table known only from the path fallback) stays broad
+// for that table, as before.
+func (s *Server) landlordWriteDetails(projectID, path string, tables []string) map[string]tableChangeDetail {
+	current := s.runtime.ManifestForProject(projectID)
+	landlordTables := current.Schema.LandlordTables
+	if len(landlordTables) == 0 {
+		return nil
+	}
+	declaredColumns := map[string][][]string{}
+	for _, write := range current.Functions[path].Dependencies.Writes {
+		table := strings.TrimSpace(write.Table)
+		declaredColumns[table] = append(declaredColumns[table], normalizedColumns(write.Columns))
+	}
+	details := map[string]tableChangeDetail{}
+	for _, table := range tables {
+		if _, landlord := landlordTables[table]; !landlord {
+			continue
+		}
+		detail := tableChangeDetail{precise: true, operation: "update"}
+		for _, columns := range declaredColumns[table] {
+			if len(columns) == 0 {
+				detail = tableChangeDetail{broad: true}
+				break
+			}
+			detail.changedColumns = appendUniqueStrings(detail.changedColumns, columns...)
+		}
+		if len(detail.changedColumns) == 0 {
+			detail = tableChangeDetail{broad: true}
+		}
+		details[table] = detail
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	return details
 }
 
 func (s *Server) broadcastMutationInvalidations(projectID string, tenantID string, path string) {
@@ -1563,6 +1617,15 @@ func (s *Server) scheduleTableChange(change tableChange) {
 		}
 	} else if change.changedAtMS > pending.changedAtMS {
 		pending.changedAtMS = change.changedAtMS
+	}
+	for table, detail := range change.landlordDetails {
+		if pending.landlordDetails == nil {
+			pending.landlordDetails = map[string]tableChangeDetail{}
+		}
+		if current, exists := pending.landlordDetails[table]; exists {
+			detail = mergeTableChangeDetail(current, detail)
+		}
+		pending.landlordDetails[table] = detail
 	}
 	for _, table := range changedTables {
 		table = strings.TrimSpace(table)
@@ -1631,6 +1694,9 @@ func (s *Server) flushTableChange(key string) {
 		// new immediate precise batch. Listener failure uses the declared broad
 		// fallback below, and recovery refreshes every tenant subscription.
 		return
+	}
+	if change.commitID != "" && !listenerHealthy {
+		s.metrics.recordReactive(func(metric *reactiveMetricState) { metric.UnhealthyListenerFallbacks++ })
 	}
 	delivery := pendingChangeForDelivery(change, listenerHealthy)
 	if len(tableChangeTables(delivery)) == 0 || (len(delivery.tables) == 0 && strings.TrimSpace(delivery.table) == "") {
@@ -1734,9 +1800,21 @@ func pendingChangeForDelivery(pending pendingTableChange, listenerHealthy bool) 
 		changedAtMS: pending.changedAtMS, declaredTables: cloneBoolMap(pending.declaredTables),
 		tables: map[string]bool{}, details: map[string]tableChangeDetail{},
 	}
-	authoritative := len(pending.observedDetails) > 0 && (pending.commitID == "" || listenerHealthy)
+	// With a healthy listener the observed tenant tables are authoritative,
+	// and the absence of a notification proves an unchanged tenant table. The
+	// commit's landlord writes are never observable here, so they are always
+	// delivered from their declaration, alongside whatever the listener saw.
+	authoritative := (len(pending.observedDetails) > 0 || len(pending.landlordDetails) > 0) &&
+		(pending.commitID == "" || listenerHealthy)
 	if authoritative {
 		for table, detail := range pending.observedDetails {
+			change.tables[table] = true
+			change.details[table] = detail
+		}
+		for table, detail := range pending.landlordDetails {
+			if observed, exists := change.details[table]; exists {
+				detail = mergeTableChangeDetail(observed, detail)
+			}
 			change.tables[table] = true
 			change.details[table] = detail
 		}

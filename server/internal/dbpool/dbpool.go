@@ -16,6 +16,8 @@ const (
 	defaultMaxOpen = 16
 	defaultMaxIdle = 1
 	defaultIdleTTL = 5 * time.Minute
+
+	maxIdleEnvironmentVariable = "GONVEX_DB_MAX_IDLE_CONNS"
 )
 
 // Limits describes the application-side physical PostgreSQL connection pool.
@@ -31,7 +33,7 @@ type Limits struct {
 func LimitsFromEnvironment() Limits {
 	limits := Limits{
 		MaxOpen: positiveEnvironmentInt("GONVEX_DB_MAX_OPEN_CONNS", defaultMaxOpen),
-		MaxIdle: environmentInt("GONVEX_DB_MAX_IDLE_CONNS", defaultMaxIdle),
+		MaxIdle: environmentInt(maxIdleEnvironmentVariable, defaultMaxIdle),
 	}
 	if limits.MaxOpen > 0 && limits.MaxIdle > limits.MaxOpen {
 		limits.MaxIdle = limits.MaxOpen
