@@ -107,7 +107,7 @@ Do not represent a passing development drill as continuously observed service or
 M05 definition gap: current repository work-packages.json says "five paging conditions" without enumerating
 their identities/thresholds. Preserve five source-linked slots P1–P5 and recover their canonical design
 source before claiming M05 passes. The additional coverage below does not replace those five or silently
-invent their original meanings. This source audit is independent preparation, not a reason to stop code work.
+invent their original meanings. This source audit is independent preparation, not a reason to stop code work. See [the exact original-source audit](verification/M05-original-paging-source-audit.md) for the import commit, coordinator copies and inaccessible design-body reference.
 
 ## Vendor/access, portability and cost audit (2026-11-12)
 
