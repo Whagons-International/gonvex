@@ -1,0 +1,79 @@
+{
+  "tool": "madge@8.0.0",
+  "base": "6273dddf6af1890f039fc14f210753593add5be6",
+  "scope": [
+    "cloudflare"
+  ],
+  "method": "exact base blob comparison for every pre-existing graph node; baseline graph excludes newly added independent modules; no source checkout/archive",
+  "before": [
+    [
+      "packages/local-runtime/src/portable.ts",
+      "packages/local-runtime/src/read-view.ts"
+    ]
+  ],
+  "after": [
+    [
+      "packages/local-runtime/src/portable.ts",
+      "packages/local-runtime/src/read-view.ts"
+    ]
+  ],
+  "baseNodes": 417,
+  "headNodes": 429,
+  "warnings": {
+    "skipped": [
+      "cloudflare:workers",
+      "@conformance-scenarios/actions-upstream.mjs",
+      "@conformance-fixture/actions.ts",
+      "@conformance-fixture/board.ts",
+      "cloudflare:test",
+      "@gonvex/module-sdk",
+      "ws",
+      "../../../packages/protocol/dist/index.js",
+      "../../reducer/harness/.generated/bundles.js",
+      "./.build/app.js",
+      "./.build/functions.json",
+      "./.build/summary.json",
+      "@conformance-fixture/host.ts",
+      "../../../../rust/crates/store/src/provision.rs?raw",
+      "../../../../rust/crates/store/src/feed.rs?raw",
+      "../../../../rust/crates/store/src/reference_integrity/schema.sql?raw",
+      "../../../../rust/crates/store/src/schema_options.sql?raw",
+      "../runtime-prelude.sql?raw",
+      "../runtime-sql.ts?raw",
+      "@conformance-fixture/principals.ts",
+      "../../../conformance/fixtures/app/migrations/0001_fixture.sql?raw",
+      "@cloudflare/vitest-plugin",
+      "vitest/config",
+      "@conformance-fixture/notes.ts",
+      "@conformance-fixture/errors.ts",
+      "@conformance-fixture/storage.ts",
+      "@conformance-fixture-v2/board.ts",
+      "../../../conformance/fixtures/app-v2/migrations/0002_board_label.sql?raw",
+      "./.generated/bundles.js",
+      "../../../../../rust/crates/store/tests/reference_integrity/aliases.sql?raw",
+      "../../../../../rust/crates/store/tests/reference_integrity/fixture.sql?raw",
+      "../../../../../rust/crates/store/tests/reference_integrity/union.sql?raw",
+      "gonvex:releases",
+      "gonvex:module-globals",
+      "gonvex:whagons-app",
+      "gonvex:whagons-functions",
+      "sucrase",
+      "fflate",
+      "./local-runtime/validation.js",
+      "./contract/globals.js",
+      "./app.js",
+      "./savepoint-module.js",
+      "./functions.json",
+      "./contract/runner.js",
+      "./contract/vectors.json",
+      "./runtime-globals.js",
+      "./meta.json",
+      "./bootstrap.js",
+      "./engines.js",
+      "cloudflare:sockets",
+      "./host.js",
+      "./kernel-modules.json",
+      "./build.json"
+    ]
+  }
+}
