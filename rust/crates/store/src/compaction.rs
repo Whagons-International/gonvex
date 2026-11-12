@@ -36,6 +36,8 @@ const MIN_FREE_BYTES: u64 = 8 << 20;
 /// (`GONVEX_REBUILD_VACUUM_MAX_BYTES`): VACUUM rewrites every live page, so
 /// this bounds the time the writer is held and the temporary file's size.
 const DEFAULT_MAX_LIVE_BYTES: u64 = 2 << 30;
+/// How long the final checkpoint waits for a concurrent one to finish.
+const CHECKPOINT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Decision {
@@ -113,11 +115,22 @@ async fn vacuum(path: &Path) -> Result<Option<(u64, u64)>, DatabaseError> {
         }
         sqlx::query("VACUUM").execute(&mut connection).await?;
         // Copy the rewritten pages from the WAL into the file, which
-        // truncates it, and empty the WAL. Readers holding an older snapshot
-        // only delay that to a later checkpoint.
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(&mut connection)
-            .await?;
+        // truncates it, and empty the WAL. The background checkpointer may
+        // be copying the migration's frames at this moment (it owns the
+        // checkpoint lock, so this one reports busy): wait for it. Readers
+        // holding an older snapshot only delay the truncation to a later
+        // checkpoint.
+        let deadline = Instant::now() + CHECKPOINT_WAIT;
+        loop {
+            let (busy, log, copied): (i64, i64, i64) =
+                sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .fetch_one(&mut connection)
+                    .await?;
+            if (busy == 0 && log == copied) || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let after: i64 = sqlx::query_scalar("SELECT page_count FROM pragma_page_count")
             .fetch_one(&mut connection)
             .await?;
