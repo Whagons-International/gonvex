@@ -12,6 +12,7 @@ import { handleIngressRequest } from "../router/ingress/routes";
 export { SessionControlObject } from "../kernel/assembly/control";
 export { AssemblyTenant } from "../kernel/assembly/tenant";
 export { AssemblyGateway } from "../kernel/assembly/gateway";
+export { GatewayControllerObject } from "../kernel/gateway/controller";
 export { PublicLimiterObject } from "../kernel/public";
 export { IngressObject } from "../router/ingress/object";
 

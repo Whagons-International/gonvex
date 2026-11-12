@@ -23,6 +23,8 @@ export type SocketOp =
   | readonly ["x"];
 
 export interface SocketWork {
+  /** K22: fence delayed work after reauth/member/scope changes, before touching holder state. */
+  readonly subscriptionEpoch?: number;
   readonly ops: readonly SocketOp[];
   /** The commit's watermark for this socket. */
   readonly watermark?: number;
@@ -34,6 +36,10 @@ export interface SocketWork {
 
 export interface ReplicaDelivery {
   readonly v: number;
+  /** X01 bounded transport telemetry; never part of the SDK/wire protocol. */
+  /** Whole-holder ordered lag recovery (K22); old holders must not fake acknowledgment. */
+  readonly recovery?: { readonly reason: "change-feed-lagged" };
+  readonly pressure?: { readonly queueAgeMs: number; readonly rpcMs: number };
   /** The tenant object's instance: a new one means its in-memory subscriptions are gone. */
   readonly instance: string;
   /** 0061: sender understands the server-only empty-work restart fence. */
@@ -49,6 +55,7 @@ export interface ReplicaDelivery {
 
 /** The holder's answer: connections it no longer has (the tenant drops their state). */
 export interface ReplicaReceipt {
+  readonly recoveryAck?: 1;
   readonly v: number;
   readonly sockets: number;
   readonly missing?: readonly string[];

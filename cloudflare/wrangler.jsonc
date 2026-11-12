@@ -16,6 +16,7 @@
   },
   "durable_objects": { "bindings": [
     { "name": "GATEWAY", "class_name": "AssemblyGateway" },
+    { "name": "GATEWAY_CONTROLLER", "class_name": "GatewayControllerObject" },
     { "name": "CONTROL", "class_name": "SessionControlObject" },
     { "name": "TENANT", "class_name": "AssemblyTenant" },
     { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" },
@@ -25,7 +26,8 @@
     { "tag": "v1", "new_sqlite_classes": ["HelloObject"] },
     { "tag": "v2", "new_sqlite_classes": ["GatewayObject", "ControlStubObject", "TenantStubObject"] },
     { "tag": "v3", "new_sqlite_classes": ["PublicLimiterObject"] },
-    { "tag": "v4", "new_sqlite_classes": ["AssemblyGateway", "SessionControlObject", "AssemblyTenant", "IngressObject"], "deleted_classes": ["HelloObject", "GatewayObject", "ControlStubObject", "TenantStubObject"] }
+    { "tag": "v4", "new_sqlite_classes": ["AssemblyGateway", "SessionControlObject", "AssemblyTenant", "IngressObject"], "deleted_classes": ["HelloObject", "GatewayObject", "ControlStubObject", "TenantStubObject"] },
+    { "tag": "v5", "new_sqlite_classes": ["GatewayControllerObject"] }
   ],
   "r2_buckets": [
     { "binding": "RELEASES", "bucket_name": "gonvex-cf-dev-k22-releases" },
@@ -42,5 +44,5 @@
   "workflows": [{ "binding": "ACTION_WORKFLOW", "name": "gonvex-cf-dev-k22-actions", "class_name": "ActionWorkflow", "script_name": "gonvex-cf-dev-k22-actions" }],
   "analytics_engine_datasets": [{ "binding": "TELEMETRY_EVENTS", "dataset": "gonvex-cf-dev-k22-telemetry" }],
   "limits": { "cpu_ms": 5000 },
-  "vars": { "GONVEX_RUNTIME_VERSION": "development", "GONVEX_GATEWAY_SHARDS": "8", "GONVEX_PRESENCE": "1" }
+  "vars": { "GONVEX_RUNTIME_VERSION": "development", "GONVEX_PRESENCE": "1" }
 }
