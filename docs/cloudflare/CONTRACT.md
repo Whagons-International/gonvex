@@ -237,6 +237,7 @@ Disposition for auth overall: **adapt**. The 10 s deadline and the 30 s revalida
 | 4000 | `presence liveness timeout` | Presence socket silent for 60 s | `lib.rs:2430-2437` | replace (A.1.8) |
 | 1007 / 1002 | transport | Invalid UTF-8 text (ratchet `CloseCode::Invalid`) or a protocol violation | `ws/lib.rs:244-256`, tests `ws/lib.rs:1108-1150` | keep (platform) |
 | none (TCP close) | — | After `client.updateRequired`, after an `auth.error` for a public/transport mismatch, a revoked public admission (`auth.error id:"session-expired"`), a running auth timing out, a send failure, or the runtime event bus closing. Queued frames are flushed first. | `lib.rs:2035-2038,2622-2637,2639-2651,2809-2811,2893`, `ws/connection.rs:436-454,355-369` | adapt: `ws.close(1000)` or `1011` after the frame. The SDK reconnects on any close |
+| 1012 | `gateway placement rebalance` | X01 bounded staggered reconnect/drain after a safe serialized session boundary and replacement admission; preserve unresolved direct Actions and existing cursor/receipt recovery | Lead ruling 0054; SDK reconnect path `packages/client/src/index.ts:2170` | adapt (authorized; exact local/deployed recovery evidence required before acceptance) |
 | 4002 | `replica row patch recovery` | **Client-initiated** after a row-patch decode failure | `sdk:2231` | keep (client side) |
 | 1000, 1001, 1011, 1012, 1013, 3001, 4001, 4999 | application-chosen | The transport passes them through unchanged (test only; not emitted by the runtime) | `ws/lib.rs:1202-1220` | keep (pass through) |
 
