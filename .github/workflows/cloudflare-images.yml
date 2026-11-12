@@ -1,0 +1,69 @@
+name: Cloudflare Container artifacts
+on:
+  pull_request:
+    branches: [cloudflare/integration]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/cloudflare-images.yml'
+      - 'cloudflare/**'
+      - 'rust/**'
+      - 'packages/module-sdk/runtime-contract/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+permissions:
+  contents: read
+concurrency:
+  group: cloudflare-images-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  export:
+    name: Export exact-head Container archives (no credentials)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Test source/archive integrity and admission
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: node --test cloudflare/scripts/export-container-images.test.mjs
+      - name: Build two fixed images from tracked immutable source
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+          IMAGE_NAME: gonvex-cf-dev-artifact-pr${{ github.event.pull_request.number }}
+        run: node cloudflare/scripts/export-container-images.mjs "$IMAGE_NAME" "$RUNNER_TEMP/gonvex-container-export"
+      - name: Retain archives and source/config/base identities
+        uses: actions/upload-artifact@v4
+        with:
+          name: gonvex-k22-container-archives
+          path: |
+            ${{ runner.temp }}/gonvex-container-export/*.docker.tar
+            ${{ runner.temp }}/gonvex-container-export/inputs.json
+            ${{ runner.temp }}/gonvex-container-export/images.json
+            ${{ runner.temp }}/gonvex-container-export/*.Dockerfile
+            ${{ runner.temp }}/gonvex-container-export/*.metadata.json
+            ${{ runner.temp }}/gonvex-container-export/*.archive.json
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain bounded-job failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gonvex-k22-container-build-failure
+          path: |
+            ${{ runner.temp }}/gonvex-container-export/failure.json
+            ${{ runner.temp }}/gonvex-container-export/inputs.json
+            ${{ runner.temp }}/gonvex-container-export/*.Dockerfile
+            ${{ runner.temp }}/gonvex-container-export/*.metadata.json
+            ${{ runner.temp }}/gonvex-container-export/*.archive.json
+            ${{ runner.temp }}/gonvex-container-export/*.log
+          retention-days: 7
+          if-no-files-found: ignore
