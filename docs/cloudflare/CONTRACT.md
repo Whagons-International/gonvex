@@ -1791,6 +1791,7 @@ new note and waits for the lead.
 | 0079 | Await the exact local holder publication | narrow private primitive permitted; no owner/terminal grant or lifecycle acceptance | K22 |
 | 0080 | Callback RPC result lifetime boundary | narrow transport adaptation permitted; pure schemas/authority/lifecycle gates unchanged | K22 |
 | 0081 | Matched tokenless closed-receipt RPC lifetime boundary | same strict adaptation for this consumer only; exact witness/processing-only cleanup gates unchanged | K22 |
+| 0082 | Matched cleanup authorization versus final sync acknowledgment | post-authorization atomic GC need not resurrect witness; ambiguous completion remains UNKNOWN with exact credit reconciliation | K22 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
