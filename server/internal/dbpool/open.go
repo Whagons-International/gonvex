@@ -59,11 +59,29 @@ func Open(databaseURL string) (*sql.DB, error) {
 }
 
 func configureBudgeted(db *sql.DB) {
-	Configure(db)
+	configureBudgetedWithMaxIdle(db, budgetedMaxIdleFromEnvironment())
+}
+
+// budgetedMaxIdleFromEnvironment returns the warm-connection count for a
+// budgeted pool. An explicit GONVEX_DB_MAX_IDLE_CONNS wins: production set it
+// to 2, but the budgeted default of 3 silently overrode it, so every tenant
+// database kept one more idle PostgreSQL session than the operator allowed.
+func budgetedMaxIdleFromEnvironment() int {
 	limits := LimitsFromEnvironment()
 	maxIdle := budgetedMaxIdle
+	if environmentInt(maxIdleEnvironmentVariable, -1) >= 0 {
+		maxIdle = limits.MaxIdle
+	}
 	if limits.MaxOpen > 0 && maxIdle > limits.MaxOpen {
 		maxIdle = limits.MaxOpen
+	}
+	return maxIdle
+}
+
+func configureBudgetedWithMaxIdle(db *sql.DB, maxIdle int) {
+	Configure(db)
+	if maxIdle < 0 {
+		maxIdle = 0
 	}
 	// Keep a few connections warm for an active database so a query burst does not
 	// create a fresh TCP/TLS PostgreSQL session per operation. A retained
