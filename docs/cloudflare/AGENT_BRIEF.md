@@ -153,6 +153,10 @@ changes for accounting/timing/privacy; the author publishes1b corrections pendin
 recheck (verification/M05-recheck-493.md). No foundation or full M05 acceptance is implied.
 0080 adapts only real owner callback RPC roots for standard disposal metadata, preserving strict pure
 validators, all string/nested fields, disposal in finally and no authority/terminal inference.
+0081 adds ONLY the matched tokenless closed-receipt consumer under the same strict transport policy;
+processing-only cleanup still needs the exact local witness and durable denial of future old confirmations.
+The fresh1b M05 recheck clears the493 cases but reports two further P2 sanitizer/timing defects; see
+verification/M05-recheck-1b.md. Foundation merge and full M05 acceptance remain held.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
