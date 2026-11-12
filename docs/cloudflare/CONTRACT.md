@@ -1787,6 +1787,7 @@ new note and waits for the lead.
 | 0075 | Same-queue owner control and bounded reply credit | permitted; preserves recovery fence and original memory/capacity gates | K22, V03, V04 |
 | 0076 | Terminal drain for a durably bound lost admission reply | narrow interface permitted; unbound uncertainty and owner-lifecycle gates remain | K22 |
 | 0077 | Observable builder-only startup diagnostic | artifact preparation permitted; cause UNKNOWN, live release pending concrete review | K22, lead |
+| 0078 | Versioned exact-echo owner-intent callbacks | leaf validation permitted; all durable/lifecycle/activation gates remain | K22 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
