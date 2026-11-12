@@ -287,6 +287,7 @@ type reactiveMetricState struct {
 	ChangeToClientDurationMS           float64
 	ChangeToClientSamples              uint64
 	ActiveTenantListeners              int
+	ActiveListenerConnections          int
 	ListenerReconnects                 uint64
 	ListenerFailures                   uint64
 	ListenerLimitRefusals              uint64
@@ -330,6 +331,7 @@ type reactiveMetricSnapshot struct {
 	DeliveryWriteDurationMS            float64 `json:"deliveryWriteDurationMs"`
 	AverageChangeToClientMS            float64 `json:"averageChangeToClientMs"`
 	ActiveTenantListeners              int     `json:"activeTenantListeners"`
+	ActiveListenerConnections          int     `json:"activeListenerConnections"`
 	ListenerReconnects                 uint64  `json:"listenerReconnects"`
 	ListenerFailures                   uint64  `json:"listenerFailures"`
 	ListenerLimitRefusals              uint64  `json:"listenerLimitRefusals"`
@@ -465,6 +467,7 @@ func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
 		DeliveryWriteDurationMS:            state.DeliveryWriteDurationMS,
 		AverageChangeToClientMS:            averageChangeToClient,
 		ActiveTenantListeners:              state.ActiveTenantListeners,
+		ActiveListenerConnections:          state.ActiveListenerConnections,
 		ListenerReconnects:                 state.ListenerReconnects,
 		ListenerFailures:                   state.ListenerFailures,
 		ListenerLimitRefusals:              state.ListenerLimitRefusals,
