@@ -1,0 +1,120 @@
+{
+  "package": "X01",
+  "acceptanceComplete": false,
+  "baseSha": "e72d3a437b65bea5a8524064e3e04904fc4a1f7b",
+  "createdAt": "2026-11-12T10:24:14.269912+00:00",
+  "branch": "cf/X01-autoscaling",
+  "checkout": "/home/gabriel/.t3/worktrees/gonvex/t3-298eec64-3e15b422e94aa466",
+  "runtime": {
+    "wrangler": "4.155.0",
+    "vitestPlugin": "1.4.10",
+    "compatibilityDate": "2026-10-23",
+    "harness": "independent K05 stand-ins, not K22 assembled serving runtime"
+  },
+  "sourceSha256": {
+    "cloudflare/kernel/delivery/outlet.ts": "571ddbc18879114a2bbb22b946907579e99429e68f025941293f31159fb8a5dd",
+    "cloudflare/kernel/delivery/protocol.ts": "4df935b540c325406de11bc219c143f800a072c345708847380ebec842d2e42f",
+    "cloudflare/kernel/gateway/controller.ts": "91d29abaea38ace0a6985557fbd8eefe55b386a8c3825933ab522dc9f74e786c",
+    "cloudflare/kernel/gateway/metrics.ts": "a9581873c753533410d77c31212d057d237684cbbc9e50a5644db555e7ed4295",
+    "cloudflare/kernel/gateway/placement.ts": "9850a78c9e9653fc2f3d8eaf461e879682d0a860e4d26a304fb4d65d15d69016",
+    "cloudflare/kernel/gateway/test/controller.spec.ts": "045545e0f43a8c4932f1cd227977a8c7b634cc8dc960a8a1468f75e537f75939",
+    "cloudflare/kernel/gateway/test/metrics.spec.ts": "a35b18b018d557fa2dff05ffd5df11b2270ffe51f5fcafc78ba9aa8743b618dc",
+    "cloudflare/kernel/gateway/test/outlet.spec.ts": "6803f733bf7f18957bbb7d498664d1df5ca9cd6eb69dc0f7e6c31a914e72fcfc",
+    "cloudflare/kernel/gateway/test/worker.ts": "323f3a519021b3ed0cc5c58f70dc07a2ce30253d3f56b99cb2f59a3648586113",
+    "cloudflare/kernel/gateway/test/wrangler.jsonc": "d8b8adde684523ab50e60fea234748be7fb894111fa5b9e440c83d3766d03a61",
+    "cloudflare/kernel/gateway/vitest.config.mjs": "4d75bc217973f03dbe284c5aa83db6476b397041f8438f309f14543bd5605b82",
+    "cloudflare/kernel/session/host.ts": "ebb568d9df2ac6d6b8b22359ec1e36f0c0e12677c071ff036963cdbc0c196746",
+    "cloudflare/kernel/session/placement/gateway.ts": "e9981df3c12b73d0b8ba45b774607c981dc242101caf13b00db5e31d95be02d5",
+    "cloudflare/kernel/session/router.ts": "36c9dbff9a9b8301633092485b42588a64574a5effb820691167d468e7a72440",
+    "cloudflare/package.json": "7a6d2c43548f7522f6858cc5338d3e1b1bef1ea48af46cee10057e107765e126"
+  },
+  "checks": {
+    "full-result.json": {
+      "docs": 0,
+      "schema": 0,
+      "types": 0,
+      "controlTypes": 0,
+      "typecheck": 0,
+      "tests": 0,
+      "bundle": 0,
+      "conformance": 0
+    },
+    "last-result.json": {
+      "typecheck": 0,
+      "rootTestsSequential": 0,
+      "gatewayTests": 0,
+      "bundle": 0,
+      "harnessBundle": 0
+    },
+    "last-nonroot-result.json": {
+      "nonrootTests": 0
+    },
+    "publish-result.json": {
+      "docs": 0,
+      "schema": 0,
+      "types": 0,
+      "controlTypes": 0,
+      "typecheck": 0,
+      "gatewayTests": 0,
+      "cycles": 0
+    }
+  },
+  "testCounts": {
+    "rootPassedSingleWorker": 390,
+    "nonRootExistingPassed": 378,
+    "gatewayPassed": 18,
+    "combinedCurrentCoveragePassed": 786,
+    "existingSkipped": 15,
+    "deployScriptNodePassed": 3,
+    "conformanceUnitPassed": 29
+  },
+  "parallelRootCaveat": "Two affected default-parallel reruns timed out unchanged migration resume test at 5000ms; earlier full package passed; current root passes --maxWorkers 1 with unchanged assertions/timeouts.",
+  "runtimeCycles": {
+    "base": [
+      [
+        "../../packages/local-runtime/src/portable.ts",
+        "../../packages/local-runtime/src/read-view.ts"
+      ]
+    ],
+    "head": [
+      [
+        "../../packages/local-runtime/src/portable.ts",
+        "../../packages/local-runtime/src/read-view.ts"
+      ]
+    ],
+    "new": 0
+  },
+  "bundles": {
+    "serving-legacy-root": {
+      "bytes": 216833,
+      "gzipBytes": 54609,
+      "sha256": "a709eaa209f77700ceeb461731291c272007636a6f9a7ab57184063330f5e238"
+    },
+    "independent-gateway-harness": {
+      "bytes": 228281,
+      "gzipBytes": 57216,
+      "sha256": "b956ee72b666c0ec9823e1242c25e66bd5d6b607aca0349471a3c9bb4fbdccb2"
+    }
+  },
+  "arch3FullCheckProcess": {
+    "memoryPeakBytes": 2229297152,
+    "wallSeconds": 165.331,
+    "containedOOMKills": 0,
+    "isServingIsolateMemory": false
+  },
+  "rawArtifactRoot": "/mnt/data/work/gonvex-x01",
+  "unmet": [
+    "K22 serving binding/migration and Session/engine integration",
+    "real assembled SDK/Whagons local+remote conformance and recovery/drain semantics",
+    "V03 1000-user and26-tenant campaigns during actual scaling",
+    "V04 SQL/KV rows, shared-isolate memory, receiver delay, throughput, cost/account headroom",
+    "X02 1000-client cold snapshot writer p95<150ms evaluation",
+    "independent review",
+    "K22 errors.spin quarantine/platform blocker remains separate"
+  ],
+  "operations": {
+    "remoteDeployment": false,
+    "stagingOrProductionTouched": false,
+    "accountChanges": false
+  }
+}
