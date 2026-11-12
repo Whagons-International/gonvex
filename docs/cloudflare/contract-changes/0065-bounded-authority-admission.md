@@ -43,3 +43,5 @@ requests arriving after release. No blind TTL, missing-enumeration inference or 
 Finite admission can bound uncertain retention while cleanup remains unresolved. It does not close 0058's
 stranded durable OWNER lifecycle gate or prove eventual cleanup. Preserve UNKNOWN/blocker evidence until
 authoritative cleanup and actual fault/availability tests establish the promised behavior.
+0069 permits a bounded tenant-instance authority prototype with explicit admission/drain and callback
+race/reentrancy guards. It does not mark terminal release or stranded-owner availability complete.
