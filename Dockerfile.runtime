@@ -4,7 +4,7 @@
 # Debian (glibc) is used rather than Alpine/musl because Go plugins are unreliable
 # under musl. The runtime binary and the plugins must be built with the same Go
 # version and the same gonvex source (via the go.mod replace) for plugin ABI match.
-FROM golang:1.26@sha256:7caba5286b4c3613a337b709c573047d8ae62ee76106647313b61e72b99f20af AS build
+FROM golang:1.26.10@sha256:cfa27959837144bf4649802ba38e59daffd0dd2a7994aa83daaf113285b0f551 AS build
 WORKDIR /src
 # Go plugin package hashes include the absolute module-cache source path. Build
 # the host runtime from the same paths used later by the in-image plugin
@@ -22,8 +22,9 @@ COPY . .
 # cgo-enabled: -buildmode=plugin requires the host binary to be cgo/dynamically linked.
 RUN CGO_ENABLED=1 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
 
-FROM golang:1.26@sha256:7caba5286b4c3613a337b709c573047d8ae62ee76106647313b61e72b99f20af
+FROM golang:1.26.10@sha256:cfa27959837144bf4649802ba38e59daffd0dd2a7994aa83daaf113285b0f551
 WORKDIR /app
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /var/cache/gonvex/go-build /var/cache/gonvex/tmp /var/lib/gonvex/data /var/lib/gonvex/plugins
 # Gonvex module source: synced project bundles render
 #   replace github.com/gonvex/gonvex => $GONVEX_MODULE_ROOT

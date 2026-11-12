@@ -13,10 +13,19 @@ import (
 
 const (
 	defaultMaxTotal       = 20
-	maxTotalSafetyCeiling = 64
+	maxTotalSafetyCeiling = 128
 )
 
-const budgetedIdleTTL = time.Second
+// budgetedIdleTTL and budgetedMaxIdle keep a few connections warm per active
+// database. Opening a task fans out ~20 parallel queries; with one warm
+// connection the rest were opened fresh (~70ms each in production) and queued
+// behind the pool, ~982k pool waits a day (2026-11-03). Idle connections still
+// hold shared budget slots, so the TTL stays short enough for dormant tenants
+// to give them back between maintenance ticks.
+const (
+	budgetedIdleTTL = 30 * time.Second
+	budgetedMaxIdle = 3
+)
 
 var runtimeBudget = &connectionBudget{limit: func() int {
 	configured := positiveEnvironmentInt("GONVEX_DB_MAX_TOTAL_CONNS", defaultMaxTotal)
@@ -48,11 +57,11 @@ func Open(databaseURL string) (*sql.DB, error) {
 func configureBudgeted(db *sql.DB) {
 	Configure(db)
 	limits := LimitsFromEnvironment()
-	maxIdle := limits.MaxIdle
-	if maxIdle > 1 {
-		maxIdle = 1
+	maxIdle := budgetedMaxIdle
+	if limits.MaxOpen > 0 && maxIdle > limits.MaxOpen {
+		maxIdle = limits.MaxOpen
 	}
-	// Keep one connection warm for an active database so a query burst does not
+	// Keep a few connections warm for an active database so a query burst does not
 	// create a fresh TCP/TLS PostgreSQL session per operation. A retained
 	// connection still occupies the process-wide budget, so expire it quickly:
 	// when more databases are active than the budget can hold, dormant pools
