@@ -12,6 +12,11 @@ function plainData(value,allowed,code) {
   return Object.fromEntries(Object.keys(descriptors).map(key=>[key,descriptors[key].value]));
 }
 const keys = ['schema','sourceSha','deploy','region','executor','configSha','domain','environment','check','scheduledAt','startedAt','finishedAt','deadlineMs','clockUncertaintyMs','attempt','operationId','traceId','idempotencyKey','status','code','durationMs','operations','settlement','settledElapsedMs','cleanupState','deadlineExceeded','observedStatus','observedCode'];
+/** For validated scalar records only. An offset shares the check's monotonic
+ * origin; its wall projection still carries the recorded clock uncertainty.
+ * Undefined preserves the explicitly labeled legacy timing fallback. */
+export const operationAttemptAt=(record,operation)=>operation.attemptedAt
+  ?? (operation.attemptedAfterMs===undefined ? undefined : record.startedAt+operation.attemptedAfterMs);
 /** Strict ingress: arbitrary provider bodies/errors/headers cannot enter retained raw records. */
 function validateRecord(r) {
   r=plainData(r,keys,'raw-schema');
@@ -40,6 +45,10 @@ function validateRecord(r) {
     for (const key of ['durableMs','appliedMs','attemptedAfterMs']) if (Object.hasOwn(o,key)) requireRaw(bounded(o[key]) && o[key]<=r.durationMs,o.status==='pass'?'operation-success-proof':'operation-elapsed');
     if (Object.hasOwn(o,'attemptedAt')) requireRaw(bounded(o.attemptedAt),'operation-timing');
     if (o.attemptedAfterMs !== undefined && o.attemptedAt !== undefined) requireRaw(Math.abs(o.attemptedAt-r.startedAt-o.attemptedAfterMs)<=r.clockUncertaintyMs,'operation-clock');
+    // A failed attempt may have no completion timings. Its own offset must
+    // still fit both clocks, independently of durable/application evidence.
+    if (o.attemptedAfterMs !== undefined) requireRaw(bounded(r.startedAt+o.attemptedAfterMs)
+      && r.startedAt+o.attemptedAfterMs<=r.finishedAt+r.clockUncertaintyMs,'operation-observation');
     for (const key of ['durableMs','appliedMs']) if (Object.hasOwn(o,key)) {
       const offset=o.attemptedAfterMs ?? Math.max(0,(o.attemptedAt ?? r.startedAt)-r.startedAt-r.clockUncertaintyMs);
       requireRaw(offset+o[key]<=r.durationMs,'operation-observation');

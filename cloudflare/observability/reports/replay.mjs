@@ -1,5 +1,5 @@
 import { requireCheck, finite } from '../checks/contract.mjs';
-import { validateRaw } from '../checks/raw-result.mjs';
+import { validateRaw, operationAttemptAt } from '../checks/raw-result.mjs';
 export { validateRaw } from '../checks/raw-result.mjs';
 const inside = (t, windows) => windows.some(w=>t>=w.start && t<w.end);
 /** One check/component/region/deploy per call. Scheduled slots use the explicit piecewise-constant
@@ -20,9 +20,10 @@ export function replay({ schedule, records, heartbeat = [], maintenance = [], as
   const onGrid = r => scheduledInside(r) && Number.isInteger((r.scheduledAt-start)/intervalMs);
   const candidates=new Map(scoped.map(r=>[r,r.operations.map(o=>{
     const uncertainty=Math.max(clockUncertaintyMs,r.clockUncertaintyMs);
-    const from=(o.attemptedAt ?? r.startedAt)-uncertainty;
-    const to=(o.attemptedAt ?? r.finishedAt)+uncertainty;
-    return { o,from,to,eligible:from<end && to>=start && from<=asOf,
+    const at=operationAttemptAt(r,o);
+    const from=(at ?? r.startedAt)-uncertainty;
+    const to=(at ?? r.finishedAt)+uncertainty;
+    return { o,at,from,to,eligible:from<end && to>=start && from<=asOf,
       windowUncertain:from<start || to>=end };
   })]));
   // Inspect operation timestamps on ALL scoped records before selecting check observations.
@@ -62,17 +63,18 @@ export function replay({ schedule, records, heartbeat = [], maintenance = [], as
     observations.push({ operationId:r.operationId,scheduledAt:r.scheduledAt,startedAt:r.startedAt,finishedAt:r.finishedAt,
       attempt:r.attempt,status:r.status,onGrid:grid,late,observedAtAsOf:observed,settlement:r.settlement ?? 'unrecorded' });
   }
-  for (const r of scoped) for (const {o,from,to,eligible,windowUncertain} of candidates.get(r)) {
+  for (const r of scoped) for (const {o,at,from,to,eligible,windowUncertain} of candidates.get(r)) {
     if (!eligible) { recordAccounting.operationsOutsideWindow++; continue; }
     requireCheck(o.deadlineMs<=deadlineMs && o.deadlineMs<=r.deadlineMs,'operation-deadline-contract');
     requireCheck(!operations.has(o.operationId),'duplicate-operation');
-    const exactTime=o.attemptedAt!==undefined, observed=r.finishedAt<=asOf;
-    if (!exactTime) recordAccounting.operationTimeFallback++;
+    const knownTime=at!==undefined, observed=r.finishedAt<=asOf;
+    if (o.attemptedAt===undefined) recordAccounting.operationTimeFallback++;
     if (windowUncertain) { recordAccounting.operationWindowUncertain++; affectRange(from,to,'operation-window-uncertain'); }
     if (!observed) recordAccounting.operationsUnconfirmedAtAsOf++;
-    const expired=asOf>=(o.attemptedAt ?? r.startedAt)+Math.max(clockUncertaintyMs,r.clockUncertaintyMs)+o.deadlineMs;
-    // Monotonic offsets bind new producers; legacy v1 uses its declared wall-clock tolerance.
-    const appliedUpper=exactTime ? o.attemptedAt+(o.appliedMs ?? 0)+r.clockUncertaintyMs : r.finishedAt+r.clockUncertaintyMs;
+    const expired=asOf>=(at ?? r.startedAt)+Math.max(clockUncertaintyMs,r.clockUncertaintyMs)+o.deadlineMs;
+    // Use the same declared attempt origin for eligibility, expiry and cutoff
+    // proof. Only records lacking BOTH forms retain the legacy fallback.
+    const appliedUpper=knownTime ? at+(o.appliedMs ?? 0)+r.clockUncertaintyMs : r.finishedAt+r.clockUncertaintyMs;
     const proofByCutoff=observed && appliedUpper<=asOf;
     const status=!observed ? expired?'fail':'pending' : o.status==='fail'?'fail':windowUncertain||!proofByCutoff?'unknown':'pass';
     if (status==='pending') recordAccounting.operationsPending++;
