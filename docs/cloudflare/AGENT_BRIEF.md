@@ -112,6 +112,9 @@ Assembly evidence precision: 0060 applies the existing 0028 JSON-number comparis
 socket failures and defines separate unchanged-SDK recovery proof; original gates remain. Existing K20 image
 metadata alone does not close its local-source provenance gap. 0061 permits an explicitly acknowledged empty
 server-epoch bootstrap after tenant restart, preserving the unchanged restart test and all scope fences.
+0062 records the existing per-holder telemetry limiter domain: one-holder canonical parity keeps exact
+assertions, with separate real multi-holder evidence and mandatory final X01-enabled capacity/security
+verification. It does not introduce a global account budget or weaken K16's per-address enforcement.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
