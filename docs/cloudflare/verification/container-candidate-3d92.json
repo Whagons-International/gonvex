@@ -253,13 +253,12 @@
     "remoteFullValidationConfigRootfsLayers": true,
     "authStoreRemoved": true
   },
-  "servingDeployment": null,
   "proofScope": "frozen18afb candidate; not future owner-lifecycle source, full acceptance or platform CPU proof",
   "limitations": [
     "Full local38 campaign remains FAILED34PASS/4FAIL",
     "Owner lifecycle/N6/stranded OWNER remains open",
     "Final full-cloudflare COPY changes require fresh builder source campaign",
-    "No Worker/Container deployment or deployment/config IDs yet",
+    "Publication snapshot predates composition deployment; subsequent failed setup is recorded separately",
     "Original K22/X01/V01-V06/capacity/security/actual-duration gates remain unchanged"
   ],
   "validatorHashes": {
@@ -267,5 +266,8 @@
     "verify.mjs": "a7650d0f2a169a54f9c7c46da1ff9ad9464080a03a35b1dee1842b31af0acedd",
     "verify-layers.py": "4eb086ef92a29c2dc75360f6927e697eefa5a6340fb2a8f2756db60d9726e53d",
     "publish-dev.py": "fa959715f8f41c4c52e2612523d1702ff4398c9e6085d7232be3a9684ec8b8ad"
-  }
+  },
+  "snapshotAt": "2026-11-12T16:29:04.860578+00:00",
+  "servingDeploymentAtPublication": null,
+  "subsequentDeploymentReport": "deployment-3d92-first-probe.json"
 }

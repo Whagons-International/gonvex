@@ -1,7 +1,8 @@
 # Frozen K22 candidate images: verified and published
 
 Source `3d92e1339b2d65dbc47ac2f5713f56bd9e57d738`, runtime `18afb02a5cccde933c571f7448a930ebafe574a0`.
-Status: development image publication verified. No assembled Worker/Container deployment yet.
+Status: development image publication verified. The later composition deployment and failed module setup are
+recorded in deployment-3d92-first-probe.json; CPU enforcement remains unexecuted.
 Owner: lead; K22 owns the next bounded private-platform proof from this clean frozen source.
 
 [Hosted run43251641388](https://github.com/Whagons-International/gonvex/actions/runs/43251641388)
@@ -40,7 +41,8 @@ This builder contains frozen18afb serving source; it does **not** contain the la
 prototype. Any final full-cloudflare COPY input change requires another source-image campaign. Use a clean
 exact3d92 source archive for the bounded private CPU/quarantine/rollback/quiet-neighbor/SDK/deploy probe;
 never label a bundle built from dirty owner source as3d92. Record actual Worker/Container image/config/
-deployment IDs, data and commands. No probe pass or deployment IDs exist in this receipt.
+deployment IDs, data and commands. This publication receipt predates the deployment. The separate first-probe record contains actual IDs
+and the failed setup; no probe pass is inferred.
 
 Keep the full34PASS/4FAIL local campaign, errors.spin local blocker, owner/N6/stranded OWNER and all eight
 package-domain gaps, real enabled files, X01 automatic26tenant/1,000user, security/cost and actual-duration
