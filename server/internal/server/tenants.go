@@ -20,7 +20,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const projectTenantHydrationTTL = 5 * time.Second
+// Hydration runs in the request path (permissions, scheduler) and opens a new
+// control-plane connection per tenant row it re-saves. At 5s it stalled every
+// production call for ~1.6s several times a minute (2026-11-02). Tenants
+// created through this runtime register themselves immediately.
+const projectTenantHydrationTTL = 5 * time.Minute
 
 type tenantTarget struct {
 	RelationshipID string `json:"relationshipId"`

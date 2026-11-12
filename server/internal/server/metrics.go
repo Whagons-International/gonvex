@@ -287,9 +287,13 @@ type reactiveMetricState struct {
 	ChangeToClientDurationMS           float64
 	ChangeToClientSamples              uint64
 	ActiveTenantListeners              int
+	ActiveListenerConnections          int
 	ListenerReconnects                 uint64
 	ListenerFailures                   uint64
 	ListenerLimitRefusals              uint64
+	RecoveryRefreshes                  uint64
+	RecoveryGroups                     uint64
+	UnhealthyListenerFallbacks         uint64
 	SharedSubscriptions                int
 	SubscriptionListeners              int
 }
@@ -330,9 +334,13 @@ type reactiveMetricSnapshot struct {
 	DeliveryWriteDurationMS            float64 `json:"deliveryWriteDurationMs"`
 	AverageChangeToClientMS            float64 `json:"averageChangeToClientMs"`
 	ActiveTenantListeners              int     `json:"activeTenantListeners"`
+	ActiveListenerConnections          int     `json:"activeListenerConnections"`
 	ListenerReconnects                 uint64  `json:"listenerReconnects"`
 	ListenerFailures                   uint64  `json:"listenerFailures"`
 	ListenerLimitRefusals              uint64  `json:"listenerLimitRefusals"`
+	RecoveryRefreshes                  uint64  `json:"recoveryRefreshes"`
+	RecoveryGroups                     uint64  `json:"recoveryGroups"`
+	UnhealthyListenerFallbacks         uint64  `json:"unhealthyListenerFallbacks"`
 	SharedSubscriptions                int     `json:"sharedSubscriptions"`
 	SubscriptionListeners              int     `json:"subscriptionListeners"`
 }
@@ -465,9 +473,13 @@ func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
 		DeliveryWriteDurationMS:            state.DeliveryWriteDurationMS,
 		AverageChangeToClientMS:            averageChangeToClient,
 		ActiveTenantListeners:              state.ActiveTenantListeners,
+		ActiveListenerConnections:          state.ActiveListenerConnections,
 		ListenerReconnects:                 state.ListenerReconnects,
 		ListenerFailures:                   state.ListenerFailures,
 		ListenerLimitRefusals:              state.ListenerLimitRefusals,
+		RecoveryRefreshes:                  state.RecoveryRefreshes,
+		RecoveryGroups:                     state.RecoveryGroups,
+		UnhealthyListenerFallbacks:         state.UnhealthyListenerFallbacks,
 		SharedSubscriptions:                state.SharedSubscriptions,
 		SubscriptionListeners:              state.SubscriptionListeners,
 	}

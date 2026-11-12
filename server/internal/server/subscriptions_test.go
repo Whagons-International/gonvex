@@ -91,13 +91,13 @@ func TestCallerIDPredicateSelectsOnlyAffectedUser(t *testing.T) {
 	detail := tableChangeDetail{precise: true, userIDs: map[string]bool{"user-a": true}}
 	callerA := callerContext{user: &gonvex.User{ID: "user-a"}}
 	callerB := callerContext{user: &gonvex.User{ID: "user-b"}}
-	if !readPredicateMatches("callerIdColumn:userId", nil, callerA, detail, nil) {
+	if !readPredicateMatches("notifications", "callerIdColumn:userId", nil, callerA, detail, nil) {
 		t.Fatal("affected caller did not match committed userId")
 	}
-	if readPredicateMatches("callerIdColumn:userId", nil, callerB, detail, nil) {
+	if readPredicateMatches("notifications", "callerIdColumn:userId", nil, callerB, detail, nil) {
 		t.Fatal("unaffected caller matched committed userId")
 	}
-	if !readPredicateMatches("callerIdColumn:userId", nil, callerB, tableChangeDetail{precise: true}, nil) {
+	if !readPredicateMatches("notifications", "callerIdColumn:userId", nil, callerB, tableChangeDetail{precise: true}, nil) {
 		t.Fatal("missing userId metadata must fail open")
 	}
 }
@@ -106,14 +106,14 @@ func TestColumnArgumentPredicateSelectsOldAndNewWorkspace(t *testing.T) {
 	detail := tableChangeDetail{precise: true, workspaceIDs: map[string]bool{"ws-old": true, "ws-new": true}}
 	for _, workspace := range []string{"ws-old", "ws-new"} {
 		args := json.RawMessage(fmt.Sprintf(`{"workspaceId":%q}`, workspace))
-		if !readPredicateMatches("columnArg:workspaceId", args, callerContext{}, detail, nil) {
+		if !readPredicateMatches("tasks", "columnArg:workspaceId", args, callerContext{}, detail, nil) {
 			t.Fatalf("affected workspace %q did not match", workspace)
 		}
 	}
-	if readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"ws-other"}`), callerContext{}, detail, nil) {
+	if readPredicateMatches("tasks", "columnArg:workspaceId", json.RawMessage(`{"workspaceId":"ws-other"}`), callerContext{}, detail, nil) {
 		t.Fatal("unaffected workspace matched committed workspace IDs")
 	}
-	if !readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"all"}`), callerContext{}, detail, nil) {
+	if !readPredicateMatches("tasks", "columnArg:workspaceId", json.RawMessage(`{"workspaceId":"all"}`), callerContext{}, detail, nil) {
 		t.Fatal("all-workspaces query must fail open")
 	}
 }
@@ -154,6 +154,61 @@ func TestResultTaskPredicateDoesNotFanOutAcrossUnrelatedPages(t *testing.T) {
 	}
 	if !group.matches(missingMetadata) {
 		t.Fatal("missing taskId metadata must fail open")
+	}
+}
+
+func TestTaskIDsArgPredicateRerunsOnlyForListedTasks(t *testing.T) {
+	reads := []manifest.ReadDependency{
+		{Table: "tasks", Columns: []string{"_id", "workspaceId", "spotId"}, Predicate: "taskIdsArg:taskIdsJson,taskId"},
+		{Table: "taskTags", Predicate: "taskIdsArg:taskIdsJson,taskId"},
+	}
+	tasksChange := func(operation string, ids ...string) tableChange {
+		rows := map[string]bool{}
+		for _, id := range ids {
+			rows[id] = true
+		}
+		return tableChange{table: "tasks", operation: operation, rowIDs: rows, changedColumns: []string{"spotId"},
+			details: map[string]tableChangeDetail{"tasks": {operation: operation, rowIDs: rows, changedColumns: []string{"spotId"}, precise: true}}}
+	}
+	tagChange := func(taskID string) tableChange {
+		return tableChange{table: "taskTags", operation: "insert", rowIDs: map[string]bool{"tag-row-1": true}, taskIDs: map[string]bool{taskID: true},
+			details: map[string]tableChangeDetail{"taskTags": {operation: "insert", rowIDs: map[string]bool{"tag-row-1": true}, taskIDs: map[string]bool{taskID: true}, precise: true}}}
+	}
+	for _, test := range []struct {
+		name   string
+		args   string
+		change tableChange
+		want   bool
+	}{
+		{"new task outside the list", `{"taskIdsJson":"[\"task-a\",\"task-b\"]","limit":500}`, tasksChange("insert", "task-new"), false},
+		{"listed task moved", `{"taskIdsJson":"[\"task-a\",\"task-b\"]"}`, tasksChange("update", "task-b"), true},
+		{"unlisted task moved", `{"taskIdsJson":"[\"task-a\",\"task-b\"]"}`, tasksChange("update", "task-z"), false},
+		{"tag on a listed task", `{"taskIdsJson":"[\"task-a\"]"}`, tagChange("task-a"), true},
+		{"tag on an unlisted task", `{"taskIdsJson":"[\"task-a\"]"}`, tagChange("task-z"), false},
+		{"array argument", `{"taskIdsJson":["task-a"]}`, tagChange("task-a"), true},
+		{"single taskId argument", `{"taskId":"task-z"}`, tagChange("task-z"), true},
+		{"taskId unions with the list", `{"taskId":"task-z","taskIdsJson":"[\"task-a\"]"}`, tagChange("task-z"), true},
+		{"no explicit ids (workspace mode) fails open", `{"workspaceId":"ws-1"}`, tasksChange("insert", "task-new"), true},
+		{"empty list fails open", `{"taskIdsJson":"[]"}`, tasksChange("insert", "task-new"), true},
+		{"unparsable list fails open", `{"taskIdsJson":"[not json"}`, tasksChange("insert", "task-new"), true},
+		{"change without ids fails open", `{"taskIdsJson":"[\"task-a\"]"}`, tableChange{table: "taskTags", operation: "insert",
+			details: map[string]tableChangeDetail{"taskTags": {operation: "insert", precise: true}}}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			group := &sharedSubscription{reads: reads, args: json.RawMessage(test.args)}
+			if got := group.matches(test.change); got != test.want {
+				t.Fatalf("matches = %v, want %v", got, test.want)
+			}
+			// The memoized group form and the stateless form agree.
+			detail := test.change.details[test.change.table]
+			if got := readPredicateMatches(test.change.table, "taskIdsArg:taskIdsJson,taskId", group.args, callerContext{}, detail, nil); got != test.want && detail.precise {
+				t.Fatalf("readPredicateMatches = %v, want %v", got, test.want)
+			}
+		})
+	}
+	broad := tableChange{table: "tasks", broad: true}
+	if !(&sharedSubscription{reads: reads, args: json.RawMessage(`{"taskIdsJson":"[\"task-a\"]"}`)}).matches(broad) {
+		t.Fatal("broad task change must fail open")
 	}
 }
 
@@ -334,6 +389,9 @@ func TestUnhealthyListenerFallsBackToDeclaredWrites(t *testing.T) {
 	})
 
 	eventually(t, time.Second, func() bool { return executions.Load() == 2 })
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.UnhealthyListenerFallbacks; got != 1 {
+		t.Fatalf("unhealthy listener fallbacks = %d, want 1", got)
+	}
 }
 
 func TestHealthyListenerSuppressesDeclaredOnlyNoOpCommit(t *testing.T) {
@@ -1264,4 +1322,285 @@ func TestGraceIdleInvalidationMarksRetainedSnapshotUnservable(t *testing.T) {
 	if servable {
 		t.Fatal("a stale snapshot must not be servable to a joining listener")
 	}
+}
+
+func TestListenerRecoveryRefreshIsPacedAndSkipsIdleGroups(t *testing.T) {
+	oldBatch, oldInterval := recoveryRefreshBatch, recoveryRefreshInterval
+	recoveryRefreshBatch, recoveryRefreshInterval = 2, 200*time.Millisecond
+	t.Cleanup(func() { recoveryRefreshBatch, recoveryRefreshInterval = oldBatch, oldInterval })
+
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	manager := server.subscriptions
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"id": "row-1"}}, nil
+	}
+	for index := range 5 {
+		indexedTestGroup(manager, fmt.Sprintf("query.%d", index), "tasks", &executions)
+	}
+	idle := indexedTestGroup(manager, "query.idle", "tasks", &executions)
+	idle.mu.Lock()
+	idle.listeners = map[*subscriptionToken]querySubscription{}
+	idle.lastResult = json.RawMessage(`[{"id":"before-outage"}]`)
+	idle.mu.Unlock()
+
+	manager.refreshTenant("project-a", "tenant-a")
+	// The first batch of two may include the idle group, which does not run.
+	eventually(t, time.Second, func() bool { return executions.Load() >= 1 })
+	time.Sleep(100 * time.Millisecond)
+	if got := executions.Load(); got > 2 {
+		t.Fatalf("recovery executed %d groups before the first pacing interval, want at most one batch of 2", got)
+	}
+	eventually(t, 2*time.Second, func() bool { return executions.Load() == 5 })
+	time.Sleep(recoveryRefreshInterval + 50*time.Millisecond)
+	if got := executions.Load(); got != 5 {
+		t.Fatalf("recovery executed %d times, want 5 (the idle group must not run)", got)
+	}
+	idle.mu.Lock()
+	stale := idle.staleWhileIdle
+	idle.mu.Unlock()
+	if !stale {
+		t.Fatal("recovery must mark an idle group's retained snapshot stale")
+	}
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.RecoveryGroups; got != 6 {
+		t.Fatalf("recovery groups metric = %d, want 6", got)
+	}
+}
+
+func TestLandlordWriteSurvivesObservedTenantWriteInSameCommit(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: "project-a",
+		Schema: manifest.Schema{
+			LandlordTables: map[string]manifest.Table{"users": {}},
+			TenantTables:   map[string]manifest.Table{"fcmTokens": {}},
+		},
+		Functions: map[string]manifest.FunctionEntry{
+			"users.setActive": {Kind: manifest.FunctionKindMutation, Dependencies: manifest.FunctionDependencies{
+				Writes: []manifest.WriteDependency{{Table: "users"}, {Table: "fcmTokens"}},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("sync manifest: %v", err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	var userExecutions, tokenExecutions atomic.Int32
+	manager.execute = func(_ context.Context, group *sharedSubscription, _ querySubscription, _ string, _ float64) (any, error) {
+		if group.key == "users.list" {
+			userExecutions.Add(1)
+		} else {
+			tokenExecutions.Add(1)
+		}
+		return []map[string]any{{"id": "row-1"}}, nil
+	}
+	indexedTestGroup(manager, "users.list", "users", &userExecutions)
+	indexedTestGroup(manager, "fcmTokens.list", "fcmTokens", &tokenExecutions)
+
+	const commitID = "set-active-commit"
+	server.broadcastMutationInvalidationsForCommitAt("project-a", "tenant-a", "users.setActive", commitID, time.UnixMilli(10))
+	// The tenant LISTEN connection observes only the tenant-side write.
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "fcmTokens",
+		operation: "delete", rowIDs: map[string]bool{"token-1": true}, triggerObserved: true, changedAtMS: 11,
+	})
+
+	eventually(t, time.Second, func() bool { return tokenExecutions.Load() == 1 })
+	eventually(t, time.Second, func() bool { return userExecutions.Load() == 1 })
+}
+
+func TestDeclaredLandlordWriteColumnsSkipUnrelatedColumnScopedReads(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: "project-a",
+		Schema:  manifest.Schema{LandlordTables: map[string]manifest.Table{"users": {}}},
+		Functions: map[string]manifest.FunctionEntry{
+			"users.updateMe": {Kind: manifest.FunctionKindMutation, Dependencies: manifest.FunctionDependencies{
+				Writes: []manifest.WriteDependency{{Table: "users", Columns: []string{"availabilityStatus", "updatedAt"}}},
+			}},
+			"users.rename": {Kind: manifest.FunctionKindMutation, Dependencies: manifest.FunctionDependencies{
+				Writes: []manifest.WriteDependency{{Table: "users"}},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("sync manifest: %v", err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	executions := map[string]*atomic.Int32{}
+	reads := map[string]manifest.ReadDependency{
+		"spots":        {Table: "users", Columns: []string{"id", "spots", "seeAllSpots"}},
+		"availability": {Table: "users", Columns: []string{"id", "availabilityStatus"}},
+		"filtered":     {Table: "users", Columns: []string{"id", "name"}, Filters: []string{"availabilityStatus"}},
+		"unscoped":     {Table: "users"},
+	}
+	for key, read := range reads {
+		executions[key] = &atomic.Int32{}
+		group := indexedTestGroup(manager, key, read.Table, executions[key])
+		manager.mu.Lock()
+		manager.unindexGroupLocked(group)
+		group.reads = []manifest.ReadDependency{read}
+		manager.indexGroupLocked(group)
+		manager.mu.Unlock()
+	}
+	manager.execute = func(_ context.Context, group *sharedSubscription, _ querySubscription, _ string, _ float64) (any, error) {
+		executions[group.key].Add(1)
+		return []map[string]any{{"id": "user-1"}}, nil
+	}
+
+	server.broadcastMutationInvalidationsForCommitAt("project-a", "tenant-a", "users.updateMe", "update-me", time.UnixMilli(10))
+	for _, key := range []string{"availability", "filtered", "unscoped"} {
+		eventually(t, time.Second, func() bool { return executions[key].Load() == 1 })
+	}
+	time.Sleep(tableChangeDebounce + subscriptionRerunCooldown + 25*time.Millisecond)
+	if got := executions["spots"].Load(); got != 0 {
+		t.Fatalf("a read of unrelated users columns ran %d times after a declared column write", got)
+	}
+
+	// Without declared columns the landlord write stays broad for the table.
+	server.broadcastMutationInvalidationsForCommitAt("project-a", "tenant-a", "users.rename", "rename", time.UnixMilli(20))
+	eventually(t, time.Second, func() bool { return executions["spots"].Load() == 1 })
+}
+
+// presence.list returns the same rows for every member of a tenant. Declared
+// with ShareByPermissions it must run once per permission set, not once per
+// user, even though it reads ephemeral state and so bypasses the query cache.
+func TestPermissionSharedEphemeralQueryRunsOncePerPermissionSet(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{Project: "project-a", Functions: map[string]manifest.FunctionEntry{
+		"presence.list": {Kind: manifest.FunctionKindQuery, Dependencies: manifest.FunctionDependencies{
+			Reads:              []manifest.ReadDependency{{Table: "userPresence", Columns: []string{"_id", "userId", "lastSeenAt", "state"}}},
+			ReadsEphemeral:     true,
+			ShareByPermissions: true,
+		}},
+	}, Schema: manifest.EmptySchema()}); err != nil {
+		t.Fatal(err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"_id": "presence-1", "userId": "user-1", "state": "active"}}, nil
+	}
+	connection := &wsConn{server: server, project: "project-a", tenant: "tenant-a", subs: map[string]querySubscription{}}
+	for index, userID := range []string{"user-1", "user-2", "user-3"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		manager.attach(querySubscription{
+			conn: connection, id: fmt.Sprintf("presence-%d", index), project: "project-a", tenant: "tenant-a",
+			path: "presence.list", args: json.RawMessage(`{}`), ctx: ctx, cancel: cancel, token: newSubscriptionToken(),
+			caller:     callerContext{user: &gonvex.User{ID: userID}, permissions: map[string]any{"role": "member"}},
+			cacheScope: "browser-" + userID,
+		})
+	}
+	manager.mu.Lock()
+	groups := len(manager.groups)
+	manager.mu.Unlock()
+	if groups != 1 {
+		t.Fatalf("presence.list subscriptions of three members formed %d groups, want 1", groups)
+	}
+	// Initial hydration may run more than once while members join; only the
+	// rerun caused by a change is under test.
+	eventually(t, time.Second, func() bool { return executions.Load() >= 1 })
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	base := executions.Load()
+
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", table: "userPresence", operation: "update",
+		changedColumns: []string{"state"}, rowIDs: map[string]bool{"presence-1": true}, triggerObserved: true,
+	})
+	eventually(t, time.Second, func() bool { return executions.Load() == base+1 })
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	if got := executions.Load() - base; got != 1 {
+		t.Fatalf("one presence change executed presence.list %d times, want once for all members", got)
+	}
+}
+
+// Per-user tables (notifications.userId) store the caller's landlord users.id,
+// not the auth subject that callerIdColumn compares. callerUserIdColumn
+// compares against the ids the handler reported for its last result and
+// reruns whenever those ids are unknown.
+func TestCallerUserIDPredicateUsesHandlerReportedIDs(t *testing.T) {
+	detail := tableChangeDetail{precise: true, operation: "insert", userIDs: map[string]bool{"landlord-7": true}}
+	reported := callerContext{user: &gonvex.User{ID: "firebase-uid"}, referenceIDs: map[string]bool{"landlord-7": true}}
+	other := callerContext{user: &gonvex.User{ID: "firebase-uid-2"}, referenceIDs: map[string]bool{"landlord-8": true}}
+	unknown := callerContext{user: &gonvex.User{ID: "landlord-7"}}
+	if !readPredicateMatches("notifications", "callerUserIdColumn:userId", nil, reported, detail, nil) {
+		t.Fatal("a change addressed to the reported landlord id must rerun")
+	}
+	if readPredicateMatches("notifications", "callerUserIdColumn:userId", nil, other, detail, nil) {
+		t.Fatal("a change addressed to another user must not rerun")
+	}
+	if !readPredicateMatches("notifications", "callerUserIdColumn:userId", nil, unknown, detail, nil) {
+		t.Fatal("unreported caller ids must rerun, never compare the auth subject")
+	}
+	if !readPredicateMatches("notifications", "callerUserIdColumn:userId", nil, other, tableChangeDetail{precise: true}, nil) {
+		t.Fatal("a change without userIds must rerun")
+	}
+	if !readPredicateMatches("notifications", "callerUserIdColumn:recipientId", nil, other, detail, nil) {
+		t.Fatal("an unsupported column must rerun")
+	}
+}
+
+func TestCallerUserIDPredicateSkipsOtherUsersNotifications(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{Project: "project-a", Functions: map[string]manifest.FunctionEntry{
+		"settings.listNotifications": {Kind: manifest.FunctionKindQuery, Dependencies: manifest.FunctionDependencies{
+			Reads: []manifest.ReadDependency{{Table: "notifications", Columns: []string{"userId", "title"}, Filters: []string{"userId"}, Predicate: "callerUserIdColumn:userId"}},
+		}},
+	}, Schema: manifest.EmptySchema()}); err != nil {
+		t.Fatal(err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	landlordIDs := map[string]string{"uid-a": "landlord-a", "uid-b": "landlord-b"}
+	executions := map[string]*atomic.Int32{"uid-a": {}, "uid-b": {}}
+	reportIDs := atomic.Bool{}
+	reportIDs.Store(true)
+	manager.execute = func(ctx context.Context, _ *sharedSubscription, listener querySubscription, _ string, _ float64) (any, error) {
+		executions[listener.caller.user.ID].Add(1)
+		if reportIDs.Load() {
+			gonvex.ReportCallerUserIDs(ctx, landlordIDs[listener.caller.user.ID])
+		}
+		return []map[string]any{}, nil
+	}
+	connection := &wsConn{server: server, project: "project-a", tenant: "tenant-a", subs: map[string]querySubscription{}}
+	for _, uid := range []string{"uid-a", "uid-b"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		manager.attach(querySubscription{
+			conn: connection, id: "inbox-" + uid, project: "project-a", tenant: "tenant-a",
+			path: "settings.listNotifications", args: json.RawMessage(`{}`), ctx: ctx, cancel: cancel, token: newSubscriptionToken(),
+			caller: callerContext{user: &gonvex.User{ID: uid}, permissions: map[string]any{"role": "member"}},
+		})
+	}
+	for _, uid := range []string{"uid-a", "uid-b"} {
+		eventually(t, time.Second, func() bool { return executions[uid].Load() >= 1 })
+	}
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	baseA, baseB := executions["uid-a"].Load(), executions["uid-b"].Load()
+
+	notify := func(userID string) {
+		server.scheduleTableChange(tableChange{
+			project: "project-a", tenant: "tenant-a", table: "notifications", operation: "insert",
+			rowIDs: map[string]bool{"notification-" + userID: true}, userIDs: map[string]bool{userID: true}, triggerObserved: true,
+		})
+	}
+	notify("landlord-b")
+	eventually(t, time.Second, func() bool { return executions["uid-b"].Load() == baseB+1 })
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	if got := executions["uid-a"].Load(); got != baseA {
+		t.Fatalf("user A's inbox reran %d times for user B's notification", got-baseA)
+	}
+
+	// Once a handler run stops reporting ids, every notification reruns it.
+	reportIDs.Store(false)
+	notify("landlord-b")
+	eventually(t, time.Second, func() bool { return executions["uid-b"].Load() == baseB+2 })
+	time.Sleep(subscriptionRerunCooldown + 50*time.Millisecond)
+	notify("landlord-a")
+	eventually(t, time.Second, func() bool { return executions["uid-a"].Load() == baseA+1 })
+	eventually(t, time.Second, func() bool { return executions["uid-b"].Load() == baseB+3 })
 }

@@ -57,6 +57,9 @@ type subscriptionManager struct {
 	visibilityMu     sync.Mutex
 	visibilityRuns   map[string]*visibilityExecution
 	visibilityAttach map[string]visibilityAttachEntry
+	// recoveryGenerations lets a newer listener recovery of a tenant stop an
+	// older paced one.
+	recoveryGenerations map[subscriptionScope]uint64
 }
 
 type visibilityAttachEntry struct {
@@ -166,6 +169,13 @@ type sharedSubscription struct {
 	visibilityUsers         []map[string]string
 	visibilityUsersRevision uint64
 	idleTimer               *time.Timer
+	// callerUserIDs are the ids the last execution reported with
+	// gonvex.ReportCallerUserIDs; nil when it reported none or the group's
+	// result is shared across users.
+	callerUserIDs map[string]bool
+	// taskIDArgs memoizes the task id sets taskIdsArg predicates parse from the
+	// immutable group args (keyed by the predicate's argument list).
+	taskIDArgs map[string]map[string]bool
 }
 
 func newSubscriptionManager(server *Server) *subscriptionManager {
@@ -444,8 +454,30 @@ func (m *subscriptionManager) requestChange(change tableChange) {
 	}
 }
 
+// Listener recovery reruns every live query in a tenant. Requesting them all at
+// once queued the whole tenant ahead of fresh invalidations in the reactive
+// admission queue and opened a burst of connections right after PostgreSQL had
+// just dropped one, which could drop the LISTEN session again. Recovery is
+// requested in batches instead; with these defaults 1,000 groups recover in
+// about 1.5 s.
+var (
+	recoveryRefreshBatch    = 64
+	recoveryRefreshInterval = 100 * time.Millisecond
+)
+
+// refreshTenant reruns every subscription group of a tenant after its LISTEN
+// connection recovered, in paced batches. A newer refresh of the same tenant
+// supersedes an unfinished one; its snapshot covers every remaining group.
+// Groups in their idle grace window are not executed: their retained snapshot
+// is marked stale so a joining listener gets a fresh execution.
 func (m *subscriptionManager) refreshTenant(project, tenant string) {
+	scope := subscriptionScope{project: project, tenant: tenant}
 	m.mu.Lock()
+	if m.recoveryGenerations == nil {
+		m.recoveryGenerations = map[subscriptionScope]uint64{}
+	}
+	m.recoveryGenerations[scope]++
+	generation := m.recoveryGenerations[scope]
 	groups := make([]*sharedSubscription, 0)
 	for _, group := range m.groups {
 		if group.project == project && group.tenant == tenant {
@@ -453,10 +485,46 @@ func (m *subscriptionManager) refreshTenant(project, tenant string) {
 		}
 	}
 	m.mu.Unlock()
+	m.server.metrics.recordReactive(func(metric *reactiveMetricState) {
+		metric.RecoveryRefreshes++
+		metric.RecoveryGroups += uint64(len(groups))
+	})
 	changedAt := epochMillis(time.Now().UTC())
-	for _, group := range groups {
-		group.request("recover", changedAt)
+	batch := max(recoveryRefreshBatch, 1)
+	first := min(batch, len(groups))
+	for _, group := range groups[:first] {
+		group.recover(changedAt)
 	}
+	if first == len(groups) {
+		return
+	}
+	go func() {
+		for start := first; start < len(groups); start += batch {
+			time.Sleep(recoveryRefreshInterval)
+			m.mu.Lock()
+			superseded := m.recoveryGenerations[scope] != generation
+			m.mu.Unlock()
+			if superseded {
+				return
+			}
+			for _, group := range groups[start:min(start+batch, len(groups))] {
+				group.recover(changedAt)
+			}
+		}
+	}()
+}
+
+func (group *sharedSubscription) recover(changedAtMS float64) {
+	group.mu.Lock()
+	if len(group.listeners) == 0 {
+		// No listener can receive a rerun. The retained snapshot may predate a
+		// notification lost while LISTEN was down, so it must not be replayed.
+		group.staleWhileIdle = true
+		group.mu.Unlock()
+		return
+	}
+	group.mu.Unlock()
+	group.request("recover", changedAtMS)
 }
 
 func (m *subscriptionManager) rebindProject(subs []querySubscription) {
@@ -627,6 +695,8 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 	}
 	group.mu.Lock()
 	rowIDs := group.rowIDs
+	caller := group.caller
+	caller.referenceIDs = group.callerUserIDs
 	group.mu.Unlock()
 	intersected := false
 	for _, read := range group.reads {
@@ -635,10 +705,15 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 		}
 		intersected = true
 		detail := tableDetail(change, read.Table)
-		if detail.precise && !readPredicateMatches(read.Predicate, group.args, group.caller, detail, rowIDs) {
+		// Broad changes may retain IDs from their precise siblings after a
+		// merge. Those IDs cannot prove the rest of the change is unrelated.
+		if !detail.precise || detail.broad {
+			return true, false
+		}
+		if !group.readPredicateMatches(read.Table, read.Predicate, caller, detail, rowIDs) {
 			continue
 		}
-		if !detail.precise || detail.broad || detail.operation == "insert" || detail.operation == "delete" {
+		if detail.operation == "insert" || detail.operation == "delete" {
 			return true, false
 		}
 		if detail.operation == "update" && len(detail.changedColumns) > 0 {
@@ -666,15 +741,112 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 	return false, !intersected
 }
 
+// readPredicateMatches is the group form of readPredicateMatches: it parses a
+// taskIdsArg list once per group instead of once per change.
+func (group *sharedSubscription) readPredicateMatches(table, predicate string, caller callerContext, detail tableChangeDetail, rowIDs map[string]bool) bool {
+	if names, ok := strings.CutPrefix(strings.TrimSpace(predicate), "taskIdsArg:"); ok {
+		group.mu.Lock()
+		requested, cached := group.taskIDArgs[names]
+		if !cached {
+			requested = requestedTaskIDs(names, group.args)
+			if group.taskIDArgs == nil {
+				group.taskIDArgs = map[string]map[string]bool{}
+			}
+			group.taskIDArgs[names] = requested
+		}
+		group.mu.Unlock()
+		return taskIDsArgMatches(requested, table, detail)
+	}
+	return readPredicateMatches(table, predicate, group.args, caller, detail, rowIDs)
+}
+
+// requestedTaskIDs reads the task ids a subscription names explicitly in the
+// comma-separated arguments: a JSON array of ids, a string holding such an
+// array (clients send large lists as taskIdsJson), or a single id string. It
+// returns nil (unknown) when no named argument yields an id or one cannot be
+// parsed; callers then stay conservative.
+func requestedTaskIDs(names string, args json.RawMessage) map[string]bool {
+	values := map[string]json.RawMessage{}
+	if json.Unmarshal(args, &values) != nil {
+		return nil
+	}
+	requested := map[string]bool{}
+	for _, name := range strings.Split(names, ",") {
+		raw, ok := values[strings.TrimSpace(name)]
+		if !ok || len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		var list []any
+		if json.Unmarshal(raw, &list) != nil {
+			var text string
+			if json.Unmarshal(raw, &text) != nil {
+				return nil
+			}
+			text = strings.TrimSpace(text)
+			if strings.HasPrefix(text, "[") {
+				if json.Unmarshal([]byte(text), &list) != nil {
+					return nil
+				}
+			} else if text != "" {
+				list = []any{text}
+			}
+		}
+		for _, item := range list {
+			id, ok := item.(string)
+			if !ok {
+				return nil
+			}
+			if id = strings.TrimSpace(id); id != "" {
+				requested[id] = true
+			}
+		}
+	}
+	if len(requested) == 0 {
+		return nil
+	}
+	return requested
+}
+
+// taskIDsArgMatches implements taskIdsArg:<arg>[,<arg>...]: a change to a
+// task-linked table (or to tasks itself) can only affect a subscription that
+// lists its task ids explicitly when one of the changed tasks is listed. The
+// changed ids are the trigger's taskId metadata plus row ids for tasks itself.
+// A child row ID does not identify its parent task. Unknown metadata, a broad
+// change, or an unknown requested set must invalidate conservatively.
+func taskIDsArgMatches(requested map[string]bool, table string, detail tableChangeDetail) bool {
+	if !detail.precise || detail.broad || requested == nil || (len(detail.taskIDs) == 0 && (table != "tasks" || len(detail.rowIDs) == 0)) {
+		return true
+	}
+	for id := range detail.taskIDs {
+		if requested[id] {
+			return true
+		}
+	}
+	if table == "tasks" {
+		for id := range detail.rowIDs {
+			if requested[id] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // readPredicateMatches implements predicates whose safety can be proven from
 // the trigger metadata, subscription arguments, and the previous result rows.
 // resultTaskIds scopes a task-linked table to tasks already in the result;
 // resultTaskIdsOrColumnArg:workspaceId also admits changes that can move a task
 // into the subscribed workspace. Unknown predicates remain conservative.
-func readPredicateMatches(predicate string, args json.RawMessage, caller callerContext, detail tableChangeDetail, resultRowIDs map[string]bool) bool {
+func readPredicateMatches(table, predicate string, args json.RawMessage, caller callerContext, detail tableChangeDetail, resultRowIDs map[string]bool) bool {
+	if !detail.precise || detail.broad {
+		return true
+	}
 	predicate = strings.TrimSpace(predicate)
 	if predicate == "" {
 		return true
+	}
+	if names, ok := strings.CutPrefix(predicate, "taskIdsArg:"); ok {
+		return taskIDsArgMatches(requestedTaskIDs(names, args), table, detail)
 	}
 	resultTaskIDsMatch := func() (bool, bool) {
 		if len(detail.taskIDs) == 0 {
@@ -706,7 +878,22 @@ func readPredicateMatches(predicate string, args json.RawMessage, caller callerC
 		if !known {
 			return true
 		}
-		return readPredicateMatches("columnArg:"+column, args, caller, detail, resultRowIDs)
+		return readPredicateMatches(table, "columnArg:"+column, args, caller, detail, resultRowIDs)
+	}
+	if strings.HasPrefix(predicate, "callerUserIdColumn:") {
+		// The trigger reports userIds only for a physical "userId" column. Any
+		// missing piece (other column, no ids in the change, no ids reported by
+		// the last execution) reruns.
+		if strings.TrimSpace(strings.TrimPrefix(predicate, "callerUserIdColumn:")) != "userId" ||
+			len(detail.userIDs) == 0 || len(caller.referenceIDs) == 0 {
+			return true
+		}
+		for id := range detail.userIDs {
+			if caller.referenceIDs[id] {
+				return true
+			}
+		}
+		return false
 	}
 	if strings.HasPrefix(predicate, "callerIdColumn:") {
 		// The column suffix documents the manifest/trigger contract. userIds is
@@ -960,7 +1147,10 @@ func (group *sharedSubscription) run() {
 		startedAt := time.Now().UTC()
 		group.manager.server.metrics.recordQueryCommitExecution(group.project, group.tenant, group.key, commitIDs)
 		executionCtx := gonvex.WithQueryChangeDetails(group.ctx, reason, changedAtMS, sortedStringSet(tables), sortedStringSet(taskIDs))
+		callerUserIDs := &gonvex.CallerUserIDCollector{}
+		executionCtx = gonvex.WithCallerUserIDCollector(executionCtx, callerUserIDs)
 		result, err := group.manager.executeVisibilityShared(executionCtx, group, representative, reason, changedAtMS)
+		group.recordCallerUserIDs(callerUserIDs, err)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.QueriesRerun++
 			metric.ReactiveExecutionPasses++
@@ -1003,6 +1193,28 @@ func (group *sharedSubscription) run() {
 		group.mu.Unlock()
 		return
 	}
+}
+
+// recordCallerUserIDs keeps the caller ids an execution reported, for the
+// callerUserIdColumn predicate. They are trusted only for a group whose
+// listeners are all the same user: a result shared by permission or
+// visibility, or served from another query, keeps the predicate conservative.
+// A failed execution, a cache hit, or a handler that reported nothing clears
+// them, so the next change reruns.
+func (group *sharedSubscription) recordCallerUserIDs(collector *gonvex.CallerUserIDCollector, err error) {
+	ids := collector.IDs()
+	if err != nil || group.caller.user == nil || strings.TrimSpace(group.caller.user.ID) == "" {
+		ids = nil
+	}
+	if ids != nil {
+		dependencies := group.manager.server.runtime.ManifestForProject(group.project).Functions[group.path].Dependencies
+		if dependencies.ShareByPermissions || strings.TrimSpace(dependencies.ShareByVisibility) != "" || strings.TrimSpace(dependencies.ShareResultFrom) != "" {
+			ids = nil
+		}
+	}
+	group.mu.Lock()
+	group.callerUserIDs = ids
+	group.mu.Unlock()
 }
 
 func (m *subscriptionManager) executeVisibilityShared(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
