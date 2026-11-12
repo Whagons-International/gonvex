@@ -40,3 +40,6 @@ N6 or stranded-OWNER proof. The author reports phase15's64 root/36 gateway cases
 passing, including9 bookkeeping model cases after a reentrant singleflight fix; failed phases13/14 remain
 retained. Those results do not activate the model or close any lifecycle gate. Require a coherent immutable
 implementation and NEW independent review, preserving every K22/X01/platform/capacity/actual-duration gate.
+
+0080 permits narrow RPC lifetime-metadata normalization only at the real callback consumer, followed by
+these unchanged strict leaf checks and disposal of the original. It does not relax untrusted data schemas.

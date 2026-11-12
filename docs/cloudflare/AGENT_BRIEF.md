@@ -146,6 +146,13 @@ attempt; no causal fix, CPU proof or original gate is inferred from this plan.
 0078 clarifies versioned exact-echo owner-intent callback replies before activation; leaf/model tests do
 not establish durable Host/Registry/SDK lifecycle proof. The4731 diagnostic review requires fixes for CI
 scratch/preparation portability and captured-ID cleanup; see verification/builder-startup-review-4731.md.
+0079 permits an awaited LOCAL exact holder publication primitive, with no owner/terminal authority.
+The19b diagnostic recheck clears the original fixes only within its plain-record boundary; the external
+execution lane remains unarmed (verification/0077-execution-core.md). M05's493 recheck requests foundation
+changes for accounting/timing/privacy; the author publishes1b corrections pending a NEW independent
+recheck (verification/M05-recheck-493.md). No foundation or full M05 acceptance is implied.
+0080 adapts only real owner callback RPC roots for standard disposal metadata, preserving strict pure
+validators, all string/nested fields, disposal in finally and no authority/terminal inference.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
