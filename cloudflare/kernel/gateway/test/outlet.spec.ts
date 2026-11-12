@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { GatewayOutlet, DELIVERY_CAPACITY_CODE } from "../../delivery/outlet";
+import { GatewayOutlet, DELIVERY_CAPACITY_CODE, deliveryPressure } from "../../delivery/outlet";
 import type { ReplicaDelivery } from "../../delivery/protocol";
 
 const payload = (instance: string, text = ""): ReplicaDelivery => ({ v: 1, instance, shared: [text], sockets: {} });
@@ -61,6 +61,60 @@ it("shares oversized-singleton credits across different tenant outlets without l
 it("supports weak ownership accounting in the pinned runtime", () => {
   const owner = {};
   expect(new WeakRef(owner).deref()).toBe(owner);
+});
+
+it("charges membership-only payloads before retaining them and preserves the legal singleton", async () => {
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const baseline = deliveryPressure();
+  const outlet = new GatewayOutlet("membership", () => ({ async deliverReplica(_t, p) {
+    if (!p.recovery) await held;
+    return { v: 1, sockets: 0, ...(p.recovery ? { recoveryAck: 1 as const } : {}) };
+  } }), async () => ["gw"]);
+  // No socket work/shared rows: these arrays alone exceed the pending byte budget.
+  const membership = { revision: 1, members: Array.from({ length: 30_000 }, (_, i) => `member-${i}-xxxxxxxxxxxx`),
+    accounts: Array.from({ length: 30_000 }, (_, i) => `account-${i}-xxxxxxxxxxx`) };
+  const first = outlet.send("gw", { ...payload("membership"), membership });
+  try {
+    expect(deliveryPressure().normal - baseline.normal).toBeGreaterThan(8 * 1024 * 1024);
+    await expect(outlet.send("gw", { ...payload("rejected"), membership })).rejects.toMatchObject({ code: DELIVERY_CAPACITY_CODE });
+    expect(deliveryPressure().count - baseline.count).toBe(1);
+    const reset = outlet.reset("gw", recovery());
+    release(); await Promise.all([first, reset]);
+    expect(deliveryPressure().normal).toBe(baseline.normal);
+    expect(deliveryPressure().count).toBe(baseline.count);
+  } finally { release(); await first; }
+});
+
+it("settles idle and frees host metadata when queued work is discarded before dispatch", async () => {
+  const baseline = deliveryPressure();
+  let calls = 0;
+  const outlet = new GatewayOutlet("discard", () => ({ async deliverReplica() { calls++; return { v: 1, sockets: 0 }; } }), async () => []);
+  const work = outlet.send("gw", payload("discard"));
+  let idle = false;
+  const drained = outlet.idle("gw").then(() => { idle = true; });
+  outlet.discard("gw");
+  await work; await Promise.resolve();
+  expect(idle).toBe(true);
+  await drained;
+  expect(calls).toBe(0);
+  expect(deliveryPressure()).toMatchObject({ normal: baseline.normal, count: baseline.count, hosts: baseline.hosts });
+});
+
+it("settles an empty failed recovery queue while retaining its required-recovery fence", async () => {
+  const baseline = deliveryPressure();
+  let supported = false;
+  const outlet = new GatewayOutlet("blocked", () => ({ async deliverReplica() {
+    return { v: 1, sockets: 0, ...(supported ? { recoveryAck: 1 as const } : {}) };
+  } }), async () => []);
+  await expect(outlet.reset("gw", recovery())).rejects.toMatchObject({ code: "GONVEX_DELIVERY_RECOVERY_UNSUPPORTED" });
+  outlet.discard("gw");
+  await outlet.idle("gw");
+  expect(deliveryPressure().hosts).toBe(baseline.hosts + 1);
+  await expect(outlet.send("gw", payload("still-blocked"))).rejects.toMatchObject({ code: DELIVERY_CAPACITY_CODE });
+  supported = true;
+  await outlet.reset("gw", recovery());
+  expect(deliveryPressure().hosts).toBe(baseline.hosts);
 });
 
 it("gives quiet tenants shared RPC credits while a busy tenant still has queued holders", async () => {

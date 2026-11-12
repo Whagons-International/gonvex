@@ -8,6 +8,26 @@ The original done_when is **unmet** until the integrated K22+X01 runtime passes 
 including the 26-tenant campaign while scaling. A PR, package harness, or configured limit is not this proof.
 This artifact does not partition tenant SQLite: one tenant still has one serialized writer.
 
+## Lead integration fixes after independent review
+
+The review of immutable head `60be3adc` requested three source changes. The lead ordinary-merged canonical
+planning base c97b35a7, then fixed membership-only byte admission, empty-discard idle/host-credit cleanup,
+and late K16 admission after router timeout. Instance/recovery text and every membership/account string
+now consume estimated credits before retention. Empty queues settle their outstanding idle promise and
+release safe metadata; failed recovery keeps its fence. The router passes its actual admission expiry to
+the limiter, which checks it before/after audit awaits and before writing slots, so an abandoned request
+cannot install late reservations. This adds no per-subscriber SQL or new persisted timer/tombstone map.
+
+Affected-source checks pass: 390 root workerd tests (one worker, unchanged assertions/timeouts), 22 gateway,
+32 public, two public-Reducer tests and 29 conformance unit tests; generators/typecheck/bundles pass and
+runtime cycles remain the same one existing local-runtime cycle. The timeout regression runs in workerd
+with a deliberately delayed audit seam and real router/guard/budget code; it proves slot cleanup and next
+admission, not deployed cross-RPC lifetime or full capacity. See `verification.json` and raw
+`/mnt/data/work/gonvex-x01/lead-review-fixes/`. First test-only typecheck failure is retained and corrected.
+Original full-suite receipts and failed parallel reruns remain historical evidence, labeled by their head;
+they are not relabeled as a fresh full-package pass. A new independent exact-head review is required.
+All assembled/deployed, V03/V04/X02 and platform guard gaps below remain open.
+
 ## Routing and recovery
 
 The router validates method/upgrade/extensions before allocating. A random pre-auth connection ID selects

@@ -129,6 +129,35 @@ describe("X01 durable placement in workerd (package harness)", () => {
     expect(await limiterFor(bindings.PUBLIC_LIMITER!, "192.0.2.222").counts()).toEqual({ pending: 0, public: 0 });
   });
 
+  it("does not leak K16 slots when its admission audit outlives the router timeout", async () => {
+    const { AddressBudget, MemorySlotStore, ADMISSION_EXPIRED_ERROR } = await import("../../public/limiter");
+    const store = new MemorySlotStore();
+    store.put("old", { gateway: "old", at: Date.now() - 60_000, kinds: ["pending", "public"] });
+    let release!: () => void;
+    const audit = new Promise<void>(resolve => { release = resolve; });
+    const budget = new AddressBudget(() => ({ liveConnections: async () => { await audit; return []; } }), Date.now, store);
+    let admission!: ReturnType<typeof budget.admit>;
+    const limiter = {
+      admit(request: Parameters<typeof budget.admit>[0]) {
+        expect(request.expiresAt).toBeGreaterThan(Date.now());
+        return admission = budget.admit({ ...request, pendingLimit: 1, publicLimit: 1 });
+      },
+      async release(request: Parameters<typeof budget.release>[0]) { budget.release(request); },
+    };
+    const fake = { ...bindings, PUBLIC_LIMITER: { getByName() { return limiter; } } } as unknown as Bindings;
+    try {
+      const response = await handleWebSocketUpgrade(new Request("https://x/ws?public=1", {
+        headers: { upgrade: "websocket", "CF-Connecting-IP": "192.0.2.223" },
+      }), fake);
+      expect(response.status).toBe(503);
+      release();
+      expect(await admission).toEqual({ ok: false, error: ADMISSION_EXPIRED_ERROR });
+      expect(store.entries.size).toBe(0);
+      expect(await budget.admit({ v: 1, connectionId: "next", gateway: "gw", publicTransport: true,
+        pendingLimit: 1, publicLimit: 1, expiresAt: Date.now() + 2_000 })).toEqual({ ok: true });
+    } finally { release(); await admission; }
+  });
+
 });
 
 it("awaits every recovery receiver and refuses an old-session acknowledgment", async () => {

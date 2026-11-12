@@ -102,6 +102,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     if (queue.recoveryRequired || credits.count >= MAX_PENDING || (!singleton
       && (queue.bytes + bytes > HOST_PENDING_BYTES || credits.normal + bytes > NORMAL_BYTES))) {
       queue.recoveryRequired = true;
+      this.settleEmpty(host, queue);
       return Promise.reject(new DeliveryCapacityError());
     }
     return this.enqueue(host, queue, payload, bytes, false);
@@ -179,9 +180,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       if (item.recovery) queue.recovery = undefined;
       queue.running = false; credits.running--;
       if (!queue.pending.length) {
-        queue.drained();
-        if (!queue.recoveryRequired) { this.queues.delete(host); credits.hosts--;
-          if (!this.queues.size) owners.delete(this.owner); }
+        this.settleEmpty(host, queue);
       } else {
         // Rotate a busy holder behind other ready holders; no cross-holder ordering requirement.
         this.queues.delete(host); this.queues.set(host, queue);
@@ -195,6 +194,16 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   private release(queue: Queue, item: Pending): void {
     if (item.recovery) credits.recovery -= item.bytes;
     else { queue.bytes -= item.bytes; credits.normal -= item.bytes; credits.count--; }
+  }
+  /** Empty blocked queues retain their recovery fence, but have no outstanding RPC to await. */
+  private settleEmpty(host: string, queue: Queue): void {
+    if (queue.running || queue.pending.length) return;
+    queue.drained();
+    if (!queue.recoveryRequired && this.queues.get(host) === queue) {
+      this.queues.delete(host); credits.hosts--;
+      if (!this.queues.size) owners.delete(this.owner);
+    }
+    if (![...this.queues.values()].some(q => q.pending.length && !q.running)) ready.delete(this);
   }
   queued(host: string): number {
     const queue = this.queues.get(host);
@@ -213,6 +222,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       else { this.release(queue, item); item.resolve(undefined); }
     }
     queue.pending = keep;
+    this.settleEmpty(host, queue);
   }
   async idle(host: string): Promise<void> { await this.queues.get(host)?.idle; }
 }
@@ -253,7 +263,13 @@ export class LocalOutlet extends OrderedOutlet {
 
 /** Conservative text/copy credits (UTF16 plus two worst-case UTF8 copies), no second JSON encoding of the delivery payload. */
 function retainedBytes(payload: ReplicaDelivery): number {
-  let bytes = 256;
+  let bytes = 256 + payload.instance.length * 8;
+  if (payload.recovery) bytes += payload.recovery.reason.length * 8 + 64;
+  if (payload.membership) {
+    bytes += 128;
+    for (const id of payload.membership.members) bytes += id.length * 8 + 64;
+    for (const id of payload.membership.accounts) bytes += id.length * 8 + 64;
+  }
   for (const text of payload.shared) bytes += text.length * 8 + 64;
   for (const [id, work] of Object.entries(payload.sockets)) {
     bytes += id.length * 8 + 256;

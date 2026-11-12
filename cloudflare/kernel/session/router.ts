@@ -40,7 +40,10 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     }
     const gatewayName = assignment?.gateway ?? gatewayFor(env, connectionId);
     slots = env.PUBLIC_LIMITER ? (publicTransport ? "pending,public" : "pending") : "";
-    const refused = await withDeadline(admitUpgrade(env, { address, connectionId, gateway: gatewayName, publicTransport }));
+    // The deadline also travels to the limiter: Promise.race cannot cancel a slow audit/RPC.
+    const admissionMs = 2_000;
+    const refused = await withDeadline(admitUpgrade(env, { address, connectionId, gateway: gatewayName, publicTransport,
+      expiresAt: Date.now() + admissionMs }), admissionMs);
     if (refused) return refused;
     const headers = new Headers(request.headers);
     headers.delete(ASSIGNMENT_HEADER);
