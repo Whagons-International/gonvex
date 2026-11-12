@@ -1784,6 +1784,7 @@ new note and waits for the lead.
 | 0072 | Invitation foreign-receipt reference quirk | preserve observed behavior; separate hardening deferred | K22, later hardening |
 | 0073 | Explicit admission for ordered holder rebuild | permitted under0061/0069; no client retry credit or lifetime approval | K22 |
 | 0074 | Sequenced owner barrier, control-only challenge and exact pre-application support | bounded implementation permitted; native/SDK/deploy proof open | K22 |
+| 0075 | Same-queue owner control and bounded reply credit | permitted; preserves recovery fence and original memory/capacity gates | K22, V03, V04 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

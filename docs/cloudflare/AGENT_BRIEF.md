@@ -135,6 +135,8 @@ Generic receipt path validation and the separate migration-gate read-only except
 can recover; no client retry credit, ambiguous-call replay or owner-lifetime acceptance follows.
 0074 binds those rebuilds to a bounded producer/sequence, strict control-only challenge and pre-application
 support/ACK. Actual owner confirmation, durable attempt/UNKNOWN rules and original gates remain mandatory.
+0075 separates reserve-charged owner control from fence-clearing whole recovery, with upfront bounded
+reply credit and retained-response ownership. No fake recovery ACK, extra channel or fit claim is allowed.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
