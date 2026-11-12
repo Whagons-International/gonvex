@@ -2,6 +2,8 @@
 
 Date: 2026-11-12. Status: bounded schema/implementation permitted; activation and acceptance unproved.
 Continues 0056/0061/0069/0073. No client wire change, extra channel or X01 placement rewrite.
+0075 specifies the narrow owner-control admission/response-credit interface. It preserves recovery-required
+fences; an ordinary control completion never substitutes for universal recovery's literal acknowledgment.
 
 ## Producer and three strict phases
 
