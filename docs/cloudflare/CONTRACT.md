@@ -1753,6 +1753,10 @@ new note and waits for the lead.
 | 0043 | K18 ingress findings | ruled in 0045 (IB4 amended) | K17, K18, V01 |
 | 0044 | K17 service principals findings | ruled in 0045 | K17, V02 |
 | 0045 | Batch-C review rulings; numbering; assembly package proposal | decided | K15-K18, K21, V01, V02 |
+| 0046 | K10 replica delivery findings | ruled in 0048 | K10, K22 |
+| 0047 | K20 sandbox findings (Dynamic Workers as L09 candidate) | ruled in 0048; L09 pull-forward for Gabriel | K20, L09 |
+| 0048 | K10 and K20 rulings; one commit channel; K22 assembly added | decided | K05, K08, K10, K20, K22, V01 |
+| 0049 | Batch-C re-review: K15, K16, K18, K21; test-harness backends; flake protocol | decided | K22, V01 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

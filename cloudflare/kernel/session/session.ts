@@ -26,6 +26,12 @@ import { type PresenceRecord, SocketPresence, type SupportRecord } from "../pres
 import { type PresenceDelivery, resyncFrame } from "../presence/tenant";
 import { handleServiceFrame, type ServiceCalls } from "../principals/frames";
 import { serviceAuthResult, type ServiceGrant } from "../principals/grant";
+import { ADMISSION_MAX_AGE_MS } from "../public/config";
+import { UNKNOWN_ADDRESS } from "../public/address";
+import { ADMISSION_ERROR, frameCost, publicAdmissionErrors, publicLimitErrors, runsTenantCode } from "../public/frames";
+import { type PublicGuard, validatePublicScope } from "../public/guard";
+import type { SlotKind } from "../public/limiter";
+import { allowCalls, type CallWindow, newWindow } from "../public/window";
 import { type ErrorSessionRecord, SocketTelemetry, type TelemetryFrame, type TelemetryHostState, telemetryHostState } from "../telemetry/socket";
 
 export const SERVICE_TOKEN_PREFIX = "gvx_svc_";
@@ -60,6 +66,14 @@ export interface SessionRecord {
   watermark?: number;
   /** K17: set while the socket is a service-principal socket (`service_grant`); it then has no tenant session. */
   service?: ServiceGrant | null;
+  /** K16: the client address bucket (`CF-Connecting-IP`), the key of every per-address budget. */
+  address?: string;
+  /** K16: slots this socket holds in its address limiter (released on first auth and on close). */
+  slots?: SlotKind[];
+  /** K16: the per-connection call window of the public transport (starts when the socket opens). */
+  publicWindow?: CallWindow;
+  /** K16: public admission, created by the first public auth (`PublicAdmission`); a revoked one stays revoked. */
+  admission?: { checkedAt: number; revoked: boolean } | null;
   /** K15: the error support session registered by this connection (repeat registers answered from memory). */
   errorSession?: ErrorSessionRecord | null;
   /** K15: `telemetry_device`, the last `auth` frame's `device` (at most 2 KiB of JSON; larger is not kept). */
@@ -81,6 +95,8 @@ export interface SessionHooks {
   persist?(): void;
   /** Keeps work started outside a frame (presence leave on close) alive (`ctx.waitUntil`). */
   waitUntil?(promise: Promise<unknown>): void;
+  /** K16: the socket authenticated for the first time; its pending slot is freed (`pending_connection.take()`). */
+  pendingCleared?(): void;
 }
 
 export interface SessionOptions {
@@ -95,6 +111,8 @@ export interface SessionOptions {
   modules?: ModuleCache;
   /** Presence v2 settings (K14); defaults follow `ready.presence`. */
   presence?: PresenceConfig;
+  /** K16: public-function limits and budgets. Without it only the default payload cap applies. */
+  publicGuard?: PublicGuard;
   /** K15: telemetry state shared by the host's sockets (rate-limit windows); default: one per session. */
   telemetry?: TelemetryHostState;
 }
@@ -133,6 +151,9 @@ export class Session {
   lastOutboundAt: number;
   /** Presence v2 on this socket (K14). */
   readonly presence: SocketPresence;
+  private readonly publicGuard: PublicGuard | undefined;
+  /** `GONVEX_PUBLIC_MAX_PAYLOAD_BYTES`. */
+  private readonly payloadBytes: number;
   /** Error and performance telemetry on this socket (K15). */
   readonly telemetry: SocketTelemetry;
 
@@ -146,6 +167,8 @@ export class Session {
     this.now = options.now ?? Date.now;
     this.modules = options.modules ?? new ModuleCache(options.ports);
     this.lastOutboundAt = record.livenessAt;
+    this.publicGuard = options.publicGuard;
+    this.payloadBytes = options.publicGuard?.limits.payloadBytes ?? LIMITS.publicPayloadBytes;
     const presence = options.presence ?? { ...DEFAULT_PRESENCE_CONFIG, enabled: options.ready.presence };
     this.presence = new SocketPresence({
       record: this.record,
@@ -162,7 +185,7 @@ export class Session {
   }
 
   /** A new socket: sends `session.ready` before anything else (A.1.2 step 1). */
-  static open(options: SessionOptions & { connectionId: string; publicTransport: boolean }): Session {
+  static open(options: SessionOptions & { connectionId: string; publicTransport: boolean; address?: string; slots?: SlotKind[] }): Session {
     const now = (options.now ?? Date.now)();
     const session = new Session({
       v: 1,
@@ -178,6 +201,9 @@ export class Session {
       revalidateAt: null,
       sentRevision: 0,
       livenessAt: now,
+      address: options.address ?? UNKNOWN_ADDRESS,
+      slots: options.slots ?? [],
+      ...(options.publicTransport ? { publicWindow: newWindow(now) } : {}),
     }, options);
     session.send(sessionReadyFrame(options.ready));
     return session;
@@ -212,18 +238,18 @@ export class Session {
 
   private async onBinary(bytes: ArrayBuffer): Promise<void> {
     if (this.closed) return;
-    if (this.record.publicTransport && bytes.byteLength > LIMITS.publicPayloadBytes) return this.close(CLOSE.publicTransportLimit);
+    if (this.record.publicTransport && bytes.byteLength > this.payloadBytes) return this.close(CLOSE.publicTransportLimit);
     if (await this.updateRequiredBeforeFrame()) return;
-    if (this.unscopedOrAnonymous() && bytes.byteLength > LIMITS.publicPayloadBytes) return this.close(CLOSE.publicPayloadTooLarge);
+    if (this.unscopedOrAnonymous() && bytes.byteLength > this.payloadBytes) return this.close(CLOSE.publicPayloadTooLarge);
     // Binary frames have no handler (lib.rs:3855).
   }
 
   private async onText(text: string): Promise<void> {
     if (this.closed) return;
     // The public transport's read limit fails before the handler sees the frame.
-    if (this.record.publicTransport && exceedsUtf8(text, LIMITS.publicPayloadBytes)) return this.close(CLOSE.publicTransportLimit);
+    if (this.record.publicTransport && exceedsUtf8(text, this.payloadBytes)) return this.close(CLOSE.publicTransportLimit);
     if (await this.updateRequiredBeforeFrame()) return;
-    if (this.unscopedOrAnonymous() && exceedsUtf8(text, LIMITS.publicPayloadBytes)) return this.close(CLOSE.publicPayloadTooLarge);
+    if (this.unscopedOrAnonymous() && exceedsUtf8(text, this.payloadBytes)) return this.close(CLOSE.publicPayloadTooLarge);
     const decoded = decodeClientFrame(text);
     if (!decoded.ok) return this.close(CLOSE.invalidFrame);
     const frame = decoded.frame;
@@ -233,7 +259,94 @@ export class Session {
       this.send(frames.authError(frame.id, AUTH_ERRORS.publicTransport, "transient"));
       return this.close(CLOSE.ended);
     }
+    // K16, in Rust's order (lib.rs:2650-2722): a revoked admission ends the socket; the public transport's
+    // call budgets; then the admission re-check (fresh before tenant code, at most 30 s old otherwise).
+    if (this.record.admission?.revoked) return this.admissionRevoked();
+    if (this.record.publicTransport && !await this.allowPublicCall(frameCost(frame, this.record.negotiated.nativeRows))) {
+      for (const text of publicLimitErrors(frame)) this.send(text);
+      return;
+    }
+    if (frame.type !== "auth" && this.record.admission && !await this.admitted(runsTenantCode(frame))) {
+      for (const text of publicAdmissionErrors(frame)) this.send(text);
+      // Rust breaks the loop: the socket ends without a close frame (kernel: 1000, as every such exit).
+      return this.close(CLOSE.ended);
+    }
     await this.dispatch(frame);
+  }
+
+  // ---- public functions (K16) ------------------------------------------------------
+
+  /**
+   * `PublicLimiter::allow`: the address window (in the address's limiter
+   * object) and this connection's window are each charged when they have
+   * room, independently; the call passes only when both had room.
+   */
+  private async allowPublicCall(cost: number): Promise<boolean> {
+    const guard = this.publicGuard;
+    if (!guard) return true;
+    const address = await guard.allowAddress(this.record.address ?? UNKNOWN_ADDRESS, cost);
+    const window = this.record.publicWindow ??= newWindow(this.record.openedAt);
+    const connection = allowCalls(window, cost, guard.limits.connectionCalls, this.now());
+    this.hooks.persist?.();
+    return address && connection;
+  }
+
+  /**
+   * `PublicAdmission::check` (public_functions.rs:253-273): re-reads the
+   * pinned scope's admission when `fresh` or when the last check is 30 s old.
+   * A failed check revokes the socket's admission for good.
+   */
+  private async admitted(fresh: boolean): Promise<boolean> {
+    const admission = this.record.admission;
+    const scope = this.record.publicScope;
+    if (!admission || !scope) return true;
+    if (admission.revoked) return false;
+    if (fresh || this.now() - admission.checkedAt >= ADMISSION_MAX_AGE_MS) {
+      if (!await validatePublicScope(this.ports.control, scope)) {
+        admission.revoked = true;
+        this.hooks.persist?.();
+        return false;
+      }
+      admission.checkedAt = this.now();
+      this.hooks.persist?.();
+    }
+    return true;
+  }
+
+  /** The revoked-admission exit (lib.rs:2046-2049, 2650-2662): `auth.error session-expired`, then the socket ends. */
+  private admissionRevoked(): void {
+    this.send(frames.authError("session-expired", ADMISSION_ERROR, "transient"));
+    this.close(CLOSE.ended);
+  }
+
+  /** When the admission monitor next needs to re-check this socket (null: no public admission to watch). */
+  admissionDueAt(): number | null {
+    const admission = this.record.admission;
+    if (this.closed || !admission || admission.revoked || !this.record.publicScope) return null;
+    return admission.checkedAt + ADMISSION_MAX_AGE_MS;
+  }
+
+  /** The pinned public scope, for the host to batch monitor checks per scope. */
+  publicScope(): readonly [string, string] | null { return this.record.publicScope; }
+
+  /**
+   * The monitor's result for this socket (`AdmissionMonitor`, every 30 s in
+   * Rust; here the host's alarm, batched per scope). A frame that re-checked
+   * in the meantime wins; a failed check revokes and ends the socket.
+   */
+  admissionMonitored(valid: boolean, now: number): Promise<void> {
+    return this.serial(() => {
+      const admission = this.record.admission;
+      if (this.closed || !admission || admission.revoked || now - admission.checkedAt < ADMISSION_MAX_AGE_MS) return;
+      if (valid) {
+        admission.checkedAt = now;
+        this.hooks.persist?.();
+        return;
+      }
+      admission.revoked = true;
+      this.hooks.persist?.();
+      this.admissionRevoked();
+    });
   }
 
   private unscopedOrAnonymous(): boolean {
@@ -288,7 +401,16 @@ export class Session {
         return this.reducerCall(frame);
       case "reducer.callMany":
         if (frame.calls.length > LIMITS.callMany) return this.send(frames.reducerError("", undefined, `reducer batch cannot contain more than ${LIMITS.callMany} calls`, "rejected"));
-        for (const call of frame.calls) await this.reducerCall({ type: "reducer.call", ...call });
+        for (const call of frame.calls) {
+          // K16: public admission is re-read before each call of a batch (lib.rs:3378-3399).
+          if (this.record.admission && !await this.admitted(true)) {
+            this.send(frames.reducerError(call.id, call.path, ADMISSION_ERROR, "rejected"));
+            continue;
+          }
+          await this.reducerCall({ type: "reducer.call", ...call });
+        }
+        // The failed check notified the connection loop, which then ends the socket.
+        if (this.record.admission?.revoked && !this.closed) this.admissionRevoked();
         return;
       case "action.call":
         if (frame.scope === "control") return control(frame);
@@ -404,7 +526,11 @@ export class Session {
     this.record.clientContract = null;
     this.record.connection = grant ? { ...NO_CONNECTION, projectId: grant.route.projectId } : NO_CONNECTION;
     this.record.service = grant;
-    if (grant) this.record.pendingUntil = null;
+    if (grant && this.record.pendingUntil !== null) {
+      this.record.pendingUntil = null;
+      // K16: a service grant takes the pending slot too (`pending_connection.take()`, lib.rs:2765-2767).
+      this.hooks.pendingCleared?.();
+    }
     this.hooks.persist?.();
     this.send(grant ? frames.authResult(frame.id, serviceAuthResult(grant) as Json) : frames.authError(frame.id, error, "transient"));
   }
@@ -457,9 +583,16 @@ export class Session {
         this.send(frames.authError(response.ok ? response.id : "", AUTH_ERRORS.publicScopeFixed, "transient"));
         return this.close(CLOSE.publicScopeFixed);
       }
-      record.publicScope ??= scope;
+      if (!record.publicScope) {
+        record.publicScope = scope;
+        // K16: the admission this auth just read starts the 30 s cache (`PublicAdmission::new`).
+        record.admission = { checkedAt: this.now(), revoked: false };
+      }
     }
-    if (connection.identity || connection.tenant) record.pendingUntil = null;
+    if ((connection.identity || connection.tenant) && record.pendingUntil !== null) {
+      record.pendingUntil = null;
+      this.hooks.pendingCleared?.();
+    }
     record.clientContract = frame.clientContract === undefined ? null : frame.clientContract.toString();
 
     const module = await this.modules.get(connection.projectId);
@@ -692,7 +825,7 @@ export class Session {
   /** Next time this session needs the host's alarm. */
   nextWake(): number | null {
     if (this.closed) return null;
-    const times = [this.record.pendingUntil, this.record.revalidateAt];
+    const times = [this.record.pendingUntil, this.record.revalidateAt, this.admissionDueAt()];
     if (this.record.tenant && !this.record.tenant.anonymous) times.push(this.lastOutboundAt + LIMITS.livenessMs);
     const due = times.filter((t): t is number => t !== null);
     return due.length ? Math.min(...due) : null;

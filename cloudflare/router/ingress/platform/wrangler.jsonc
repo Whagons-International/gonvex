@@ -1,0 +1,27 @@
+// Platform run of the K18 test composition (run.mjs deploys it, then deletes it).
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "gonvex-cf-dev-k18-ingress",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  // The Whagons bundle is never deployed: the fixture module only.
+  "alias": { "gonvex:whagons-app": "../test/fixtures/absent.js", "gonvex:whagons-functions": "../test/fixtures/absent.json" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONTROL", "class_name": "TestControlObject" },
+      { "name": "TENANT", "class_name": "TestTenant" },
+      { "name": "INGRESS", "class_name": "IngressObject" },
+      { "name": "RECORDER", "class_name": "Recorder" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TestControlObject", "TestTenant", "IngressObject", "Recorder"] }],
+  "vars": {
+    "GONVEX_RUNTIME_VERSION": "development",
+    "GONVEX_INGRESS_PROJECTS": "proj-fixture",
+    "GONVEX_SHARE_WEB_URL": "https://{tenant}.app.example.test"
+  }
+}

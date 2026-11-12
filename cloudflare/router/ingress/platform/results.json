@@ -1,0 +1,146 @@
+{
+  "date": "2026-11-12T00:08:58.439Z",
+  "worker": "gonvex-cf-dev-k18-ingress",
+  "checks": [
+    {
+      "name": "seed",
+      "ok": true
+    },
+    {
+      "name": "telnyx: first signed delivery 200",
+      "ok": true,
+      "detail": {
+        "ms": 424
+      }
+    },
+    {
+      "name": "telnyx: 30 signed deliveries 200",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "telnyx: every body reached the Action byte for byte and verified there",
+      "ok": true,
+      "detail": {
+        "forwarded": 31
+      }
+    },
+    {
+      "name": "telnyx: Action ran as _gonvex_service:ingress on the system channel",
+      "ok": true
+    },
+    {
+      "name": "telnyx: wrong signature 401",
+      "ok": true,
+      "detail": {
+        "status": 401,
+        "ms": 143
+      }
+    },
+    {
+      "name": "telnyx: stale timestamp 401",
+      "ok": true,
+      "detail": {
+        "status": 401
+      }
+    },
+    {
+      "name": "telnyx: unknown tenant 404",
+      "ok": true,
+      "detail": {
+        "status": 404
+      }
+    },
+    {
+      "name": "telnyx: disabled tenant 404",
+      "ok": true,
+      "detail": {
+        "status": 404
+      }
+    },
+    {
+      "name": "telnyx: replayed delivery answered 200 and run once",
+      "ok": true,
+      "detail": {
+        "statuses": [
+          200,
+          200
+        ],
+        "runs": 1
+      }
+    },
+    {
+      "name": "relay: signed delivery 200",
+      "ok": true,
+      "detail": {
+        "ms": 75
+      }
+    },
+    {
+      "name": "github: documented vector 200",
+      "ok": true,
+      "detail": {
+        "ms": 117
+      }
+    },
+    {
+      "name": "github: wrong secret 401",
+      "ok": true,
+      "detail": {
+        "status": 401
+      }
+    },
+    {
+      "name": "github: exactly 5 MiB 200",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "ms": 907
+      }
+    },
+    {
+      "name": "github: 5 MiB + 1 413",
+      "ok": true,
+      "detail": {
+        "status": 413
+      }
+    },
+    {
+      "name": "share page 200 with Open Graph tags",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "ms": 87
+      }
+    },
+    {
+      "name": "share image 200 svg",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "ms": 89
+      }
+    },
+    {
+      "name": "share page for an unknown token 404",
+      "ok": true,
+      "detail": {
+        "status": 404
+      }
+    },
+    {
+      "name": "worker deleted",
+      "ok": true
+    }
+  ],
+  "latencyMs": {
+    "firstDelivery": 424,
+    "telnyxWarm": {
+      "p50": 93,
+      "p95": 141,
+      "max": 180
+    },
+    "sharePage": 87
+  },
+  "upload": "350.13 KiB / gzip: 80.10 KiB"
+}

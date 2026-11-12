@@ -56,6 +56,9 @@ export class CloudflareReducerBackend extends CloudflareBackend {
     return r.json();
   }
 
+  /** The Worker config `wrangler dev` runs (K16's `cloudflare-public` runs its own harness on the same bundles). */
+  get harnessConfig() { return join(HARNESS, 'wrangler.jsonc'); }
+
   async start() {
     const fixtures = join(this.workDir, 'k07-fixtures');
     await mkdir(fixtures, { recursive: true });
@@ -80,7 +83,7 @@ export class CloudflareReducerBackend extends CloudflareBackend {
     this.inspectorPort = await freePort();
     const log = createWriteStream(process.env.GONVEX_CONFORMANCE_WRANGLER_LOG ?? join(this.workDir, 'wrangler.log'), { flags: 'a' });
     this.child = spawn(join(CLOUDFLARE, 'node_modules/.bin/wrangler'), [
-      'dev', '--config', join(HARNESS, 'wrangler.jsonc'), '--ip', '127.0.0.1', '--port', String(this.port), '--inspector-port', String(this.inspectorPort),
+      'dev', '--config', this.harnessConfig, '--ip', '127.0.0.1', '--port', String(this.port), '--inspector-port', String(this.inspectorPort),
       '--persist-to', this.state, '--var', `GONVEX_STUB_ADMIN_KEY:${this.adminKey}`, '--show-interactive-dev-session=false',
     ], { cwd: CLOUDFLARE, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     this.child.stdout.pipe(log); this.child.stderr.pipe(log);

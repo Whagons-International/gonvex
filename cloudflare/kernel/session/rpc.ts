@@ -20,6 +20,7 @@ export interface GatewayRpc {
   hopToTenant(tenant: string, n: number): Promise<number[]>;
   presence(delivery: PresenceDelivery): Promise<PresenceReceipt>;
   presenceConnections(tenantId: string): Promise<ConnectionReport[]>;
+  liveConnections(connectionIds: string[]): Promise<string[]>;
 }
 
 export interface TenantRpc {

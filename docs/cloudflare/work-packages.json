@@ -718,13 +718,40 @@
     "K03",
     "K04",
     "K05",
-    "K06"
+    "K06",
+    "K10",
+    "K15",
+    "K17"
    ],
    "owns": [
     "cloudflare/bridge-support/"
    ],
    "done_when": "Whagons compatibility CI passes through the bridge",
    "reference": []
+  },
+  {
+   "id": "K22",
+   "stage": 1,
+   "wave": 2,
+   "title": "Assembly: compose the merged packages into the deployed kernel Worker, replacing K05's stubs (K07 tenant object, K06 behind K05, K08/K10/K12/K13/K15/K16/K17 ports, live-query resubscribe, operatorDataChanged, telemetry port, promote K17's harness control adapter)",
+   "depends_on": [
+    "K10",
+    "K15",
+    "K16",
+    "K18",
+    "K20",
+    "K21"
+   ],
+   "owns": [
+    "cloudflare/src/",
+    "cloudflare/wrangler.jsonc",
+    "cloudflare/kernel/assembly/"
+   ],
+   "done_when": "Every Rust-vs-kernel scenario that passed per package passes against the single deployed kernel Worker, in local workerd and on a gonvex-cf-dev-* deploy",
+   "reference": [
+    "docs/cloudflare/contract-changes/0045-batch-c-review-rulings.md",
+    "docs/cloudflare/contract-changes/0048-k10-k20-review-rulings.md"
+   ]
   },
   {
    "id": "V01",
@@ -746,7 +773,8 @@
     "K18",
     "K19",
     "K20",
-    "K21"
+    "K21",
+    "K22"
    ],
    "owns": [
     "cloudflare/conformance/"
@@ -774,7 +802,8 @@
     "K18",
     "K19",
     "K20",
-    "K21"
+    "K21",
+    "K22"
    ],
    "owns": [
     "cloudflare/conformance/"
@@ -802,7 +831,8 @@
     "K18",
     "K19",
     "K20",
-    "K21"
+    "K21",
+    "K22"
    ],
    "owns": [
     "cloudflare/conformance/"
@@ -830,7 +860,8 @@
     "K18",
     "K19",
     "K20",
-    "K21"
+    "K21",
+    "K22"
    ],
    "owns": [
     "cloudflare/budgets/"
@@ -858,7 +889,8 @@
     "K18",
     "K19",
     "K20",
-    "K21"
+    "K21",
+    "K22"
    ],
    "owns": [
     "cloudflare/conformance/"
@@ -886,7 +918,8 @@
     "K18",
     "K19",
     "K20",
-    "K21"
+    "K21",
+    "K22"
    ],
    "owns": [
     "docs/cloudflare/security-review.md"
