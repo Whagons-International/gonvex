@@ -149,3 +149,35 @@ public status page or resources/bindings. The runbook names the remaining owner/
 Lead owns integration, fresh review, activation and every original V02/V05/X01/V03/V04/R01/14d/30d gate.
 
 Provider retry configuration follows the [official RetryStrategyBuilder documentation](https://www.checklyhq.com/docs/constructs/retry-strategy/); the default can retry a different region, so this adapter explicitly uses sameRegion. Five-second retry backoff is included in the proposed confirmation bound. Checkly ignores launchOptions/most Chromium args: the arch3 GPU flag requirement applies to local launches; no hosted launch compatibility is assumed. Hosted automatic traces/video can capture login/fixture data: verify vendor redaction/retention before uploading any secret-bearing browser flow.
+
+## Revision after the 445695ee review
+
+The original report/raw records remain immutable under `docs/cloudflare/verification/M05-foundation/`.
+New revision evidence is appended separately. The three foundation fixes enforce monotonic completion
+elapsed time even when synchronous work starves the timer, account actual operation attempts independently
+of schedule-grid membership, and require finite nonnegative numeric job elapsed evidence.
+
+`runCheck` records `deadlineExceeded`, actual `settlement` (fulfilled/rejected/unsettled), optional
+`settledElapsedMs`, and `cleanupState`. A late result is FAIL even if the timer did not run. `observedStatus`
+and `observedCode` retain the pre-enforcement outcome; they do not claim it arrived before the deadline.
+`finishedAt` ends the observation, not necessarily underlying work. An abort request never proves cancellation
+or cleanup settlement; unresolved work remains charged and new writes pause. Task/file mutator admission
+also checks monotonic elapsed time before starting another write. No automatic ambiguous-write retry follows.
+
+Replay keeps expected schedule-slot accounting separate from `recordAccounting` and scoped `observations`.
+Every eligible actual create/update contributes to the operation denominator, including off-grid/retry/late
+attempts. New operation records have actual `attemptedAt`; historical v1 records use the enclosing check's
+actual interval with explicitly counted timing fallback/boundary uncertainty. An unexpected observation
+removes affected slots' healthy certificate (UNKNOWN); it does not invent an entire interval of outage.
+Exact on-time failed first samples stay failed. Raw symptoms, retries and first failures remain visible.
+Attempts unconfirmed at `asOf` are pending until their declared deadline expires, or UNKNOWN at an ambiguous
+window boundary; they stay in the denominator without being fabricated successes or premature service
+failures. `operationsPending`/`operationsUnknown` explain any difference between attempted and success+failed.
+An entire duplicate/malformed/contradictory input report throws an integrity error and emits no availability
+object. It must be presented as UNKNOWN/integrity failure, never an empty healthy report. Per-operation
+elapsed evidence cannot exceed the enclosing observation or widen the predeclared check deadline.
+
+Independent prior-slot heartbeat matching is unchanged by these fixes; its existing interval-wide witness
+window is an unrated input-contract diagnostic in the 445 review, not new heartbeat/hosted proof. Actual
+independent scheduling, grace policy and outage drills remain activation dependencies. No reviewed-source
+clearance is inferred from author regression tests; lead must arrange a NEW independent review of the pin.

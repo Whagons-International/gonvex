@@ -49,10 +49,25 @@ export async function runCheck(c, check, adapter, guard) {
   const operations = [];
   const runIds = ids(), controller = new AbortController(), start = performance.now();
   const raw = { schema: 'gonvex.monitor.v1', ...Object.fromEntries(['sourceSha','deploy','region','executor','configSha','domain','environment'].map(k => [k,c[k]])), check, scheduledAt: c.scheduledAt, startedAt: Date.now(), deadlineMs: c.deadlineMs, clockUncertaintyMs: c.clockUncertaintyMs ?? 0, attempt: c.attempt ?? 0, ...runIds };
-  let timer;
-  const execution = Promise.resolve().then(() => adapter({ ...c, ...runIds, signal: controller.signal, guard, operations }));
+  let timer, timerExpired = false, settlement = 'unsettled', settledElapsedMs;
+  const expire = () => {
+    controller.abort();
+    if (guard) guard.state.paused = true;
+  };
+  const assertDeadline = () => {
+    if (controller.signal.aborted || performance.now() - start > c.deadlineMs) {
+      expire(); throw new CheckError('deadline', 'fail');
+    }
+  };
+  // Timer callbacks cannot preempt synchronous work or a chain of microtasks. Record actual
+  // settlement independently of the race, and enforce the monotonic deadline again afterwards.
+  const execution = Promise.resolve().then(() => adapter({ ...c, ...runIds, signal: controller.signal, guard, operations, assertDeadline }))
+    .then(value => { settlement = 'fulfilled'; settledElapsedMs = performance.now() - start; return value; },
+      error => { settlement = 'rejected'; settledElapsedMs = performance.now() - start; throw error; });
   try {
-    const outcome = await Promise.race([execution, new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); if (guard) guard.state.paused = true; reject(new CheckError('deadline', 'fail')); }, c.deadlineMs); })]);
+    await Promise.race([execution, new Promise((_, reject) => { timer = setTimeout(() => {
+      timerExpired = true; expire(); reject(new CheckError('deadline', 'fail'));
+    }, c.deadlineMs); })]);
     raw.status = 'pass'; raw.code = 'ok';
     // Only enumerated safe evidence leaves the adapter; arbitrary exceptions and data never escape.
     raw.operations = operations;
@@ -62,5 +77,16 @@ export async function runCheck(c, check, adapter, guard) {
   } finally { clearTimeout(timer); }
   raw.operations = operations.map(o => ({ ...o }));
   raw.durationMs = performance.now() - start; raw.finishedAt = Date.now();
+  raw.settlement = settlement;
+  if (settledElapsedMs !== undefined) raw.settledElapsedMs = settledElapsedMs;
+  raw.cleanupState = !guard ? 'not-applicable' : settlement === 'unsettled' || raw.code === 'ledger-unavailable' ? 'unknown'
+    : !guard.state.cleanupHealthy ? 'failed' : guard.state.active || guard.state.fixtures.length ? 'retained' : 'ledger-clear';
+  raw.deadlineExceeded = timerExpired || raw.durationMs > c.deadlineMs;
+  if (raw.deadlineExceeded) {
+    raw.observedStatus = raw.status; raw.observedCode = raw.code;
+    raw.status = 'fail'; raw.code = 'deadline'; expire();
+  }
+  // This is an immutable observation, not cancellation/cleanup settlement. Late underlying
+  // completion may still occur; the returned record and original outcome are never rewritten.
   return raw;
 }

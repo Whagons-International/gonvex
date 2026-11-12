@@ -14,6 +14,7 @@ export async function taskScenario(c, a) {
   for (const name of ['openReader','mutate','freshRead','cleanup']) port(a, name);
   requireCheck(c.guard, 'cleanup-ledger-required', 'blocked');
   const fixtureId = `synthetic-${c.operationId}`;
+  c.assertDeadline();
   await c.guard.begin(Date.now(), fixtureId);
   let cleaned = false, reader;
   const operations = c.operations;
@@ -22,9 +23,10 @@ export async function taskScenario(c, a) {
     reader = await a.openReader(c.identities.reader, { signal: c.signal, fixtureId });
     requireCheck(reader?.principal === c.identities.reader && typeof reader.waitApplied === 'function', 'independent-reader');
     for (const kind of ['create','update']) {
+      c.assertDeadline();
       requireCheck(!c.signal.aborted && !c.guard.state.paused,'writes-paused','unknown');
       const operation = ids(), begin = performance.now();
-      const record = { operationId:operation.operationId, kind, attempted:true, deadlineMs:c.deadlineMs, status:'fail' };
+      const record = { operationId:operation.operationId, kind, attempted:true, attemptedAt:Date.now(), deadlineMs:c.deadlineMs, status:'fail' };
       operations.push(record);
       const receipt = await a.mutate(c.identities.writer, { kind, fixtureId, ...operation, signal: c.signal });
       requireCheck(receipt?.durable === true && receipt?.operationId === operation.operationId && Number.isSafeInteger(receipt.revision) && receipt.revision > 0, 'durable-confirmation');
@@ -53,9 +55,11 @@ export async function taskScenario(c, a) {
 export async function fileScenario(c, a) {
   requireCheck(c.fileBytes instanceof Uint8Array && c.fileBytes.byteLength <= 1024 && c.fileBytes.byteLength > 0, 'file-budget', 'blocked');
   requireCheck(c.fileIntervalMs >= 900000 && c.fileSideEffectsApproved === true && c.guard, 'file-preflight', 'blocked');
+  c.assertDeadline();
   await c.guard.begin(Date.now(), c.operationId);
   let cleaned = false;
   try {
+    c.assertDeadline();
     const f = await port(a, 'privateFileRoundtrip')(c.identities.writer, c.fileBytes, { signal:c.signal, operationId:c.operationId });
     requireCheck(f?.bytes instanceof Uint8Array && Buffer.from(f.bytes).equals(Buffer.from(c.fileBytes)), 'file-bytes');
     const denied = await port(a, 'unauthorizedFileRead')(c.identities.unauthorized, { file: f.privateHandle, signal:c.signal });
@@ -70,5 +74,7 @@ export async function jobScenario(c, a) {
   requireCheck(Number.isFinite(c.jobDeadlineMs) && c.jobDeadlineMs > 0 && typeof c.jobDeadlineSource === 'string' && c.jobDeadlineSource.length > 0, 'job-deadline-required', 'blocked');
   // Read an already declared job. Creating jobs requires a separate side-effect approval/ledger.
   const r = await port(a, 'jobTerminal')({ signal:c.signal, deadlineMs:c.jobDeadlineMs, deadlineSource:c.jobDeadlineSource });
-  requireCheck(r?.durable === true && r?.terminal === 'completed' && r?.elapsedMs <= c.jobDeadlineMs && r?.deadlineSource === c.jobDeadlineSource, 'job-terminal-deadline');
+  requireCheck(r?.durable === true && r?.terminal === 'completed' && r?.deadlineSource === c.jobDeadlineSource, 'job-terminal-deadline');
+  requireCheck(Number.isFinite(r.elapsedMs) && r.elapsedMs >= 0, 'job-elapsed-unknown', 'unknown');
+  requireCheck(r.elapsedMs <= c.jobDeadlineMs, 'job-terminal-deadline');
 }
