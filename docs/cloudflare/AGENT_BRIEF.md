@@ -127,6 +127,10 @@ unresolved review findings.
 0068 keeps Action reply generations and legacy deployment-skew gaps explicit; no lost history is fabricated.
 0069 permits bounded owner-authority prototyping; terminal release, cleanup and availability remain open.
 0070 permits recovery-only exact-subset correlation cleanup, never progress or normal-completion fallback.
+0071 permits one owner refresh only after an exact, typed zero-invocation rejection; ambiguous calls are
+never automatically replayed. The original first-writer restart test and owner-lifecycle gates remain.
+0072 records the both-backend invitation receipt collision quirk; preserve outside-gate behavior in K22.
+Generic receipt path validation and the separate migration-gate read-only exception remain unchanged.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 

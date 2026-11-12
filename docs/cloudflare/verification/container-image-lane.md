@@ -1,6 +1,6 @@
 # Credential-free Container archive lane
 
-Status: implemented source; actual hosted archives, quota/cost, publication and deployment pending.
+Status: hosted archives verified and published to development registry; no Worker/Container deployed.
 Owner: lead. K22 retains serving composition, runtime fixes and the secret-gated preview helper.
 
 `.github/workflows/cloudflare-images.yml` runs only for relevant same-repository PR changes targeting
@@ -43,5 +43,42 @@ It validates descriptor bytes/sizes, platform, rootfs diff ids and config integr
 cannot substitute. Index, platform-manifest and config digests are recorded separately. Bounded archive
 identity diagnostics survive failures. Synthetic but real-format OCI/Docker-save positive/negative fixtures
 cover index/attestation layouts and foreign/tampered configs; pinned crane independently reads the fixture.
-Actual hosted rerun/archives remain required. Layer-content verification by the daemonless importer and
-registry mapping must finish before publication; do not equate a published platform digest with the index.
+At this repair checkpoint, actual hosted rerun/archives and layer-content/import verification were still
+required before publication. The verified outcome below records their completion; a published platform
+digest must not be equated with the built index.
+
+## Verified run and development publication, 2026-11-12
+
+PR404 head `2b32e9eb09d873df43c84fc4f733bddef0a46574` produced actual successful
+[run43241519837](https://github.com/Whagons-International/gonvex/actions/runs/43241519837), from
+14:51:25 to 15:23:36 UTC. Artifact13958510830 is a 323,113,097-byte ZIP with API SHA256
+`f4916d1a47ed0a539432d156c830dc0ef13ad5f4979209fa079fe953964356f4`. Download verification matched.
+Reproduced `git archive`, all 2,234 tracked/effective inputs and context manifest matched exactly.
+Both pinned recipes, frontend/base materials, build metadata, index/platform/config graph and archive
+hashes matched. Independently hashed all blobs and 21 compressed/uncompressed layers against config
+diffIDs; checked actual SLSA-v1 attestation subjects/materials and full pinned crane v0.20.6 validation.
+The first local attestation check assumed v0.2 and failed; that failed log is retained, then the actual v1
+schema, subjects and pins were verified. Producer integrity guards were unchanged.
+
+Both `gonvex-cf-dev-artifact-pr404-*` images were published through the approved Vault wrapper, using
+15-minute push/pull registry credentials and a private standard tool auth store removed on exit. Remote
+full validation, config/rootfs/layer identity and equality with the local import manifest passed. No broad
+Cloudflare token entered CI, a command argument or a retained auth store.
+
+| Image | Archive bytes | Published import manifest | Config digest |
+|---|---:|---|---|
+| sandbox | 129,944,576 | `sha256:efad3409656342f27ab179c547786cf15eed8fe797decd1c8d3685d5034d3aea` | `sha256:552f8ea53e04211d6384265cbd3f5ba1454f21d7615096360425f18ad5da20f4` |
+| builder | 192,269,312 | `sha256:d9b31f5b02e23f22d7b3a9485963f2008f43e603f68c99b21b6f78e81e207cbe` | `sha256:06ebe0208b03754b719bf2ea25a5c0100c7fbc66c7920f9d7fa074f12dec1b56` |
+
+These import manifests differ from the built OCI indexes and platform manifests; the verified mapping
+preserves config and layer bytes. Exact index/platform/archive/base digests, commands and raw receipts are
+under `/mnt/data/work/gonvex-cloudflare-lead/container-export-lane/artifacts/43241519837/`:
+`download-receipt.json`, `source-archive-verification.json`, `layer-import-verification.json` and
+`publication.json`; rerun validation via `verify.mjs` and `verify-layers.py` under normal resource admission.
+Publication uses `publish-dev.py` only within the approved Vault wrapper.
+
+PR404 squash-merged into integration as `ca1ae8a04c0adc5b2564c74ae3f7441a4b1e0119`; reviewed and merged
+trees match. This closes the source-image build/publication unblock, not the runtime gates. The builder
+contains the integration scaffold, not K22. A final K22 full-context build is still mandatory; sandbox reuse
+also requires exact relevant-input comparison. Upload success proves this artifact was accepted, not account
+quota headroom or measured billing. No serving deployment, CPU enforcement or assembled capacity is claimed.

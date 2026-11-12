@@ -1,6 +1,7 @@
 # 0066: Credential-free hosted image builds, Vault-only publishing
 
-Date: 2026-11-12. Status: decided (lead); actual hosted artifacts/publishing/deployment remain unproved.
+Date: 2026-11-12. Status: decided (lead); initial source-image archives/publication verified later in
+verification/container-image-lane.md. Final K22 image build and serving deployment remain unproved.
 
 ## Observed blocker
 

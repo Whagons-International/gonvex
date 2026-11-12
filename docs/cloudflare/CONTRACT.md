@@ -1697,6 +1697,7 @@ Disposition for every row: **keep** except pruning, which is **replace**: per 00
 | Claim | `INSERT … ON CONFLICT DO NOTHING` in the Reducer transaction; `subject` = caller account id | `S:lib.rs:1600-1617`; the receipt lookup query is `R:execution.rs:198-215` |
 | Result | `UPDATE … SET result` in the same transaction | `S:lib.rs:1620-1637` |
 | Replay | Same key → stored result; path mismatch → `IdempotencyPathMismatch` | `S:lib.rs:1172-1199` |
+| Invitation accept exception | Its special unclaimed branch does not call generic replay/path validation; an existing foreign-path receipt can finish the Control invitation without changing the member role. **Keep** observed outside-gate reference behavior for K22; hardening deferred in 0072. | `S:lib.rs:1600`; `R:control.rs:1701`, `R:control.rs:1899`; both-backend probe in 0072 |
 | Pruning | **None.** No `DELETE FROM _gonvex_reducer_idempotency` anywhere in `rust/`, `go/` or `packages/`; the `created_at` index has no reader. Same for Control Plane `gonvex_control_idempotency` | grep; `S:lib.rs:1163-1164` |
 | Client offline window | App-declared `client-contract.json` `{version, offlineMaxAgeMs}`: positive integer ms or `null` (= unlimited); no SDK default (no contract → no limit); validated at build and in the runtime; test example 604,800,000 (7 d) | `P:client/src/client-upgrades.ts:6`, `P:gonvex/src/module-artifact.ts:218-224`, `R:modules.rs:1252-1260`, `R:modules.rs:1268-1276` |
 | What the window gates | Only creating new offline intents (`Date.now()-lastOnlineAtMs > offlineMaxAgeMs` → "Offline editing window expired"); queued outbox entries have no expiry and replay whenever the client reconnects | `P:client/src/index.ts:1652`, `P:client/src/index.ts:1674`, `P:client/src/outbox.ts:232`, `P:client/src/outbox.ts:614` |
@@ -1766,6 +1767,21 @@ new note and waits for the lead.
 | 0048 | K10 and K20 rulings; one commit channel; K22 assembly added | decided | K05, K08, K10, K20, K22, V01 |
 | 0049 | Batch-C re-review: K15, K16, K18, K21; test-harness backends; flake protocol | decided | K22, V01 |
 | 0050 | Final rulings K10, K15, K16, K20; IB6 sandbox workspace; staging DuckDB defect for Gabriel | decided (§2a Gabriel) | K10, K20, K22, L09 |
+| 0051–0052 | K20 landed and K10 combined integration merge | decided | K10, K20, K22 |
+| 0053 | Required automatic fleet scaling and assembled capacity curves | required; proof open | X01, V03, V04, staging candidate |
+| 0054 | Sharded placement and bounded reconnect drain | design decided; assembled proof open | X01, K22 |
+| 0055 | External uptime, tracing and operational proof plan | plan accepted; no live activation or uptime claim | K15, R01, V02, V05, M05 |
+| 0056 | Bounded ordered outlet and acknowledged recovery | design decided; final proof open | X01, K22 |
+| 0057 | Local errors.spin guard failure | affected local proof blocked; private-platform proof required | K22, V01 |
+| 0058–0059 | Semantic recovery metadata and oversized identity | design authorized; lifecycle/fit proof remains | K22 |
+| 0060–0063 | Evidence boundaries, empty scope bootstrap, telemetry domains and verified resume checker | decided; original failures/gates retained | K22, V01, V03, V04 |
+| 0064–0065 | Generation-bound initial completion and finite admission | decided; no false progress/quiescence | K22, X01 |
+| 0066 | Credential-free source-image CI and Vault-only publication | initial archives/publication verified; final K22 build/deploy open | K20, K22 |
+| 0067–0068 | Intermediate initial-page fences and Action reply skew | decided; final source/rollout proof open | K22 |
+| 0069 | Tenant-instance owner authority and terminal drain | bounded prototype permitted; lifecycle UNMET | K22 |
+| 0070 | Recovery-only exact-subset processing facts | follow-up permitted; final independent/deployed proof open | K22 |
+| 0071 | One refresh after proven zero invocation | bounded prototype permitted; ambiguous replay prohibited | K22 |
+| 0072 | Invitation foreign-receipt reference quirk | preserve observed behavior; separate hardening deferred | K22, later hardening |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
