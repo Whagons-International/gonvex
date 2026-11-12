@@ -867,6 +867,13 @@ impl ControlPlane {
             }
             let migrated =
                 apply_migrations_locked(&mut connection, &migrations, MigrationScope::Tenant).await;
+            // Before the post-batch steps below, which then run on the
+            // compacted file.
+            if let Ok((applied, _)) = &migrated {
+                if applied_rebuild(&migrations, applied) {
+                    crate::compaction::after_rebuild(&database_path(&database_url)).await;
+                }
+            }
             // A migration that rebuilds `members` drops the membership outbox
             // triggers with the old table. Restore them after any batch that
             // applied a migration, or failed after earlier ones committed.
@@ -972,6 +979,9 @@ pub(crate) fn apply_migrations<'a>(
         }
         let (applied, notices) =
             apply_migrations_locked(&mut connection, &migrations, scope).await?;
+        if applied_rebuild(&migrations, &applied) {
+            crate::compaction::after_rebuild(&database_path(database_url)).await;
+        }
         drop(connection);
         if !applied.is_empty() {
             crate::rows::clear_result_column_kinds();
@@ -985,6 +995,15 @@ type AppliedMigrations = (Vec<String>, Vec<CommitNotice>);
 
 fn rebuilds_foreign_keys(migration: &SqlMigration) -> bool {
     migration.foreign_key_rebuild
+}
+
+/// Whether this batch applied a foreign-key rebuild. Only then does the
+/// file need compaction ([`crate::compaction`]); the schema connection was
+/// already retired by [`rebuild_pending`], so no cached statement outlives it.
+fn applied_rebuild(migrations: &[SqlMigration], applied: &[String]) -> bool {
+    migrations
+        .iter()
+        .any(|migration| applied.contains(&migration.name) && rebuilds_foreign_keys(migration))
 }
 
 /// Whether a foreign-key rebuild of `scope` has not been applied yet. Only
