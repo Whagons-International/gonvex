@@ -10,6 +10,15 @@ and `new_value` strings in `comparableLog`. Strings, keys, key order and integer
 Keep every row, revision, provenance, count and digest assertion and retain the raw observations. This
 repairs a formal-harness omission of an existing ruling; it introduces no numeric tolerance or runtime change.
 
+## Captured host-error stacks
+
+0015 S0-1 applies to a real failed host call whose `GonvexHostError` is caught into an Action result string
+(such as `actions.toolsProbe`'s `result.duplicate`), as well as a field named `error`. The first line remains
+exact contract. A narrow actual-host-error first-line predicate may use only the existing JS stack-line
+removal rule; do not add duration/UUID/token masking or discard non-stack lines. Tests must preserve
+different first lines, non-stack multiline detail and arbitrary application text resembling a stack. Keep
+raw frames and all existing assertions. No handler, Rust or application-module change follows from this.
+
 ## Real deployment boundary
 
 K22's local real-entry deployment exposed active gateway socket closure during Wrangler reload:
