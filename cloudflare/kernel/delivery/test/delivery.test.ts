@@ -57,7 +57,7 @@ interface Harness {
   commit(statements: Array<[string, unknown[]]>): Promise<number>;
 }
 
-async function withEngine<T>(body: (harness: Harness) => Promise<T>): Promise<T> {
+async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE): Promise<T> {
   const stub = env.HELLO.getByName(`k10-${++objects}-${Math.random()}`);
   return runInDurableObject(stub, async (_instance, state) => {
     const sql = directSql(state.storage.sql);
@@ -66,6 +66,9 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>): Promise<T>
       sql.run("CREATE TABLE members (id TEXT PRIMARY KEY, account_id TEXT, status TEXT, role TEXT, permissions JSON)");
       sql.run("CREATE TABLE items (id TEXT PRIMARY KEY, rank INTEGER, label TEXT)");
       sql.run("CREATE INDEX items_rank ON items (rank)");
+      sql.run("CREATE TABLE tasks (id TEXT PRIMARY KEY, state TEXT)");
+      sql.run("CREATE TABLE tnotes (id TEXT PRIMARY KEY, task_id TEXT, body TEXT)");
+      sql.run("CREATE INDEX tnotes_task ON tnotes (task_id)");
       installChangeFeed(sql);
       sql.run("INSERT INTO members VALUES ('m-alice', 'acct-alice', 'active', 'admin', '{}')");
     });
@@ -77,7 +80,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>): Promise<T>
       tenantId: "t",
       serial: <R>(fn: () => Promise<R>) => { const next = queue.then(fn, fn); queue = next.catch(() => undefined); return next; },
       read: async (fn) => { const r = await storage.invoke("query", async (s) => fn(s)); if (!r.ok) throw r.error; return r.value; },
-      module: () => MODULE,
+      module: () => module,
       outlet: new LocalOutlet((host, payload) => { payloads.push([host, payload]); return { v: 1, sockets: Object.keys(payload.sockets).length }; }, () => ["h1"]),
     });
     let commands = 0;
@@ -220,6 +223,18 @@ describe("feed", () => {
     });
   });
 
+  it("sends the own-membership hand-off on the commit channel and drops that Member's subscriptions (0048 §1a)", async () => {
+    await withEngine(async ({ engine, payloads }) => {
+      engine.dispatch(socket("s1"), { type: "replica.open", id: "sub", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      payloads.length = 0;
+      engine.membershipChanged("h1", "m-alice", 5);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(payloads).toEqual([["h1", expect.objectContaining({ membership: { revision: 5, members: ["m-alice"], accounts: [] }, sockets: {} })]]);
+      expect(engine.subscriptions("s1").size).toBe(0);
+    });
+  });
+
   it("drops a connection's state on a newer subscription epoch", async () => {
     await withEngine(async ({ engine }) => {
       engine.dispatch(socket("s1"), { type: "replica.open", id: "sub", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
@@ -358,5 +373,44 @@ describe("payload limits", () => {
     expect(parts.at(-1)!.watermark).toBe(9);
     expect(parts.filter((p) => p.sockets.a?.opened).length).toBe(1);
     expect(splitPayload({ ...payload, sockets: {} }, 1000)).toHaveLength(1);
+  });
+});
+
+const MASKED: ReplicaModule = {
+  projectId: "p",
+  artifactHash: "h2",
+  functions: new Map([
+    ["notes.all", { path: "notes.all", kind: "query", delivery: "replica", replica: parseDefinition({ table: "tnotes", key: "id", columns: ["id", "task_id", "body"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 10000 }) }],
+  ]),
+  visibility: new Map([
+    ["tasks", parsePlan({ version: 2, table: "tasks", key: "id", sets: {}, where: { operator: "eq", column: "state", value: { literal: "open" } } })],
+    ["tnotes", parsePlan({ version: 2, table: "tnotes", key: "id", sets: {}, where: { operator: "inherits", column: "task_id", table: "tasks", key: "id" } })],
+  ]),
+};
+
+describe("design rule: no SQL per subscriber", () => {
+  // A parent's flip makes every subscriber re-decide its children (`affected_rows`). The read happens once per
+  // transaction, whatever the number of subscribers (0048 §1).
+  const commitReads = async (subscribers: number) => withEngine(async ({ engine, payloads, commit }) => {
+    const notes: Array<[string, unknown[]]> = [["INSERT INTO tasks VALUES ('t1', 'open')", []]];
+    for (let i = 0; i < 50; i++) notes.push(["INSERT INTO tnotes VALUES ($1, 't1', $2)", [`n${String(i).padStart(2, "0")}`, `note ${i}`]]);
+    await commit(notes);
+    for (let i = 0; i < subscribers; i++) engine.dispatch(socket(`s${i}`), { type: "replica.open", id: `sub${i}`, path: "notes.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    await engine.settled();
+    payloads.length = 0;
+    const before = { statements: engine.stats.commitStatements, rowsRead: engine.stats.commitRowsRead };
+    await commit([["UPDATE tasks SET state = 'closed' WHERE id = 't1'", []]]);
+    const deltas = payloads.flatMap(([, p]) => Object.values(p.sockets).flatMap((w) => w.ops))
+      .filter((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.delta"'));
+    expect(deltas.length).toBe(subscribers);
+    expect(JSON.parse(deltas[0]![1] as string).deleted).toHaveLength(50);
+    return { statements: engine.stats.commitStatements - before.statements, rowsRead: engine.stats.commitRowsRead - before.rowsRead };
+  }, MASKED);
+
+  it("reads the same rows per commit for 1, 10 and 100 subscribers", { timeout: 60_000 }, async () => {
+    const one = await commitReads(1), ten = await commitReads(10), hundred = await commitReads(100);
+    console.log(`K10 commit reads (statements / rows read): 1 subscriber ${one.statements} / ${one.rowsRead}, 10: ${ten.statements} / ${ten.rowsRead}, 100: ${hundred.statements} / ${hundred.rowsRead}`);
+    expect(ten).toEqual(one);
+    expect(hundred).toEqual(one);
   });
 });

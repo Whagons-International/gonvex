@@ -7,7 +7,7 @@
 
 import { type EvalMemo, type MemberHandle } from "../visibility/class.ts";
 import type { JsonObject, JsonValue } from "../visibility/json.ts";
-import { aclColumns, indexColumns, inheritedColumns, inheritsAny, type VisibilityExpression, type VisibilityPlan } from "../visibility/plan.ts";
+import { indexColumns, inheritedColumns, inheritsAny, type VisibilityExpression, type VisibilityPlan } from "../visibility/plan.ts";
 import {
   activeGrantSets, ancestorDerivedChangeConcerns, ancestorRowChangeConcerns, boundIndexes, changeConcernsMember, derivedChangeConcerns,
   grantChangeConcerns, grantContribution, indexesAhead, parentAdmits, principalChangeConcerns, recomputeDerived,
@@ -41,10 +41,73 @@ type Step = { kind: "skip" } | { kind: "resync"; reason: Resync } | { kind: "app
 
 /** What delivery needs from the tenant for one event: catalog kinds and one synchronous read. */
 export interface FeedReads {
-  /** Rows of a table by a column's values, as of `revision` (undefined: the log no longer covers it). */
   readonly sql: VisibilitySql;
   readonly kinds: (table: string) => ReadonlyMap<string, JsonKind>;
   readonly clock: () => { revision: number; retained: number };
+}
+
+/**
+ * The reads `affected_rows` makes, once per transaction for every subscription
+ * and socket (design rule: no SQL per subscriber). Rust shares the same read
+ * through a recent-reads cache keyed by event, definition and values; here one
+ * object lives for one transaction. Rows are whole rows (every column of the
+ * table), so subscriptions of any collection on the table can share them.
+ */
+export class TransactionReads {
+  private clockValue: { revision: number; retained: number } | undefined;
+  private readonly byValues = new Map<string, Map<string, JsonValue>>();
+  private readonly later = new Map<string, ReadonlyArray<readonly [string, JsonValue]>>();
+  /** Statements made through this object (the PR's numbers). */
+  statements = 0;
+
+  constructor(readonly reads: FeedReads) {}
+
+  clock(): { revision: number; retained: number } {
+    if (!this.clockValue) {
+      this.statements += 1;
+      this.clockValue = this.reads.clock();
+    }
+    return this.clockValue;
+  }
+
+  /** Rows of `table` whose `column` is one of `values`, by key, at the current state. */
+  rowsWhere(table: string, key: string, column: string, values: readonly string[]): ReadonlyMap<string, JsonValue> {
+    const memo = `${table}\u0000${column}\u0000${JSON.stringify(values)}`;
+    let rows = this.byValues.get(memo);
+    if (!rows) {
+      const kinds = this.reads.kinds(table);
+      const columns = [...kinds.keys()].sort().map((name) => { quote(name); return [name, kinds.get(name)!] as const; });
+      rows = new Map();
+      this.statements += 1;
+      const result = this.reads.sql.run(
+        `SELECT ${jsonObjectExpr("r", columns)} FROM ${quote(table)} AS r WHERE r.${quote(column)} IN (SELECT value FROM json_each($1))`,
+        [JSON.stringify(values)],
+      );
+      for (const raw of result.rows) {
+        if (raw[0] === null || raw[0] === undefined) continue;
+        const row = JSON.parse(String(raw[0])) as JsonValue;
+        rows.set(rowKey(row, key), row);
+      }
+      this.byValues.set(memo, rows);
+    }
+    return rows;
+  }
+
+  /** `(row id, old value)` of `table`'s changes after `revision` up to the clock, in order. */
+  laterChanges(table: string, revision: number): ReadonlyArray<readonly [string, JsonValue]> {
+    const memo = `${table}\u0000${revision}`;
+    let rows = this.later.get(memo);
+    if (!rows) {
+      this.statements += 1;
+      const result = this.reads.sql.run(
+        `SELECT row_id, old_value FROM _gonvex_sync_changes WHERE table_name = $1 AND revision > $2 AND revision <= $3 ORDER BY revision, ordinal`,
+        [table, revision, this.clock().revision],
+      );
+      rows = result.rows.map(([rowId, oldText]) => [String(rowId), oldText === null || oldText === undefined ? null : (JSON.parse(String(oldText)) as JsonValue)] as const);
+      this.later.set(memo, rows);
+    }
+    return rows;
+  }
 }
 
 // ---- legacy (version 1) ------------------------------------------------------------------
@@ -143,7 +206,7 @@ function addToken(sets: ResolvedVisibility, name: string, token: string): void {
   sets.sets = next;
 }
 
-function maskStep(subscription: Subscription, revision: number, changes: readonly LogChange[], collapsed: CollapsedChanges, reads: FeedReads): Step {
+function maskStep(subscription: Subscription, revision: number, changes: readonly LogChange[], collapsed: CollapsedChanges, reads: TransactionReads): Step {
   const plan = subscription.plan;
   const parents = inheritedColumns(plan);
   const anyParents = inheritsAny(plan).filter((e) => e.via).map((e) => [e.via!, e.table] as const);
@@ -258,38 +321,20 @@ function maskStep(subscription: Subscription, revision: number, changes: readonl
 }
 
 /** `affected_rows` / `read_affected_rows`: source rows by column values as of `revision`, minus rows this event changed. */
-function affectedRows(subscription: Subscription, affected: Map<string, Set<string>>, revision: number, collapsed: CollapsedChanges, reads: FeedReads): Array<[string, JsonValue]> | undefined {
+function affectedRows(subscription: Subscription, affected: Map<string, Set<string>>, revision: number, collapsed: CollapsedChanges, reads: TransactionReads): Array<[string, JsonValue]> | undefined {
   const definition = subscription.definition;
   const clock = reads.clock();
   if (clock.revision < revision || clock.retained > revision) return undefined;
-  const wanted = new Set<string>([...definition.columns, ...aclColumns(subscription.plan), ...definition.equalFilters.map(([column]) => column), ...definition.excludeWhenSet, ...affected.keys(), definition.key]);
-  if (definition.orderBy) wanted.add(definition.orderBy);
-  const kinds = reads.kinds(definition.table);
-  const columns = [...wanted].sort().map((column) => { quote(column); return [column, kinds.get(column) ?? "text"] as const; });
   const rows = new Map<string, JsonValue>();
   for (const [column, values] of [...affected].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-    const result = reads.sql.run(
-      `SELECT ${jsonObjectExpr("r", columns)} FROM ${quote(definition.table)} AS r WHERE r.${quote(column)} IN (SELECT value FROM json_each($1))`,
-      [JSON.stringify([...values].sort())],
-    );
-    for (const raw of result.rows) {
-      if (raw[0] === null || raw[0] === undefined) continue;
-      const row = JSON.parse(String(raw[0])) as JsonValue;
-      rows.set(rowKey(row, definition.key), row);
-    }
+    for (const [key, row] of reads.rowsWhere(definition.table, definition.key, column, [...values].sort())) rows.set(key, row);
   }
   if (clock.revision > revision) {
     // Rows written after the event: their image at the event is the before-image of their first later change.
-    const later = reads.sql.run(
-      `SELECT row_id, old_value FROM _gonvex_sync_changes WHERE table_name = $1 AND revision > $2 AND revision <= $3 ORDER BY revision, ordinal`,
-      [definition.table, revision, clock.revision],
-    );
     const first = new Set<string>();
-    for (const [rowId, oldText] of later.rows) {
-      const id = String(rowId);
+    for (const [id, old] of reads.laterChanges(definition.table, revision)) {
       if (first.has(id)) continue;
       first.add(id);
-      const old = oldText === null || oldText === undefined ? null : (JSON.parse(String(oldText)) as JsonValue);
       const matches = [...affected].some(([column, values]) => {
         const value = isObject(old) && Object.hasOwn(old, column) ? old[column] : undefined;
         return value !== undefined && value !== null && values.has(scalar(value));
@@ -511,7 +556,7 @@ export type FeedFrame =
  * reconcile, which is removed). `subscriptions` is mutated in place.
  */
 export function applyTransaction(
-  subscriptions: Map<string, Subscription>, event: FeedTransaction, collapsed: CollapsedChanges, reads: FeedReads, share: EventShare | undefined, scope: string,
+  subscriptions: Map<string, Subscription>, event: FeedTransaction, collapsed: CollapsedChanges, reads: TransactionReads, share: EventShare | undefined, scope: string,
 ): { frames: FeedFrame[]; removed: Subscription[] } {
   const frames: FeedFrame[] = [];
   const touches = new Map<string, EntityTouch>();

@@ -85,6 +85,12 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
     return result;
   }
 
+  /** 0048 §1a: one tenant → holder channel for commits, so the hand-off cannot overtake the commit's frames. */
+  protected override ownMembershipChanged(socket: SocketView, revision: number): void {
+    const memberId = socket.tenant?.member.id;
+    if (memberId) this.delivery.membershipChanged(socket.host, memberId, revision);
+  }
+
   protected override subscriptionFloor(socket: SocketView): number | undefined {
     return this.delivery.subscriptionFloor(socket);
   }
@@ -96,7 +102,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
   }
 
   /** K05 `TenantPort.connectionReset`: the socket's subscriptions were dropped. */
-  async connectionReset(connectionId: string, epoch: number): Promise<void> {
+  override async connectionReset(connectionId: string, epoch: number): Promise<void> {
     this.delivery.reset(connectionId, epoch);
   }
 

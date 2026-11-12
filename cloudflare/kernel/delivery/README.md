@@ -116,5 +116,6 @@ cd conformance && node src/cli.mjs --backend rust=rust --backend cf=cloudflare-d
 - Platform (0046 §3, `harness/platform.mjs`, `bench/platform.mjs`): every replica scenario passes Rust against the
   deployed kernel; G1 reader latency p50 74 ms, p95 97 ms from this machine (call → the reader's delta).
 - Cost per commit: two statements (the clock, one page of change rows joined with their transaction); rows read ≈ 1 +
-  2 × change rows; nothing written. A cold open: the clock, the principal (one statement with a warm principal cache),
+  2 × change rows; nothing written. Rows a moved token or parent flip may reveal are read once per transaction for
+  every subscriber (`TransactionReads`): 4 statements / 108 rows for 1, 10 or 100 subscribers in the test. A cold open: the clock, the principal (one statement with a warm principal cache),
   ⌈rows / 256⌉ scan statements; rows read ≈ the window. No delivery state is written to SQLite.

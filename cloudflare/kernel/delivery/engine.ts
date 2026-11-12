@@ -19,7 +19,7 @@ import { EvalMemo } from "../visibility/class.ts";
 import type { JsonValue } from "../visibility/json.ts";
 import { VisibilityRegistry } from "../visibility/tenant.ts";
 import type { ReplicaModule } from "./definition.ts";
-import { applyTransaction, EventShare, type FeedFrame, type FeedReads } from "./feed.ts";
+import { applyTransaction, EventShare, TransactionReads, type FeedFrame } from "./feed.ts";
 import { compactTransaction, deltaBody, deltaFrame, deltaTail, errorFrame, needHashesFrame, readyFrame, resetFrame, transactionFrame, watermarkFrame } from "./frames.ts";
 import { CollapsedChanges, readClock, readTransactions, type FeedTransaction } from "./log.ts";
 import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt, type SocketOp, type SocketWork } from "./protocol.ts";
@@ -140,6 +140,9 @@ export interface DeliveryStats {
   statements: number;
   rowsRead: number;
   resets: number;
+  /** Reads of the commit feed (clock, change log, affected rows), across every connection. */
+  commitStatements: number;
+  commitRowsRead: number;
 }
 
 const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -157,7 +160,7 @@ export function streamIdentity(path: string, argsText: string): string {
 export class ReplicaDeliveryEngine {
   readonly instance = crypto.randomUUID();
   readonly registry: VisibilityRegistry;
-  readonly stats: DeliveryStats = { opens: 0, commits: 0, payloads: 0, statements: 0, rowsRead: 0, resets: 0 };
+  readonly stats: DeliveryStats = { opens: 0, commits: 0, payloads: 0, statements: 0, rowsRead: 0, resets: 0, commitStatements: 0, commitRowsRead: 0 };
   private readonly connections = new Map<string, Connection>();
   private delivered: { epoch: string; revision: number } | undefined;
   private wanted = 0;
@@ -216,6 +219,19 @@ export class ReplicaDeliveryEngine {
     if (!connection || epoch < connection.epoch) return;
     this.drop(connection);
     this.connections.delete(connectionId);
+  }
+
+  /**
+   * K07's own-membership hand-off (lib.rs `membership_changed_frames`), on the same ordered channel as the commits
+   * (0048 §1a): the holder discards the Member's sessions and sends `auth.error membership-changed`, then the watermark.
+   */
+  membershipChanged(host: string, memberId: string, revision: number): void {
+    for (const connection of [...this.connections.values()]) {
+      if (connection.session.member.id !== memberId || revision <= connection.session.admissionRevision) continue;
+      this.drop(connection);
+      this.connections.delete(connection.id);
+    }
+    void this.sendOne(host, this.payload([], {}, undefined, { revision, members: [memberId], accounts: [] }), 0);
   }
 
   /** K07's call watermark rule: undefined without subscriptions, else the revision this socket's holder accepted. */
@@ -408,6 +424,22 @@ export class ReplicaDeliveryEngine {
     const target = this.wanted;
     try { this.knownHosts = await this.options.outlet.hosts(); } catch (error) { console.error("delivery: holder list failed", error); }
     const work = await this.options.read((db) => {
+      const before = { statements: db.stats.statements, rowsRead: db.stats.rowsRead };
+      try {
+        return this.commitWork(db);
+      } finally {
+        this.stats.commitStatements += db.stats.statements - before.statements;
+        this.stats.commitRowsRead += db.stats.rowsRead - before.rowsRead;
+      }
+    });
+    await this.sendAll(work.payloads);
+    this.wanted = Math.max(this.wanted, work.clock.revision);
+    return this.wanted > target;
+  }
+
+  /** The synchronous part of `deliverCommits`, inside one Query invocation. */
+  private commitWork(db: StorageSession): { payloads: Array<[string, ReplicaDelivery, number]>; clock: { revision: number } } {
+    {
       const clock = readClock(sqlOf(db));
       if (this.delivered === undefined) {
         // First wake of this instance: nothing before the clock is owed to anyone it knows.
@@ -433,10 +465,7 @@ export class ReplicaDeliveryEngine {
       }
       this.delivered = { epoch: clock.epoch, revision: clock.revision };
       return { payloads, clock };
-    });
-    await this.sendAll(work.payloads);
-    this.wanted = Math.max(this.wanted, work.clock.revision);
-    return this.wanted > target;
+    }
   }
 
   /** Every subscription of every connection gets `replica.reset` (lib.rs 2367-2386, replica.rs 1340-1355). */
@@ -468,11 +497,12 @@ export class ReplicaDeliveryEngine {
       return at;
     };
     const membership = membershipChanges(transaction);
-    const reads: FeedReads = {
+    // One set of reads per transaction, shared by every subscription of every connection (no SQL per subscriber).
+    const reads = new TransactionReads({
       sql: db,
       kinds: (table) => db.catalogOf(table).columns,
       clock: () => { const c = readClock(sqlOf(db)); return { revision: c.revision, retained: c.retained }; },
-    };
+    });
     const eventShare = new EventShare(new EvalMemo());
     const byHost = new Map<string, Record<string, SocketWork>>();
     const lagged = new Set<string>();

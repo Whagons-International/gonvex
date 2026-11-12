@@ -140,6 +140,8 @@ export abstract class ReducerTenantObject<E extends ReducerTenantEnv = ReducerTe
   }
 
   async attachGateway(gateway: string): Promise<void> { await this.gateways.attach(gateway); }
+  /** K10's subscription reset (K05 `TenantPort.connectionReset`): this object holds none; `ReplicaTenantObject` overrides it. */
+  async connectionReset(_connectionId: string, _epoch: number): Promise<void> {}
   async detachGateway(gateway: string): Promise<void> { await this.gateways.detach(gateway); }
   async registeredGateways(): Promise<string[]> { return this.gateways.list(); }
 

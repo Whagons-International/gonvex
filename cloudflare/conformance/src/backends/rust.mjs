@@ -188,13 +188,6 @@ export class RustBackend extends Backend {
   }
 
   /**
-   * Optional (`capabilities.changeLog`): the tenant's change log, read from its
-   * SQLite file. The runtime's `/dev/data` routes refuse `_gonvex_*` tables, and
-   * the change log is not visible through the contract with its old values,
-   * ordinals and provenance.
-   * @returns {Promise<{ clock: any, changes: any[], transactions: any[] }>}
-   */
-  /**
    * K10: gives the tenant database a new replica epoch, as a restore or an
    * import without `--keep-epoch` does (`_gonvex_sync_clock.epoch`). The
    * runtime keeps running; SQLite's WAL lets this second writer in.
@@ -210,6 +203,13 @@ export class RustBackend extends Backend {
     }
   }
 
+  /**
+   * Optional (`capabilities.changeLog`): the tenant's change log, read from its
+   * SQLite file. The runtime's `/dev/data` routes refuse `_gonvex_*` tables, and
+   * the change log is not visible through the contract with its old values,
+   * ordinals and provenance.
+   * @returns {Promise<{ clock: any, changes: any[], transactions: any[] }>}
+   */
   async readChangeLog(project, tenantId) {
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(join(this.dataDir, 'projects', project, 'tenants', `${tenantId}.db`), { readOnly: true });

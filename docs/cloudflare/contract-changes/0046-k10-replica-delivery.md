@@ -95,3 +95,14 @@ second SDK client (and a thin client) receives it through its collection.
   kernel's tenant class (0037 follow-up for K19).
 - Outbound backpressure on the gateway: workerd's `WebSocket.send` has none (A.1.8), so a slow client's snapshot is
   buffered by its gateway; the tenant is protected by the per-holder lag bound only.
+
+## 6. Review fixes (ruled in 0048 §1)
+
+| Request | Change |
+|---|---|
+| `connectionReset` reached tenant objects without it | No-op `connectionReset` on K07's `ReducerTenantObject` and K05's `TenantStubObject` (`ReplicaTenantObject` overrides it); `TenantRpc.connectionReset` is optional. `pnpm test` ends with no unhandled errors. |
+| Rebase onto K17 | K17's `schema-transform/capture.ts` kept; every `package.json` suite kept; `receiptCrash` stays last under its original comment, after `replicaReconnectWave` and `servicePrincipals` |
+| No SQL per subscriber (design rule) | `affected_rows` reads go through one `TransactionReads` per transaction: the clock once, whole rows once per (table, column, values), later changes once per table, shared by every subscription of every connection. A parent flip that re-decides 50 children for every subscriber (`delivery.test.ts`): **4 statements / 108 rows read per commit for 1, 10 and 100 subscribers** (before: 4 / 108, 22 / 585, 202 / 5,355). |
+| `rust.mjs` | `resetEpoch` moved out from between `readChangeLog`'s doc comment and the method |
+| §1a one commit channel | `ReplicaTenantObject` sends K07's own-membership hand-off as a `ReplicaDelivery` on the ordered holder channel, so it cannot overtake a commit's frames; the tenant object with delivery no longer uses `DeliveryBatch` for commits. K08's live-query frames join the per-socket list when K22 wires K08 (§1c). |
+
