@@ -112,6 +112,23 @@ func TestBudgetedPoolHonorsExplicitMaxIdleEnvironment(t *testing.T) {
 	}
 }
 
+func TestSecondaryPoolMaxIdleNeverExceedsOperatorLimit(t *testing.T) {
+	t.Setenv("GONVEX_DB_MAX_OPEN_CONNS", "")
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "")
+	if got := boundedMaxIdle(1); got != 1 {
+		t.Fatalf("boundedMaxIdle(1) = %d, want 1", got)
+	}
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "0")
+	if got := boundedMaxIdle(1); got != 0 {
+		t.Fatalf("boundedMaxIdle(1) with GONVEX_DB_MAX_IDLE_CONNS=0 = %d, want 0", got)
+	}
+	configure := func(db *sql.DB) { configureBudgetedWithMaxIdle(db, boundedMaxIdle(1)) }
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "")
+	if got := retainedIdleConnections(t, configure); got != 1 {
+		t.Fatalf("secondary pool idle connections = %d, want 1", got)
+	}
+}
+
 // retainedIdleConnections opens five concurrent connections through a
 // configured budgeted pool, releases them, and reports how many stay warm.
 func retainedIdleConnections(t *testing.T, configure func(*sql.DB)) int {

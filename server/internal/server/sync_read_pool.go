@@ -16,11 +16,17 @@ import (
 // per tenant database, which keeps the shared warm idle connections.
 var syncReadPools sync.Map // databaseURL -> *sql.DB
 
+// syncReadPoolMaxIdle keeps one warm connection in the sync-read pool. The
+// tenant store already keeps its own warm connections to the same database;
+// at the shared default both pools together held up to six idle sessions per
+// tenant database, a large share of production's ~97 PostgreSQL slots.
+const syncReadPoolMaxIdle = 1
+
 func syncReadDB(databaseURL string) (*sql.DB, error) {
 	if pool, ok := syncReadPools.Load(databaseURL); ok {
 		return pool.(*sql.DB), nil
 	}
-	db, err := dbpool.Open(databaseURL)
+	db, err := dbpool.OpenWithMaxIdle(databaseURL, syncReadPoolMaxIdle)
 	if err != nil {
 		return nil, err
 	}

@@ -78,6 +78,27 @@ func budgetedMaxIdleFromEnvironment() int {
 	return maxIdle
 }
 
+// OpenWithMaxIdle is Open with a lower ceiling on warm connections. Secondary
+// pools to a database that already has a primary pool (the sync-read pool)
+// use it so they do not double the idle sessions held per tenant database.
+func OpenWithMaxIdle(databaseURL string, maxIdle int) (*sql.DB, error) {
+	db, err := Open(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	configureBudgetedWithMaxIdle(db, boundedMaxIdle(maxIdle))
+	return db, nil
+}
+
+// boundedMaxIdle never lets a caller keep more warm connections than the
+// operator's budgeted limit allows.
+func boundedMaxIdle(maxIdle int) int {
+	if current := budgetedMaxIdleFromEnvironment(); maxIdle > current {
+		return current
+	}
+	return maxIdle
+}
+
 func configureBudgetedWithMaxIdle(db *sql.DB, maxIdle int) {
 	Configure(db)
 	if maxIdle < 0 {

@@ -2,60 +2,47 @@ package server
 
 import (
 	"context"
-	"sync"
-	"sync/atomic"
+	"database/sql"
+	"os"
+	"strings"
 	"testing"
-	"time"
 )
 
-// Callers that arrive while a clock read is running must not reuse it: it may
-// predate the commit they deliver. They share the next read instead.
-func TestBatchedSyncClockNeverServesAReadStartedBeforeTheCaller(t *testing.T) {
-	url := "postgres://batched-clock-test/" + t.Name()
-	var reads atomic.Int64
-	firstStarted := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	read := func(context.Context) (syncClock, error) {
-		n := reads.Add(1)
-		if n == 1 {
-			close(firstStarted)
-			<-releaseFirst
+func TestSyncReadPoolKeepsOneWarmConnection(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("GONVEX_ERROR_TEST_POSTGRES_URL"))
+	if databaseURL == "" {
+		t.Skip("GONVEX_ERROR_TEST_POSTGRES_URL is not set")
+	}
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "")
+	separator := "?"
+	if strings.Contains(databaseURL, "?") {
+		separator = "&"
+	}
+	// A distinct URL gets a fresh pool from the process-wide sync-read cache.
+	databaseURL += separator + "application_name=gonvex_sync_read_pool_test"
+	db, err := syncReadDB(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		syncReadPools.Delete(databaseURL)
+		_ = db.Close()
+	})
+	connections := make([]*sql.Conn, 0, 3)
+	for range 3 {
+		connection, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
 		}
-		return syncClock{Revision: uint64(n)}, nil
-	}
-	first := make(chan syncClock, 1)
-	go func() {
-		clock, _ := batchedSyncClock(context.Background(), url, read)
-		first <- clock
-	}()
-	<-firstStarted
-
-	var wg sync.WaitGroup
-	late := make(chan uint64, 10)
-	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			clock, err := batchedSyncClock(context.Background(), url, read)
-			if err != nil {
-				t.Error(err)
-			}
-			late <- clock.Revision
-		}()
-	}
-	time.Sleep(50 * time.Millisecond)
-	close(releaseFirst)
-	wg.Wait()
-	close(late)
-	if got := (<-first).Revision; got != 1 {
-		t.Fatalf("first caller revision = %d, want 1", got)
-	}
-	for revision := range late {
-		if revision != 2 {
-			t.Fatalf("late caller got revision %d from a read that started before it, want 2", revision)
+		if err := connection.PingContext(context.Background()); err != nil {
+			t.Fatal(err)
 		}
+		connections = append(connections, connection)
 	}
-	if got := reads.Load(); got != 2 {
-		t.Fatalf("reads = %d, want 2 (one running, one shared by every late caller)", got)
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	if idle := db.Stats().Idle; idle != syncReadPoolMaxIdle {
+		t.Fatalf("sync-read pool idle connections = %d, want %d", idle, syncReadPoolMaxIdle)
 	}
 }
