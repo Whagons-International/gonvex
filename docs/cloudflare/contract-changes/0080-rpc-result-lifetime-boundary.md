@@ -36,3 +36,7 @@ Require native positive and false replies, malformed versions/bindings, unknown 
 strings/nested fields, scope changes during await, and disposal on success/refusal/exception. Keep every
 prior failure and exact runtime evidence. No serving activation, N6/OWNER, platform CPU, SDK/full-matrix
 or original K22/X01/capacity/security/duration acceptance follows.
+
+0081 extends this same policy ONLY to the matched tokenless `drainAdmissionIntent` closed-receipt
+consumer, with unchanged pure validation and0076 processing-only cleanup conditions. No other consumer
+is implicitly added.

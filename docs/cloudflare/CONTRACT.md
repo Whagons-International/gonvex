@@ -1790,6 +1790,7 @@ new note and waits for the lead.
 | 0078 | Versioned exact-echo owner-intent callbacks | leaf validation permitted; all durable/lifecycle/activation gates remain | K22 |
 | 0079 | Await the exact local holder publication | narrow private primitive permitted; no owner/terminal grant or lifecycle acceptance | K22 |
 | 0080 | Callback RPC result lifetime boundary | narrow transport adaptation permitted; pure schemas/authority/lifecycle gates unchanged | K22 |
+| 0081 | Matched tokenless closed-receipt RPC lifetime boundary | same strict adaptation for this consumer only; exact witness/processing-only cleanup gates unchanged | K22 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.
