@@ -175,6 +175,28 @@ impl ModuleRegistry {
         self.install_validated(host, &record, validated).await
     }
 
+    /// Installs a project's stored artifact (its manifest without migration
+    /// bodies, verified by its digest when it was read).
+    pub async fn install_stored(
+        &self,
+        host: &ModuleHost,
+        stored: gonvex_store::StoredArtifact,
+    ) -> Result<Arc<ProjectModule>, ModuleRegistryError> {
+        let manifest: Value = serde_json::from_str(&stored.manifest_text).map_err(|error| {
+            ModuleRegistryError::InvalidArtifact {
+                project: stored.project_id.clone(),
+                message: format!("stored artifact: {error}"),
+            }
+        })?;
+        let record = RuntimeManifestRecord {
+            project_id: stored.project_id,
+            module_hash: stored.module_hash,
+            manifest,
+        };
+        let validated = validate_manifest(&record, Migrations::Stored(stored.migrations))?;
+        self.install_validated(host, &record, validated).await
+    }
+
     /// Loads and activates a manifest that [`validate_manifest_record`]
     /// accepted. A push validates before it provisions tenants and installs
     /// that result instead of decoding and hashing the artifact again.
@@ -365,6 +387,25 @@ pub struct ValidatedManifest {
 pub(crate) fn validate_manifest_record(
     record: &RuntimeManifestRecord,
 ) -> Result<ValidatedManifest, ModuleRegistryError> {
+    validate_manifest(record, Migrations::Decode)
+}
+
+/// Where a validated manifest's migrations come from.
+pub(crate) enum Migrations<'a> {
+    /// Decode and checksum every migration file of the manifest.
+    Decode,
+    /// A push: reuse the installed module's migrations when the pushed
+    /// artifact's verified hash is the installed one (its migration files
+    /// are then byte-identical), else decode.
+    ReuseInstalled(Option<&'a ProjectModule>),
+    /// A stored artifact: its bodiless migrations, already checksummed.
+    Stored(Vec<gonvex_store::SqlMigration>),
+}
+
+pub(crate) fn validate_manifest(
+    record: &RuntimeManifestRecord,
+    migrations: Migrations<'_>,
+) -> Result<ValidatedManifest, ModuleRegistryError> {
     let project = record.project_id.clone();
     let module = record
         .manifest
@@ -374,11 +415,23 @@ pub(crate) fn validate_manifest_record(
             project: project.clone(),
             message: "manifest has no TypeScript module".to_owned(),
         })?;
-    let migrations =
+    let stored = matches!(migrations, Migrations::Stored(_));
+    // The artifact hash is verified before any migration is reused.
+    let (artifact, functions, visibility) = artifact_from_manifest(record, !stored)?;
+    let decode = || {
         migrations_from_module(module).map_err(|message| ModuleRegistryError::InvalidArtifact {
             project: project.clone(),
             message,
-        })?;
+        })
+    };
+    let migrations = match migrations {
+        Migrations::Decode => decode()?,
+        Migrations::ReuseInstalled(Some(installed)) if installed.artifact_hash == artifact.hash => {
+            installed.migrations.clone()
+        }
+        Migrations::ReuseInstalled(_) => decode()?,
+        Migrations::Stored(migrations) => migrations,
+    };
     let client_contract = client_contract_from_module(module).map_err(|message| {
         ModuleRegistryError::InvalidArtifact {
             project: project.clone(),
@@ -399,7 +452,6 @@ pub(crate) fn validate_manifest_record(
             project: project.clone(),
             message: format!("permissionGrants: {message}"),
         })?;
-    let (artifact, functions, visibility) = artifact_from_manifest(record)?;
     for cron in &crons {
         let function =
             functions
@@ -429,6 +481,43 @@ pub(crate) fn validate_manifest_record(
     })
 }
 
+/// Whether `path` is a migration file of a module artifact.
+fn is_migration_file(path: &str) -> bool {
+    let file = Path::new(path);
+    file.parent() == Some(Path::new("migrations"))
+        && file.extension().and_then(|value| value.to_str()) == Some("sql")
+}
+
+/// A manifest serialized without its migration bodies: the stored artifact
+/// text ([`gonvex_store::StoredArtifact`]).
+struct WithoutMigrationBodies<'a>(&'a Value, u8);
+
+impl serde::Serialize for WithoutMigrationBodies<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        // Depth 0: the manifest; 1: its `module`; 2: the module's `files`.
+        let (Value::Object(object), depth) = (self.0, self.1) else {
+            return self.0.serialize(serializer);
+        };
+        let mut map = serializer.serialize_map(None)?;
+        for (key, value) in object {
+            match (depth, key.as_str()) {
+                (0, "module") | (1, "files") => {
+                    map.serialize_entry(key, &WithoutMigrationBodies(value, depth + 1))?
+                }
+                (2, path) if is_migration_file(path) => {}
+                _ => map.serialize_entry(key, value)?,
+            }
+        }
+        map.end()
+    }
+}
+
+/// The stored text of `manifest`: everything but its migration bodies.
+pub(crate) fn manifest_without_migration_bodies(manifest: &Value) -> Result<String, String> {
+    serde_json::to_string(&WithoutMigrationBodies(manifest, 0)).map_err(|error| error.to_string())
+}
+
 /// Validates the exact standalone module object emitted by the TypeScript CLI
 /// and returns its canonical hash. This powers release and migration tooling
 /// without starting V8 or connecting to PostgreSQL.
@@ -456,12 +545,10 @@ fn migrations_from_module(
     };
     let mut migrations = Vec::new();
     for (path, encoded) in files {
-        let file = Path::new(path);
-        if file.parent() != Some(Path::new("migrations"))
-            || file.extension().and_then(|value| value.to_str()) != Some("sql")
-        {
+        if !is_migration_file(path) {
             continue;
         }
+        let file = Path::new(path);
         let name = file
             .file_name()
             .and_then(|value| value.to_str())
@@ -599,8 +686,13 @@ fn hash_json(value: &Value) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// `verify_contract`: recompute the canonical hash and require it to equal
+/// the module hash. A stored artifact ([`gonvex_store::StoredArtifact`])
+/// lacks its migration bodies, so its text is verified by its own digest
+/// instead; the complete artifact was verified when it was stored.
 fn artifact_from_manifest(
     record: &RuntimeManifestRecord,
+    verify_contract: bool,
 ) -> Result<ExtractedArtifact, ModuleRegistryError> {
     let invalid = |message: String| ModuleRegistryError::InvalidArtifact {
         project: record.project_id.clone(),
@@ -618,12 +710,14 @@ fn artifact_from_manifest(
             record.module_hash, hash
         )));
     }
-    let canonical_hash = canonical_artifact_hash(module)
-        .map_err(|message| invalid(format!("canonical artifact hash: {message}")))?;
-    if hash != canonical_hash {
-        return Err(invalid(format!(
-            "module artifact hash {hash:?} does not match canonical contract hash {canonical_hash:?}"
-        )));
+    if verify_contract {
+        let canonical_hash = canonical_artifact_hash(module)
+            .map_err(|message| invalid(format!("canonical artifact hash: {message}")))?;
+        if hash != canonical_hash {
+            return Err(invalid(format!(
+                "module artifact hash {hash:?} does not match canonical contract hash {canonical_hash:?}"
+            )));
+        }
     }
     let javascript: JavaScriptWire = serde_json::from_value(
         module
@@ -1235,7 +1329,7 @@ mod tests {
             module_hash: canonical,
             manifest,
         };
-        let (artifact, functions, _) = artifact_from_manifest(&record).unwrap();
+        let (artifact, functions, _) = artifact_from_manifest(&record, true).unwrap();
         assert_eq!(
             artifact.functions[0].args.as_ref().unwrap()["value"]["literal"],
             Value::Null
@@ -1248,7 +1342,7 @@ mod tests {
             gonvex_profiler::function::name(slot).unwrap(),
             ("project-a".to_owned(), "tasks.find".to_owned())
         );
-        let (_, again, _) = artifact_from_manifest(&record).unwrap();
+        let (_, again, _) = artifact_from_manifest(&record, true).unwrap();
         assert_eq!(again["tasks.find"].profile_slot, slot);
     }
 
@@ -1271,7 +1365,7 @@ mod tests {
                 module_hash: hash,
                 manifest: serde_json::json!({"module":module}),
             };
-            assert!(artifact_from_manifest(&record).is_err());
+            assert!(artifact_from_manifest(&record, true).is_err());
         }
         let mut module = serde_json::json!({"generation":1,"language":"typescript","entrypoint":"test.js","files":{},"functions":{"test":{"kind":"reducer","public":true,"interactive":false,"classification":"system"}},"javascript":{"path":"test.js","hash":"abc","code":"eA=="}});
         let hash = canonical_artifact_hash(module.as_object().unwrap()).unwrap();
@@ -1281,7 +1375,7 @@ mod tests {
             module_hash: hash,
             manifest: serde_json::json!({"module":module}),
         };
-        let (artifact, functions, _) = artifact_from_manifest(&record).unwrap();
+        let (artifact, functions, _) = artifact_from_manifest(&record, true).unwrap();
         assert!(functions["test"].public);
         assert_eq!(
             artifact.functions[0].metadata["public"],
@@ -1332,7 +1426,7 @@ mod tests {
             module_hash: canonical,
             manifest: serde_json::json!({"module":module}),
         };
-        let (artifact, functions, _) = artifact_from_manifest(&record).unwrap();
+        let (artifact, functions, _) = artifact_from_manifest(&record, true).unwrap();
         assert_eq!(functions["callbacks.receive"].action_profile, "agent");
         assert_eq!(
             artifact

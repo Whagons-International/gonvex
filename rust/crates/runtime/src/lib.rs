@@ -518,14 +518,45 @@ impl Runtime {
                 self.inner.config.tenant_database_urls.clone(),
             )
             .await?;
-            for record in control.runtime_manifests().await? {
-                let project = record.project_id.clone();
-                let module = match self
-                    .inner
-                    .modules
-                    .install(&self.inner.module_host, record)
-                    .await
-                {
+            for head in control.runtime_manifest_heads().await? {
+                let project = head.project_id.clone();
+                // The stored artifact skips reading, hashing and decoding the
+                // migration history; without one (first boot of this runtime,
+                // or a manifest saved by an older one) boot reads the complete
+                // manifest and stores the artifact for the next boot.
+                let installed = match control.stored_artifact(&head).await? {
+                    Some(stored) => {
+                        self.inner
+                            .modules
+                            .install_stored(&self.inner.module_host, stored)
+                            .await
+                    }
+                    None => {
+                        let Some(record) = control.runtime_manifest(&project).await? else {
+                            continue;
+                        };
+                        match modules::validate_manifest_record(&record) {
+                            Ok(mut validated) => {
+                                if store_migration_history(
+                                    &control,
+                                    &record,
+                                    &validated.migrations,
+                                    head.updated_at,
+                                )
+                                .await
+                                {
+                                    release_migration_bodies(&mut validated.migrations);
+                                }
+                                self.inner
+                                    .modules
+                                    .install_validated(&self.inner.module_host, &record, validated)
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                };
+                let module = match installed {
                     Ok(module) => module,
                     Err(error) => {
                         self.inner.modules.record_failure(&project, &error).await;
@@ -1479,8 +1510,14 @@ async fn apply_dev_sync(
         module_hash,
         manifest: std::mem::take(manifest),
     };
-    let validated = modules::validate_manifest_record(&record)
-        .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+    let validated = {
+        let installed = runtime.inner.modules.project(&project).await;
+        modules::validate_manifest(
+            &record,
+            modules::Migrations::ReuseInstalled(installed.as_deref()),
+        )
+        .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?
+    };
     let migrations = validated.migrations.clone();
     control
         .clone()
@@ -1494,6 +1531,34 @@ async fn apply_dev_sync(
         .await
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     let tenants = provision_pushed_tenants(&control, &project, &routes, &migrations).await?;
+    drop(migrations);
+    // A push of the artifact already stored (a no-op redeploy) rewrites
+    // nothing; otherwise the bodies are stored before the module holds its
+    // migrations without them (tenants load a body when they need it).
+    let stored_text = modules::manifest_without_migration_bodies(&record.manifest)
+        .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error))?;
+    let current = control
+        .stored_artifact_is_current(
+            &project,
+            &record.module_hash,
+            &gonvex_store::manifest_sha256(&stored_text),
+        )
+        .await
+        .unwrap_or(false);
+    let mut validated = validated;
+    let bodies_stored = current
+        || {
+            match control.store_migration_bodies(&validated.migrations).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(project, %error, "migration bodies were not stored; the module keeps them in memory");
+                    false
+                }
+            }
+        };
+    if bodies_stored {
+        release_migration_bodies(&mut validated.migrations);
+    }
     let installed = runtime
         .inner
         .modules
@@ -1513,10 +1578,23 @@ async fn apply_dev_sync(
         .send(RuntimeEvent::ModuleReloaded {
             project_id: project.clone(),
         });
-    control
-        .save_runtime_manifest(&record)
-        .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if !current {
+        let updated_at = control
+            .save_runtime_manifest(&record)
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        if bodies_stored {
+            let stored = gonvex_store::StoredArtifact {
+                project_id: project.clone(),
+                module_hash: record.module_hash.clone(),
+                manifest_text: stored_text,
+                migrations: installed.migrations.clone(),
+            };
+            if let Err(error) = control.save_stored_artifact(&stored, updated_at).await {
+                tracing::warn!(project, %error, "the stored artifact was not saved; the next boot reads the complete manifest");
+            }
+        }
+    }
     Ok(serde_json::json!({
         "ok":true,
         "project":project,
@@ -1525,6 +1603,46 @@ async fn apply_dev_sync(
         "schemaDefinition":record.manifest.get("schema").cloned().unwrap_or_else(|| serde_json::json!({})),
         "runtimeReloaded":true,
     }))
+}
+
+/// Stores `record`'s migration bodies and its manifest without them for the
+/// manifest row saved at `manifest_updated_at`. Returns whether both were
+/// stored (a failure only costs the next boot the complete manifest).
+async fn store_migration_history(
+    control: &ControlPlane,
+    record: &gonvex_store::RuntimeManifestRecord,
+    migrations: &[gonvex_store::SqlMigration],
+    manifest_updated_at: i64,
+) -> bool {
+    let stored = async {
+        let manifest_text = modules::manifest_without_migration_bodies(&record.manifest)
+            .map_err(gonvex_store::DatabaseError::Decode)?;
+        control.store_migration_bodies(migrations).await?;
+        control
+            .save_stored_artifact(
+                &gonvex_store::StoredArtifact {
+                    project_id: record.project_id.clone(),
+                    module_hash: record.module_hash.clone(),
+                    manifest_text,
+                    migrations: migrations.to_vec(),
+                },
+                manifest_updated_at,
+            )
+            .await
+    }
+    .await;
+    if let Err(error) = &stored {
+        tracing::warn!(project = %record.project_id, %error, "the stored artifact was not saved; the next boot reads the complete manifest again");
+    }
+    stored.is_ok()
+}
+
+/// Drops migration bodies the Control Plane stores; provisioning loads one
+/// by checksum when a tenant must apply it.
+fn release_migration_bodies(migrations: &mut [gonvex_store::SqlMigration]) {
+    for migration in migrations {
+        *migration = migration.without_body();
+    }
 }
 
 /// Provisions a pushed module's migrations on every tenant and reports each

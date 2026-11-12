@@ -57,7 +57,9 @@ pub mod reader_priority;
 pub mod reference_integrity;
 pub mod sql_lexer;
 pub mod statement_profile;
+mod stored_artifact;
 pub use provision::{MigrationScope, SqlMigration};
+pub use stored_artifact::{manifest_sha256, RuntimeManifestHead, StoredArtifact};
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -901,22 +903,23 @@ impl ControlPlane {
                     .is_some_and(|stored| constant_time_equal(stored.as_bytes(), key.as_bytes())))
     }
 
+    /// Saves the complete manifest and returns the row's new `updated_at`
+    /// (the version a [`StoredArtifact`] refers to).
     pub async fn save_runtime_manifest(
         &self,
         record: &RuntimeManifestRecord,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<i64, DatabaseError> {
         let _admission = self.pools.admit(&self.database_url).await?;
-        sqlx::query(concat!(
+        Ok(sqlx::query_scalar(concat!(
             "INSERT INTO gonvex_runtime_manifests(project_id,manifest,module_hash,updated_at) VALUES($1,$2,$3,",
             now_ms!(),
-            ") ON CONFLICT(project_id) DO UPDATE SET manifest=excluded.manifest,module_hash=excluded.module_hash,updated_at=excluded.updated_at"
+            ") ON CONFLICT(project_id) DO UPDATE SET manifest=excluded.manifest,module_hash=excluded.module_hash,updated_at=excluded.updated_at RETURNING updated_at"
         ))
         .bind(&record.project_id)
         .bind(Json(&record.manifest))
         .bind(&record.module_hash)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     pub async fn tenant_directory_entry(

@@ -1016,6 +1016,78 @@ async fn authenticated_sdk_receipt_replica_composition() {
     );
 }
 
+/// A push stores the module's migration history once (bodies by checksum,
+/// the manifest without them); a push of the same artifact rewrites nothing,
+/// and boot installs the stored artifact with bodiless migrations.
+#[tokio::test]
+async fn pushed_migration_history_is_stored_once_and_installed_without_bodies() {
+    let Some(f) = Fixture::new().await else {
+        return;
+    };
+    f.enable_sdk_session().await;
+    sqlx::query(
+        "UPDATE gonvex_runtime_projects SET project_key='receipt-upgrade-sync' WHERE id='project'",
+    )
+    .execute(&f.control_pool)
+    .await
+    .unwrap();
+    f.sync_client_contract(2).await;
+    assert_eq!(f.count("receipt_records").await, 0);
+    let (manifest, migrations): (String, String) = sqlx::query_as(
+        "SELECT manifest, migrations FROM gonvex_runtime_artifacts WHERE project_id='project'",
+    )
+    .fetch_one(&f.control_pool)
+    .await
+    .unwrap();
+    assert!(!manifest.contains("migrations/0001_rename_value.sql"));
+    assert!(manifest.contains("client-contract.json"));
+    assert!(migrations.contains("0001_rename_value.sql"));
+    let bodies: Vec<String> = sqlx::query_scalar("SELECT sql FROM gonvex_runtime_migration_bodies")
+        .fetch_all(&f.control_pool)
+        .await
+        .unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0].contains("RENAME COLUMN value TO count"));
+    let installed = f.runtime.inner.modules.project("project").await.unwrap();
+    assert!(installed.migrations[0].sql().is_none());
+    let saved: i64 = sqlx::query_scalar(
+        "SELECT updated_at FROM gonvex_runtime_manifests WHERE project_id='project'",
+    )
+    .fetch_one(&f.control_pool)
+    .await
+    .unwrap();
+
+    // The same artifact again: provisioned, nothing rewritten.
+    f.sync_client_contract(2).await;
+    let again: i64 = sqlx::query_scalar(
+        "SELECT updated_at FROM gonvex_runtime_manifests WHERE project_id='project'",
+    )
+    .fetch_one(&f.control_pool)
+    .await
+    .unwrap();
+    assert_eq!(again, saved);
+
+    // Boot: the stored artifact describes the saved manifest row.
+    let heads = f.control.runtime_manifest_heads().await.unwrap();
+    let stored = f.control.stored_artifact(&heads[0]).await.unwrap().unwrap();
+    assert_eq!(stored.migrations.len(), 1);
+    assert!(stored.migrations[0].sql().is_none());
+    assert_eq!(
+        stored.migrations[0].checksum,
+        installed.migrations[0].checksum
+    );
+    let booted = f
+        .runtime
+        .inner
+        .modules
+        .install_stored(&f.runtime.inner.module_host, stored)
+        .await
+        .unwrap();
+    assert_eq!(booted.artifact_hash, installed.artifact_hash);
+    assert_eq!(booted.client_contract, Some(2));
+    f.close().await;
+}
+
 #[tokio::test]
 async fn receipt_initialization_preserves_legacy_replay() {
     let Some(f) = Fixture::new().await else {
