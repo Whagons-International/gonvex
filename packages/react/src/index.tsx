@@ -335,6 +335,11 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   // state so it cannot leak through the public auth value.
   const developerTokenRef = useRef<string | null>(initialAuth.developerToken);
   const pendingDeveloperTokenRef = useRef<{ token: string } | null>(null);
+  // A tenant selection is published only after the runtime accepts it. Until
+  // then, background session installs (provider token exchange, refresh,
+  // directory updates) must authenticate the selected tenant instead of the
+  // previously active one, or they cancel the selection in flight.
+  const pendingTenantSelectionRef = useRef<PendingTenantSelection | null>(null);
   // A persisted session is only a candidate until bootstrap/external auth has
   // installed its complete project + tenant + account scope on the client.
   // Never let the token-refresh effect authenticate an account-only socket in
@@ -376,8 +381,9 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (next) {
       if (persist) safeLocalStorageSet(storageKey, JSON.stringify(next));
       if (!activeDeveloper) {
-        if (installClientAuth) installClientSession(props.client, props.projectId, next);
-        installedClientScopeRef.current = authSessionScope(props.projectId, next);
+        const installed = withPendingTenantSelection(next, pendingTenantSelectionRef.current);
+        if (installClientAuth) installClientSession(props.client, props.projectId, installed);
+        installedClientScopeRef.current = authSessionScope(props.projectId, installed);
       } else if (!activeDeveloper.clientInstalled && installClientAuth && developerTokenRef.current) {
         // A grant restored after reload waits for its account session to be
         // confirmed, then connects with the grant instead of that session.
@@ -920,18 +926,53 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (!current || !current.tenants.some((tenant) => tenant.id === tenantId)) {
       throw new Error(`Your account does not have access to tenant ${tenantId}.`);
     }
-    const next = { ...current, activeTenantId: tenantId };
-    await props.client.authenticate({
-      project: props.projectId,
-      tenant: tenantId,
-      token: current.accessToken,
-      fetchToken: fetchAccessToken,
-      identity: { sub: current.account.id, iss: props.projectId },
-    });
-    // Publish the new tenant only after the runtime accepted it and the client
-    // activated its authoritative Local Replica scope. This keeps React hooks
-    // from observing a tenant that is not usable yet.
-    installSession(next, true, false);
+    const selection: PendingTenantSelection = { accountId: current.account.id, tenantId };
+    const authInvalidationVersion = authInvalidationVersionRef.current;
+    pendingTenantSelectionRef.current = selection;
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        const latest = sessionRef.current;
+        if (!latest || latest.account.id !== selection.accountId
+          || !latest.tenants.some((tenant) => tenant.id === tenantId)) {
+          throw new Error(`Your account does not have access to tenant ${tenantId}.`);
+        }
+        try {
+          await props.client.authenticate({
+            project: props.projectId,
+            tenant: tenantId,
+            token: latest.accessToken,
+            fetchToken: fetchAccessToken,
+            identity: { sub: latest.account.id, iss: props.projectId },
+          });
+          break;
+        } catch (cause) {
+          // A background install of the same account (for example the provider
+          // token exchange that runs on load) replaced this frame. It already
+          // carries the selected tenant; authenticate again with its newest
+          // token. A newer selection, sign-out or account change wins instead.
+          const superseded = cause instanceof GonvexClientError && cause.code === "superseded";
+          if (!superseded || attempt >= TENANT_SELECTION_MAX_RETRIES
+            || pendingTenantSelectionRef.current !== selection
+            || authInvalidationVersion !== authInvalidationVersionRef.current) {
+            throw cause;
+          }
+        }
+      }
+      const accepted = sessionRef.current;
+      if (pendingTenantSelectionRef.current !== selection || !accepted
+        || accepted.account.id !== selection.accountId
+        || authInvalidationVersion !== authInvalidationVersionRef.current) {
+        throw new GonvexClientError("Tenant selection was replaced by a newer session.", { code: "superseded" });
+      }
+      // Publish the new tenant only after the runtime accepted it and the client
+      // activated its authoritative Local Replica scope. This keeps React hooks
+      // from observing a tenant that is not usable yet. Use the newest session:
+      // its token may have rotated while the selection was in flight.
+      pendingTenantSelectionRef.current = null;
+      installSession({ ...accepted, activeTenantId: tenantId }, true, false);
+    } finally {
+      if (pendingTenantSelectionRef.current === selection) pendingTenantSelectionRef.current = null;
+    }
   }, [fetchAccessToken, installSession, props.client, props.projectId]);
 
   const refreshMemberships = useCallback(async () => {
@@ -1307,6 +1348,21 @@ function sessionFromNativeGrant(value: JsonValue, previous?: GonvexAuthSession):
   }
   const session = value as GonvexAuthSession;
   return preserveActiveTenant(session, previous);
+}
+
+type PendingTenantSelection = { accountId: string; tenantId: string };
+const TENANT_SELECTION_MAX_RETRIES = 3;
+
+function withPendingTenantSelection(
+  session: GonvexAuthSession,
+  pending: PendingTenantSelection | null,
+): GonvexAuthSession {
+  if (!pending || pending.accountId !== session.account.id
+    || session.activeTenantId === pending.tenantId
+    || !session.tenants.some((tenant) => tenant.id === pending.tenantId)) {
+    return session;
+  }
+  return { ...session, activeTenantId: pending.tenantId };
 }
 
 function preserveActiveTenant(

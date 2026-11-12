@@ -1951,7 +1951,7 @@ export class GonvexClient {
       this.authFetchGeneration = Symbol();
       return;
     }
-    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
+    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.", "superseded");
     this.applyAuth(auth);
     // The caller owns auth now: a token fetch still in flight from the
     // previous installation must not clobber this one when it resolves.
@@ -2015,7 +2015,7 @@ export class GonvexClient {
    * provider rather than calling this method directly.
    */
   authenticate(auth: GonvexClientAuth): Promise<void> {
-    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
+    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.", "superseded");
     this.applyAuth(auth);
     this.authFetchGeneration = Symbol();
     const promise = new Promise<void>((resolve, reject) => {
