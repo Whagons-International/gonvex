@@ -66,6 +66,10 @@ type syncSubscription struct {
 	closed          bool
 	deliveryRunning bool
 	deliveryPending bool
+	// reconcileRequested makes the next delivery re-execute the handler even
+	// when the durable change log has nothing new: a visibility dependency on a
+	// landlord table changes outside the tenant database's log.
+	reconcileRequested bool
 }
 
 type syncLogChange struct {
@@ -640,6 +644,15 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 	if subscription.closed || !subscriptionCurrent(subscription) {
 		return nil
 	}
+	forced := subscription.reconcileRequested
+	subscription.reconcileRequested = false
+	delivered := false
+	defer func() {
+		if forced && !delivered && !subscription.closed {
+			// A failed or deferred delivery must not lose the requested reconcile.
+			subscription.reconcileRequested = true
+		}
+	}()
 	databaseURL := s.databaseURLForTenant(subscription.project, subscription.tenant)
 	latest, err := currentSyncCursor(ctx, databaseURL, subscription.definition, subscription.conn.currentSyncScope())
 	if err != nil {
@@ -650,7 +663,12 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		return nil
 	}
 	if latest.Revision <= subscription.cursor.Revision {
-		if !subscription.verified {
+		if forced && subscription.verified {
+			subscription.conn.write(serverMessage{
+				Type: "sync.syncing", ID: subscription.id, Path: subscription.path, Reason: "reconciling",
+			})
+		}
+		if !subscription.verified || forced {
 			settled, err := s.deliverAuthoritativeSync(ctx, subscription, nil, latest)
 			if err != nil {
 				return err
@@ -659,6 +677,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 				return nil
 			}
 		}
+		delivered = true
 		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, latest))
 		return nil
 	}
@@ -686,12 +705,12 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		// write in one workspace does not re-run every other workspace's window.
 		changes = scopedSyncChanges(subscription.definition, args, subscription.visibleKeys, changes)
 	}
-	if len(changes) == 0 && subscription.verified {
+	if len(changes) == 0 && subscription.verified && !forced {
 		subscription.cursor = latest
 		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, latest))
 		return nil
 	}
-	authoritativeReconcile := syncNeedsAuthoritativeReconcile(subscription.definition, changes)
+	authoritativeReconcile := forced || syncNeedsAuthoritativeReconcile(subscription.definition, changes)
 	if subscription.verified && authoritativeReconcile {
 		subscription.conn.write(serverMessage{
 			Type: "sync.syncing", ID: subscription.id, Path: subscription.path, Reason: "reconciling",
@@ -705,6 +724,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		if !settled {
 			return nil
 		}
+		delivered = true
 		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, subscription.cursor))
 		return nil
 	}
@@ -716,6 +736,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		if !settled {
 			return nil
 		}
+		delivered = true
 		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, subscription.cursor))
 		return nil
 	}
@@ -1501,6 +1522,17 @@ func (s *Server) scheduleSyncDelivery(subscription *syncSubscription) {
 	}()
 }
 
+// resetSyncsForVisibilityChange reconciles every sync whose visibility
+// dependencies a committed change may affect. Syncs used to be reset instead
+// (except progressive ones): the client then dropped its rows and reopened the
+// sync, re-running the handler and resending the full snapshot, which also
+// closed open task form and approval dialogs on every task write.
+//
+// A reconcile re-runs the handler and sends only the difference. A change to a
+// table the tenant database logs durably is picked up from the change log. A
+// change to a landlord table never reaches that log, so the next delivery is
+// forced to reconcile; before, progressive syncs silently skipped such a
+// change because their log had nothing new.
 func (s *Server) resetSyncsForVisibilityChange(change tableChange) {
 	s.wsMu.RLock()
 	connections := make([]*wsConn, 0)
@@ -1510,32 +1542,63 @@ func (s *Server) resetSyncsForVisibilityChange(change tableChange) {
 		}
 	}
 	s.wsMu.RUnlock()
+	if len(connections) == 0 {
+		return
+	}
+	unlogged := syncUnloggedTables(s.runtime.ManifestForProject(change.project).Schema)
 	for _, connection := range connections {
 		connection.mu.Lock()
-		reset := make([]*syncSubscription, 0)
 		reconcile := make([]*syncSubscription, 0)
-		for id, subscription := range connection.syncs {
-			if syncVisibilityAffected(subscription.definition, change) {
-				if subscription.definition.Mode == "progressive" {
-					reconcile = append(reconcile, subscription)
-					continue
-				}
-				delete(connection.syncs, id)
-				reset = append(reset, subscription)
+		forced := make([]*syncSubscription, 0)
+		for _, subscription := range connection.syncs {
+			if !syncVisibilityAffected(subscription.definition, change) {
+				continue
 			}
+			if syncVisibilityChangeUnlogged(subscription.definition, change, unlogged) {
+				forced = append(forced, subscription)
+				continue
+			}
+			reconcile = append(reconcile, subscription)
 		}
 		connection.mu.Unlock()
-		for _, subscription := range reset {
+		for _, subscription := range forced {
 			subscription.mu.Lock()
-			subscription.closed = true
+			subscription.reconcileRequested = true
 			subscription.mu.Unlock()
-			connection.releaseSyncListener(subscription)
-			connection.write(serverMessage{Type: "sync.reset", ID: subscription.id, Path: subscription.path, Reason: "visibility-changed"})
+			s.scheduleSyncDelivery(subscription)
 		}
 		for _, subscription := range reconcile {
 			s.scheduleSyncDelivery(subscription)
 		}
 	}
+}
+
+// syncUnloggedTables returns a predicate for tables whose writes never reach
+// a tenant database's durable sync log: landlord tables, and any table the
+// tenant schema does not define.
+func syncUnloggedTables(schema manifest.Schema) func(string) bool {
+	schema = schema.Normalize()
+	tenant := schema.TenantSchema().Tables
+	landlord := schema.LandlordTables
+	return func(table string) bool {
+		if _, ok := landlord[table]; ok {
+			return true
+		}
+		_, ok := tenant[table]
+		return !ok
+	}
+}
+
+// syncVisibilityChangeUnlogged reports whether change touches one of the
+// sync's visibility tables outside the tenant change log. A table missing
+// from the tenant schema is treated as unlogged too.
+func syncVisibilityChangeUnlogged(definition manifest.SyncDefinition, change tableChange, unlogged func(string) bool) bool {
+	for _, table := range definition.VisibilityTables {
+		if changeContainsTable(change, table) && unlogged(table) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *wsConn) releaseSyncListener(subscription *syncSubscription) {
