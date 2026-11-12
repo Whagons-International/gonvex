@@ -654,6 +654,7 @@ export class Session {
       const recovery = recoveryOf(payload);
       if (!recovery) throw new Error("recovery marker is required");
       await this.verifyRecoveryAuth(tenantId, epoch);
+      await this.observeRecoveryScope(tenantId, epoch);
       this.delivery.recover(payload.instance, recovery.reason);
       await this.rebuildLiveQueries(tenantId, epoch);
       await this.verifyRecoveryAuth(tenantId, epoch);
@@ -669,6 +670,7 @@ export class Session {
     return this.serial(async () => {
       this.requireRecoveryScope(tenantId, epoch);
       await this.verifyRecoveryAuth(tenantId, epoch);
+      await this.observeRecoveryScope(tenantId, epoch);
       this.delivery.recover(payload.instance, "change-feed-reset");
       await this.rebuildLiveQueries(tenantId, epoch);
       await this.verifyRecoveryAuth(tenantId, epoch);
@@ -679,6 +681,15 @@ export class Session {
 
   private requireRecoveryScope(tenantId: string, epoch: number): void {
     if (this.closed || epoch !== (this.record.subscriptionEpoch ?? 0) || this.record.tenant?.route.tenantId !== tenantId) throw new Error("delivery recovery scope changed");
+  }
+
+  /** Register this actual authorized Session view through the existing normal
+   * tenant handler. Returned challenge epochs never supply identity or data. */
+  private async observeRecoveryScope(tenantId: string, epoch: number): Promise<void> {
+    this.requireRecoveryScope(tenantId, epoch);
+    const replies = await this.ports.tenants.dispatch(this.view(), { type: "replica.openMany", opens: [] });
+    this.requireRecoveryScope(tenantId, epoch);
+    if (replies.length) throw new Error("delivery scope registration was refused");
   }
 
   private async verifyRecoveryAuth(tenantId: string, epoch: number): Promise<void> {

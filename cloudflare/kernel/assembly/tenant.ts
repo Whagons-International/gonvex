@@ -152,6 +152,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     return this.queryModule.module;
   }
   override async dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]> {
+    // Every real caller supplies its current server-owned scope, including a
+    // writer with no subscriptions. Its no-op commit watermark is scoped too.
+    if (socket.tenant && !this.delivery.observe(socket, false)) return [];
     if (frame.type === "query.call" && frame.path === RECEIPT_QUERY) return super.dispatch(socket, frame);
     if (frame.type === "query.unsubscribe") {
       this.delivery.queryUnsubscribe(socket, frame.id);

@@ -135,7 +135,11 @@ describe("K22 session delivery scope", () => {
     await f.session.receive('{"type":"query.subscribe","id":"q","path":"items.live","args":{}}');
     f.session.delivery.opening("pending-replica", "items.all");
     const recovery: RecoveryDelivery = { v: 1, instance: "new", shared: [], sockets: {}, recovery: { reason: "change-feed-lagged" } };
-    f.ports.tenants.dispatch = async (socket) => { f.dispatches.push(socket as RecoverySocketView); return ['{"type":"query.error","id":"q","error":"visibility unavailable"}']; };
+    f.ports.tenants.dispatch = async (socket, frame) => {
+      f.dispatches.push(socket as RecoverySocketView);
+      if (frame.type === "replica.openMany" && !frame.opens.length) return [];
+      return ['{"type":"query.error","id":"q","error":"visibility unavailable"}'];
+    };
     await expect(f.session.recoverReplica("t", recovery)).rejects.toThrow("live query recovery was refused");
     expect(f.sent.some((text) => text.includes('"id":"pending-replica"') && text.includes('"reason":"change-feed-lagged"'))).toBe(true);
     expect(f.dispatches.at(-1)?.queryRecovery).toBe(true);

@@ -198,8 +198,7 @@ export class ReplicaDeliveryEngine {
     if (!session) return [];
     const connection = this.connection(socket, session);
     if (!connection) return [];
-    const recovery = this.recovering.get(connection.host);
-    if (recovery && !recovery.pending && Date.now() >= recovery.retryAt) this.requestRecovery(connection.host);
+    this.retryBarriers(connection.host);
     if (frame.type === "replica.close") {
       this.removePending(connection, frame.id);
       this.remove(connection, frame.id);
@@ -760,8 +759,13 @@ export class ReplicaDeliveryEngine {
           const computed = this.options.live?.computedRevisions(id) ?? [];
           sockets[id] = { ops: (frames?.get(id) ?? []).map((text) => ["f", text] as const), subscriptionEpoch: this.connections.get(id)!.epoch, watermark: computed.length ? Math.min(...computed) : 0 } as ScopedSocketWork;
         }
-        return { payload: this.payload([], sockets, 0), revision: clock.revision };
+        // Catch-up concerns only the freshly authorized known connections.
+        // A global zero watermark would challenge unrelated quiet sockets.
+        return { payload: Object.keys(sockets).length ? this.payload([], sockets) : undefined, revision: clock.revision };
       });
+      // All actual receivers already acknowledged the real reset/rebuild.
+      // With no remaining recipient/work, no receipt or progress is invented.
+      if (!result.payload) return { ...result, receipt: undefined };
       const receipt = this.options.outlet.send(host, result.payload);
       // The outlet runs exactly one RPC per host: normals may now enqueue,
       // but cannot be delivered before catch-up was acknowledged. Floors stay
@@ -779,6 +783,10 @@ export class ReplicaDeliveryEngine {
       }
       return { ...result, receipt };
     });
+    if (!catchup.payload) {
+      if (owners.get(host) === state) { owners.delete(host); this.kick(); }
+      return;
+    }
     const accepted = await catchup.receipt;
     if (!accepted || Object.keys(accepted.scopeRequired ?? {}).length) throw new Error("delivery catch-up was discarded or unscoped");
     if (owners.get(host) !== state) return;

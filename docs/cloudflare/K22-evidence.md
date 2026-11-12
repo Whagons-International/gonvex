@@ -167,3 +167,71 @@ outside compared transcripts. Its 32 controller-status reads and holder RPCs
 wake objects: it must be disabled for true cold/hibernation/cost fixtures, or its
 overhead attributed explicitly. It neither drives a different serving handler
 nor changes an assertion/normalizer. Diagnostic failures fail the scenario.
+
+## Published candidate and retained follow-up failures
+
+PR400 was opened non-draft against cloudflare/integration at
+`a957d17b17b5d851e7ef6dc29108d1aa81f95912`. Independent review is pinned to that
+immutable artifact; later changes need fresh review. No implementation-child
+watcher or merge was started.
+
+The fresh 38-selected canonical run did not complete: its first thin-SDK
+scenario timed out on initial views, then waited indefinitely for an SDK
+revision barrier. The finite job ended **exit124 / 900.026 s**, with 37 selected
+cases unexecuted and no final runner JSON. The wrapper receipt measured whole-job
+CPU 51.637397 s and peak 1,054,380,032 bytes; these are not Worker-isolate or
+platform-memory measurements. `evidence/a957-followups/canonical-timeout.json`
+and `assembly-combined-canonical-1.log` retain the failure.
+
+0063's targeted-recipient fix resolved initial mounts in a fresh four-selected
+run, but writes still stalled: catch-up used a global zero watermark while
+ordinary writer sockets were not registered in the delivery engine. That run
+ended at its finite 240 s bound without a completed report. Logs remain in
+`assembly-0063-local-1.log`, with source reconstruction/patch snapshots in
+`evidence/canonical-0063-failed-source`. It is not a passing named subset.
+
+Source fixes now observe the actual server SocketView on ordinary tenant
+dispatch, and register authorized quiet sessions during existing bootstrap/
+recovery through the real empty-openMany handler. Catch-up uses only scoped
+own work and invents no receipt/progress when there are no recipients.
+Current verification remains incremental until a new frozen complete run.
+
+Independent named observations on fresh owned fixtures:
+
+- `external-auth-local-1`: real Firebase Auth Emulator 15.35.0 with synthetic
+  users, unchanged control-external-auth **1 pass / 0 fail / 0 skip**, 10.8 s.
+  Both real serving handlers were used; the owned emulator stopped afterward.
+- `telemetry-domains-local-1`: actual automatic placement, measured holder IDs
+  and window starts/counts. Same-account/same-holder accepted 20 performance +
+  100 error units then refused two; a distinct holder accepted 120/refused one;
+  two anonymous sockets on the SAME holder each accepted20/refused1. Operator
+  attribution/privacy assertions passed. Inspection overhead is explicit; this
+  is not a cold/hibernation/cost or automatic-capacity result.
+- `sdk-deploy-local-1`: original supplemental probe FAIL preserved (wrong new
+  contract-field expectation and digest-checker resume model gap).
+  `sdk-deploy-local-2`: corrected numeric contract expectation and verified
+  same-socket resume model, **zero failures on Rust and kernel,16/18 digests,
+  equal final DB checksums**. It exercised actual K19 entry swaps, unchanged
+  SDK reconnects, generation/schema/defaults, stale-artifact refusal, durable
+  receipt/replay, visibility/reauth and contract gating. This was incremental
+  working-tree proof with gateway/driver/checker hashes in its directory, not
+  final-head or private-platform rollout acceptance. Original raw continuity
+  scenarios and all failed artifacts remain unchanged.
+
+The verified-resume checker preserves all ready/delta digest assertions and
+adds negative socket/id/descriptor/scope/cursor/hash/staging/reset/close cases.
+Current Node conformance units:49 passed. The native Host ABC test uses a
+controlled stall around the actual hook; it is source-boundary evidence, not a
+platform fault. Early failed test/cleanup-context receipts are retained.
+
+Session-owned, generation- and scope-bound terminal errors for failed quiet
+initial requests, including real unchanged-SDK post-error reducer/revision
+liveness, remain OPEN. A provisional engine-only helper was removed before
+publication because it removed correlations too early and could apply instance
+state while reporting errors. No passing assertion was removed to hide it.
+
+Expanded attribution inventory: `cloudflare/kernel/assembly/evidence/inventory.mjs`
+indexes all39 formal scenarios with source hashes/document references and six
+package golden/definition sources. `package-comparisons.json` records eight
+explicit additional package coverage gaps; documentation mentions are not
+passing receipts. These missing cases must be implemented, not waived.

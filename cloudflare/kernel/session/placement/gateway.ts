@@ -304,6 +304,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     const scopeRequired: Record<string, number> = {};
     const scopeAck: Record<string, number> = {};
     const bootstraps: Array<Promise<void>> = [];
+    const wholeHolderChallenge = !Object.keys(payload.sockets).length && !payload.shared.length
+      && payload.watermark === undefined && !payload.membership;
     for (const ws of sockets ?? []) {
       const session = this.host.sessions.get(ws);
       const tenant = session?.record.tenant;
@@ -316,10 +318,15 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
         continue;
       }
       const own = payload.sockets[id];
-      if (payload.scopeFence === 1 && !own && (session.record.replicaInstance !== payload.instance || payload.watermark === undefined)) {
-        // Authoritative scope only: zero application of this unscoped payload.
-        scopeRequired[id] = session.record.subscriptionEpoch ?? 0;
-        continue;
+      if (!own) {
+        if (payload.scopeFence === 1 && (wholeHolderChallenge || payload.watermark !== undefined)) {
+          // A global watermark needs authority even for the same instance.
+          // An unaddressed socket applies no instance, data or watermark.
+          scopeRequired[id] = session.record.subscriptionEpoch ?? 0;
+          continue;
+        }
+        // Targeted work for another socket grants no authority over this one.
+        if (payload.watermark === undefined) continue;
       }
       if (payload.scopeFence === 1 && own && !own.ops.length && own.watermark === undefined && !own.opened && !own.removed
         && !payload.shared.length && payload.watermark === undefined && !payload.membership) {

@@ -151,6 +151,60 @@ describe("handshake", () => {
 });
 
 describe("gateway placement", () => {
+  it("0063 targets only A on a shared A/B/C holder, including an auth arrival during empty bootstrap", async () => {
+    const w = await world({ a: ["ana", "ben"] });
+    const clients = await Promise.all(Array.from({ length: 17 }, () => signedIn(w, "ana", "a")));
+    try {
+      const names = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+      let selected: { name: string; sockets: Array<{ id: string; epoch: number }> } | undefined;
+      for (const name of names) {
+        const sockets = await inGateway(name, (instance) => [...instance.host.sessions.values()].filter((s: any) => s.record.tenant?.route.tenantId === w.tenants.a).map((s: any) => ({ id: s.record.connectionId, epoch: s.record.subscriptionEpoch }))) as Array<{ id: string; epoch: number }>;
+        if (sockets.length >= 3) { selected = { name, sockets }; break; }
+      }
+      expect(selected).toBeDefined();
+      const { name, sockets: [a, b, c] } = selected!;
+      const before = await inGateway(name, (instance) => [...instance.host.sessions.values()].filter((s: any) => [b!.id, c!.id].includes(s.record.connectionId)).map((s: any) => JSON.stringify(s.record)));
+      const targeted = { v: 1, scopeFence: 1, instance: "targeted-instance", shared: [], sockets: { [a!.id]: { subscriptionEpoch: a!.epoch, ops: [["f", '{"type":"targeted-probe","owner":"A"}']] } } };
+      const receipt = await gateway(name).deliverReplica(w.tenants.a, targeted);
+      expect(receipt.scopeRequired).toBeUndefined();
+      expect(receipt.scopeAck).toBeUndefined();
+      expect(await inGateway(name, (instance) => [...instance.host.sessions.values()].filter((s: any) => [b!.id, c!.id].includes(s.record.connectionId)).map((s: any) => JSON.stringify(s.record)))).toEqual(before);
+      // This is a deterministic source-boundary stall around the ACTUAL hook,
+      // not evidence of a platform/network fault or assembled deployment.
+      await inGateway(name, (instance) => {
+        const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === a!.id) as any;
+        const actual = session.bootstrapReplica.bind(session);
+        const held = new Promise<void>(resolve => { instance.__releaseBootstrap = resolve; });
+        instance.__bootstrapEntered = false;
+        session.bootstrapReplica = async (...args: any[]) => { instance.__bootstrapEntered = true; await held; return actual(...args); };
+      });
+      const bootstrap = gateway(name).deliverReplica(w.tenants.a, { ...targeted, sockets: { [a!.id]: { subscriptionEpoch: a!.epoch, ops: [] } } });
+      for (let i = 0; i < 50 && !await inGateway(name, (instance) => instance.__bootstrapEntered); i++) await new Promise(resolve => setTimeout(resolve, 1));
+      expect(await inGateway(name, (instance) => instance.__bootstrapEntered)).toBe(true);
+      await inGateway(name, async (instance) => {
+        const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === c!.id) as any;
+        await session.receive(JSON.stringify({ type: "auth", id: "during-fence", clientContract: 1, project: w.projectId, tenant: w.tenants.a, token: w.tokens.ben }));
+      });
+      await inGateway(name, (instance) => instance.__releaseBootstrap());
+      const ack = await bootstrap;
+      expect(ack.scopeAck).toEqual({ [a!.id]: a!.epoch });
+      expect(ack.scopeRequired).toBeUndefined();
+      const state = await inGateway(name, (instance) => [...instance.host.sessions.values()].filter((s: any) => [b!.id, c!.id].includes(s.record.connectionId)).map((s: any) => ({ id: s.record.connectionId, epoch: s.record.subscriptionEpoch, instance: s.record.replicaInstance, watermark: s.record.watermark }))) as any[];
+      expect(state.every(s => s.instance !== "targeted-instance")).toBe(true);
+      // A global watermark is applicable even when A's instance already matches.
+      const global = await gateway(name).deliverReplica(w.tenants.a, { ...targeted, sockets: {}, watermark: 50 });
+      expect(global.scopeAck).toBeUndefined();
+      expect(global.scopeRequired[a!.id]).toBe(a!.epoch);
+      for (const s of state) expect(global.scopeRequired[s.id]).toBe(s.epoch);
+    } finally {
+      // Close server endpoints in their owning Durable Object I/O context.
+      for (const name of await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[]) await inGateway(name, (instance) => {
+        instance.__releaseBootstrap?.();
+        for (const session of instance.host.sessions.values()) if (session.record.tenant?.route.tenantId === w.tenants.a) session.close({ code: 1000, reason: "test complete" });
+      });
+    }
+  });
+
   it("0061 challenges a restarted sender without mutation, rejects a stale Member fence, then acknowledges only real empty bootstrap", async () => {
     const w = await world({ a: ["ana", "ben"] });
     const c = await signedIn(w, "ana", "a");
