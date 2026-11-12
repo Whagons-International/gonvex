@@ -1,8 +1,27 @@
 import { randomUUID } from 'node:crypto';
 import { validateRaw } from './raw-result.mjs';
 
+// Brand only errors constructed here. WeakMap lookup never inspects an arbitrary
+// adapter exception (including proxies); cached scalar outcomes cannot be rewritten.
+const declaredErrors = new WeakMap();
 export class CheckError extends Error {
-  constructor(code, status = 'fail') { super(code); this.code = code; this.status = ['fail','unknown','blocked'].includes(status) ? status : 'fail'; }
+  constructor(code, status = 'fail') {
+    const safe = typeof code === 'string' && /^[a-z-]{1,64}$/.test(code);
+    const outcome = Object.freeze({code:safe ? code : 'adapter-error',status:['fail','unknown','blocked'].includes(status) ? status : 'fail',safe});
+    super(outcome.code); this.code = outcome.code; this.status = outcome.status;
+    declaredErrors.set(this,outcome);
+  }
+}
+function declaredOutcome(error) {
+  const outcome=declaredErrors.get(error);
+  if (!outcome?.safe) return null;
+  // A branded object is the actual local Error, not a wrapping proxy. Descriptors
+  // detect replaced values/accessors without invoking them or traversing prototypes.
+  for (const key of ['code','status']) {
+    const field=Object.getOwnPropertyDescriptor(error,key);
+    if (!field || !Object.hasOwn(field,'value') || field.value!==outcome[key]) return null;
+  }
+  return outcome;
 }
 export const requireCheck = (ok, code, status) => { if (!ok) throw new CheckError(code, status); };
 export const ids = () => ({ operationId: randomUUID(), traceId: randomUUID().replaceAll('-', ''), idempotencyKey: randomUUID() });
@@ -75,8 +94,10 @@ export async function runCheck(c, check, adapter, guard) {
     // Only enumerated safe evidence leaves the adapter; arbitrary exceptions and data never escape.
     raw.operations = operations;
   } catch (e) {
-    raw.status = e instanceof CheckError ? e.status : 'fail';
-    raw.code = e instanceof CheckError && /^[a-z-]{1,64}$/.test(e.code) ? e.code : 'adapter-error';
+    const outcome=declaredOutcome(e);
+    raw.status = outcome ? outcome.status : declaredErrors.has(e) ? 'unknown' : 'fail';
+    raw.code = outcome ? outcome.code : 'adapter-error';
+    if (!outcome) expire();
   } finally { clearTimeout(timer); }
   raw.operations = operations;
   raw.durationMs = performance.now() - start; raw.finishedAt = Date.now();

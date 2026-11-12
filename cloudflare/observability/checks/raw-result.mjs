@@ -44,6 +44,10 @@ function validateRecord(r) {
       const offset=o.attemptedAfterMs ?? Math.max(0,(o.attemptedAt ?? r.startedAt)-r.startedAt-r.clockUncertaintyMs);
       requireRaw(offset+o[key]<=r.durationMs,'operation-observation');
       if (o.attemptedAt !== undefined) requireRaw(o.attemptedAt+o[key]<=r.finishedAt+r.clockUncertaintyMs,'operation-observation');
+      // Legacy and offset-only operations still cannot complete before the
+      // earliest possible attempt fits the actual wall observation. Monotonic
+      // duration alone cannot certify an application beyond finishedAt/asOf.
+      else requireRaw(r.startedAt+(o.attemptedAfterMs ?? 0)+o[key]<=r.finishedAt+r.clockUncertaintyMs,'operation-observation');
     }
     if (o.durableMs !== undefined && o.appliedMs !== undefined) requireRaw(o.durableMs<=o.appliedMs,'operation-elapsed-order');
     if (o.status==='pass') requireRaw(bounded(o.durableMs) && bounded(o.appliedMs) && o.durableMs<=o.appliedMs && o.appliedMs<=o.deadlineMs && o.appliedMs<=r.durationMs,'operation-success-proof');
