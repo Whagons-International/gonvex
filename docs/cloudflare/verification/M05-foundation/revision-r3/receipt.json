@@ -1,0 +1,452 @@
+{
+  "schema": "gonvex.m05.correction.v1",
+  "sourceCheckpoint": "54443a752d47edaf566abfab09404787443f04ca",
+  "codeCommit": "a9550d7255e7639402ff6b4f9d2f6d3a446ae934",
+  "base": "87726e8060a57b0742cec1144fabecdc05272b04",
+  "priorReviewedHead": "1b3455bb46132fd4b6cd658d38fb1796cd0d01a9",
+  "role": "lead bounded review fixes; NOT independent source approval",
+  "tests": {
+    "foundation": 100,
+    "conformance": 29,
+    "existingFoundationByteUnchanged": 84,
+    "new": 16,
+    "preFixInitial15": {
+      "passed": 4,
+      "failed": 11
+    }
+  },
+  "cycles": {
+    "baseNodes": 417,
+    "headNodes": 430,
+    "before": 1,
+    "after": 1
+  },
+  "existingGraphUnchanged": true,
+  "sourceFiles": [
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/.github/workflows/cloudflare.yml",
+      "bytes": 10582,
+      "sha256": "50cca3cf204c43c0f4cedec1256b0c48be721d08938617fa40a2f942f2dda62b"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/README.md",
+      "bytes": 19168,
+      "sha256": "409e85f4262c26f4232cb43d62e11921672b6c26e8b53ef2195bb037f18203b0"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/checks/browser.mjs",
+      "bytes": 2411,
+      "sha256": "2db1bd1490e7842dccd3734b852efbc63c5b9e2e0d4af6cbfb51ae70c24042e5"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/checks/contract.mjs",
+      "bytes": 7942,
+      "sha256": "784928030796c9baa6af39a8705c414da8193e248c8aa5b2ff6b819094903d84"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/checks/network.mjs",
+      "bytes": 2291,
+      "sha256": "48a5a7c3862ea2f3ad125ea8da87e042a8c3952c201fd9abd4827c34d69d716d"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/checks/raw-result.mjs",
+      "bytes": 7273,
+      "sha256": "15a9bcc437bdc59118ee2fa83b485fff53ff7fd4f7a4f94dcde9fd94fb5c0133"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/checks/scenarios.mjs",
+      "bytes": 5610,
+      "sha256": "989c808f594c1679bc4d87295ff29ebda0882862dccd6b4ed02af181ab1377f1"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/checks/sdk.mjs",
+      "bytes": 4272,
+      "sha256": "81b68e25997c3d679d609dc38deeeb8ad8100e6c2afd650be7426ee1cb9bed76"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/cli.mjs",
+      "bytes": 1139,
+      "sha256": "7cd07926382561627dbd908d73dea251a2f6a83b5820e1ee084aa66df698b565"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/correlation/attachments.json",
+      "bytes": 1549,
+      "sha256": "f4a9b45f2d1e77acfc04f820b1a97aa49deb13bf7fb07bb7f782a50c1891ccd6"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/correlation/envelope.mjs",
+      "bytes": 6180,
+      "sha256": "9c2b3d6248bbfb35d5b95258f85a62fe77bd394862b78bcff5947e51fa95d133"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/fixtures/replay.json",
+      "bytes": 5227,
+      "sha256": "8511e4046a0b63c4b36d1b49b5a692abf404a326660ee5349c14bf6e72eb8e3c"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/fixtures/sqlite-application.mjs",
+      "bytes": 3237,
+      "sha256": "7b41033108d84ec79b4806ee00a866fb3d395942e26d81e4911f7c3ebe022b0f"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/providers/checkly.mjs",
+      "bytes": 2372,
+      "sha256": "64d18e461f1ac0bca3c85393ad6cbc4ad1b1c89fc8fd5e600e4f413f755724b9"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/providers/config.mjs",
+      "bytes": 3044,
+      "sha256": "8f2967a3f97adf227b3724c23b5027ed06d2dd65a0ce5515c97340d22d182775"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/providers/dispatch.mjs",
+      "bytes": 1605,
+      "sha256": "9b5c00b73924ceb598d98896a3c276dace14e657bc1a9d6d4c52ebea031a8d43"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/providers/operations.mjs",
+      "bytes": 4468,
+      "sha256": "ee034b136cfe683fe74987ee78169aa8933f9dec8ed28aba963e57a286c39b39"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/reports/replay.mjs",
+      "bytes": 11249,
+      "sha256": "c286de3456e5470c36d3b355ea8eca6e566c8a136a6afcddb827a86155e06dc7"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/runbooks/operations.md",
+      "bytes": 4774,
+      "sha256": "a451263ea6fb686f669eeaf5dff9ba6c6ae5e706f95274a7576ec3fe255fe275"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/test/boundary-privacy.test.mjs",
+      "bytes": 12416,
+      "sha256": "3592e661c250806be3aff98ce3ea2bc900ced7f7ce23fa40ed5073fabc874baa"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/test/foundation.test.mjs",
+      "bytes": 16957,
+      "sha256": "6f3f7a970d2140bcac08bad6adfb75f288d2c8d538ca7925448bcc893e0d6869"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/test/recheck-1b.test.mjs",
+      "bytes": 6389,
+      "sha256": "4e4d0cff745078f68a79b0b5adda4c5a5efb77ce801048bc32098cbbb43f88fe"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/cloudflare/observability/test/revision-regressions.test.mjs",
+      "bytes": 12066,
+      "sha256": "57deeb7c8b58dfe8ccb17924bd0ad1bda2b0fdf6a57ab95b9368cbebeb5d4013"
+    }
+  ],
+  "sourceBytes": 152221,
+  "sourceBytesDomain": "23 implementation/workflow source files incl tests/docs; NOT serving bundle or cost",
+  "tools": [
+    {
+      "path": "/home/gabriel/.config/nvm/versions/node/v24.13.1/bin/node",
+      "bytes": 122523096,
+      "sha256": "d95de52ccb76fb2c5775bf176f29f3025e4b19352c092aad51ce5d930717359f"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/coach-compile",
+      "bytes": 3184,
+      "sha256": "dacea7997d490a715410d8fccf9f965d83de3e9138cd2ca4b6b3748cf48cb00f"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/coach-resources",
+      "bytes": 88,
+      "sha256": "9ab4b91d9f73965fa38f62a366fd68e8de1a182e5791509e4e416130b46c6acd"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/build-headroom",
+      "bytes": 93,
+      "sha256": "7264efbfd1da6982967642226c02744b9ace740026e3e620dcb110716eabe922"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/tools/node_modules/madge/lib/api.js",
+      "bytes": 4423,
+      "sha256": "ac4fd47e6d92c3ea2fdc76222cd92349271e1650db22f006e017c970927b6fec"
+    },
+    {
+      "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/scripts/sync-sqlite-schema-options.mjs",
+      "bytes": 573,
+      "sha256": "b20f9e327d0f93a59ab56f878b0a243da4ead0b25edef81f573cf8a54a3db65a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-merge-continuation/node_modules/wrangler@4.155.0_@cloudflare+workers-types@5.20261028.1_@types+node@24.12.4/node_modules/wrangler/bin/wrangler.js",
+      "bytes": 3088,
+      "sha256": "780661a508810f3b65786895b1ca9aacbc4f55d329ae6b8c1e49ec8433569f77"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-merge-continuation/node_modules/fumadocs-mdx@15.5.3_@types+mdast@4.0.4_@types+mdx@2.0.14_@types+react@19.2.14_fumadocs-_485e6a4b810e00acef928e808a4a2c29/node_modules/fumadocs-mdx/bin.js",
+      "bytes": 44,
+      "sha256": "f4522525a19d395c93d13e632ed6a4b535af99f709bee75c2146f920cdb87f81"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-merge-continuation/node_modules/next@16.4.6_@playwright+test@1.61.0_@types+node@24.12.4_react-dom@19.2.6_react@19.2.6__react@19.2.6/node_modules/next/dist/bin/next",
+      "bytes": 28419,
+      "sha256": "db32609884270b06aaceae7df284f683af5e0ec715d9debaf0f9d444230ca74f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-merge-continuation/node_modules/typescript@7.0.2/node_modules/typescript/bin/tsc",
+      "bytes": 44,
+      "sha256": "2219f428a7e55aaf1f7ad85b9b0f0cf5078aeb76ccc9a7c6036c92d48f492ffd"
+    }
+  ],
+  "commands": {
+    "tests": "bash test-after.sh: exact two CI commands, local Node24, explicit own TMPDIR/RUNNER_TEMP",
+    "generators": "bash checks.sh: schema/types/docs/cycles, every compile wrapped with unchanged coach-compile",
+    "preFix": "immutable1b archive with first15 new tests, actual11 failures/4 controls"
+  },
+  "rawArtifacts": [
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/before.log",
+      "bytes": 2484,
+      "sha256": "482e648f11f33d4b47c88ea7814e8fff66233955cdb9240052e74e79613fd259"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/after.log",
+      "bytes": 2799,
+      "sha256": "71a38fee62e72ab90ba050ab1051c06ee46292f6c2489a2ec07c98de3d404a3b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/before-executed.log",
+      "bytes": 13101,
+      "sha256": "27cd94ec230142ad89b88b08df80b514c48443c64b16f63c173ac3e4f5c1ec12"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/after-executed.log",
+      "bytes": 15225,
+      "sha256": "06ea68fc0745bdd12b644ab2c182b8c97ccf8054ab9a263100191ce8cbebee98"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/final-tests.log",
+      "bytes": 15324,
+      "sha256": "68fa86f4af26a5c655b9038e495d3bdbeeaaeb78cfb9f15ba9416b4dbd8f1df2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/test-after.sh",
+      "bytes": 580,
+      "sha256": "8520c23099673f76a058188cf97907e9e1f655be7009b86881c49e91b8029476"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/checks.sh",
+      "bytes": 2024,
+      "sha256": "525c16e4cb452e2671500143f1831f412839a5ebfeb2ebc8ef2835d761708e4c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/compare.cjs",
+      "bytes": 1454,
+      "sha256": "84b53fcb3de691f27199d69ed63313c14a903af284df66e612dd7e2a652e9c42"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/docs-final.sh",
+      "bytes": 587,
+      "sha256": "3c3b60b307eb536ab45410534c3b5fce89499cf3e911cf8fd61739d63455148f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/receipt.py",
+      "bytes": 5840,
+      "sha256": "6dbd0865499da73fff8cd25b7f0c23bf23168135c9338a0ef6817baf617580fd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/generators.log",
+      "bytes": 2427,
+      "sha256": "c631b310ad27c0f21d6446cc0571c0d215a5a344435804bd0e1fa3ff679b8e31"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/generators-tracked.log",
+      "bytes": 2427,
+      "sha256": "714bb936ee3f9b564080f8d5658978fcce708b46bdd400fc803eb97bf2eebd34"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/generators-complete.log",
+      "bytes": 2424,
+      "sha256": "6f7553106ccbd95a6420d0d87cf333af06a6bc74a94f25c9b1fc7b42a4007b25"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/cycles-working-tree-with-ignored.json",
+      "bytes": 134960,
+      "sha256": "2d843ba3e6bd6040800ab6d5e631237d82d3444c0e64954cf9492d122e8a9335"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/cycles-archive-missing-rust.json",
+      "bytes": 133687,
+      "sha256": "cefe3a6d039c02c587171256b803e1d88875faea9c427ec2cbe013f5a1609be2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/cycles.json",
+      "bytes": 133723,
+      "sha256": "84cc974e06b42fae2693ca1608b6c93d9a93dad61f661ad575c702706b57e936"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/result.json",
+      "bytes": 68,
+      "sha256": "9c0f9f28b48d7c4e087e9424688452bee68dc506223998faf2c3c13707f80f90"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/tracked-cycle-inputs.json",
+      "bytes": 368071,
+      "sha256": "f21f34c5ee20ebe05142f6e7127b7bf492de52687aade8a7d31e43aec7e11c40"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-cloudflare-lead/m05-review-fix-1b/docs-final.log",
+      "bytes": 2562,
+      "sha256": "701142d9b39bf9d9fcd384e04cc968d780ecd13aaedc30713ef99430fde9a463"
+    }
+  ],
+  "report": {
+    "path": "/home/gabriel/.t3/worktrees/gonvex/cf-P00-contract-bbae8d38d63e35d0/docs/cloudflare/verification/M05-foundation/revision-r3/report.md",
+    "bytes": 5957,
+    "sha256": "841c2477a5f9af415a9335551c1106d683193905adb83909cae2eddf63614dda"
+  },
+  "phases": [
+    {
+      "log": "before.log",
+      "unit": "gonvex-lead-planning-20261112-phase-a4deaf6f9661.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 78334,
+        "exit_code": 1,
+        "io_source": "unavailable",
+        "memory_peak": 30855168,
+        "wall_seconds": 0.09
+      },
+      "arbitration": "kernel-v1"
+    },
+    {
+      "log": "after.log",
+      "unit": "gonvex-lead-planning-20261112-phase-bc2e38de5b88.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 71935,
+        "exit_code": 1,
+        "io_source": "unavailable",
+        "memory_peak": 25202688,
+        "wall_seconds": 0.077
+      },
+      "arbitration": "kernel-v1"
+    },
+    {
+      "log": "before-executed.log",
+      "unit": "gonvex-lead-planning-20261112-phase-04905418854f.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 264533,
+        "exit_code": 1,
+        "io_source": "unavailable",
+        "memory_peak": 61353984,
+        "wall_seconds": 0.253
+      },
+      "arbitration": "kernel-v1"
+    },
+    {
+      "log": "after-executed.log",
+      "unit": "gonvex-lead-planning-20261112-phase-add7a0e128de.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 1290793,
+        "exit_code": 0,
+        "io_source": "unavailable",
+        "memory_peak": 127193088,
+        "wall_seconds": 0.59
+      },
+      "arbitration": "kernel-v1"
+    },
+    {
+      "log": "final-tests.log",
+      "unit": "gonvex-lead-planning-20261112-phase-ac2f5a354d06.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 1349129,
+        "exit_code": 0,
+        "io_source": "unavailable",
+        "memory_peak": 145420288,
+        "wall_seconds": 0.624
+      },
+      "arbitration": "kernel-v1"
+    },
+    {
+      "log": "generators.log",
+      "unit": "gonvex-lead-planning-20261112-phase-b1b49015b6d0.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 13778935,
+        "exit_code": 1,
+        "io_source": "unavailable",
+        "memory_peak": 727994368,
+        "wall_seconds": 9.049
+      },
+      "arbitration": "kernel-v1"
+    },
+    {
+      "log": "generators-tracked.log",
+      "unit": "gonvex-lead-planning-20261112-phase-8a5418806949.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 14168116,
+        "exit_code": 1,
+        "io_source": "unavailable",
+        "memory_peak": 663691264,
+        "wall_seconds": 8.136
+      },
+      "arbitration": "kernel-v1"
+    },
+    {
+      "log": "generators-complete.log",
+      "unit": "gonvex-lead-planning-20261112-phase-066f19f00334.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 12398379,
+        "exit_code": 0,
+        "io_source": "unavailable",
+        "memory_peak": 637018112,
+        "wall_seconds": 7.46
+      },
+      "arbitration": "kernel-v1"
+    },
+    {
+      "log": "docs-final.log",
+      "unit": "gonvex-lead-planning-20261112-phase-cf1cb114e9c8.service",
+      "actual": {
+        "arbitration": "kernel-v1",
+        "contained_oom_kills": 0,
+        "cpu_usec": 1836057,
+        "exit_code": 0,
+        "io_source": "unavailable",
+        "memory_peak": 229920768,
+        "wall_seconds": 1.28
+      },
+      "arbitration": "kernel-v1"
+    }
+  ],
+  "deviations": [
+    "First relative-path test launches executed zero tests; logs preserved",
+    "First cycle pass included ignored pre-existing harness artifacts; next archive missed two Rust leaves; final verified tracked archives and unchanged strict graph assertions pass",
+    "Earlier commentary estimated12 baseline failures; actual retained count11 is authoritative"
+  ],
+  "gates": {
+    "finiteFoundation": "NEW independent exact-head recheck required",
+    "M05": "UNMET",
+    "activation": "NONE",
+    "originalFivePagingConditions": "source definitions unresolved; original drill done_when unchanged",
+    "K22_X01_platform_app_security_capacity_duration": "UNMET"
+  },
+  "operations": {
+    "packageManager": false,
+    "installs": 0,
+    "account": 0,
+    "credentials": 0,
+    "deployment": 0,
+    "servingSourceChanges": false,
+    "reviewerRetasked": false
+  }
+}

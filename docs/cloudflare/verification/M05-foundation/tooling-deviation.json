@@ -1,0 +1,154 @@
+{
+  "schema": "m05.owned-relocation.v1",
+  "paths": [
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/node_modules",
+      "bytes": 1065321728,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/apps/dashboard/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/dashboard/node_modules",
+      "bytes": 4452,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/dashboard/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/apps/docs/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/node_modules",
+      "bytes": 4613,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/apps/local-replica-test/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/local-replica-test/node_modules",
+      "bytes": 2794,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/local-replica-test/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/cloudflare/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/cloudflare/node_modules",
+      "bytes": 7599,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/cloudflare/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/packages/client/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/client/node_modules",
+      "bytes": 2973,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/client/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/packages/create-gonvex/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/create-gonvex/node_modules",
+      "bytes": 1303,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/create-gonvex/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/packages/expo-sqlite/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/expo-sqlite/node_modules",
+      "bytes": 2983,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/expo-sqlite/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/packages/gonvex/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/gonvex/node_modules",
+      "bytes": 3909,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/gonvex/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/packages/local-runtime/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/local-runtime/node_modules",
+      "bytes": 2987,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/local-runtime/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/packages/module-sdk/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/module-sdk/node_modules",
+      "bytes": 1300,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/module-sdk/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/packages/protocol/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/protocol/node_modules",
+      "bytes": 1298,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/protocol/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/packages/react/node_modules",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/react/node_modules",
+      "bytes": 2971,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/packages/react/node_modules"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/apps/docs/.next",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/.next",
+      "bytes": 12548,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/.next"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/apps/docs/.source",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/.source",
+      "bytes": 6000,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/.source"
+    },
+    {
+      "before": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e/apps/docs/tsconfig.tsbuildinfo",
+      "after": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/tsconfig.tsbuildinfo",
+      "bytes": 428938,
+      "nowSymlink": "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/tsconfig.tsbuildinfo"
+    }
+  ],
+  "bytes": 1065808396,
+  "lockAndMetadataSha256": {
+    "package.json": "0810af1af0ec9993926a64bcc66e61c8837c191d5ca4c040748a55ca015069f0",
+    "pnpm-lock.yaml": "67ad1e56a60fdeaf62738ce0363b66e6835cf2d360fc54cae299636dcda581ec",
+    "cloudflare/package.json": "516d963a576abdbedd3997008a2234b49b889d5dc8e9b5bd19c93a8dca83f007"
+  },
+  "scope": [
+    ".github/workflows/cloudflare.yml",
+    "cloudflare/observability/README.md",
+    "cloudflare/observability/checks/browser.mjs",
+    "cloudflare/observability/checks/contract.mjs",
+    "cloudflare/observability/checks/network.mjs",
+    "cloudflare/observability/checks/scenarios.mjs",
+    "cloudflare/observability/checks/sdk.mjs",
+    "cloudflare/observability/cli.mjs",
+    "cloudflare/observability/correlation/attachments.json",
+    "cloudflare/observability/correlation/envelope.mjs",
+    "cloudflare/observability/fixtures/replay.json",
+    "cloudflare/observability/fixtures/sqlite-application.mjs",
+    "cloudflare/observability/providers/checkly.mjs",
+    "cloudflare/observability/providers/config.mjs",
+    "cloudflare/observability/providers/dispatch.mjs",
+    "cloudflare/observability/providers/operations.mjs",
+    "cloudflare/observability/reports/replay.mjs",
+    "cloudflare/observability/runbooks/operations.md",
+    "cloudflare/observability/test/foundation.test.mjs"
+  ],
+  "globalStore": "unverified; no unchanged-store claim",
+  "initialPhase": "gonvex-m05-foundation-20261112-phase-d4a59efc08b8.service",
+  "initialPhaseExit": 1,
+  "initialPhaseResult": "all fresh-path, file-hash and link-existence assertions passed; final working diff comparison failed after agent staged implementation; no package/lock diff",
+  "receiptLimitation": "canonical before/after mapping reconstructed from retained absolute links; literal original relative-link spelling was not saved before the failed final assertion",
+  "headroomPassed": true,
+  "counts": {
+    "files": 71730,
+    "symlinks": 2262,
+    "brokenAfter": 0
+  },
+  "completeCanonicalMapAndFileHashes": {
+    "path": "/mnt/data/work/gonvex-m05-foundation/artifacts/dependency-relocation.json",
+    "sha256": "5db3eb2b98a8237707b6438afadcf800b5bcac64ee42c3f0f1e1449ef63a56cc"
+  },
+  "unintendedInstall": {
+    "command": "pnpm --filter @gonvex/docs typecheck",
+    "phase": "gonvex-m05-foundation-20261112-phase-f97917521cea.service",
+    "runtime": "Node22.23.4/Corepack/pnpm11.1.2",
+    "packages": 610,
+    "description": "pnpm auto-installed workspace dependencies before docs script. Initial root/cloudflare node_modules absent. Local new paths moved; no other checkout touched. No global store unchanged claim."
+  },
+  "initialCommandFailure": {
+    "phase": "gonvex-m05-foundation-20261112-phase-9b7756505298.service",
+    "description": "resource helper uses buildroot cwd; relative test path not found. Corrected absolute path passed subsequent phases."
+  }
+}
