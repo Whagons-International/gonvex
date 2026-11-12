@@ -81,7 +81,7 @@ export interface Dispatcher {
 }
 
 /** A direct call's outcome, delivered once (K05/K07 turn it into `action.result` / `action.error`). */
-export interface CallFinished { id: string; ok: boolean; value?: string | undefined; error?: string | undefined }
+export interface CallFinished { reply?: { host: string; connectionId: string; epoch: number; id: string; path: string; tenantId: string; traceJson?: string }; committedRevision?: number | undefined; id: string; ok: boolean; value?: string | undefined; error?: string | undefined }
 
 export interface ActionCallsOptions {
   storage: DurableObjectStorage;
@@ -248,6 +248,13 @@ export class ActionCalls {
     return { v: 1, ok: true, persisted: true };
   }
 
+  private replyContext(run: Run): Pick<CallFinished, "reply"> {
+    const session = JSON.parse(run.session ?? "null") as ActionSession | null;
+    if (!session?.reply) return {};
+    const { host, connectionId, epoch, id, path } = session.reply;
+    return { reply: { host, connectionId, epoch, id, path, tenantId: session.tenantId, ...(session.reply.traceJson ? { traceJson: session.reply.traceJson } : {}) } };
+  }
+
   /** Fenced on the attempt, one statement; the outcome is delivered once. */
   async complete(request: CompleteRequest): Promise<Completion> {
     const now = this.clock();
@@ -263,7 +270,7 @@ export class ActionCalls {
     ).length === 1;
     if (!applied) return { v: 1, applied: false, rejected: true };
     this.leases.delete(run.id);
-    await this.options.onFinished?.(request.error !== undefined ? { id: run.id, ok: false, error: request.error } : { id: run.id, ok: true, value: request.value ?? "null" });
+    await this.options.onFinished?.(request.error !== undefined ? { id: run.id, ok: false, error: request.error, ...this.replyContext(run) } : { id: run.id, ok: true, value: request.value ?? "null", ...(request.committedRevision === undefined ? {} : { committedRevision: request.committedRevision }), ...this.replyContext(run) });
     return { v: 1, applied: true, appliedAttempt: request.attempt };
   }
 
@@ -278,7 +285,7 @@ export class ActionCalls {
   private async kill(run: Run, error: string): Promise<void> {
     this.exec(`UPDATE ${RUNS} SET state = 'dead', finished_at = ?, last_error = ?, owner = NULL, session = NULL WHERE id = ?`, this.clock(), error, run.id);
     this.leases.delete(run.id);
-    await this.options.onFinished?.({ id: run.id, ok: false, error });
+    await this.options.onFinished?.({ id: run.id, ok: false, error, ...this.replyContext(run) });
   }
 
   // ---- recovery: an alarm source on K11's TenantAlarm --------------------------------

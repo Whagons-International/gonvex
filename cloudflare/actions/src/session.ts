@@ -4,6 +4,8 @@
 import type { Identity } from "../../kernel/host/src/index.js";
 
 export interface ActionSession {
+  /** Server-owned route for a direct Workflow call's eventual reply; never part of module identity. */
+  reply?: { host: string; connectionId: string; epoch: number; id: string; path: string; traceJson?: string };
   projectId: string;
   tenantId: string;
   account: { id: string; email?: string; name?: string; avatarUrl?: string };

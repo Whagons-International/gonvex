@@ -1926,21 +1926,15 @@ async function acceptInvitation(ctx: Ctx, connection: ControlConnection, args: u
 /** Membership projection (membership_projector.rs:119-185): revision-guarded upsert. */
 export function projectMemberships(ctx: Ctx, tenantId: string, rows: Array<{ accountId: string; memberId: string; status: string; membershipRevision: number }>): number {
   return ctx.sql.tx(() => {
-    for (const row of rows) {
-      ctx.sql.run(
-        `INSERT INTO account_tenant_index(account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-         VALUES($1,$2,$3,$4,$5,${NOW_MS})
-         ON CONFLICT(account_id,tenant_id) DO UPDATE SET
-           member_id=excluded.member_id,status=excluded.status,
-           tenant_membership_revision=excluded.tenant_membership_revision,updated_at=${NOW_MS}
-         WHERE excluded.tenant_membership_revision >= account_tenant_index.tenant_membership_revision`,
-        row.accountId,
-        tenantId,
-        row.memberId,
-        row.status,
-        row.membershipRevision,
-      );
-    }
+    if (rows.length) ctx.sql.run(
+      `INSERT INTO account_tenant_index(account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
+       SELECT json_extract(value,'$.accountId'),$1,json_extract(value,'$.memberId'),json_extract(value,'$.status'),json_extract(value,'$.membershipRevision'),${NOW_MS}
+       FROM json_each($2) WHERE TRUE
+       ON CONFLICT(account_id,tenant_id) DO UPDATE SET member_id=excluded.member_id,status=excluded.status,
+         tenant_membership_revision=excluded.tenant_membership_revision,updated_at=${NOW_MS}
+       WHERE excluded.tenant_membership_revision >= account_tenant_index.tenant_membership_revision`,
+      tenantId, JSON.stringify(rows),
+    );
     return rows.length;
   });
 }

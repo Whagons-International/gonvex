@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PREFIX = "gonvex-cf-dev-preview-";
-const MAX_NAME = 63; // Worker names become a DNS label on workers.dev.
+const MAX_NAME = 54; // Leave room for the assembled companion Workers and buckets.
 const NAME_PATTERN = /^gonvex-cf-dev-preview-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
 export function previewName(branch) {

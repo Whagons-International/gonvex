@@ -52,6 +52,7 @@ export interface RenewRequest { v: 1; id: string; attempt: number }
 export interface Renewal { v: 1; ok: boolean; persisted: boolean }
 
 export interface CompleteRequest {
+  committedRevision?: number | undefined;
   v: 1;
   id: string;
   attempt: number;

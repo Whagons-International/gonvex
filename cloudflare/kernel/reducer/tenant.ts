@@ -12,6 +12,8 @@ import { applyInstallUnit, CaptureState, ChangeWake, directSql, finalize, planCh
 import type { CaptureHooks } from "../migrate/capture-port.ts";
 import { TenantMigrator, type MigrationStatus, type PlanStore } from "../migrate/index.ts";
 import { ModuleRegistry, TenantModuleHost, type ModuleExports } from "../host/src/index.js";
+import type { FileMetadataSource } from "../host/src/database-host";
+import type { TenantCall } from "../host/src/invoke";
 import type { ClientFrame } from "../session/decode";
 import { frames as sessionFrames } from "../session/protocol";
 import type { SocketView } from "../session/ports";
@@ -32,6 +34,12 @@ export interface KernelTenantOptions {
   readonly bundle: (artifactHash: string) => ModuleExports | undefined;
   /** Release plans (K02): built once per release outside the object. */
   readonly plans: PlanStore;
+  readonly files?: (() => FileMetadataSource | undefined) | undefined;
+  /** A Worker swap may carry a newer manifest than the previous object's KV. */
+  readonly restoreManifest?: ((stored: StoredModule) => StoredModule) | undefined;
+  readonly tenantOnly?: boolean | undefined;
+  readonly beforeInvoke?: ((call: TenantCall) => void) | undefined;
+  readonly afterInvoke?: ((call: TenantCall) => void) | undefined;
   /**
    * Declared reference integrity: flush before finalize, and K02's
    * `after_migration`. Default: the port of reference_integrity.rs
@@ -110,7 +118,7 @@ export class KernelTenant {
     this.reducers = new ReducerPath({
       storage: this.storage,
       direct: ctx.storage,
-      host: { run: (call) => this.requireHost().run(call) } as TenantModuleHost,
+      host: { run: (call) => this.runHost(call) } as TenantModuleHost,
       module: () => this.active,
       permissions: this.permissions,
       gateClosed: () => this.migrator.gateClosed(),
@@ -151,8 +159,12 @@ export class KernelTenant {
 
   /** Restores the active module after a wake. */
   restore(): void {
-    const stored = this.options.ctx.storage.kv.get<StoredModule>(MODULE_KEY);
-    if (stored) this.installCode(stored.projectId, stored.manifest);
+    const previous = this.options.ctx.storage.kv.get<StoredModule>(MODULE_KEY);
+    const stored = previous && (this.options.restoreManifest?.(previous) ?? previous);
+    if (stored) {
+      this.installCode(stored.projectId, stored.manifest);
+      if (stored !== previous) this.options.ctx.storage.kv.put(MODULE_KEY, stored);
+    }
   }
 
   /**
@@ -182,12 +194,22 @@ export class KernelTenant {
     if (!exports) throw new Error(`module bundle ${module.artifactHash} is not part of this Worker version`);
     if (!this.registry || this.registry.moduleId !== projectId) {
       this.registry = new ModuleRegistry(projectId);
-      this.host = new TenantModuleHost({ storage: this.storage, registry: this.registry, permissions: this.permissions });
+      const files = this.options.files?.();
+      this.host = new TenantModuleHost({ storage: this.storage, registry: this.registry, permissions: this.permissions, ...(files ? { files } : {}) });
     }
-    this.registry.install(moduleArtifact(module, ++this.generations, exports));
+    const artifact = moduleArtifact(module, ++this.generations, exports);
+    this.registry.install(this.options.tenantOnly ? { ...artifact, functions: artifact.functions.filter((fn) => fn.kind !== "action") } : artifact);
     this.permissions.setSource(module.permissionGrants);
     this.active = module;
   }
+
+  recordOverrun(commandId: string): void { this.requireHost().quarantine.add(commandId); }
+
+  private async runHost(call: TenantCall) {
+    this.options.beforeInvoke?.(call);
+    try { return await this.requireHost().run(call); } finally { this.options.afterInvoke?.(call); }
+  }
+  invoke(call: TenantCall) { return this.runHost(call); }
 
   // ---- frames ------------------------------------------------------------------------
 

@@ -1,0 +1,279 @@
+{
+  "base": "e72d3a437b65bea5a8524064e3e04904fc4a1f7b",
+  "status": "in-progress; no K22 completion claim",
+  "scenarios": [
+    {
+      "scenario": "thin-sdk-parity",
+      "source": "cloudflare/conformance/scenarios/thin-sdk-parity.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "reducer-second-client",
+      "source": "cloudflare/conformance/scenarios/reducer-second-client.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "replica-resume",
+      "source": "cloudflare/conformance/scenarios/replica-resume.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "reducer-errors",
+      "source": "cloudflare/conformance/scenarios/reducer-errors.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "local-workerd pure-CPU guard blocker, unmodified"
+    },
+    {
+      "scenario": "presence",
+      "source": "cloudflare/conformance/scenarios/presence.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "live-query-window",
+      "source": "cloudflare/conformance/scenarios/live-query-window.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "control-auth",
+      "source": "cloudflare/conformance/scenarios/control-auth.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "control-tenants",
+      "source": "cloudflare/conformance/scenarios/control-tenants.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "control-invitations",
+      "source": "cloudflare/conformance/scenarios/control-invitations.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "control-support",
+      "source": "cloudflare/conformance/scenarios/control-support.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "control-external-auth",
+      "source": "cloudflare/conformance/scenarios/control-external-auth.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "control-native-auth",
+      "source": "cloudflare/conformance/scenarios/control-native-auth.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "control-sessions",
+      "source": "cloudflare/conformance/scenarios/control-sessions.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "receipt-lost-reply",
+      "source": "cloudflare/conformance/scenarios/receipt-lost-reply.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "receipt-owner-switch",
+      "source": "cloudflare/conformance/scenarios/receipt-owner-switch.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "receipt-upgrade",
+      "source": "cloudflare/conformance/scenarios/receipt-upgrade.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "receipt-crash",
+      "source": "cloudflare/conformance/scenarios/receipt-crash.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "storage-sql",
+      "source": "cloudflare/conformance/scenarios/storage-sql.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "module-host",
+      "source": "cloudflare/conformance/scenarios/module-host.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "session-handshake",
+      "source": "cloudflare/conformance/scenarios/session-handshake.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "session-frames",
+      "source": "cloudflare/conformance/scenarios/session-frames.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "change-capture",
+      "source": "cloudflare/conformance/scenarios/change-capture.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "visibility-masks",
+      "source": "cloudflare/conformance/scenarios/visibility-masks.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "receipt-expiry",
+      "source": "cloudflare/conformance/scenarios/receipt-expiry.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "scheduler",
+      "source": "cloudflare/conformance/scenarios/scheduler.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "live-query-task-grid",
+      "source": "cloudflare/conformance/scenarios/live-query-task-grid.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "operator-routes",
+      "source": "cloudflare/conformance/scenarios/operator-routes.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "presence-edges",
+      "source": "cloudflare/conformance/scenarios/presence-edges.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "actions",
+      "source": "cloudflare/conformance/scenarios/actions.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "service-principals",
+      "source": "cloudflare/conformance/scenarios/service-principals.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "replica-orphan-reveal",
+      "source": "cloudflare/conformance/scenarios/replica-orphan-reveal.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "replica-windows",
+      "source": "cloudflare/conformance/scenarios/replica-windows.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "replica-reset",
+      "source": "cloudflare/conformance/scenarios/replica-reset.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "replica-tenant-restart",
+      "source": "cloudflare/conformance/scenarios/replica-tenant-restart.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "replica-reconnect-wave",
+      "source": "cloudflare/conformance/scenarios/replica-reconnect-wave.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "public-limits",
+      "source": "cloudflare/conformance/scenarios/public-limits.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "public-calls",
+      "source": "cloudflare/conformance/scenarios/public-calls.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "bridge-upstream",
+      "source": "cloudflare/conformance/scenarios/bridge-upstream.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    },
+    {
+      "scenario": "error-telemetry",
+      "source": "cloudflare/conformance/scenarios/error-telemetry.mjs",
+      "local": "not-yet-complete",
+      "remote": "not-run",
+      "classification": "inventory pending package-evidence attribution"
+    }
+  ]
+}

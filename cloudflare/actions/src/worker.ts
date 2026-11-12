@@ -38,7 +38,7 @@ export interface ActionEnv extends PublicLimitsEnv {
 
 /** What the Worker build provides: the project's generations and the other packages' ports. */
 export interface ActionWorkerConfig<Env extends ActionEnv = ActionEnv> {
-  registry(env: Env): ModuleRegistry;
+  registry(env: Env, projectId: string): ModuleRegistry;
   control?(env: Env): ControlPort | undefined;
   /** `ctx.scheduler` from an Action. Default: the tenant's `schedule` RPC (K11's `Scheduler.enqueue`). */
   scheduler?(env: Env, tenantId: string): SchedulerPort | undefined;
@@ -64,13 +64,13 @@ function tenantStub(env: ActionEnv, tenantId: string): TenantStub {
   return (env.TENANT as unknown as { getByName(name: string): TenantStub }).getByName(tenantId);
 }
 
-function runtimeFor(env: ActionEnv, tenantId: string): { runtime: ActionRuntime; tenant: TenantStub; control: ControlPort | undefined } {
+function runtimeFor(env: ActionEnv, tenantId: string, projectId: string): { runtime: ActionRuntime; tenant: TenantStub; control: ControlPort | undefined } {
   if (!config) throw new Error("the Action Worker has no module: configureActions was not called");
   const c = config as unknown as ActionWorkerConfig<ActionEnv>;
   const tenant = tenantStub(env, tenantId);
   const control = c.control?.(env);
   const runtime = new ActionRuntime({
-    registry: c.registry(env),
+    registry: c.registry(env, projectId),
     tenant,
     control,
     scheduler: c.scheduler ? c.scheduler(env, tenantId) : { enqueue: (request) => tenantRpc("schedule", () => tenant.schedule(request)) },
@@ -105,7 +105,7 @@ export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, CallJob | Hand
     const timeout = (this.env.ACTION_STEP_TIMEOUT ?? "24 hours") as "24 hours";
     const delay = (this.env.ACTION_STEP_RETRY_DELAY ?? "5 seconds") as "5 seconds";
     const outcome = (await step.do("run action", { retries: { limit: 10, delay, backoff: "exponential" }, timeout }, async (): Promise<StepOutcome> => {
-      const { runtime, tenant } = runtimeFor(this.env, job.tenantId);
+      const { runtime, tenant } = runtimeFor(this.env, job.tenantId, job.projectId);
       const c = config as unknown as ActionWorkerConfig<ActionEnv>;
       const outcome = await runCall({ runtime, tenant, renewMs: c.renewMs }, job, owner);
       switch (outcome.kind) {
@@ -125,14 +125,14 @@ export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, CallJob | Hand
           };
           if (done.bytes <= STEP_RESULT_INLINE_BYTES) return small;
           // A step result holds 1 MiB: a large answer is applied from inside the step.
-          const completion = await tenantRpc("completeCall", () => tenant.completeCall({ v: 1, id: job.id, attempt: done.attempt, value: done.value, error: done.error }));
+          const completion = await tenantRpc("completeCall", () => tenant.completeCall({ v: 1, id: job.id, attempt: done.attempt, value: done.value, error: done.error, committedRevision: done.committedRevision }));
           return { ...small, value: undefined, completion };
         }
       }
     })) as StepOutcome;
     if (outcome.kind !== "done" || outcome.completion) return outcome;
     const completion = await step.do("apply result", { retries: { limit: 20, delay: "2 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () =>
-      tenantRpc("completeCall", () => tenantStub(this.env, job.tenantId).completeCall({ v: 1, id: job.id, attempt: outcome.attempt, value: outcome.value, error: outcome.error })));
+      tenantRpc("completeCall", () => tenantStub(this.env, job.tenantId).completeCall({ v: 1, id: job.id, attempt: outcome.attempt, value: outcome.value, error: outcome.error, committedRevision: outcome.committedRevision })));
     return { ...outcome, value: undefined, completion };
   }
 
@@ -146,7 +146,7 @@ export class ActionWorkflow extends WorkflowEntrypoint<ActionEnv, CallJob | Hand
     const timeout = (this.env.ACTION_STEP_TIMEOUT ?? "24 hours") as "24 hours";
     const delay = (this.env.ACTION_STEP_RETRY_DELAY ?? "5 seconds") as "5 seconds";
     const result = await step.do("run action", { retries: { limit: 10, delay, backoff: "exponential" }, timeout }, async () => {
-      const { runtime, tenant, control } = runtimeFor(this.env, job.tenantId);
+      const { runtime, tenant, control } = runtimeFor(this.env, job.tenantId, job.projectId);
       const c = config as unknown as ActionWorkerConfig<ActionEnv>;
       const outcome = await runHandoff({ runtime, tenant, control, renewMs: c.renewMs }, job);
       return outcome.kind === "done" && !outcome.outcome.ok ? { ...outcome, outcome: { ok: false as const, error: outcome.outcome.error.slice(0, 8_000) } } : outcome;
@@ -169,7 +169,7 @@ export interface DirectCall {
 export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
   /** Inline for standard and public Actions; a Workflow run for agent Actions (`{ pending: id }`). */
   async call(input: DirectCall): Promise<ActionReport | { pending: true; id: string }> {
-    const { runtime, tenant } = runtimeFor(this.env, input.session.tenantId);
+    const { runtime, tenant } = runtimeFor(this.env, input.session.tenantId, input.session.projectId);
     const active = runtime.options.registry.activeGeneration;
     const contract = active?.engine.functions.get(input.path);
     if (contract?.kind === "action" && profileOf(contract) === "agent" && input.session.account.id !== "") {

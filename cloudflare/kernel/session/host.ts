@@ -24,6 +24,7 @@ import { UNKNOWN_ADDRESS } from "../public/address";
 import { type PublicGuard, validatePublicScope } from "../public/guard";
 import type { SlotKind } from "../public/limiter";
 import { type TelemetryHostState, telemetryHostState } from "../telemetry/socket";
+import { HolderRecoveryStore, recoveryScope, attachmentRecord, type AttachmentRecord, type RecoveryReference } from "./recovery-store";
 
 /** Liveness and revalidation due within this window run in the same alarm (deadlines never run early). */
 const ALARM_SLACK_MS = 2_000;
@@ -44,7 +45,7 @@ export interface HostOptions {
   telemetry?: TelemetryHostState;
 }
 
-interface Attachment { session: SessionRecord }
+interface Attachment { session: AttachmentRecord; recovery?: RecoveryReference }
 
 export class SocketHost {
   readonly sessions = new Map<WebSocket, Session>();
@@ -52,16 +53,31 @@ export class SocketHost {
   /** K15: one set of telemetry rate-limit windows for every socket of this object. */
   readonly telemetry: TelemetryHostState;
   private scheduled: number | null | undefined;
+  private readonly recovery: HolderRecoveryStore;
+  private readonly recoveryDirty = new WeakSet<WebSocket>();
+  private readonly recoveryRefs = new WeakMap<WebSocket, RecoveryReference>();
+  private readonly publishing = new WeakSet<WebSocket>();
 
   constructor(private readonly options: HostOptions) {
+    this.recovery = new HolderRecoveryStore(options.ctx.storage);
     this.modules = new ModuleCache(options.ports);
     this.telemetry = options.telemetry ?? telemetryHostState({ presenceEnabled: options.presence?.enabled ?? options.ready.presence });
     options.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
     // Rebuild the in-memory index from attachments on every wake (S3 §8: eager rebuild costs nothing measurable).
+    const active = new Set<string>();
     for (const ws of options.ctx.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as Attachment | null;
-      if (attachment?.session) this.sessions.set(ws, this.restore(ws, attachment.session));
+      if (attachment?.recovery) active.add(attachment.recovery.generation);
+      if (attachment?.session) {
+        try { this.sessions.set(ws, this.restore(ws, attachment.session, attachment.recovery)); }
+        catch (error) {
+          console.error("session host: recovery metadata unavailable", error);
+          try { ws.close(1012, "session recovery requires reconnect"); } catch { /* already closed */ }
+          if (attachment.recovery) this.recovery.discard(attachment.recovery);
+        }
+      }
     }
+    this.recovery.sweep(active);
   }
 
   /**
@@ -103,11 +119,15 @@ export class SocketHost {
       // A close that wakes a hibernated object: the closing socket is not among `getWebSockets()`
       // when the constructor rebuilds the index (measured in workerd), but its attachment is readable.
       const attachment = ws.deserializeAttachment() as Attachment | null;
-      if (attachment?.session) session = this.restore(ws, attachment.session);
+      if (attachment?.session) {
+        try { session = this.restore(ws, attachment.session, attachment.recovery); }
+        catch { /* Missing private identity cannot authorize even a restored close-time session. */ }
+      }
     }
     this.sessions.delete(ws);
     if (session) this.releaseSlots(ws, session, session.record.slots ?? []);
     await session?.closedByPeer();
+    this.abandonRecovery(ws);
   }
 
   /** The alarm: deadlines, liveness and one batched revalidation round. */
@@ -175,6 +195,7 @@ export class SocketHost {
 
   private sessionOptions(ws: WebSocket) {
     const hooks: SessionHooks = {
+      recoveryChanged: () => this.recoveryDirty.add(ws),
       persist: () => this.persist(ws, this.sessions.get(ws)),
       tenantChanged: (previous, next) => this.options.tenantChanged?.(ws, previous, next),
       waitUntil: (promise) => this.options.ctx.waitUntil(promise),
@@ -199,6 +220,7 @@ export class SocketHost {
           if (session) this.releaseSlots(ws, session, session.record.slots ?? []);
           try { ws.close(frame.code, frame.reason); } catch (error) { console.error("session host: close failed", error); }
           this.sessions.delete(ws);
+          this.abandonRecovery(ws);
         },
       },
     };
@@ -214,7 +236,7 @@ export class SocketHost {
     const freed = held.filter(k => kinds.includes(k));
     if (!freed.length) return;
     session.record.slots = held.filter(k => !freed.includes(k));
-    try { ws.serializeAttachment({ session: session.record } satisfies Attachment); } catch { /* over 16 KiB: the release below is idempotent */ }
+    this.persist(ws, session);
     const guard = this.options.publicGuard;
     if (guard) this.options.ctx.waitUntil(guard.release(session.record.address ?? UNKNOWN_ADDRESS, session.record.connectionId, freed));
   }
@@ -226,18 +248,43 @@ export class SocketHost {
     return connectionIds.filter(id => open.has(id));
   }
 
-  private restore(ws: WebSocket, record: SessionRecord): Session {
-    return Session.restore(record, this.sessionOptions(ws));
+  private restore(ws: WebSocket, record: AttachmentRecord, ref?: RecoveryReference): Session {
+    if (ref) {
+      record = this.recovery.restore(record, ref);
+      this.recoveryRefs.set(ws, ref);
+    } else {
+      if (!record.connection || !("tenant" in record) || record.privateIdentity) throw new Error("holder recovery identity unavailable");
+      this.recoveryDirty.add(ws); // Old attachments migrate on their next semantic/attachment change.
+    }
+    return Session.restore(record as SessionRecord, this.sessionOptions(ws));
+  }
+
+  private abandonRecovery(ws: WebSocket): void {
+    const ref = this.recoveryRefs.get(ws);
+    if (ref) this.recovery.discard(ref);
+    this.recoveryRefs.delete(ws);
+    this.recoveryDirty.delete(ws);
   }
 
   private persist(ws: WebSocket, session: Session | undefined): void {
-    if (!session || session.closed) return;
+    if (!session || session.closed || this.publishing.has(ws)) return;
+    this.publishing.add(ws);
+    const previous = this.recoveryRefs.get(ws);
+    let next = previous;
     try {
-      ws.serializeAttachment({ session: session.record } satisfies Attachment);
+      if (!previous || this.recoveryDirty.has(ws) || previous.scope !== recoveryScope(session.record)) next = this.recovery.write(session.record);
+      ws.serializeAttachment({ session: attachmentRecord(session.record), recovery: next! } satisfies Attachment);
+      this.recoveryRefs.set(ws, next!);
+      this.recoveryDirty.delete(ws);
     } catch (error) {
-      // Over the 16 KiB attachment limit (S3 §8). The socket keeps working while
-      // the object is awake; after hibernation it resumes from the last record that fit.
-      console.error("session host: attachment not saved", error);
+      // Do not leave the socket running under a stale current-looking attachment.
+      if (next && next !== previous) { try { this.recovery.discard(next); } catch { /* wake sweep reclaims an abandoned generation */ } }
+      console.error("session host: attachment/recovery publish failed", error);
+      session.close({ code: 1012, reason: "session recovery requires reconnect" });
+      return;
+    } finally {
+      this.publishing.delete(ws);
     }
+    if (previous && previous !== next) { try { this.recovery.discard(previous); } catch { /* safe orphan; never invalidate the published generation */ } }
   }
 }

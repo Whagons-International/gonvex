@@ -4,6 +4,7 @@
  */
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+import { CloudflareAssemblyBackend } from './cloudflare-assembly.mjs';
 import { RustBackend } from './rust.mjs';
 import { CloudflareControlBackend } from './cloudflare-control.mjs';
 import { CloudflareBackend } from './cloudflare.mjs';
@@ -15,6 +16,7 @@ import { CloudflarePublicBackend } from './cloudflare-public.mjs';
 
 export const BACKENDS = {
   rust: RustBackend,
+  'cloudflare-assembly': CloudflareAssemblyBackend,
   // K06: the control object in local workerd (control-plane scenarios only).
   'cloudflare-control': CloudflareControlBackend,
   // The kernel on local workerd (K05: session layer; later packages fill in the rest).

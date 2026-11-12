@@ -144,7 +144,7 @@ function requestedSumDigest(request: OpenRequest, negotiated: boolean): boolean 
   return sum;
 }
 
-function resolve(db: StorageSession, context: OpenContext, definition: ReplicaDefinition, plan: VisibilityPlan, revision: number): ResolvedVisibility {
+export function resolveCollection(db: StorageSession, context: Pick<OpenContext, "module" | "registry" | "session">, definition: ReplicaDefinition, plan: VisibilityPlan, revision: number): ResolvedVisibility {
   const module = context.module!;
   if (plan.version === 2) {
     const acl = context.registry.acl.ensure(db, module.visibility, [plan]);
@@ -201,7 +201,7 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
   // The read: clock, principal, scan statement.
   const begun = await context.read((db) => {
     const clock = readClock(sqlOf(db));
-    const resolved = resolve(db, context, definition, plan, clock.revision);
+    const resolved = resolveCollection(db, context, definition, plan, clock.revision);
     const scan = scanPlan(definition, plan, resolved, request.args, db.catalogOf(definition.table).columns);
     return { clock, resolved, scan };
   });

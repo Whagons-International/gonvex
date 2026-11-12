@@ -188,3 +188,17 @@ describe("direct agent calls (ActionCalls)", () => {
     });
   });
 });
+
+
+describe("K22 Workflow reply boundary", () => {
+  it("retains the server reply target and nested commit revision for onFinished after the run row clears session", async () => {
+    await withCalls(async (h) => {
+      const routed = { ...session, reply: { host: "gw-1", connectionId: "socket-1", epoch: 7, id: "action-1", path: "agent.turn" } };
+      const id = await h.calls.begin({ session: routed, path: "agent.turn", args: {} });
+      await h.calls.claim({ v: 1, id, owner: "workflow-1" });
+      await h.calls.complete({ v: 1, id, attempt: 1, value: "42", committedRevision: 19 });
+      expect(h.sql.exec("SELECT session FROM _gonvex_st_action_runs WHERE id=?", id).one().session).toBeNull();
+      expect(h.finished).toEqual([{ id, ok: true, value: "42", reply: { ...routed.reply, tenantId: routed.tenantId }, committedRevision: 19 }]);
+    });
+  });
+});

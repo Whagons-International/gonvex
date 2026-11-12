@@ -69,6 +69,16 @@ export class SocketDelivery {
     else this.host.send(watermarkFrame(revision));
   }
 
+  /** Whole-holder recovery includes opens tracked by the holder but not yet installed in the tenant. */
+  recover(instance: string, reason: string): void {
+    this.batcher.flush();
+    for (const [id, path] of Object.entries(this.host.tracked())) this.host.send(resetFrame(id, path, reason));
+    this.forget();
+    this.batcher.clearBindings();
+    this.host.setInstance(instance);
+    this.host.trackedChanged();
+  }
+
   /** One delivery for this socket (`work` is its own part, if any). */
   apply(payload: ReplicaDelivery, work: SocketWork | undefined): void {
     const tracked = this.host.tracked();

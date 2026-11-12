@@ -261,6 +261,58 @@ describe("alarms", () => {
 });
 
 describe("hibernation", () => {
+  it("serializes large recovery requests and private identity, restores them after eviction and cleans on close", async () => {
+    const w = await world({ a: ["ana"] });
+    const c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const generation = await inGateway(name!, (instance) => {
+      const host = instance.host;
+      const [ws, session] = [...host.sessions].find(([, s]: any) => s.record.tenant?.route.tenantId === w.tenants.a)!;
+      session.record.tenant.member.permissions = { legalLargeFixture: "x".repeat(100_000) };
+      session.record.connection.tenant = session.record.tenant;
+      session.record.liveQueries = { q: { type: "query.subscribe", id: "q", path: "items.live", args: { text: "漢".repeat(100_000) } } };
+      session.record.pendingActions = { pending: "agent.run" };
+      host.recoveryDirty.add(ws);
+      host.persist(ws, session);
+      const attachment = ws.deserializeAttachment();
+      expect(attachment.session.privateIdentity).toBe(1);
+      expect(attachment.session.tenant).toBeUndefined();
+      expect(attachment.session.liveQueries).toBeUndefined();
+      expect(JSON.stringify(attachment).length).toBeLessThan(16_384);
+      return attachment.recovery.generation;
+    }) as string;
+    await evictDurableObject(gateway(name!));
+    await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any;
+      expect(session.record.tenant.member.permissions.legalLargeFixture.length).toBe(100_000);
+      expect(session.record.liveQueries.q.args.text.length).toBe(100_000);
+      expect(session.record.pendingActions).toEqual({ pending: "agent.run" });
+    });
+    c.ws.close(1000); await c.closed();
+    await runInDurableObject(gateway(name!), (_instance, state) => {
+      expect([...state.storage.kv.list({ prefix: `session-recovery/${generation}/` })]).toEqual([]);
+    });
+  });
+
+  it("fails closed and abandons the unpublished generation when attachment publication fails", async () => {
+    const w = await world({ a: ["ana"] });
+    const c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    await inGateway(name!, (instance) => {
+      const host = instance.host;
+      const [ws, session] = [...host.sessions].find(([, s]: any) => s.record.tenant?.route.tenantId === w.tenants.a)!;
+      const original = ws.serializeAttachment;
+      try {
+        ws.serializeAttachment = () => { throw new Error("injected attachment publication failure"); };
+        session.record.pendingActions = { pending: "agent.run" };
+        host.recoveryDirty.add(ws);
+        host.persist(ws, session);
+        expect(session.closed).toBe(true);
+      } finally { ws.serializeAttachment = original; }
+    });
+    expect((await c.closed()).code).toBe(1012);
+  });
+
   it("restores sessions from attachments after the gateway is evicted", async () => {
     const w = await world({ a: ["ana"] });
     const c = await signedIn(w, "ana", "a");

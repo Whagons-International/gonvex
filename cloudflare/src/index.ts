@@ -1,37 +1,37 @@
-import type { GreetResult } from "./hello";
-import { handleStubRoute, handleWebSocketUpgrade, STUB_PREFIX } from "../kernel/session";
+// K22: the serving kernel. Fixture routes and the K05 stand-ins are test-only.
+import { fixtureControl } from "../kernel/assembly/fixture-control";
+import type { RolloutMessage } from "../control/operator/release";
+import { handleWebSocketUpgrade } from "../kernel/session/router";
+import { handleDevRequest } from "../router/dev/routes";
+import { handleRolloutBatch } from "../router/dev/rollout";
+import { handleStorageRequest, STORAGE_PREFIX } from "../router/storage/index";
+import { filesConfigFromEnv } from "../kernel/files/config";
+import type { FilesTenantRpc } from "../kernel/files/rpc";
+import { handleIngressRequest } from "../router/ingress/routes";
 
-export { HelloObject } from "./hello";
-export { ControlStubObject, GatewayObject, TenantStubObject } from "../kernel/session";
+export { SessionControlObject } from "../kernel/assembly/control";
+export { AssemblyTenant } from "../kernel/assembly/tenant";
+export { AssemblyGateway } from "../kernel/assembly/gateway";
 export { PublicLimiterObject } from "../kernel/public";
+export { IngressObject } from "../router/ingress/object";
 
-const TENANT_ROUTE = /^\/t\/([a-z0-9][a-z0-9_-]{0,63})\/(greet|ws)$/;
-
-function json(body: unknown, status = 200): Response {
-  return Response.json(body, { status });
-}
+interface ServingEnv extends Env { GONVEX_ASSEMBLY_FIXTURE_KEY?: string }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/") {
-      return json({ ok: true, service: "gonvex-cloudflare" });
-    }
-    // K05: the client socket. The tenant arrives in the first `auth` frame (0004).
+    if (url.pathname === "/") return Response.json({ ok: true, service: "gonvex-cloudflare" });
     if (url.pathname === "/ws") return handleWebSocketUpgrade(request, env);
-    if (url.pathname.startsWith(STUB_PREFIX)) return (await handleStubRoute(request, env))!;
-
-    const match = TENANT_ROUTE.exec(url.pathname);
-    if (!match) return json({ error: "not found" }, 404);
-    const [, tenant, action] = match as unknown as [string, string, "greet" | "ws"];
-    const stub = env.HELLO.getByName(tenant);
-
-    if (action === "ws") {
-      return stub.fetch(request);
-    }
-    if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
-    const name = url.searchParams.get("name") ?? "world";
-    const result: GreetResult = await stub.greet(name);
-    return json({ tenant, ...result });
+    const fixture = await fixtureControl(request, env);
+    if (fixture) return fixture;
+    const dev = await handleDevRequest(request, env, ctx);
+    if (dev) return dev;
+    if (url.pathname.startsWith("/auth/")) return env.CONTROL.getByName("control").fetch(request);
+    if (url.pathname.startsWith(STORAGE_PREFIX)) return handleStorageRequest(request, {
+      bucket: env.FILES, config: filesConfigFromEnv(env as unknown as Record<string, unknown>), tenant: (id) => env.TENANT.getByName(id) as unknown as FilesTenantRpc,
+    });
+    const ingress = await handleIngressRequest(request, env);
+    return ingress ?? Response.json({ error: "not found" }, { status: 404 });
   },
-} satisfies ExportedHandler<Env>;
+  queue: (batch, env) => handleRolloutBatch(batch as MessageBatch<RolloutMessage>, env),
+} satisfies ExportedHandler<ServingEnv>;
