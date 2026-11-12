@@ -161,6 +161,11 @@ verification/M05-recheck-1b.md. Foundation merge and full M05 acceptance remain 
 atomic GC; no witness resurrection, fresh terminal proof or success inference follows from absence.
 The fresha59 M05 recheck clears the exact1b cases but finds two failed-offset/expiry P2 defects; see
 verification/M05-recheck-a59.md. New bounded correction evidence still requires NEW independent review.
+0083 conditionally permits only the native ownerAdmissionIntent authority-result consumer after descriptor
+proof, with exact own data keys, unchanged primitive checks, disposal and current stored-binding/physical
+scope checks. It does not cover dispatchOwned/drainOwner or activate serving ownership. Local319 terminal
+and published34b6 M05 artifacts have separate fresh reviews; the outside0077 adapter's4f7538 preparation
+checkpoint still requires concrete cross-unit/wrapper integration before its own fresh review/release.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
