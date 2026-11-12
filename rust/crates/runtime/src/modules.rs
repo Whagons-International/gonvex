@@ -171,61 +171,29 @@ impl ModuleRegistry {
         host: &ModuleHost,
         record: RuntimeManifestRecord,
     ) -> Result<Arc<ProjectModule>, ModuleRegistryError> {
+        let validated = validate_manifest_record(&record)?;
+        self.install_validated(host, &record, validated).await
+    }
+
+    /// Loads and activates a manifest that [`validate_manifest_record`]
+    /// accepted. A push validates before it provisions tenants and installs
+    /// that result instead of decoding and hashing the artifact again.
+    pub async fn install_validated(
+        &self,
+        host: &ModuleHost,
+        record: &RuntimeManifestRecord,
+        validated: ValidatedManifest,
+    ) -> Result<Arc<ProjectModule>, ModuleRegistryError> {
         let project = record.project_id.clone();
-        let module = record
-            .manifest
-            .get("module")
-            .and_then(Value::as_object)
-            .ok_or_else(|| ModuleRegistryError::InvalidArtifact {
-                project: project.clone(),
-                message: "manifest has no TypeScript module".to_owned(),
-            })?;
-        let migrations = migrations_from_module(module).map_err(|message| {
-            ModuleRegistryError::InvalidArtifact {
-                project: project.clone(),
-                message,
-            }
-        })?;
-        let client_contract = client_contract_from_module(module).map_err(|message| {
-            ModuleRegistryError::InvalidArtifact {
-                project: project.clone(),
-                message,
-            }
-        })?;
-        let crons = crons_from_module(module, &project)?;
-        let permission_grants = module
-            .get("permissionGrants")
-            .filter(|value| !value.is_null())
-            .map(|value| {
-                serde_json::from_value::<crate::permission_bits::PermissionGrantSource>(
-                    value.clone(),
-                )
-                .map_err(|error| error.to_string())
-                .and_then(|source| source.validate().map(|()| source))
-            })
-            .transpose()
-            .map_err(|message| ModuleRegistryError::InvalidArtifact {
-                project: project.clone(),
-                message: format!("permissionGrants: {message}"),
-            })?;
-        let (artifact, functions, visibility) = artifact_from_manifest(&record)?;
-        for cron in &crons {
-            let function = functions.get(&cron.function).ok_or_else(|| {
-                ModuleRegistryError::InvalidArtifact {
-                    project: project.clone(),
-                    message: format!(
-                        "cron {:?} targets unknown function {:?}",
-                        cron.name, cron.function
-                    ),
-                }
-            })?;
-            if !matches!(function.kind.as_str(), "reducer" | "action") {
-                return Err(ModuleRegistryError::InvalidArtifact {
-                    project: project.clone(),
-                    message: format!("cron {:?} must target a Reducer or Action", cron.name),
-                });
-            }
-        }
+        let ValidatedManifest {
+            migrations,
+            client_contract,
+            crons,
+            permission_grants,
+            artifact,
+            functions,
+            visibility,
+        } = validated;
         let loaded = host
             .load(LoadRequest {
                 module_id: project.clone(),
@@ -257,7 +225,7 @@ impl ModuleRegistry {
         let installed = Arc::new(ProjectModule {
             project_id: project.clone(),
             generation,
-            artifact_hash: record.module_hash,
+            artifact_hash: record.module_hash.clone(),
             client_contract,
             functions,
             replica_epochs: Default::default(),
@@ -382,9 +350,21 @@ fn crons_from_module(
     Ok(crons)
 }
 
+/// Everything a manifest record yields once validated. Migrations are
+/// decoded and checksummed here, once per artifact; tenants share them.
+pub struct ValidatedManifest {
+    pub(crate) migrations: Vec<gonvex_store::SqlMigration>,
+    client_contract: Option<u64>,
+    crons: Vec<CronSpec>,
+    permission_grants: Option<crate::permission_bits::PermissionGrantSource>,
+    artifact: ModuleArtifactWire,
+    functions: BTreeMap<String, FunctionDefinition>,
+    visibility: BTreeMap<String, crate::visibility::VisibilityPlan>,
+}
+
 pub(crate) fn validate_manifest_record(
     record: &RuntimeManifestRecord,
-) -> Result<Vec<gonvex_store::SqlMigration>, ModuleRegistryError> {
+) -> Result<ValidatedManifest, ModuleRegistryError> {
     let project = record.project_id.clone();
     let module = record
         .manifest
@@ -399,8 +379,54 @@ pub(crate) fn validate_manifest_record(
             project: project.clone(),
             message,
         })?;
-    artifact_from_manifest(record)?;
-    Ok(migrations)
+    let client_contract = client_contract_from_module(module).map_err(|message| {
+        ModuleRegistryError::InvalidArtifact {
+            project: project.clone(),
+            message,
+        }
+    })?;
+    let crons = crons_from_module(module, &project)?;
+    let permission_grants = module
+        .get("permissionGrants")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<crate::permission_bits::PermissionGrantSource>(value.clone())
+                .map_err(|error| error.to_string())
+                .and_then(|source| source.validate().map(|()| source))
+        })
+        .transpose()
+        .map_err(|message| ModuleRegistryError::InvalidArtifact {
+            project: project.clone(),
+            message: format!("permissionGrants: {message}"),
+        })?;
+    let (artifact, functions, visibility) = artifact_from_manifest(record)?;
+    for cron in &crons {
+        let function =
+            functions
+                .get(&cron.function)
+                .ok_or_else(|| ModuleRegistryError::InvalidArtifact {
+                    project: project.clone(),
+                    message: format!(
+                        "cron {:?} targets unknown function {:?}",
+                        cron.name, cron.function
+                    ),
+                })?;
+        if !matches!(function.kind.as_str(), "reducer" | "action") {
+            return Err(ModuleRegistryError::InvalidArtifact {
+                project: project.clone(),
+                message: format!("cron {:?} must target a Reducer or Action", cron.name),
+            });
+        }
+    }
+    Ok(ValidatedManifest {
+        migrations,
+        client_contract,
+        crons,
+        permission_grants,
+        artifact,
+        functions,
+        visibility,
+    })
 }
 
 /// Validates the exact standalone module object emitted by the TypeScript CLI
@@ -916,33 +942,49 @@ pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, St
         .get("javascript")
         .and_then(Value::as_object)
         .ok_or_else(|| "artifact has no JavaScript bundle".to_owned())?;
-    let mut contract = serde_json::json!({
-        "generation":module.get("generation").cloned().unwrap_or(Value::Null),
-        "language":module.get("language").cloned().unwrap_or(Value::String("typescript".to_owned())),
-        "entrypoint":module.get("entrypoint").cloned().unwrap_or(Value::Null),
-        "files":module.get("files").cloned().unwrap_or_else(|| serde_json::json!({})),
-        "functions":module.get("functions").cloned().unwrap_or_else(|| serde_json::json!({})),
-        "visibility":module.get("visibility").cloned().unwrap_or_else(|| serde_json::json!({})),
-        "crons":module.get("crons").cloned().unwrap_or_else(|| serde_json::json!([])),
-        "invitationAcceptanceReducer":module.get("invitationAcceptanceReducer").cloned().unwrap_or(Value::String(String::new())),
-        "javascript":{
+    // The signed contract is streamed into the hash as canonical JSON. It
+    // borrows the module's values: building it as one JSON value copied every
+    // file (migration history included) and then its text, twice per push.
+    let present = |key: &str, default: Value| {
+        module
+            .get(key)
+            .map_or(std::borrow::Cow::Owned(default), std::borrow::Cow::Borrowed)
+    };
+    let mut contract = BTreeMap::<&str, std::borrow::Cow<'_, Value>>::new();
+    contract.insert("generation", present("generation", Value::Null));
+    contract.insert(
+        "language",
+        present("language", Value::String("typescript".to_owned())),
+    );
+    contract.insert("entrypoint", present("entrypoint", Value::Null));
+    contract.insert("files", present("files", serde_json::json!({})));
+    contract.insert("functions", present("functions", serde_json::json!({})));
+    contract.insert("visibility", present("visibility", serde_json::json!({})));
+    contract.insert("crons", present("crons", serde_json::json!([])));
+    contract.insert(
+        "invitationAcceptanceReducer",
+        present("invitationAcceptanceReducer", Value::String(String::new())),
+    );
+    contract.insert(
+        "javascript",
+        std::borrow::Cow::Owned(serde_json::json!({
             "path":javascript.get("path").cloned().unwrap_or(Value::Null),
             "hash":javascript.get("hash").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase(),
-        },
-    });
+        })),
+    );
     // A split artifact signs its reducer bundle too. Unsplit artifacts keep
     // their existing hash because the key is absent.
     if let Some(bundle) = module.get("reducerBundle") {
         let bundle = bundle
             .as_object()
             .ok_or_else(|| "reducerBundle must be an object".to_owned())?;
-        contract.as_object_mut().expect("contract object").insert(
-            "reducerBundle".to_owned(),
-            serde_json::json!({
+        contract.insert(
+            "reducerBundle",
+            std::borrow::Cow::Owned(serde_json::json!({
                 "path": bundle.get("path").cloned().unwrap_or(Value::Null),
                 "hash": bundle.get("hash").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase(),
                 "functions": bundle.get("functions").cloned().unwrap_or_else(|| serde_json::json!([])),
-            }),
+            })),
         );
     }
     // Declared only by modules that use `ctx.permissions`; absent keeps every
@@ -951,44 +993,65 @@ pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, St
         .get("permissionGrants")
         .filter(|value| !value.is_null())
     {
-        contract["permissionGrants"] = grants.clone();
+        contract.insert("permissionGrants", std::borrow::Cow::Borrowed(grants));
     }
-    let bytes = canonical_json(&contract)?.into_bytes();
-    Ok(Sha256::digest(bytes)
+    let mut hasher = Sha256::new();
+    write_canonical_entries(
+        contract.iter().map(|(key, value)| (*key, value.as_ref())),
+        &mut hasher,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(hasher
+        .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
 }
 
-fn canonical_json(value: &Value) -> Result<String, String> {
+/// Canonical JSON: no whitespace, object keys in byte order, strings and
+/// numbers as serde_json writes them.
+fn write_canonical(value: &Value, out: &mut impl std::io::Write) -> std::io::Result<()> {
     match value {
-        Value::Null => Ok("null".to_owned()),
-        Value::Bool(value) => Ok(value.to_string()),
-        Value::Number(value) => Ok(value.to_string()),
-        Value::String(value) => serde_json::to_string(value).map_err(|error| error.to_string()),
+        Value::Null => out.write_all(b"null"),
+        Value::Bool(value) => out.write_all(if *value { b"true" } else { b"false" }),
+        Value::Number(value) => write!(out, "{value}"),
+        Value::String(value) => serde_json::to_writer(out, value).map_err(std::io::Error::from),
         Value::Array(values) => {
-            let values = values
-                .iter()
-                .map(canonical_json)
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(format!("[{}]", values.join(",")))
+            out.write_all(b"[")?;
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    out.write_all(b",")?;
+                }
+                write_canonical(value, out)?;
+            }
+            out.write_all(b"]")
         }
         Value::Object(object) => {
-            let mut entries = object.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-            let entries = entries
-                .into_iter()
-                .map(|(key, value)| {
-                    Ok(format!(
-                        "{}:{}",
-                        serde_json::to_string(key).map_err(|error| error.to_string())?,
-                        canonical_json(value)?
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(format!("{{{}}}", entries.join(",")))
+            let mut entries = object
+                .iter()
+                .map(|(key, value)| (key.as_str(), value))
+                .collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            write_canonical_entries(entries.into_iter(), out)
         }
     }
+}
+
+/// Writes `{key:value,...}` for entries already in canonical key order.
+fn write_canonical_entries<'a>(
+    entries: impl Iterator<Item = (&'a str, &'a Value)>,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    out.write_all(b"{")?;
+    for (index, (key, value)) in entries.enumerate() {
+        if index > 0 {
+            out.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *out, key).map_err(std::io::Error::from)?;
+        out.write_all(b":")?;
+        write_canonical(value, out)?;
+    }
+    out.write_all(b"}")
 }
 
 fn text(object: &Map<String, Value>, key: &str) -> Result<String, ModuleRegistryError> {
@@ -1021,6 +1084,83 @@ fn nonempty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The encoding before it was streamed, kept as the reference: artifact
+    /// hashes signed by earlier runtimes and CLIs must not change.
+    fn reference_canonical_json(value: &Value) -> String {
+        match value {
+            Value::Array(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(reference_canonical_json)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Value::Object(object) => {
+                let mut entries = object.iter().collect::<Vec<_>>();
+                entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+                let entries = entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{}:{}",
+                            serde_json::to_string(key).unwrap(),
+                            reference_canonical_json(value)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                format!("{{{}}}", entries.join(","))
+            }
+            Value::String(value) => serde_json::to_string(value).unwrap(),
+            other => other.to_string(),
+        }
+    }
+
+    #[test]
+    fn streamed_canonical_hash_matches_the_reference_encoding() {
+        let value = serde_json::json!({
+            "b": [1, 2.5, -3, 1e300, u64::MAX, true, false, null, "\u{e9}\u{1}\"\\\n\u{2028}"],
+            "a": {"z": {}, "y": [], "\u{e9}": 1, "A": 2, "": "empty"},
+            "files": {"migrations/0001_x.sql": "LS0gZ29udmV4OnNjb3BlIHRlbmFudA=="},
+        });
+        let mut streamed = Vec::new();
+        write_canonical(&value, &mut streamed).unwrap();
+        assert_eq!(
+            String::from_utf8(streamed).unwrap(),
+            reference_canonical_json(&value)
+        );
+        let module = serde_json::json!({
+            "generation": 2,
+            "entrypoint": "index.ts",
+            "files": value["files"].clone(),
+            "functions": {"tasks:list": {"kind": "query"}},
+            "javascript": {"path": "module.js", "hash": " ABCD ", "source": "ignored"},
+            "reducerBundle": {"path": "r.js", "hash": "EF", "functions": ["tasks:save"]},
+            "permissionGrants": {"grants": []},
+        });
+        let contract = serde_json::json!({
+            "generation": 2,
+            "language": "typescript",
+            "entrypoint": "index.ts",
+            "files": value["files"].clone(),
+            "functions": {"tasks:list": {"kind": "query"}},
+            "visibility": {},
+            "crons": [],
+            "invitationAcceptanceReducer": "",
+            "javascript": {"path": "module.js", "hash": "abcd"},
+            "reducerBundle": {"path": "r.js", "hash": "ef", "functions": ["tasks:save"]},
+            "permissionGrants": {"grants": []},
+        });
+        let expected: String = Sha256::digest(reference_canonical_json(&contract).as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            canonical_artifact_hash(module.as_object().unwrap()).unwrap(),
+            expected
+        );
+    }
 
     #[test]
     fn cached_replica_epochs_preserve_hashes_and_tenant_identity() {

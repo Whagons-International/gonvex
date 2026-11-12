@@ -4,6 +4,7 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Instant;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -59,13 +60,21 @@ pub enum MigrationScope {
     Tenant,
 }
 
+/// One migration file of a module artifact, decoded and checksummed once
+/// when the artifact is read. Every tenant's provisioning shares the body:
+/// cloning a migration list copies no SQL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqlMigration {
     pub name: String,
+    /// Lowercase hex SHA-256 of `sql`. A tenant compares it with the checksum
+    /// it recorded when it applied the migration; bodies already applied are
+    /// never executed or scanned again.
     pub checksum: String,
     pub scope: MigrationScope,
     pub no_transaction: bool,
-    pub sql: String,
+    pub sql: Arc<str>,
+    /// Whether the body carries `-- gonvex:foreign-key-rebuild`.
+    foreign_key_rebuild: bool,
 }
 
 impl SqlMigration {
@@ -74,12 +83,16 @@ impl SqlMigration {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
+        let foreign_key_rebuild = sql
+            .lines()
+            .any(|line| line.trim() == "-- gonvex:foreign-key-rebuild");
         Self {
             name,
             checksum,
             scope,
             no_transaction,
-            sql,
+            sql: sql.into(),
+            foreign_key_rebuild,
         }
     }
 }
@@ -971,10 +984,7 @@ pub(crate) fn apply_migrations<'a>(
 type AppliedMigrations = (Vec<String>, Vec<CommitNotice>);
 
 fn rebuilds_foreign_keys(migration: &SqlMigration) -> bool {
-    migration
-        .sql
-        .lines()
-        .any(|line| line.trim() == "-- gonvex:foreign-key-rebuild")
+    migration.foreign_key_rebuild
 }
 
 /// Whether a foreign-key rebuild of `scope` has not been applied yet. Only
@@ -1029,20 +1039,21 @@ fn apply_migrations_locked<'a>(
             ),
         )
         .await?;
+        // One read of the ledger per batch, not one query per migration.
+        let mut recorded: std::collections::HashMap<String, String> =
+            sqlx::query_as::<_, (String, String)>("SELECT name,checksum FROM gonvex_migrations")
+                .fetch_all(&mut *connection)
+                .await?
+                .into_iter()
+                .collect();
         let mut applied = Vec::new();
         let mut notices = Vec::new();
         for migration in migrations
             .iter()
             .filter(|migration| migration.scope == scope)
         {
-            let recorded = sqlx::query_scalar::<_, String>(
-                "SELECT checksum FROM gonvex_migrations WHERE name=$1",
-            )
-            .bind(&migration.name)
-            .fetch_optional(&mut *connection)
-            .await?;
-            if let Some(recorded) = recorded {
-                if recorded != migration.checksum {
+            if let Some(recorded) = recorded.get(&migration.name) {
+                if *recorded != migration.checksum {
                     return Err(protocol(format!(
                         "migration {} checksum mismatch: database has {}, artifact has {}",
                         migration.name, recorded, migration.checksum
@@ -1134,6 +1145,7 @@ fn apply_migrations_locked<'a>(
                 Ok(notice) => notices.extend(notice),
                 Err(error) => return Err(error),
             }
+            recorded.insert(migration.name.clone(), migration.checksum.clone());
             applied.push(migration.name.clone());
         }
         Ok((applied, notices))
