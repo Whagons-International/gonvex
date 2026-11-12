@@ -91,6 +91,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       visibility: { items: { table: "items", key: "id", where: { operator: "public" } } },
     });
     const live = new LiveQueries({ run: snapshotRunner(storage), module: () => liveModule, visibility: kernelVisibility(new VisibilityRegistry()) });
+    const receive = (host:string,payload:ReplicaDelivery) => { payloads.push([host,payload]); return (receiver.deliver?.(host,payload) ?? {v:1,sockets:Object.keys(payload.sockets).length}) as ReplicaReceipt; };
     const engine = new ReplicaDeliveryEngine({
       ...(composeLive ? { live } : {}),
       tenantId: "t",
@@ -98,7 +99,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       serial: <R>(fn: () => Promise<R>) => { const next = queue.then(fn, fn); queue = next.catch(() => undefined); return next; },
       read: async (fn) => { const r = await storage.invoke("query", async (s) => fn(s)); if (!r.ok) throw r.error; return r.value; },
       module: () => module,
-      outlet: new LocalOutlet((host, payload) => { payloads.push([host, payload]); return (receiver.deliver?.(host, payload) ?? { v: 1, sockets: Object.keys(payload.sockets).length }) as ReplicaReceipt; }, () => ["h1"]),
+      outlet: new LocalOutlet(receive, () => ["h1"], undefined, receive),
     });
     let commands = 0;
     return body({
@@ -461,7 +462,7 @@ describe("K22 ordered query and replica commits", () => {
       let executed = false;
       await engine.querySubscribe(view, (db) => { executed = true; return live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }); });
       expect(executed).toBe(false);
-      expect(engine.subscriptionFloor(view)).toBeUndefined(); // No successfully installed subscription yet.
+      expect(engine.subscriptionFloor(view)).toBe(0); // Unacknowledged holder fence also blocks this not-yet-installed query.
       acknowledge({ v: 1, sockets: 1, scopeAck: { restored: 7 } });
       for (let i = 0; i < 100 && !executed; i++) await new Promise((resolve) => setTimeout(resolve, 1));
       expect(executed).toBe(true);
@@ -511,6 +512,32 @@ describe("K22 ordered query and replica commits", () => {
       await engine.querySubscribe(view, (db) => live.subscribeSnapshot(db, view.connectionId, view.tenant, request));
       expect((payloads.at(-1)![1].sockets.initial as ScopedSocketWork).subscriptionEpoch).toBe(2);
     }, MODULE, true);
+  });
+  it("requires exact terminal enqueue receipts before initial progress; malformed or missing ACKs retain suppression",async()=>{
+    for(const mode of ["enqueued","obsolete","missing","duplicate","foreign","extra"]){
+      await withEngine(async({engine,live,receiver,commit,payloads,delivered})=>{
+        await commit([["INSERT INTO items VALUES ('i1',1,'before')",[]]]);delivered.length=0;payloads.length=0;
+        const view={...socket(`ack-${mode}`),initialRequests:[{kind:"query" as const,id:"q",path:"items.live",epoch:0,generation:1}]};
+        let recoverySeen!:()=>void;
+        const recovering=new Promise<void>(resolve=>{recoverySeen=resolve;});
+        receiver.deliver=(_host,payload)=>{
+          if(payload.recovery){recoverySeen();return {v:1,sockets:1};} // unsupported recovery stays blocked, never synthetic ACK
+          const status={generation:mode==="foreign"?999:1,status:mode==="obsolete"?"obsolete" as const:"enqueued" as const};
+          return {v:1,sockets:1,...(mode==="missing"?{}:{initialCompletions:{[view.connectionId]:mode==="duplicate"?[status,status]:[status],...(mode==="extra"?{unoffered:[status]}:{})}})};
+        };
+        await engine.querySubscribe(view,db=>live.subscribeSnapshot(db,view.connectionId,view.tenant,{id:"q",path:"items.live",args:{}}));
+        await engine.settled();
+        if(!["enqueued","obsolete"].includes(mode))await Promise.race([recovering,new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error(`missing recovery after ${mode} receipt`)),1000))]);
+        if(mode==="enqueued")expect(engine.subscriptionFloor(view)).toBeGreaterThan(0);
+        else expect(engine.subscriptionFloor(view)).toBe(0);
+        expect(delivered).toEqual([]);
+        if(!["enqueued","obsolete"].includes(mode)){
+          expect(payloads.some(([,p])=>!!p.recovery)).toBe(true);
+          const quiet=socket(`quiet-${mode}`);engine.observe(quiet);
+          expect(engine.subscriptionFloor(quiet)).toBe(0);
+        }
+      },MODULE,true);
+    }
   });
   it("puts live-query results before replica frames in the same commit payload, including live-only sockets", async () => {
     await withEngine(async ({ engine, live, payloads, commit }) => {

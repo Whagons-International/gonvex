@@ -319,3 +319,37 @@ unknown-owner availability or memory fit; a recovery/operator lifecycle is still
 0069 authorizes a prototype tenant-instance owner token/admission/drain protocol, with actual-holder
 confirmation and UNKNOWN transport outcomes. This checkpoint deliberately contains only the finite
 0065 admission guard. No token lifecycle or eventual terminal-owner cleanup is claimed implemented.
+
+### Frozen e07 combined collection: FAILED
+
+Implementation checkpoint728ce38a ordinarily merged integration86c80c8c without conflicts, producing
+`e07a616be0ff10b065864b4a3f33cdfcf5b11e83`. Exact source hashes, commands, configs and raw logs are under
+`/mnt/data/work/gonvex-k22/evidence/e07a616be0ff10b065864b4a3f33cdfcf5b11e83/`.
+Typecheck, all CI generators,49 conformance unit cases and the bundle/cycle comparison passed.
+Runtime cycles stayed1→1 with no additions; bundle1,662,248 bytes /397,491 gzip bytes.
+The full package command FAILED in an original S4 Action scenario: the new completed-run branch returned
+rejected for an older attempt, whereas the original receipt is duplicate. Later suites were not executed.
+The follow-up restores that original receipt; only the actual completed attempt can retry its retained reply.
+No original S4 assertion changed.
+
+The four-scenario actual assembled named campaign timed out at240 seconds (exit124), during thin-SDK.
+There is no final runner JSON, and later scenarios are UNEXECUTED. New initial completion receipt maps
+used a null prototype, which native Gateway RPC could not serialize (DataCloneError). They are converted
+to plain own-key records only at RPC boundaries, without a row/result JSON roundtrip. A native RPC positive
+ENQUEUED receipt, obsolete path, ordinary missing-metadata path and special own-key regression follow.
+These fixes do not relabel the frozen e07 failures or establish unchanged-SDK fault liveness.
+
+The real local SQL observation measured2,300,241 UTF-8 column bytes in the legacy principal/argument shape.
+Its chunked input manifest covers2,300,357 bytes in36 chunks, each<=65,536 bytes. These exclude SQLite
+row headers/physical page overhead and are representation/integrity evidence. Per-column measurements
+are emitted by the follow-up fixture. Local acceptance does not prove the conservative2-MB platform ceiling
+or current documented8-MB remote enforcement. [Cloudflare's current limits page](https://developers.cloudflare.com/durable-objects/platform/limits/)
+was read2026-11-12 (page updated2026-11-07); no brief/contract limit was changed.
+
+Follow-up source checks found the barrier floor must precede the no-subscription return: recovery
+clears old LQ state, whose absence cannot certify a quiet writer's progress. Malformed/missing completion
+receipt tests cover this zero floor. An older K22 supplemental0061 unit assumption of an undefined floor
+before installing its deferred query was strengthened to exact0 while the holder fence remains unacknowledged.
+No original package/Rust-vs-kernel scenario assertion changed. The retained Engine initial-reference lifecycle
+after an acknowledged Session rebuild remains a source follow-up: recoveryAck alone is not a0064 terminal
+completion receipt and is never used to bulk-clear refs.

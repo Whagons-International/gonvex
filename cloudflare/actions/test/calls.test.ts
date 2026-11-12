@@ -203,9 +203,9 @@ describe("direct agent calls (ActionCalls)", () => {
       // platform-limit expectation). This measures representation; platform
       // row-limit enforcement is a separate deployment proof obligation.
       h.sql.exec("INSERT INTO _k22_old_row_limit VALUES (?,?)",JSON.stringify(args),JSON.stringify(principal));
-      const inlineBytes=new TextEncoder().encode(JSON.stringify(args)+JSON.stringify(principal)).byteLength;
-      expect(h.sql.exec("SELECT length(CAST(args AS BLOB))+length(CAST(session AS BLOB)) bytes FROM _k22_old_row_limit").one().bytes).toBe(inlineBytes);
-      console.log("K22_ACTION_INPUT_BYTES",JSON.stringify({legacyInlineBytes:inlineBytes}));
+      const argsBytes=new TextEncoder().encode(JSON.stringify(args)).byteLength,sessionBytes=new TextEncoder().encode(JSON.stringify(principal)).byteLength;
+      expect(h.sql.exec("SELECT length(CAST(args AS BLOB)) argsBytes,length(CAST(session AS BLOB)) sessionBytes FROM _k22_old_row_limit").one()).toEqual({argsBytes,sessionBytes});
+      console.log("K22_ACTION_INPUT_BYTES",JSON.stringify({argsBytes,sessionBytes,legacyInlineBytes:argsBytes+sessionBytes,excludes:"SQLite row header and physical page overhead"}));
       const id=await h.calls.begin({session:principal,path:"agent.turn",args,provenance});
       expect(h.sql.exec("SELECT max(length(body)) bytes FROM _gonvex_st_action_input_chunks WHERE id=?",id).one().bytes).toBeLessThanOrEqual(65536);
       const representation=h.sql.exec("SELECT bytes,chunks,length(hash) digestChars FROM _gonvex_st_action_inputs WHERE id=?",id).one();
@@ -233,6 +233,20 @@ describe("direct agent calls (ActionCalls)", () => {
       const id=await calls.begin({session,path:"agent.turn",args:{value:"x".repeat(1_100_000)}});
       expect(await calls.claim({v:1,id,owner:"workflow"})).toMatchObject({ok:true,args:{value:"x".repeat(1_100_000)}});
       expect(h.jobs).toHaveLength(1);
+    });
+  });
+
+  it("preserves stale done receipts without retrying reply settlement or taking the stale supplied answer",async()=>{
+    await withCalls(async h=>{
+      const id=await h.calls.begin({session,path:"agent.turn",args:{}});
+      await h.calls.claim({v:1,id,owner:"workflow"});await h.calls.claim({v:1,id,owner:"workflow"});
+      h.fail.finished=true;await expect(h.calls.complete({v:1,id,attempt:2,value:'"stored"'})).rejects.toThrow("gateway reply unavailable");
+      h.fail.finished=false;
+      expect(await h.make().complete({v:1,id,attempt:1,value:'"stale"'})).toEqual({v:1,applied:false,duplicate:true,appliedAttempt:2});
+      expect(h.finished).toEqual([]);
+      expect(h.sql.exec("SELECT failures FROM _gonvex_st_action_replies WHERE id=?",id).one().failures).toBe(1);
+      await h.make().complete({v:1,id,attempt:2,value:'"also not the stored answer"'});
+      expect(h.finished).toEqual([{id,ok:true,value:'"stored"'}]);expect(h.jobs).toHaveLength(1);
     });
   });
 

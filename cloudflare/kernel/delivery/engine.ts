@@ -342,8 +342,11 @@ export class ReplicaDeliveryEngine {
   subscriptionFloor(socket: SocketView): number | undefined {
     const connection = this.connections.get(socket.connectionId);
     if (connection && connection.epoch !== (socket.subscriptionEpoch ?? 0)) return undefined;
-    if (!connection || (!connection.subscriptions.size && !connection.pending.length && !this.options.live?.subscriptionIds(connection.id).length)) return undefined;
+    if (!connection) return undefined;
+    // Recovery cleared the old subscriptions; their absence cannot bypass an
+    // unresolved holder barrier or certify a quiet writer's revision.
     if (this.recovering.has(connection.host) || this.fencing.has(connection.host)) return 0;
+    if (!connection.subscriptions.size && !connection.pending.length && !connection.initials.size && !this.options.live?.subscriptionIds(connection.id).length) return undefined;
     return Math.min(this.accepted.get(connection.id) ?? 0, ...(this.options.live?.computedRevisions(connection.id) ?? []));
   }
 
@@ -759,7 +762,7 @@ export class ReplicaDeliveryEngine {
     // Normal admission only. A recovery-required/capacity/old-holder failure
     // stays explicitly undeliverable; it cannot bypass the shared byte fence.
     const payload: ReplicaDelivery = { v: REPLICA_DELIVERY_VERSION, instance: this.instance, shared: [], sockets: {},
-      initialFailure: { v: 1, reason: "delivery-recovery-failed", requests } };
+      initialFailure: { v: 1, reason: "delivery-recovery-failed", requests: Object.fromEntries(Object.entries(requests)) } };
     return this.options.outlet.send(host, payload).then(receipt => {
       if (receipt?.initialFailureAck !== 1) throw new Error("GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED");
       for (const [id, refs] of Object.entries(requests)) for (const ref of refs) {

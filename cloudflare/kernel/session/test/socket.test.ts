@@ -256,6 +256,43 @@ describe("gateway placement", () => {
     }
   });
 
+  it("returns native RPC initial ENQUEUED/obsolete receipts as plain own-key records",async()=>{
+    const w=await world({a:["ana"]}),c=await signedIn(w,"ana","a");
+    const [name]=await stub("GET",`gateways?tenant=${w.tenants.a}`) as string[];
+    try{
+      await inGateway(name!,instance=>{
+        const session=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+        const actual=session.ports.tenants.dispatch;
+        session.ports.tenants.dispatch=(view:any,frame:any)=>frame.type==="query.subscribe"?Promise.resolve([]):actual(view,frame);
+      });
+      c.send({type:"query.subscribe",id:"q",path:"items.live",args:{}});
+      let origin:any;
+      for(let i=0;i<50&&!origin;i++){
+        origin=await inGateway(name!,instance=>{const s=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+          const ref=Object.values(s.record.initialRequests??{}).find((r:any)=>r.kind==="query"&&r.id==="q");return ref?{id:s.record.connectionId,ref}:null;});
+        if(!origin)await new Promise(r=>setTimeout(r,1));
+      }
+      expect(origin).toBeTruthy();
+      const text=JSON.stringify({type:"query.result",id:"q",path:"items.live",reason:"initial",result:[]});
+      const work={subscriptionEpoch:origin.ref.epoch,initialScope:origin.ref,ops:[["f",text]],initialCompletions:[{request:origin.ref,opIndex:0,outcome:"accepted"}]};
+      const payload={v:1,instance:"native-initial",shared:[],sockets:{[origin.id]:work}};
+      // This is an actual DO stub RPC, including result serialization.
+      const receipt=await gateway(name!).deliverReplicaInitial(w.tenants.a,payload);
+      expect(receipt.initialCompletions).toEqual({[origin.id]:[{generation:origin.ref.generation,status:"enqueued"}]});
+      expect(Object.getPrototypeOf(receipt.initialCompletions)).toBe(Object.prototype);
+      await c.next(f=>f.type==="query.result"&&f.id==="q");
+      const obsolete=await gateway(name!).deliverReplicaInitial(w.tenants.a,payload);
+      expect(obsolete.initialCompletions).toEqual({[origin.id]:[{generation:origin.ref.generation,status:"obsolete"}]});
+      const normal=await gateway(name!).deliverReplica(w.tenants.a,{v:1,instance:"native-initial",shared:[],sockets:{[origin.id]:{subscriptionEpoch:origin.ref.epoch,ops:[]}}});
+      expect(normal.initialCompletions).toBeUndefined();
+      const special=await gateway(name!).deliverReplicaInitial(w.tenants.a,{...payload,sockets:Object.fromEntries([['__proto__',work],['constructor',work]])});
+      expect(Object.hasOwn(special.initialCompletions,'__proto__')).toBe(true);
+      expect(Object.hasOwn(special.initialCompletions,'constructor')).toBe(true);
+      expect(special.initialCompletions.__proto__).toEqual([{generation:origin.ref.generation,status:"obsolete"}]);
+      expect(c.frames.some(f=>f.type==="query.result"&&f.id==="q")).toBe(false);
+    }finally{c.ws.close(1000);await c.closed();}
+  });
+
   it("0061 challenges a restarted sender without mutation, rejects a stale Member fence, then acknowledges only real empty bootstrap", async () => {
     const w = await world({ a: ["ana", "ben"] });
     const c = await signedIn(w, "ana", "a");

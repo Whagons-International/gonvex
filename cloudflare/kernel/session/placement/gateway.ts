@@ -393,7 +393,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     }
     return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}),
       ...(Object.keys(scopeRequired).length ? { scopeRequired } : {}), ...(Object.keys(scopeAck).length ? { scopeAck } : {}),
-      ...(Object.keys(initialCompletions).length ? { initialCompletions } : {}) };
+      ...(Object.keys(initialCompletions).length ? { initialCompletions: Object.fromEntries(Object.entries(initialCompletions)) } : {}) };
   }
 
   /** K16: which of these connections are open here (the address limiter's audit of leaked slots). */

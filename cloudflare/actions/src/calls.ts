@@ -327,8 +327,9 @@ export class ActionCalls {
   async complete(request: CompleteRequest): Promise<Completion> {
     const run = this.load(request.id);
     if (run?.state === "done") {
-      if (run.attempts !== request.attempt) return { v: 1, applied: false, rejected: true };
-      await this.deliverReply(run.id);
+      // Preserve the original terminal duplicate receipt for every attempt.
+      // Only the attempt that actually completed may retry its stored reply.
+      if (run.attempts === request.attempt) await this.deliverReply(run.id);
       return { v: 1, applied: false, duplicate: true, appliedAttempt: run.attempts };
     }
     if (!run || run.state !== "live" || run.status !== "processing" || run.attempts !== request.attempt) return { v: 1, applied: false, rejected: true };
