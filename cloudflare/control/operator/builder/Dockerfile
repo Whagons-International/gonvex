@@ -17,6 +17,7 @@ COPY cloudflare/package.json cloudflare/package.json
 RUN pnpm install --frozen-lockfile --filter @gonvex/cloudflare
 COPY rust/crates/store/src/control_schema.sql rust/crates/store/src/control_schema.sql
 COPY cloudflare cloudflare
+COPY packages/module-sdk/runtime-contract packages/module-sdk/runtime-contract
 ENV GONVEX_BUILDER_HOST=0.0.0.0 GONVEX_BUILDER_PORT=8790 NODE_OPTIONS=--max-old-space-size=1536
 EXPOSE 8790
 CMD ["node", "cloudflare/control/operator/builder/server.mjs"]
