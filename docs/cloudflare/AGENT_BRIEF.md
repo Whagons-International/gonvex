@@ -137,6 +137,12 @@ can recover; no client retry credit, ambiguous-call replay or owner-lifetime acc
 support/ACK. Actual owner confirmation, durable attempt/UNKNOWN rules and original gates remain mandatory.
 0075 separates reserve-charged owner control from fence-clearing whole recovery, with upfront bounded
 reply credit and retained-response ownership. No fake recovery ACK, extra channel or fit claim is allowed.
+0076 permits terminal-only reconciliation of a durably bound lost-admission reply using fresh actual-holder
+terminal proof and tenant quiescence. Unbound/legacy/old-instance uncertainty remains UNKNOWN; no token is
+recovered or minted, and no owner-lifetime acceptance follows.
+0077 records completed startup forensics with cause UNKNOWN and permits K22 to prepare one bounded,
+observable builder-only diagnostic. Lead reviews its exact artifact/manifest before releasing a live dev
+attempt; no causal fix, CPU proof or original gate is inferred from this plan.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
