@@ -169,6 +169,10 @@ retired evidence. Its qualified synthetic Proxy observation is separate from nat
 M05's finite disabled34b6 foundation passed fresh independent review and merged as c11b7740; full M05,
 original five-drill source definitions and all hosted/application/duration gates remain UNMET. The outside
 0077 adapter's4f7538 preparation still requires concrete cross-unit/wrapper integration before review/release.
+The freshLOCAL5e review now clears scoped R1/R2/0083 source fixes, without serving activation or acceptance.
+Separate79b helper and corrected outsideee977385 require refreshed joint pins and NEW independent review;
+0077 clarifies exact durable-byte verification before arm/ACK. See verification/K22-owner-review-5e.md.
+No live diagnostic is released; actual wrapper/account/deadline and all original gates remain unproven.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 
