@@ -104,6 +104,9 @@ struct Context {
     tables: RwLock<Shapes>,
     /// Digest of the definitions `tables` was built from.
     digest: Mutex<[u8; 32]>,
+    /// `PRAGMA schema_version` when `digest` was read: SQLite bumps it on
+    /// every schema change, so an unchanged cookie means an unchanged digest.
+    cookie: Mutex<Option<i64>>,
     events: Mutex<Vec<Event>>,
     records: RwLock<HashMap<String, Arc<crate::record_views::RecordDescriptor>>>,
     /// Open [`KeyChanges`] guards: migrations may change primary keys.
@@ -434,6 +437,7 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
             "the linked SQLite lacks SQLITE_ENABLE_PREUPDATE_HOOK; build with rust/.cargo/config.toml".into(),
         ));
     }
+    let cookie = committed_schema_cookie(connection).await?;
     let digest = catalog_digest(connection).await?;
     let shapes = load_shapes(connection, digest).await?;
     let records = record_descriptors(connection).await?;
@@ -500,6 +504,7 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
     };
     *context.tables.write().unwrap() = shapes;
     *context.digest.lock().unwrap() = digest;
+    *context.cookie.lock().unwrap() = cookie;
     *context.records.write().unwrap() = records;
     Ok(())
 }
@@ -523,15 +528,42 @@ pub async fn refresh(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
         // every refresh (two small reads).
         let records = record_descriptors(connection).await?;
         *context.records.write().unwrap() = records;
-        let digest = catalog_digest(connection).await?;
-        if digest == *context.digest.lock().unwrap() {
+        // Reading the digest concatenates and hashes every table definition;
+        // provisioning refreshes after each step, mostly with no DDL between.
+        // Only committed cookies are compared: they only ever increase,
+        // while a rolled-back transaction can reuse the value it had raised.
+        let cookie = committed_schema_cookie(connection).await?;
+        if cookie.is_some() && *context.cookie.lock().unwrap() == cookie {
             return Ok(());
         }
-        let shapes = load_shapes(connection, digest).await?;
-        *context.tables.write().unwrap() = shapes;
-        *context.digest.lock().unwrap() = digest;
+        let digest = catalog_digest(connection).await?;
+        if digest != *context.digest.lock().unwrap() {
+            let shapes = load_shapes(connection, digest).await?;
+            *context.tables.write().unwrap() = shapes;
+            *context.digest.lock().unwrap() = digest;
+        }
+        *context.cookie.lock().unwrap() = cookie;
     }
     Ok(())
+}
+
+/// The committed schema cookie of `main` (`PRAGMA schema_version`), or
+/// `None` inside a transaction, whose own uncommitted changes it would see.
+async fn committed_schema_cookie(
+    connection: &mut SqliteConnection,
+) -> Result<Option<i64>, DatabaseError> {
+    let autocommit = {
+        let mut handle = connection.lock_handle().await?;
+        unsafe { ffi::sqlite3_get_autocommit(handle.as_raw_handle().as_ptr()) != 0 }
+    };
+    if !autocommit {
+        return Ok(None);
+    }
+    Ok(Some(
+        sqlx::query_scalar("PRAGMA main.schema_version")
+            .fetch_one(connection)
+            .await?,
+    ))
 }
 
 /// Logical record views registered on this database, by record name (for
@@ -642,6 +674,48 @@ mod tests {
     use crate::rows::table_columns;
     use serde_json::{json, Value};
     use sqlx::{Connection, Row, SqliteConnection};
+
+    /// The digest gate trusts only committed cookies: a rolled-back schema
+    /// change can bring back a cookie value with different definitions.
+    #[tokio::test]
+    async fn only_committed_schema_cookies_gate_the_catalog_digest() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        let before = super::committed_schema_cookie(&mut connection)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::raw_sql("BEGIN; CREATE TABLE rolled_back(id INTEGER PRIMARY KEY);")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::committed_schema_cookie(&mut connection)
+                .await
+                .unwrap(),
+            None
+        );
+        sqlx::raw_sql("ROLLBACK")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::committed_schema_cookie(&mut connection)
+                .await
+                .unwrap(),
+            Some(before)
+        );
+        sqlx::raw_sql("CREATE TABLE kept(id INTEGER PRIMARY KEY)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert!(
+            super::committed_schema_cookie(&mut connection)
+                .await
+                .unwrap()
+                .unwrap()
+                > before
+        );
+    }
 
     async fn connection_with(table_sql: &str, table: &str, key: &str) -> SqliteConnection {
         let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();

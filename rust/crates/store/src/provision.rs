@@ -1162,7 +1162,14 @@ fn install_tenant_identity(
                 "identity-v2 migration required: tenant members still use user_id",
             ));
         }
-        crate::execute_script(&mut transaction, TENANT_IDENTITY_SQL).await?;
+        crate::execute_script(&mut transaction, TENANT_IDENTITY_TABLES_SQL).await?;
+        // Recreating unchanged triggers rewrote `sqlite_schema` and changed
+        // the schema cookie on every boot and push: one more synced commit
+        // per tenant, and every other connection re-parsed the whole schema.
+        // Only a missing or differing definition is replaced.
+        if !identity_triggers_current(&mut transaction).await? {
+            crate::execute_script(&mut transaction, TENANT_IDENTITY_TRIGGERS_SQL).await?;
+        }
         transaction.commit().await?;
         Ok(())
     })
@@ -1628,7 +1635,7 @@ async fn record_bootstrap(
 
 /// Tenant-local Member identity and the Control Plane membership outbox. A
 /// deleted Member projects as `revoked` one revision past its last row.
-const TENANT_IDENTITY_SQL: &str = r#"
+const TENANT_IDENTITY_TABLES_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS members (
   id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active',
   display_name TEXT NOT NULL DEFAULT '', avatar_url TEXT NOT NULL DEFAULT '',
@@ -1644,6 +1651,9 @@ CREATE TABLE IF NOT EXISTS _gonvex_control_plane_membership_outbox (
   membership_revision INTEGER NOT NULL,
   updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
 );
+"#;
+
+const TENANT_IDENTITY_TRIGGERS_SQL: &str = r#"
 DROP TRIGGER IF EXISTS gonvex_queue_control_plane_membership_insert;
 DROP TRIGGER IF EXISTS gonvex_queue_control_plane_membership_update;
 DROP TRIGGER IF EXISTS gonvex_queue_control_plane_membership_delete;
@@ -1669,6 +1679,45 @@ CREATE TRIGGER gonvex_queue_control_plane_membership_delete AFTER DELETE ON memb
   WHERE excluded.membership_revision>=_gonvex_control_plane_membership_outbox.membership_revision;
 END;
 "#;
+
+/// `(name, sql)` of each membership outbox trigger exactly as SQLite stores
+/// it in `sqlite_schema`: the statement text without its final `;`.
+fn identity_triggers() -> Vec<(&'static str, &'static str)> {
+    let sql = TENANT_IDENTITY_TRIGGERS_SQL;
+    sql.match_indices("CREATE TRIGGER ")
+        .map(|(start, keyword)| {
+            let body = &sql[start..];
+            let end = body.find("END;").expect("trigger end") + "END".len();
+            let name = body[keyword.len()..]
+                .split_whitespace()
+                .next()
+                .expect("trigger name");
+            (name, &body[..end])
+        })
+        .collect()
+}
+
+/// Whether every membership outbox trigger exists with its current text.
+async fn identity_triggers_current(
+    connection: &mut SqliteConnection,
+) -> Result<bool, DatabaseError> {
+    let expected = identity_triggers();
+    let names = serde_json::to_string(&expected.iter().map(|(name, _)| *name).collect::<Vec<_>>())
+        .map_err(|error| protocol(error.to_string()))?;
+    let current: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, sql FROM main.sqlite_schema WHERE type='trigger' AND tbl_name='members'
+           AND name IN (SELECT value FROM json_each($1))",
+    )
+    .bind(names)
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(current.len() == expected.len()
+        && expected.iter().all(|(name, sql)| {
+            current
+                .iter()
+                .any(|(current_name, current_sql)| current_name == name && current_sql == sql)
+        }))
+}
 
 #[cfg(test)]
 #[path = "provision_upgrade_tests.rs"]
