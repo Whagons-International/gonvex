@@ -326,7 +326,7 @@ func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
 	controlName := "gonvex_legacy_control_" + suffix
 	projectID := "legacy-" + strings.ReplaceAll(suffix, "_", "-")
 	projectName := "gonvex_legacy_project_" + suffix
-	tenantName := tenantDatabaseNameWithAlias(projectID, "acme", "acme")
+	tenantName := legacyTenantDatabaseNameWithAlias(projectID, "acme", "acme")
 	controlURL := createTenantRegistryTestDatabase(t, baseURL, controlName)
 	projectURL := createTenantRegistryTestDatabase(t, baseURL, projectName)
 	tenantURL := createTenantRegistryTestDatabase(t, baseURL, tenantName)

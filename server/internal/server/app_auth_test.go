@@ -319,11 +319,11 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	}
 	invalidPublicRequest := httptest.NewRequest(http.MethodPost, "/provider-signed-callback", nil)
 	invalidPublicRequest.Header.Set("x-gonvex-project-id", projectID)
-	invalidPublicRequest.Header.Set("authorization", "Bearer invalid-explicit-token")
+	invalidPublicRequest.Header.Set("authorization", "Bearer gvx_session_invalid-explicit-token")
 	invalidPublicResponse := httptest.NewRecorder()
 	runtime.Handler().ServeHTTP(invalidPublicResponse, invalidPublicRequest)
 	if invalidPublicResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("public callback ignored an explicitly invalid token: %d %s", invalidPublicResponse.Code, invalidPublicResponse.Body.String())
+		t.Fatalf("public callback ignored an explicitly invalid runtime session: %d %s", invalidPublicResponse.Code, invalidPublicResponse.Body.String())
 	}
 	if _, _, err := runtime.exchangeAppAuthCode(context.Background(), projectID, code, verifier, redirectURI); err == nil {
 		t.Fatal("expected an authorization code replay to be rejected")

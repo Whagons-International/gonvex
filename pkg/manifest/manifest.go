@@ -12,7 +12,7 @@ const (
 	FunctionKindSync             FunctionKind = "sync"
 )
 
-const NotifySchemaVersion = "15"
+const NotifySchemaVersion = "16"
 
 type FunctionEntry struct {
 	Kind         FunctionKind         `json:"kind"`
@@ -33,13 +33,18 @@ type SyncDefinition struct {
 	ExcludeWhenSet   []string          `json:"excludeWhenSet,omitempty"`
 	VisibilityTables []string          `json:"visibilityTables,omitempty"`
 	// VisibilityColumns is derived from column-scoped Reads by the runtime.
-	VisibilityColumns     map[string][]string `json:"visibilityColumns,omitempty"`
-	OrderBy               string              `json:"orderBy,omitempty"`
-	OrderDirection        string              `json:"orderDirection,omitempty"`
-	Mode                  string              `json:"mode,omitempty"`
-	MaxRows               int                 `json:"maxRows,omitempty"`
-	MaxBytes              int64               `json:"maxBytes,omitempty"`
-	RetentionMilliseconds int64               `json:"retentionMs,omitempty"`
+	VisibilityColumns map[string][]string `json:"visibilityColumns,omitempty"`
+	// VisibilityPredicates is derived by the runtime from Reads that declare a
+	// row predicate (resultTaskIds, resultTaskIdsOrColumnArg:<col>,
+	// columnArg:<col>). It scopes which logged changes of that table can affect
+	// one subscription. Never serialized; absent means every change matters.
+	VisibilityPredicates  map[string]string `json:"-"`
+	OrderBy               string            `json:"orderBy,omitempty"`
+	OrderDirection        string            `json:"orderDirection,omitempty"`
+	Mode                  string            `json:"mode,omitempty"`
+	MaxRows               int               `json:"maxRows,omitempty"`
+	MaxBytes              int64             `json:"maxBytes,omitempty"`
+	RetentionMilliseconds int64             `json:"retentionMs,omitempty"`
 }
 
 // FunctionDependencies describe the database surface a function observes or

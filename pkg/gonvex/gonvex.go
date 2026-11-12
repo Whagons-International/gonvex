@@ -305,6 +305,10 @@ func (o *readOption) Windowed() *readOption {
 // resultTaskIds matches task-linked changes whose taskId is in the previous
 // result. resultTaskIdsOrColumnArg:workspaceId also matches changes addressed
 // to the workspaceId argument, preserving insert and routing membership.
+// callerUserIdColumn:userId matches changes whose userId is one of the ids the
+// handler reported with ReportCallerUserIDs for its previous result; use it
+// only for reads whose result depends on the caller's own rows, never for
+// leaderboards, ranks or totals over other users' rows.
 func (o *readOption) Predicate(name string) *readOption {
 	for index := range o.dependencies {
 		o.dependencies[index].Predicate = strings.TrimSpace(name)
@@ -329,6 +333,14 @@ func Writes(tables ...string) *writeOption {
 	return option
 }
 
+// Columns lists the columns a write can change. Tenant-table writes are
+// observed precisely by database triggers, so this is documentation there. A
+// landlord table's writes are invisible to the tenant trigger stream, so the
+// runtime trusts this list instead: it treats the write as an update of only
+// these columns and skips reactive reads of that table whose declared columns,
+// filters and ordering do not include any of them. Omit Columns for a landlord
+// table the function can insert into or delete from; the write then
+// invalidates every read of that table.
 func (o *writeOption) Columns(columns ...string) *writeOption {
 	for index := range o.dependencies {
 		o.dependencies[index].Columns = cleanDependencyNames(columns)
@@ -483,6 +495,68 @@ func WithQueryChangeDetails(ctx context.Context, reason string, changedAtMS floa
 		details = &QueryChangeDetails{Tables: append([]string(nil), tables...), TaskIDs: append([]string(nil), taskIDs...)}
 	}
 	return context.WithValue(ctx, queryChangeContextKey{}, QueryChangeInfo{Reason: reason, ChangedAtMS: changedAtMS, Details: details})
+}
+
+type callerUserIDsContextKey struct{}
+
+// CallerUserIDCollector receives the caller's application user ids reported
+// by one query execution. Runtime hosts attach it to a reactive execution.
+type CallerUserIDCollector struct {
+	mu  sync.Mutex
+	ids map[string]bool
+}
+
+// WithCallerUserIDCollector attaches collector to ctx for one execution.
+func WithCallerUserIDCollector(ctx context.Context, collector *CallerUserIDCollector) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, callerUserIDsContextKey{}, collector)
+}
+
+// ReportCallerUserIDs tells the runtime which user ids identify the caller in
+// this query's per-user columns, for example the landlord users.id a
+// notifications.userId column stores when the auth subject is a Firebase UID.
+// A read declared with Predicate("callerUserIdColumn:userId") then reruns only
+// for changes whose userId is one of these ids. Report every id whose rows the
+// result can contain, on every execution; an execution that reports none
+// makes the next change rerun the query. It is a no-op outside a reactive
+// execution.
+func ReportCallerUserIDs(ctx context.Context, ids ...string) {
+	if ctx == nil {
+		return
+	}
+	collector, _ := ctx.Value(callerUserIDsContextKey{}).(*CallerUserIDCollector)
+	if collector == nil {
+		return
+	}
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" && id != "<nil>" {
+			if collector.ids == nil {
+				collector.ids = map[string]bool{}
+			}
+			collector.ids[id] = true
+		}
+	}
+}
+
+// IDs returns the reported ids, or nil when the execution reported none.
+func (collector *CallerUserIDCollector) IDs() map[string]bool {
+	if collector == nil {
+		return nil
+	}
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
+	if len(collector.ids) == 0 {
+		return nil
+	}
+	ids := make(map[string]bool, len(collector.ids))
+	for id := range collector.ids {
+		ids[id] = true
+	}
+	return ids
 }
 
 func WithQueryVisibilityKey(ctx context.Context, key string) context.Context {
