@@ -94,6 +94,7 @@ export async function runCheck(c, check, adapter, guard) {
   let safe;
   try { safe=validateRaw(raw); }
   catch(error) { expire(); throw error; }
+  if (safe.status==='pass' && safe.operations.some(o=>o.status==='fail')) { safe.status='fail'; safe.code='operation-failed'; }
   safe.durationMs=performance.now()-start; safe.finishedAt=Date.now();
   if(!safe.deadlineExceeded && safe.durationMs>c.deadlineMs) {
     safe.observedStatus=safe.status; safe.observedCode=safe.code;

@@ -109,6 +109,8 @@ test('R3: producer rejects unsafe adapter output before export and pauses new wr
 test('R3: producer returns safe failed attempts and declares Date.now alignment/quantization',async()=>{
   let operation;const r=await runCheck(context(),'sdk-task',c=>{operation=op({attemptedAt:Date.now(),attemptedAfterMs:c.elapsedMs()});c.operations.push(operation);throw new CheckError('write-rejected');});
   assert.equal(r.status,'fail');assert.equal(r.operations.length,1);assert.ok(r.clockUncertaintyMs>=1);validateRaw(r);
+  const fulfilled=await runCheck(context(),'sdk-task',c=>{c.operations.push(op({attemptedAt:Date.now()}));});
+  assert.equal(fulfilled.status,'fail');assert.equal(fulfilled.operations.length,1);assert.equal(fulfilled.code,'operation-failed');
   operation.appliedMs={private:'FAKE_PRIVATE_SENTINEL'};assert.ok(!JSON.stringify(r).includes('SENTINEL'));
 });
 test('R3: CLI integrity rejection has no stdout, raw body, parser context or private error text',async()=>{
