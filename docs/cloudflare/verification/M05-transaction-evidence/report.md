@@ -120,7 +120,9 @@ its two original Symbol allocations first, then invalidates transaction evidence
 before any observer. `persistReplicaWatermark` keeps its original closed publication
 path; the captured evidence call is pumped only after the frame operation,
 deferred frames and opening-watermark drain finish, and only if it is still the
-same installed call. The original CI failures remain recorded separately from
+same installed call. Its receipt-generation equality uses the existing
+captured-owner-first form, preserving the identical Symbol comparison while
+leaving the extractor's assignment inventory unambiguous. The original CI failures remain recorded separately from
 the correction's checks. Earlier author source-equivalence receipts describe
 their original validated head; this correction requires its own exact-head
 validation and fresh independent review.

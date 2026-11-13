@@ -4837,7 +4837,7 @@ export class GonvexClient {
       && !!auth && this.activeAuthFrameId===auth && this.latestAuthFrameId===undefined && !this.authResendRequired
       && this.tenantAdmissionValue===admission && this.auth.project===project && this.auth.tenant===tenant
       && this.sessionScopeGeneration===session && this.outboxScopeGeneration===outbox && this.outboxScope===outboxScope
-      && this.receiptReconciliationGeneration===reconciliation && this.hasAuthoritativeReplicaScope && this.replicaScope===scope
+      && reconciliation===this.receiptReconciliationGeneration && this.hasAuthoritativeReplicaScope && this.replicaScope===scope
       && this.replicaDefinitionEpoch===definition && this.replicaReady===activation && this.hydratedReplicaReady===activation
       && !this.outboxRecoveryPending && this.localSessionStateValue==='authenticated' && this.replica.freshness()==='current' && this.replica.cursor()?.epoch===epoch
       && this.serverCapabilities.replicaWatermark===1 && this.serverCapabilities.reducerReceiptLookup===1
