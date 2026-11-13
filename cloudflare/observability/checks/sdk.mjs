@@ -9,6 +9,11 @@ import { requireCheck } from './contract.mjs';
 export function sdkApplication({ connect, refs, argumentsFor, matches, durableEvidence, readEvidence }) {
   requireCheck(typeof connect==='function' && typeof argumentsFor==='function' && typeof matches==='function' && typeof durableEvidence==='function' && typeof readEvidence==='function', 'sdk-bindings-missing','blocked');
   requireCheck(['create','update','remove','read','collection'].every(k=>refs?.[k]?.path), 'sdk-functions-missing','blocked');
+  // This adapter's authoritative read uses query.call. A generated query-kind ref can
+  // still declare replica/live delivery; do not erase that mismatch or infer eligibility
+  // from kind alone. A separate audited read binding is required before connecting.
+  requireCheck((refs.read.kind===undefined || refs.read.kind==='query') && refs.read.delivery==null,
+    'sdk-read-delivery','blocked');
   const fresh = async (principal, opts, fn) => {
     const client=await connect(principal,{signal:opts.signal,fresh:true});
     try { requireCheck(client?.localSessionState() === 'authenticated','sdk-auth');return await fn(client); }
