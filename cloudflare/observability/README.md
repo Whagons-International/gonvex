@@ -28,6 +28,27 @@ three regions or continuous monitoring. It creates no tenant/account and sends n
 
 ## Bind the real application later
 
+The [Whagons task preparation](bindings/whagons-task.json) pins cached app source
+`73276b5589d363c1190a6d028413a21559226631` separately from framework source
+`8851a125dbd7316e6de30717bbcaf807ee2f5eb7`. It contains function/argument metadata,
+source blob hashes and missing prerequisites, with no executable binding or credentials.
+
+```sh
+node cloudflare/observability/cli.mjs binding-audit
+# Optional: audit declaration-only JSON with the same shape as proposedTaskBinding().
+node cloudflare/observability/cli.mjs binding-audit declarations.json
+```
+
+The command always exits nonzero: **2** for a BLOCKED report, **1** for unreadable,
+oversized or malformed input. A consistent source plan is not an app success. Arbitrary input
+values are never echoed; only fixed issue codes and expected source pins leave the audit.
+Claiming configured prerequisites cannot enable it. This command performs no SDK/network/app call.
+See [the source/binding report](../../docs/cloudflare/verification/M05-binding-preparation/report.md)
+and [the proposed public evidence port](../../docs/cloudflare/verification/M05-binding-preparation/port-proposal.md).
+`tasks.get` is query-kind **and replica-delivery**. `sdkApplication` refuses that fresh-read
+mapping before connecting; never strip generated delivery metadata to make it fit `query.call`.
+The public SDK evidence proposal remains separate, unimplemented work requiring lead coordination.
+
 `providers/dispatch.mjs` runs portable functions with explicit `context`, bindings and a serialized guard.
 There is no execute-live CLI, default origin, login, identity or selector. The shipped configuration has
 null app bindings and is **BLOCKED** for real Whagons. Never replace these gaps with the test fixture.
