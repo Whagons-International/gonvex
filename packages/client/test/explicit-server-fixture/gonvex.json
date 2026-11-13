@@ -1,0 +1,1 @@
+{"project":"m05-explicit-synthetic","backendDir":"gonvex","generatedDir":"gonvex/_generated","tenantMode":"multiTenant","module":{"language":"typescript","entrypoint":"gonvex/index.ts","split":true}}

@@ -1,0 +1,2507 @@
+{
+  "schema": "m05.explicit-server-evidence.v1",
+  "base": "1b934f15a2bd11db8753fd39dedf895a31952bb3",
+  "priorFrozenBase": "b9c4b2483a5629421caf8a29c2ee867f0d8f21d5",
+  "checkout": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e",
+  "branch": "cf/M05-explicit-server-evidence-b9c4",
+  "domain": "SDK race/control + controlled generated native module; NOT Whagons",
+  "monitoring": "DISABLED",
+  "fullM05": "UNMET",
+  "checks": {
+    "SDK": {
+      "total": 1248,
+      "old": 1178,
+      "new": 70,
+      "fullInvocation": "receipt-guard-sdk-full.json",
+      "realNpmPackDryRun": true
+    },
+    "OPFS": 19,
+    "policies": 199,
+    "watermarkPass": 12,
+    "watermarkIntendedFailures": [
+      4,
+      4,
+      4
+    ],
+    "controlWatchPass": 38,
+    "controlWatchIntendedFailures": 20,
+    "native": {
+      "newComposition": 1,
+      "originalReceipts": 8
+    },
+    "monitoring": 156,
+    "conformance": 29,
+    "generatedRefTypeConsumer": "PASS",
+    "cycles": {
+      "client": [
+        0,
+        0
+      ],
+      "cloudflare": [
+        1,
+        1
+      ]
+    }
+  },
+  "deviations": [
+    "original watermark script attempted Corepack pnpm download; DNS EAI_AGAIN/no test report; failed and retained",
+    "lead-approved private launcher-only adaptation; no shared/extractor/assertion change",
+    "first artifact child compiler stderr ignored by original test; corrected private normal lock-state context",
+    "initial type context ancestor built-SDK fallback corrected in owned archive only"
+  ],
+  "metrics": {
+    "scope": "compiled SDK bytes and whole local runner; NOT serving/app performance",
+    "indexJS": {
+      "base": 316697,
+      "candidate": 324777,
+      "baseGzip": 63733,
+      "candidateGzip": 65142
+    },
+    "indexDTS": {
+      "base": 42695,
+      "candidate": 43297
+    },
+    "newEntropyBytes": 32,
+    "newEntropyHexCharacters": 64,
+    "boundedAuthRecordsPerClient": 1,
+    "fullSDKPhase": {
+      "collection": "pre-receipt-guard sdk-full-current.json (1247), frozen",
+      "memoryPeakBytes": 1242124288,
+      "cpuUsec": 94481301,
+      "wallSeconds": 68.069
+    },
+    "nativeCurrentPhase": {
+      "collection": "pre-receipt-guard native-current.json (9), frozen",
+      "memoryPeakBytes": 811012096,
+      "cpuUsec": 19502219,
+      "wallSeconds": 28.28
+    },
+    "servingRowsLatencyMemoryOverhead": "UNEXECUTED; actual native K12 counters retained in native-current.log; no claimed serving gain"
+  },
+  "tools": [
+    {
+      "path": "/home/gabriel/.config/nvm/versions/node/v24.13.1/bin/node",
+      "resolved": "/home/gabriel/.config/nvm/versions/node/v24.13.1/bin/node",
+      "bytes": 122523096,
+      "sha256": "d95de52ccb76fb2c5775bf176f29f3025e4b19352c092aad51ce5d930717359f"
+    },
+    {
+      "path": "/home/gabriel/.config/nvm/versions/node/v24.13.1/lib/node_modules/npm/bin/npm-cli.js",
+      "resolved": "/home/gabriel/.config/nvm/versions/node/v24.13.1/lib/node_modules/npm/bin/npm-cli.js",
+      "bytes": 54,
+      "sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/coach-compile",
+      "resolved": "/home/gabriel/.local/bin/coach-compile",
+      "bytes": 3184,
+      "sha256": "dacea7997d490a715410d8fccf9f965d83de3e9138cd2ca4b6b3748cf48cb00f"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/build-headroom",
+      "resolved": "/home/gabriel/.local/bin/build-headroom",
+      "bytes": 93,
+      "sha256": "7264efbfd1da6982967642226c02744b9ace740026e3e620dcb110716eabe922"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/coach-resources",
+      "resolved": "/home/gabriel/.local/bin/coach-resources",
+      "bytes": 88,
+      "sha256": "9ab4b91d9f73965fa38f62a366fd68e8de1a182e5791509e4e416130b46c6acd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/source/framework/packages/gonvex/node_modules/typescript/bin/tsc",
+      "resolved": "/mnt/data/work/gonvex-merge-continuation/node_modules/typescript@7.0.2/node_modules/typescript/bin/tsc",
+      "bytes": 44,
+      "sha256": "2219f428a7e55aaf1f7ad85b9b0f0cf5078aeb76ccc9a7c6036c92d48f492ffd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/source/framework/packages/gonvex/node_modules/typescript-api/lib/typescript.js",
+      "resolved": "/mnt/data/work/gonvex-merge-continuation/node_modules/typescript@6.0.3/node_modules/typescript/lib/typescript.js",
+      "bytes": 9144216,
+      "sha256": "569177652966bd528c319171c7dd22860dbf72bde116cbc4f644f1d02bb12e39"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/source/framework/cloudflare/node_modules/vitest/vitest.mjs",
+      "resolved": "/mnt/data/work/gonvex-merge-continuation/node_modules/vitest@4.1.12_@types+node@24.12.4_jsdom@29.1.1_vite@8.2.1_@types+node@24.12.4_esbuild@0.28.2_jiti@2.7.0_yaml@2.9.1_/node_modules/vitest/vitest.mjs",
+      "bytes": 43,
+      "sha256": "39db22f579acf5639bbb17a261408debbde03f4692c0c439e77e7f13aeba74d6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/source/framework/cloudflare/node_modules/wrangler/bin/wrangler.js",
+      "resolved": "/mnt/data/work/gonvex-merge-continuation/node_modules/wrangler@4.155.0_@cloudflare+workers-types@5.20261028.1_@types+node@24.12.4/node_modules/wrangler/bin/wrangler.js",
+      "bytes": 3088,
+      "sha256": "780661a508810f3b65786895b1ca9aacbc4f55d329ae6b8c1e49ec8433569f77"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-merge-continuation/node_modules/@cloudflare+workerd-linux-64@1.20261023.1/node_modules/@cloudflare/workerd-linux-64/bin/workerd",
+      "resolved": "/mnt/data/work/gonvex-merge-continuation/node_modules/@cloudflare+workerd-linux-64@1.20261023.1/node_modules/@cloudflare/workerd-linux-64/bin/workerd",
+      "bytes": 144038248,
+      "sha256": "b6aff93fcc97091fa38b4ba78c172276349c4940000694c5baf382c218b8e6ee"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-merge-continuation/cycle-tool/node_modules/madge/bin/cli.js",
+      "resolved": "/mnt/data/work/gonvex-merge-continuation/cycle-tool/node_modules/madge/bin/cli.js",
+      "bytes": 6239,
+      "sha256": "8d58bbb04977e5c68f85d9496ada8d7129fa751dd3d314129ef9d0a79ecd3bea"
+    }
+  ],
+  "sources": [
+    {
+      "path": "packages/client/src/index.ts",
+      "bytes": 322960,
+      "sha256": "40f488d63b7a8d8ccfd6be540605169db56b0fe60e9fe734e977179a2cb564e7",
+      "baseBlob": "a82b6e0d8597871907b8594605c6e1aa2ef6abe2"
+    },
+    {
+      "path": "packages/client/src/transaction-evidence.ts",
+      "bytes": 6316,
+      "sha256": "4426b2b98230984f50b682124cb093bbaf0cfbed257543fd4d77eb322e3eeb57",
+      "baseBlob": "28e7c388e1d0269d63f43f14b789865355b15147"
+    },
+    {
+      "path": "packages/client/src/transaction-evidence.test.ts",
+      "bytes": 13717,
+      "sha256": "2b6da837541ef95cdd97c325518337b3adef6590c1d1f80ec955995e735b5139",
+      "baseBlob": "5af163f6c1a9962f0837caa449d36d422cd19b62"
+    },
+    {
+      "path": "packages/client/src/explicit-server-evidence.test.ts",
+      "bytes": 19757,
+      "sha256": "cfad5c98a4b79480e80837b3db6c221058bed39c649af2527285815569397881",
+      "baseBlob": null
+    },
+    {
+      "path": "packages/client/test/explicit-server.native-proof.ts",
+      "bytes": 9359,
+      "sha256": "ccf5e28d0c38f03a543e37c9b5e104a0b20f9bcb4aa78ac6b13cc9c2455751b0",
+      "baseBlob": null
+    },
+    {
+      "path": "packages/client/test/explicit-server.native-worker.ts",
+      "bytes": 1059,
+      "sha256": "3f4e2a5c73b85380fd2f835929f4785c3554af4dae7d7c09e44c27ecaa8687c5",
+      "baseBlob": null
+    },
+    {
+      "path": "packages/client/test/explicit-server.build.mjs",
+      "bytes": 2575,
+      "sha256": "c6bc428b3411458f6c06c810bdfa31ee033673bc9843a410349965ca7b9c88b1",
+      "baseBlob": null
+    },
+    {
+      "path": "packages/client/test/explicit-server.types.ts",
+      "bytes": 1410,
+      "sha256": "16316fc407dcaeab7157b017fe090231f970ddfb27d525034f0b2314efc736ef",
+      "baseBlob": null
+    },
+    {
+      "path": "verification/typescript/check-watermark-publication-runtime.mjs",
+      "bytes": 5610,
+      "sha256": "9c0ed90fedeec1afe179c979ae5a4dfc230abd434cda494aebd8069616fe09f7",
+      "baseBlob": "f429e70f5f07949ccc279575178c7993afd3995e"
+    },
+    {
+      "path": "verification/typescript/check-control-watch-runtime.mjs",
+      "bytes": 5534,
+      "sha256": "6e468bff4d141df1dec9234320faaebc538f24640c557fb0a7f7b2fd40b4a963",
+      "baseBlob": "8f111ee0f0b3b58849c2346295f57f965466410f"
+    },
+    {
+      "path": "verification/typescript/watermark-publication.mjs",
+      "bytes": 15340,
+      "sha256": "b2b170474c53ba617e4905318eeb5e32250ea97f24a1729e6b32c09a191cff8f",
+      "baseBlob": "1af8be48e8382b29500bcff060077b4b7763dab2"
+    },
+    {
+      "path": "verification/typescript/control-watch-publication.mjs",
+      "bytes": 5894,
+      "sha256": "fbfffb9e6ea0762616e4fb6930f4b7e37ca2fa89ef89d045490cc00062ab5b8c",
+      "baseBlob": "d646d2c3480f510639738a5e514f3a8be6167b2b"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/path.ts",
+      "bytes": 21311,
+      "sha256": "3753791b7d653bd60677d04866349e572ed03aff5e81703ec902a06454c80d66",
+      "baseBlob": "3267c437e752e218b5845c87a2ad5c7acf840fb4"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/module.ts",
+      "bytes": 5963,
+      "sha256": "af4dfecf9ac281d894bbc0980a8e7627fba32746e1886f9450bc2166eb3b92af",
+      "baseBlob": "cf86953f1e4ec16465ec9204f9e9e423084ac3af"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/tenant.ts",
+      "bytes": 12387,
+      "sha256": "b09dc974d155c620e06dc36e860569cc8a7ef6a328ea0bb29c71371a6e8014d5",
+      "baseBlob": "9da3b23f51c0c9319c7f36884f1237973f23d339"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/receipts.spec.ts",
+      "bytes": 15201,
+      "sha256": "6af723e7c0057af781dfb053bf4931fbf5665041a92d8882a2d82036998b6cb8",
+      "baseBlob": "0e79fad388ffa76460a8d8403e6a15efff244e4b"
+    },
+    {
+      "path": "packages/protocol/src/index.ts",
+      "bytes": 23753,
+      "sha256": "1aa211b8367cd6e7a066576bef501b15cfea54548976f0405fbe480b29aa9bae",
+      "baseBlob": "4775cb60387d81c99799091f45074b0b1bc0308b"
+    }
+  ],
+  "receipts": [
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/base-adoption.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/base-adoption.json",
+      "bytes": 766,
+      "sha256": "2f693899302daf6d671bc7d4fb76f3601ab97f4cf761747ba7d081ec1f076338"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/base-archive.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/base-archive.json",
+      "bytes": 157,
+      "sha256": "0c41885696f91b422fb375f109dc8f463b0636c453482acad30d394fa092a8ce"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/base-client-build-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/base-client-build-headroom.log",
+      "bytes": 112,
+      "sha256": "7b426504e86c32d353c82e4cfe19f6561807d7b7a8bbfba84ca5feeab6a36796"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/base-client-build.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/base-client-build.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-02-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-02-headroom.log",
+      "bytes": 112,
+      "sha256": "45c201a84a9626b210c8b734b6c0978d2057ebcff6917c417259d5c1b3085975"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-02.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-02.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-current-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-current-headroom.log",
+      "bytes": 112,
+      "sha256": "10b049dca51ce380c352d3a65cbf74ecac28e2db9f82b699a6bde0401f5282c9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-current.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-current.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client-headroom.log",
+      "bytes": 112,
+      "sha256": "c84f530d1fa06a4b78738c82cb1b88272d794eb189376d7795a0727064e02065"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-client.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-gonvex-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-gonvex-headroom.log",
+      "bytes": 112,
+      "sha256": "9d7dcf444e6c2413095be1325f74b98e9b2ca3467057cb355a4374e272e4c9e9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-gonvex.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-gonvex.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "155d648fd750fe7d4e3f08fb57efd8a7a9e5a43268cbf5ac4ba1ac541a941d37"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-local-runtime-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-local-runtime-headroom.log",
+      "bytes": 112,
+      "sha256": "0f9d6a53bb96ae99f621ca63ae0b5aafb1bbee5096afb06c4fa603022f14cc8a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-local-runtime.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-local-runtime.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-module-sdk-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-module-sdk-headroom.log",
+      "bytes": 112,
+      "sha256": "ae5e46194171e1d360ea2152d36a5ca94ec0856dd4ccf88ec73234b443874eb3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-module-sdk.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-module-sdk.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "474463fb071e8c98c9b6ddf930837cab65024210883ad2c327420c7447c17faf"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-protocol-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-protocol-headroom.log",
+      "bytes": 112,
+      "sha256": "d331a54b8203b0e2e75b0724b42eade233c196b21b3e7309b588879d50b71a0a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-protocol.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-protocol.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-react-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-react-headroom.log",
+      "bytes": 112,
+      "sha256": "8247e516b474e0bddc0181bf852f7e905db37338da5cc9583af7c38b41a0c817"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-react.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-react.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-resources.log",
+      "bytes": 2557,
+      "sha256": "a1f87884c1754c7973b90010c706fec9dd00d6f8be98186fb41921ca318603b6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/build-steps.json",
+      "bytes": 3754,
+      "sha256": "50e49d4c3941ec8af32586d6d7c4df9e888fb9fcc8080fe9a479b568792eae6a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/changed-files.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/changed-files.json",
+      "bytes": 5230,
+      "sha256": "771b70acc007c3ff324f50dd156644f28529ab3d9a924928160bc6b17793e2cd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/classifier.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/classifier.json",
+      "bytes": 142,
+      "sha256": "7faf26a5b809fd49dca2e8eaa4348055f2633745223ab3a3066412cbb0b288f1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cloudflare-types-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cloudflare-types-headroom.log",
+      "bytes": 112,
+      "sha256": "5216798b8ba68f2afa2fe56b636690bd8bdd807c6019801464460a9b6d64adb8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cloudflare-types.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cloudflare-types.log",
+      "bytes": 1386,
+      "sha256": "002fe6423e201ca17f012ec0390e5b8914a4db1bccb64ba3c52974e31e759dc0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/collected-native-manifests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/collected-native-manifests.json",
+      "bytes": 66435,
+      "sha256": "9a33930c08f94cc27abb8411d74085294240c40a9ca47fd24cc1b9734d2509d1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/collected-native-v2.module.js",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/collected-native-v2.module.js",
+      "bytes": 10062,
+      "sha256": "8ef0444fdfdeffa4df3464535356fbdf966a950e84580a761dcd51b6943aff7e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/collected-native.module.js",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/collected-native.module.js",
+      "bytes": 10062,
+      "sha256": "8ef0444fdfdeffa4df3464535356fbdf966a950e84580a761dcd51b6943aff7e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/compile-fd-current-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/compile-fd-current-headroom.log",
+      "bytes": 112,
+      "sha256": "aa0d41ea2cb8ef580b3605376c8ff8536be9c43aaa72884bef60fa7e3f0a6619"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/compile-fd-current.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/compile-fd-current.log",
+      "bytes": 196,
+      "sha256": "596d0c579fc6980c7ec24bd1a572b981e6fe00f2d489aac321f4766dba5d0b49"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/compile-fd-preflight-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/compile-fd-preflight-headroom.log",
+      "bytes": 112,
+      "sha256": "eb33212a61506a2e8efb7f806e3e01c4785c87c511fd90e5d6f5ab0fbe00c414"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/compile-fd-preflight.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/compile-fd-preflight.log",
+      "bytes": 196,
+      "sha256": "887851982d4d0b824163784767d85b881c5ceaebd1246664ed0f3f0249f0beca"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/conformance29-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/conformance29-headroom.log",
+      "bytes": 112,
+      "sha256": "ff5bac14474f2800ee70b2c90a82699de3fe770c67dbf8a5a220f2ade7f766b8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/conformance29.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/conformance29.log",
+      "bytes": 2655,
+      "sha256": "045a59fef438783576d7e29b07b56e0cbe4821706c6f344f4ee45388b1aca67b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-types-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-types-headroom.log",
+      "bytes": 112,
+      "sha256": "a1940a96739ce19c0b52d9baff09370a1a5698462f5c0d345303f6a9ad489ae0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-types.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-types.log",
+      "bytes": 1210,
+      "sha256": "70e2c3781819a10565146f46862ab1b48bd647ba56b4ed42c047782963dc7c14"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/compiled-source.json",
+      "bytes": 169,
+      "sha256": "30ceed41981ea30ed561e0a30835b618db5d8bd5b543bb22ac7128aac277aad9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/execution.log",
+      "bytes": 150,
+      "sha256": "25dee41fbd6bc8605ac5ad6326f9306f72622027b9c2a3acb51344b00d2db5f9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/native-close.jsonl",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/native-close.jsonl",
+      "bytes": 1471,
+      "sha256": "9263b078a7d0c94def3fa49675abce6765e1471aad4f533e12a7ca75e3776e94"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/tests.json",
+      "bytes": 11828,
+      "sha256": "bd714455ed5967aeca5088988d9856c98e2d4dc6e68a379eb70efb0845a88238"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/candidate/vitest.config.mjs",
+      "bytes": 664404,
+      "sha256": "0159bb5a010534f35e8844e9df099e1fa4bc914a3d6fb16851d0d4568b509976"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/check-only-before-watch-fanout/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/check-only-before-watch-fanout/compiled-source.json",
+      "bytes": 169,
+      "sha256": "1416ec9dce9eff415411c6be7e5bad466b2ec3a49ac2161d1f6d93d56be77a69"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/check-only-before-watch-fanout/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/check-only-before-watch-fanout/execution.log",
+      "bytes": 171,
+      "sha256": "90918dc58c8a4044784f34327a79ea57930b22ed604a81d3baddd35d28b5b108"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/check-only-before-watch-fanout/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/check-only-before-watch-fanout/tests.json",
+      "bytes": 11181,
+      "sha256": "3fc1dd02a166e5cec6eeb077f24034b7f3675e7320dee8354bd1e8a3c7574d1c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/check-only-before-watch-fanout/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/check-only-before-watch-fanout/vitest.config.mjs",
+      "bytes": 664423,
+      "sha256": "a6486425df9619f6c29bd069f86ab4ac2f7be3249b8b770f093d4647d2f54f36"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/compiled-source.json",
+      "bytes": 169,
+      "sha256": "b43b1d75be568fb6ab680be6939c9636e06adc6ef1d81113d1cf6aa31d75ecd0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/execution.log",
+      "bytes": 170,
+      "sha256": "e1d55cfc9123995af5db3741e308bf35eed7ebbb255e75b377b7141b354ea973"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/native-close.jsonl",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/native-close.jsonl",
+      "bytes": 211,
+      "sha256": "cd3f7f4e68a3c6433624d26d3b4f34768fb76b8c675f25b17c8b961563cc958a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/tests.json",
+      "bytes": 11428,
+      "sha256": "737bb4e49981c5fe32fbe9cd1d72732c10364807557dcda5a5ad89804a11adb9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-receipt-activation/vitest.config.mjs",
+      "bytes": 664442,
+      "sha256": "920e07f06959aa0d6faa0512b476a74c0149282e0531cbee4b1891238f6454de"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/compiled-source.json",
+      "bytes": 169,
+      "sha256": "c047556faa2ec674f588e8da7ac6bd432f4924b77f796c86879bb5725d3fcf0e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/execution.log",
+      "bytes": 167,
+      "sha256": "4696373c69a411c0d202b6b07f2e8043f37b616418859506eac897b295e77dbf"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/native-close.jsonl",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/native-close.jsonl",
+      "bytes": 236,
+      "sha256": "1e9d60e4183adf3a6ea33f12b15e6b215d1269511e2eb7e61d486647eccb69c5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/tests.json",
+      "bytes": 11427,
+      "sha256": "4fd62718e2286e9604ff57d4a1079268d1ed85cda64e1a6de2fd04b818057122"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/clear-uses-transport-owner/vitest.config.mjs",
+      "bytes": 664399,
+      "sha256": "46341fdc370e86b4da8922893d02bb2321b7eb8812cf0c67db5a02c751f6e718"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/late-session-scope-invalidation/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/late-session-scope-invalidation/compiled-source.json",
+      "bytes": 169,
+      "sha256": "b24a5853ea3ab7cd796fee15f5affc9326e778666e37d4f9a4ade71b610cbb4a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/late-session-scope-invalidation/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/late-session-scope-invalidation/execution.log",
+      "bytes": 172,
+      "sha256": "77fac6ec00ec3ebb5a37fe922f26d97b1fcc7b461e10f95103e56551b7e29053"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/late-session-scope-invalidation/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/late-session-scope-invalidation/tests.json",
+      "bytes": 11245,
+      "sha256": "1792a16c15ffcd2156bf0086793d3a9a508cd726885f1a06596db36bab029b8f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/late-session-scope-invalidation/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/late-session-scope-invalidation/vitest.config.mjs",
+      "bytes": 664428,
+      "sha256": "7c271b1c79759ec90a81cd60a4c07f667d1d9f5d68165b7bea7d8119b9db5b8d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/notify-before-scope-installed/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/notify-before-scope-installed/compiled-source.json",
+      "bytes": 169,
+      "sha256": "89a9cc3cb30e581afa7d8d286a3c05d39ac7dd1465ef11e8302eb3809b6b47bb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/notify-before-scope-installed/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/notify-before-scope-installed/execution.log",
+      "bytes": 170,
+      "sha256": "87f1e784539f7b74900bcf9b6bf00a0ed92d6b81b4ba6d793be21fed1db1fba2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/notify-before-scope-installed/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/notify-before-scope-installed/tests.json",
+      "bytes": 14069,
+      "sha256": "85ece75a9334db5b97e095fd7dbcfb49d925b022318a4bcad67a064833c2516d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/notify-before-scope-installed/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/notify-before-scope-installed/vitest.config.mjs",
+      "bytes": 664377,
+      "sha256": "448716396f03d0d6b33216322c58643c54ce9db0b696a93657a8be85d295e270"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/receipt.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/receipt.json",
+      "bytes": 9043,
+      "sha256": "0c5118958085e58b7ec9ad2236ef3893fb5764520c732f0b1d1fe6167e4250dc"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/reuse-visibility-activation/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/reuse-visibility-activation/compiled-source.json",
+      "bytes": 169,
+      "sha256": "91459e04a984936c139d2cfef2573973c4cf5849e76c44fa457eca25ba6ed336"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/reuse-visibility-activation/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/reuse-visibility-activation/execution.log",
+      "bytes": 168,
+      "sha256": "6df4774f038b04620b60dfe63b60ea0193190442b2b4104c3d4af3075e6070a8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/reuse-visibility-activation/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/reuse-visibility-activation/tests.json",
+      "bytes": 11213,
+      "sha256": "fb7e02cd0f7f991b43db6d7ecce07a412b9650b0c29f9ca3303a573419876510"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/reuse-visibility-activation/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/reuse-visibility-activation/vitest.config.mjs",
+      "bytes": 664441,
+      "sha256": "24855973bb394e854413e4fdad9873b74960d0c976ebf9542928e5c100a94595"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-inactive-owner-read/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-inactive-owner-read/compiled-source.json",
+      "bytes": 169,
+      "sha256": "34388a7f611554e2359050924ca154b5178668ead82e171c3cc6a1054cd9c45b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-inactive-owner-read/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-inactive-owner-read/execution.log",
+      "bytes": 165,
+      "sha256": "dd14c96a2ea20b92ce7dff48a95a2ff7bc081d4222c98b05fcafb6fd6b9cb159"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-inactive-owner-read/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-inactive-owner-read/tests.json",
+      "bytes": 12128,
+      "sha256": "c59556ba03b1342fc5abc33f15b23e5c741c2b43720a53c44c482adffaf63ecb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-inactive-owner-read/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-inactive-owner-read/vitest.config.mjs",
+      "bytes": 664388,
+      "sha256": "bf021b310e16183386bc52b2b49e02e5f9adefe89f5625d3aed297bfa7012c42"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-scope-observer/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-scope-observer/compiled-source.json",
+      "bytes": 169,
+      "sha256": "e9c4673bbcb1d1d1936f89e654c421727c6f3bab96bf1521363cd99d3eaf088b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-scope-observer/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-scope-observer/execution.log",
+      "bytes": 160,
+      "sha256": "6c6154a1f1b1e016b3fbe1acec6b9f13d7d0a0930672c9b93a319ac866a01cca"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-scope-observer/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-scope-observer/tests.json",
+      "bytes": 14061,
+      "sha256": "871ed4fcf17fe691c6648cd02500670bfa1dce6d691a4c01c3312daac65a5dcf"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-scope-observer/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-scope-observer/vitest.config.mjs",
+      "bytes": 663980,
+      "sha256": "ce1cb3b258114e2b2e6aca2137c2b973caced7d38f55695571655eae4a268c30"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-watch-restart/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-watch-restart/compiled-source.json",
+      "bytes": 169,
+      "sha256": "f2a01801653f5e632f9a5269473fdfebdfb4f38a0b5216ac605c415c5b7c18e8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-watch-restart/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-watch-restart/execution.log",
+      "bytes": 159,
+      "sha256": "6e0168da976ae3e43b92104e47e27cbc2903953be5fd98cbe5cd96c5688ec838"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-watch-restart/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-watch-restart/tests.json",
+      "bytes": 12657,
+      "sha256": "7a7d8e15b38770db15ded2561b608aa0bb2bf43c1cd6deb8b80aa959e535eddb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-watch-restart/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/skip-watch-restart/vitest.config.mjs",
+      "bytes": 664395,
+      "sha256": "3a4b8e56e60f8ddbf3e0e458a0c59203280ca08752b55234dc456f1debd0be4c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/tie-cache-to-connection/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/tie-cache-to-connection/compiled-source.json",
+      "bytes": 169,
+      "sha256": "8aa084d4b9ff3130bbdf7cb911d4b1b4640557edb2047095483454b321a18fb3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/tie-cache-to-connection/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/tie-cache-to-connection/execution.log",
+      "bytes": 164,
+      "sha256": "90d92ecb11dd331fbef8aa602aac03193732d34517b4bf9d7b7e313e3676c5ac"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/tie-cache-to-connection/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/tie-cache-to-connection/tests.json",
+      "bytes": 11237,
+      "sha256": "b51a33861f4c5b0baf7bfd97a47c71255cd741a9f1414ecf16690ce5d44786cc"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/tie-cache-to-connection/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/tie-cache-to-connection/vitest.config.mjs",
+      "bytes": 664378,
+      "sha256": "d4cb1f12d47b2da1f4b0b9d0fef475207c14363690274c0e66d54831d2e91a4d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-data-notification/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-data-notification/compiled-source.json",
+      "bytes": 169,
+      "sha256": "03089f38cce1b644c7f542a090ec2f4b5f2805774fbf9ea799a84a3ad07053a5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-data-notification/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-data-notification/execution.log",
+      "bytes": 167,
+      "sha256": "1760f9104580ec951ed78e498248d47e79cdad0e5e69ebde37b90bf4b1f5ce6c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-data-notification/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-data-notification/tests.json",
+      "bytes": 11188,
+      "sha256": "4066823d3eae0570483ca63f10aac010e384cfbf118e9cb1dc38f337eb23bfaf"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-data-notification/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-data-notification/vitest.config.mjs",
+      "bytes": 664386,
+      "sha256": "be51827c79e6093cf26121a9d46f9807c412c0366473b9b46ad8876b7afb060e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-initial-notification/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-initial-notification/compiled-source.json",
+      "bytes": 169,
+      "sha256": "753629346dd9a8530a9feba4ddedb6ec03281f6b8b15874c33e2e0ff4923d40d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-initial-notification/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-initial-notification/execution.log",
+      "bytes": 170,
+      "sha256": "b7dca950f9686341f1b38e88869626fb3bcf463f8c1306bed37b2ead91b988f6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-initial-notification/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-initial-notification/tests.json",
+      "bytes": 11191,
+      "sha256": "981853213d8b24fa6284a0f1a7d2d073ff7267a9f176f12b14c4715d4c885ddf"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-initial-notification/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct/unfenced-initial-notification/vitest.config.mjs",
+      "bytes": 664411,
+      "sha256": "485b564d595b731485accef94e25088c2c305dcf24bc0e58923320ac89fa0cd4"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct-headroom.log",
+      "bytes": 112,
+      "sha256": "ad10a1c478072af49d80c05937e366e4b145c7e45ed31c73282b767ea21703ed"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/control-watch-runtime-direct.log",
+      "bytes": 102,
+      "sha256": "613f040f0755132b1eddbac0d36692b50f138eafac8cf2a1e523a68f4120723d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-preflight-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-preflight-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "f94998f7ccdcac1e133ab07594234f8a5c1b5686cc08dfd183cf0038ba7839a3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-preflight-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-preflight-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "faf83fa97e54397a5af70da64970ac5d8c8636fde83eb552b2146cd4055e41d8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-preflight-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-preflight-resources.log",
+      "bytes": 2499,
+      "sha256": "d56b813b4243659ba2763a2e02a62847c9eb08dd13cab47f998d76aca9e98f1b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-preflight-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-preflight-steps.json",
+      "bytes": 4575,
+      "sha256": "1e2a70f62430e81e8bbc42544f396a8fc540171eaa728b903128f48c3589b557"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-source-identity.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/current-source-identity.json",
+      "bytes": 8001,
+      "sha256": "25775382b4cbf5f865bc1ce626f6b92ceceb33186a687f3c4ff35a8d72867421"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cycles-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cycles-headroom.log",
+      "bytes": 112,
+      "sha256": "491bf57e22f44a22625f67e2cf29b7f8ee20cac10fe581a99e7746acf72d7ba1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cycles.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cycles.json",
+      "bytes": 5812,
+      "sha256": "242621026500f11962b049e241eed7f6e6f43dab58e1c6e7aeac655dde79d439"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cycles.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/cycles.log",
+      "bytes": 103,
+      "sha256": "f22bba61c13e57b08cfca481f18231594d020deb483f5d3f910f390fd6f0e553"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dashboard-codegen-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dashboard-codegen-headroom.log",
+      "bytes": 112,
+      "sha256": "8229751c26c71b675c3e682dfaf1b2a1b34ca906d8d441bebc31b83299afe06b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dashboard-codegen.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dashboard-codegen.log",
+      "bytes": 293,
+      "sha256": "3e21b03bc005a1f2dc37ea69c8ef9eb6c08b6dc9e93d8940c0ddf37649645b62"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dev-02-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dev-02-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "60bafd8478d6dfeb1e091ebea7d45bb9580f450e6ae38ec7d6e2c13aaf1717be"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dev-02-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dev-02-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "8abb1021ca5021fb6783e5754be7d28c91e41a1f66737c9f468ea608f1f6fc2b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dev-02-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dev-02-resources.log",
+      "bytes": 2487,
+      "sha256": "abf5096e1057d94aff6155254bd39e01663883fd21966ec138338c822683eb5c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dev-02-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/dev-02-steps.json",
+      "bytes": 1631,
+      "sha256": "0513153a01fb0794b8d662c3730866713f690e95379c61aaa133e157dd7c4a73"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/direct-launcher-adaptation.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/direct-launcher-adaptation.json",
+      "bytes": 1749,
+      "sha256": "76c28dbe7c2c69b09042fe7ef4eed56f4ac3adbc55a5fdf6a36673461109386f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-mdx-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-mdx-headroom.log",
+      "bytes": 112,
+      "sha256": "ff397dba9cb6a289362a3e8f7100a3cea35fe5f28c35deeb6ce191be81d34923"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-mdx.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-mdx.log",
+      "bytes": 44,
+      "sha256": "478062e1a62360b2401575e05cd670899677ece43ad1544d088b04b45f8181dd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-next-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-next-headroom.log",
+      "bytes": 112,
+      "sha256": "4fe0c8aae2620759143a7b6bc6bcd7579dd097e13650f03cb7a5b54b00f77cb6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-next.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-next.log",
+      "bytes": 104,
+      "sha256": "5a1d20dd14cdeaffa3ee0f4536ddd497111c0951fc8e1c64f1de70e4f493870f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-tsc-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-tsc-headroom.log",
+      "bytes": 112,
+      "sha256": "216b4167ac82dac1eed88c51ad23efe2d18a7445cfac6b32afc52a58d29c87de"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-tsc.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/docs-tsc.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-check-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-check-steps.json",
+      "bytes": 2661,
+      "sha256": "c8996ab8bf44f9e5574f4f02e8e306e602b8baf8c14d26e04dccad08739ce357"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-checks-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-checks-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "7c7498509e8605991d7b3bc2202c823b7e59db06e66f17f81d9280d8095ac6fd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-checks-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-checks-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "237b143166183b0e75015c52bddb63d83973eb8613e49000434a7ef2f33511f9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-checks-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-checks-resources.log",
+      "bytes": 2515,
+      "sha256": "7d446e39ed862e0cb10a5f381b767c14b7db2ea54150bc310bb38f92d8d6f8ea"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-current-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-current-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "dfec48a5e01e79ca3fd3b59feac7927a5527dcc6d291c27da58d0b4e8f721835"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-current-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-current-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "258f6472244e9b8351ebcd93579c10ead0bd6d00517c2ec707b2b8e54eaec25c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-current-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-current-resources.log",
+      "bytes": 2570,
+      "sha256": "11118f062ab4c462240e7651261a3bc52c8d9f6cd777ffec28bbf3ee9e67d0e8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-current-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-current-steps.json",
+      "bytes": 3851,
+      "sha256": "f55561c9f332bacbc580fc7c9b9eccff210ae9be14be775e1984740cd3770920"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-actions-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-actions-headroom.log",
+      "bytes": 112,
+      "sha256": "0a2f6cece89b1c54bcdace967bff437e8fa0ba27d8d497f9aa6a086fb6abdcb1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-actions.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-actions.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-cloudflare-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-cloudflare-headroom.log",
+      "bytes": 112,
+      "sha256": "d6ddb5c60382e8ed62c2a71f29b0f3c037d4c01f036f0e38621f832f546ff368"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-cloudflare.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-cloudflare.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-control-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-control-headroom.log",
+      "bytes": 112,
+      "sha256": "de984e7c6f85dfb3dd3e43fc99c2a4053cc6f4176147781c81b9db46d732ffda"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-control.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-control.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-files-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-files-headroom.log",
+      "bytes": 112,
+      "sha256": "e68d206ed52d693d53316f6c6bc445b16a5931fe19bed662d2d58b93432e3209"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-files.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-files.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-host-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-host-headroom.log",
+      "bytes": 112,
+      "sha256": "667a30fc9ea1dc37a56e68062aa064edd4c41fb9e5f18af6af11bf6dcc155a12"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-host.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-host.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-principals-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-principals-headroom.log",
+      "bytes": 112,
+      "sha256": "ed582bf2e4053c55537a3b83b4a51b9fcc812f9b35f4165aea32c74daf99bcaf"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-principals.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-principals.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-telemetry-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-telemetry-headroom.log",
+      "bytes": 112,
+      "sha256": "72590662deeba423f73fb180887b85cf480cb1873ce81ef872952a16d1994ec2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-telemetry.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-kernel-telemetry.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-router-dev-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-router-dev-headroom.log",
+      "bytes": 112,
+      "sha256": "96b917972e77c21b1982faabe87cfcd379dddaa085fd0b6735fb757b81d78c8e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-router-dev.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-router-dev.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-router-ingress-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-router-ingress-headroom.log",
+      "bytes": 112,
+      "sha256": "e7abb7c170a9f2dc2508902cc62c7e69f0aa6012611b440ecf50d25a386b959a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-router-ingress.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-router-ingress.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-sandbox-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-sandbox-headroom.log",
+      "bytes": 112,
+      "sha256": "5c9b4b11d9711348727768e11207348251e8e6602a7fc77d3faf99bfa8c9f7aa"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-sandbox.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/final-types-sandbox.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/fixture-codegen-02-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/fixture-codegen-02-headroom.log",
+      "bytes": 112,
+      "sha256": "2049bdb532ce91dcd044bfb044f804bd5a6f5624f788df02a8fb5d09f9652802"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/fixture-codegen-02.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/fixture-codegen-02.log",
+      "bytes": 122,
+      "sha256": "1c6635e789c567fa9398ffe8a1e23cd7c9cc6b12693f85172ed5b692612a7a0a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/fixture-codegen-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/fixture-codegen-headroom.log",
+      "bytes": 112,
+      "sha256": "870e0996cb6542952b499eacfda3458d8d36888ac93a014e3c5547d06e360038"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/fixture-codegen.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/fixture-codegen.log",
+      "bytes": 293,
+      "sha256": "fac8e4a190a5e1d7b86940ad39a264b60d6c566a07980a02a3917b9b47f4ef66"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-current-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-current-headroom.log",
+      "bytes": 112,
+      "sha256": "e6a6d46829341c19ab9feb6c4aa25505aa7e8ab53d5b931f005b4940759163f1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-current.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-current.json",
+      "bytes": 28121,
+      "sha256": "f4f8cffb6190631ae886669c89cd160ba89b7df34a3aa2e3780d2a55b6c9febb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-current.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-current.log",
+      "bytes": 121,
+      "sha256": "1a2621953cc90569bc51033169b08125eb6bd7d58a286c5c6dad96a16f1fd294"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests-02-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests-02-headroom.log",
+      "bytes": 112,
+      "sha256": "11cfa4a45921b43c6ad218a2ac19e64681983a2d18ba2fb38ef0120427e45c13"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests-02.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests-02.json",
+      "bytes": 22806,
+      "sha256": "5bed0cc54a327c943c4d1c19d36549fe434d96249fa509d80e1a38a5706aece3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests-02.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests-02.log",
+      "bytes": 122,
+      "sha256": "e73e48d0aee16ca6f3943b13a6fa5ad20ec5111d4a549d83a3c9464894d5f485"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests-headroom.log",
+      "bytes": 112,
+      "sha256": "463f9f2f9af96255d1027f7dd67ca06a0e790a1ffdd7e4c19e9f1567e15c93eb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests.json",
+      "bytes": 23672,
+      "sha256": "0ad629288b3d9ed56adeaa37890e5d884cdb6da19cbb5380dbe1badd10ee5bc7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/focused-tests.log",
+      "bytes": 119,
+      "sha256": "d83b4b640444815271320f4e311651ca85f42675c4058e52d7b5ed404da6c025"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gate-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gate-steps.json",
+      "bytes": 5483,
+      "sha256": "9ad851aa2a4ebafa1f55b0e08943db457f966abf9ea41395a3b0a7140c7dbc2a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "d48295c2bf1f1d15df2c025afc06a2af3c67f387dbacb5c9ca0cb5c6425f3c3d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "2d3cca50b845aa9e9a66f3213ee16146ee625da8572c18579c967929e15ad2d8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-resources.log",
+      "bytes": 2653,
+      "sha256": "45aa41f59d13e6d48060232e069df8a15435f88a74d9eac9b1f3053cda3a3e6a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-tail-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-tail-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "6722e3939fadab8a49df79f4bc7be63f9f4a8c7f287fbf2862c6df244ddc53c6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-tail-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-tail-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "36fd04bfb7225f70eac5e0305c6a2f3e90d4956e57f0a843d8fbf37bff622ed6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-tail-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-tail-resources.log",
+      "bytes": 2782,
+      "sha256": "11b06100c58e00b2548bac7c951bdba01efe66f332e3d1fc6ab04e8878635af7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-tail-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/gates-tail-steps.json",
+      "bytes": 7490,
+      "sha256": "e084425ad8b9e9aac6a4e76b8f9eba53d1e2ed6d14eaac1c47f412c28ea0c4b5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/generated-drift.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/generated-drift.json",
+      "bytes": 15386,
+      "sha256": "7a5f9da1ff460488f35eacaa3d1b4d73d05fa8b8899baa263c30ee80823340fb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/generated-fixture-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/generated-fixture-source.json",
+      "bytes": 13712,
+      "sha256": "7312d385b23a766a199f5d0cbcdf230dcce931e3f3b16aa322c2507f73110cce"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/measurements.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/measurements.json",
+      "bytes": 869,
+      "sha256": "24336708282a3b015c8fb8bd5f4b1d8ec72ed3764156db479cd28634f1c713b8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/monitoring156-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/monitoring156-headroom.log",
+      "bytes": 112,
+      "sha256": "0da5e95fcdfc42cb069cf6483570b468664ff8cb204074112d2865d51b1b5463"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/monitoring156.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/monitoring156.log",
+      "bytes": 15400,
+      "sha256": "714389506379deccecc1be7eecc9e762fbfa2f5d4e1443249c2e1b09e1b2faf2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-02-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-02-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "8bd24d66576a2fd0e3ef30e34a5932f24f165cbd3bdef967f5089f0eb12c6bec"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-02-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-02-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "592384e929291965c154782efd24cc43e601753d716239b6677bd021af1ca345"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-02-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-02-resources.log",
+      "bytes": 2481,
+      "sha256": "36c23508d95f802a6d63e47c400e7c379cff052b937795bd25b7808383742aa2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-02-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-02-steps.json",
+      "bytes": 986,
+      "sha256": "7ebd22a5b8c3374720061442fdfc36b8b8754266e17007cfc47b5afbf6dd19e0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-collected-input-hashes.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-collected-input-hashes.json",
+      "bytes": 280,
+      "sha256": "23d120307298fe7952672d37b547dd38458ff12ee7c564d39dd75bb582e3a0bc"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-composition-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-composition-headroom.log",
+      "bytes": 112,
+      "sha256": "687a8af6d5124f0b289f3188eb0a0fa6975f102240d18b8f2f5f872a0319e62c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-composition.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-composition.json",
+      "bytes": 3937,
+      "sha256": "e502305ba2187fc73214cc8e3585ed05aae5bc3e6b2fac121e47d083599bf812"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-composition.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-composition.log",
+      "bytes": 324,
+      "sha256": "116ec2d236b0d5b4e4dffb8e2296d727c84d9d9ddfea08b07190d45a5f11a6d0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-current-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-current-headroom.log",
+      "bytes": 112,
+      "sha256": "44fd50ea3e575b7b9a55e925557a6dcc7c8d9a4eb6b6fc0cc972ba99eab67704"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-current.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-current.json",
+      "bytes": 3937,
+      "sha256": "29461599ed78c478839a707c432a158c86fc84616283c8361d08127dbc1547b0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-current.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-current.log",
+      "bytes": 3253,
+      "sha256": "d4f9a859aad439801b7870478999a5722f8385fd533303045bd818bf4081fad8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-generate-02-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-generate-02-headroom.log",
+      "bytes": 112,
+      "sha256": "08de82c8eb9dbd509455d0d9c256e70f7812ea65c9b87777652f9febeb2c4ab7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-generate-02.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-generate-02.log",
+      "bytes": 425,
+      "sha256": "a62bef498f14d2c5f8b6fd5858d23dffe928c24bba094dfb0c84c787ce91d429"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-generate-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-generate-headroom.log",
+      "bytes": 112,
+      "sha256": "c427c6b472df759a8ed6a5c10e79286b69f52a99831d55131fd472189e91bd28"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-generate.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-generate.log",
+      "bytes": 3500,
+      "sha256": "37d6ee00da91f2c136d39e631d5aa0f5f1f498b152550aa0367922e1a1f28b72"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "3659aa3ae417f82001cf16b353281ed082a02adf7eb1ac5b22dd04a0d8b09c15"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "5bfb5ced21df71490cb910ca1aef3decfee88d6835e9cd3052d241adb715b191"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-producer-repro-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-producer-repro-headroom.log",
+      "bytes": 112,
+      "sha256": "45e4162c8d2ae1a5f18021628e91ebe76fb5888f7059db401f00e99f90d176c1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-producer-repro.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-producer-repro.json",
+      "bytes": 631,
+      "sha256": "c692d324bad408772f4b5a715add5098b3520e429ab0dcd8a61e291dc75e61d9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-producer-repro.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-producer-repro.log",
+      "bytes": 254,
+      "sha256": "3ab2afa53848907e696471c90564f058ab845de3dd66835b533cb3838c8e074f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-resources.log",
+      "bytes": 2474,
+      "sha256": "39e7822ab36bc3ff6ad6a3e185c9bd5fa487509d6f641484cf1e4ae8507b8edb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-steps.json",
+      "bytes": 792,
+      "sha256": "3c47b8c373153e2f487477d33187b4910fec1ae497e9e909a8e450e5f46547c4"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-v1-manifest.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-v1-manifest.json",
+      "bytes": 33171,
+      "sha256": "1b6ac628b26457cc4b87c60cc206f2cee5e74c6251b9cd28b4aef067dc9d41a8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-v2-manifest.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/native-v2-manifest.json",
+      "bytes": 33251,
+      "sha256": "737ddc35cdee7500c1430b68732939b2389e489f3f33ac7b9e76659fb9581dc7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/opfs-build-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/opfs-build-headroom.log",
+      "bytes": 112,
+      "sha256": "7ca66dec38893b99cadd01a4785171f31c90284c61bef238a3e838dd17ca146a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/opfs-build.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/opfs-build.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/opfs19-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/opfs19-headroom.log",
+      "bytes": 112,
+      "sha256": "04f71287a26d346b384a28d6c74a83aa47725b3029d2fcf651b439313038bd9e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/opfs19.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/opfs19.log",
+      "bytes": 2062,
+      "sha256": "e1630e76f1adadd2a1e1575f4636383c0a7114d785830a2c19d4f316c0fa845a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/os-settlement.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/os-settlement.json",
+      "bytes": 1755,
+      "sha256": "356a6775135cf921c648a24ce016c279a74d9567ae9ef3d94d57080d7e8a88c1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3648930-compiler.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3648930-compiler.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3648931-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3648931-headroom.log",
+      "bytes": 112,
+      "sha256": "b13c9623dd21ac54806a66ec5884bf2fb0374a580ebe4d4c9e76461dc608bad6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3696553-compiler.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3696553-compiler.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3696559-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3696559-headroom.log",
+      "bytes": 112,
+      "sha256": "e756c3f01d760531e14f80a5cf7a563c7edfdb35c91a3014a35133d4451584a1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3925748-compiler.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3925748-compiler.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3925749-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-3925749-headroom.log",
+      "bytes": 112,
+      "sha256": "d917402a074fe67319c08aec2957984625c7b0369a37f1bd80232f575b5b10f7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-initial-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/package-artifact-initial-headroom.log",
+      "bytes": 112,
+      "sha256": "7459685508df5ef97d13bb5b069fdcf40809ac4ebf2f77a258f42f178396dc36"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/policies199-current-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/policies199-current-headroom.log",
+      "bytes": 112,
+      "sha256": "376d6bbd3822017c6ab8046a49e10a4f69cd20ddde1c3131c16db7a0a5565109"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/policies199-current.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/policies199-current.log",
+      "bytes": 13648,
+      "sha256": "ee3196c2b1784b4e2e5cc71ea2e413949867a98a9ac08854c9709cdfde7837c3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/policies199-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/policies199-headroom.log",
+      "bytes": 112,
+      "sha256": "5c96b86ed00c4e3416c5874aa9d2b8e40aa8a0982802ed821deb6fdc9f4784cc"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/policies199.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/policies199.log",
+      "bytes": 13636,
+      "sha256": "27ad7169db5c25a4c206e5a51d2694b814e5319e07744ee4db22dabf9711de66"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/pre-receipt-guard-receipt.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/pre-receipt-guard-receipt.json",
+      "bytes": 113518,
+      "sha256": "634a468d098644f026e33fb318f435dc3da4176dd5e43886bdad8f00cc01c75c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/read-only-algorithms.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/read-only-algorithms.json",
+      "bytes": 17154,
+      "sha256": "bdd993b91f2ad3600de257a87eece797ba7c365dee44dd3c249437396f1d2f78"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-build-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-build-headroom.log",
+      "bytes": 112,
+      "sha256": "507c53dc8910f72af2cb2f9fe0fb2ad0a1e3a243b2cd19951d817c5842c461d0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-build.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-build.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/compiled-source.json",
+      "bytes": 169,
+      "sha256": "4af42d961a0f523d89024bdb96ae692b1347efbe694be90fe67ab8b3fab0f498"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/execution.log",
+      "bytes": 143,
+      "sha256": "56c22240da77238d1d5eb1e4e05181a84ba67f5a65f2eba3fb67b67d1013ae9a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/native-close.jsonl",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/native-close.jsonl",
+      "bytes": 1471,
+      "sha256": "9263b078a7d0c94def3fa49675abce6765e1471aad4f533e12a7ca75e3776e94"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/tests.json",
+      "bytes": 11801,
+      "sha256": "882b18b681049fa3aa1d14a6e7ee25faf5b720ff01c8f3ed0be1ff481aadec63"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/candidate/vitest.config.mjs",
+      "bytes": 664565,
+      "sha256": "a3810219828eb48ba2f3e9be56174b29aa083a7198b88e94cea59bc52ff19cc7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/check-only-before-watch-fanout/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/check-only-before-watch-fanout/compiled-source.json",
+      "bytes": 169,
+      "sha256": "f34abb757c675b3158283cb1eb08439061b56a6f67ec7533b83e977864d098da"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/check-only-before-watch-fanout/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/check-only-before-watch-fanout/execution.log",
+      "bytes": 164,
+      "sha256": "0cfacc9268faf4c067c08d631cb57008dded04ddf4a7f3248d20930ec8062659"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/check-only-before-watch-fanout/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/check-only-before-watch-fanout/tests.json",
+      "bytes": 11182,
+      "sha256": "c8034b4703644e38e344541bcff1f9964d49703d94efa2efa353981d89103ae8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/check-only-before-watch-fanout/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/check-only-before-watch-fanout/vitest.config.mjs",
+      "bytes": 664584,
+      "sha256": "11361bd2ae41f81fb300332e76424533a0059b7c6d5bc16d5ee20b2092c86ca9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/compiled-source.json",
+      "bytes": 169,
+      "sha256": "2585c3636d697d5dd3557b897c56fe653c5cd4e3f284eb14a1d8c844fa8cbf10"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/execution.log",
+      "bytes": 163,
+      "sha256": "34243f90a3bd3a2c2a60307bfcb47f2361e7a8dd94ffbc74a0128cc684af9e73"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/native-close.jsonl",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/native-close.jsonl",
+      "bytes": 211,
+      "sha256": "cd3f7f4e68a3c6433624d26d3b4f34768fb76b8c675f25b17c8b961563cc958a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/tests.json",
+      "bytes": 11428,
+      "sha256": "ed1949948abfa731bce8a56e1037b04fda71b9339c51a4d4beb5d9384c4a244b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-receipt-activation/vitest.config.mjs",
+      "bytes": 664603,
+      "sha256": "1288c50ce38bbd18c5a84374f8b26ecb2f60f62830d98ca3d727ded4e135dbac"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/compiled-source.json",
+      "bytes": 169,
+      "sha256": "f1a38eaad69245992bff91832de23a76aea658dcdf96733154b3cf03c064488f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/execution.log",
+      "bytes": 160,
+      "sha256": "f2d8c3d0bcb4b8f8d0948ae5fa4972f4d51d4b4d931e1e3276ddab611c38046f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/native-close.jsonl",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/native-close.jsonl",
+      "bytes": 236,
+      "sha256": "1e9d60e4183adf3a6ea33f12b15e6b215d1269511e2eb7e61d486647eccb69c5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/tests.json",
+      "bytes": 11429,
+      "sha256": "a8a60137406d8750d14802994a98ee2e3a7bcd3e96301d3ce271fa0b42413a44"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/clear-uses-transport-owner/vitest.config.mjs",
+      "bytes": 664560,
+      "sha256": "b4105cabf7231795f11f2dea6fe8a7fa26db1c7d4ebf9f622594efbac7e7ec39"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/late-session-scope-invalidation/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/late-session-scope-invalidation/compiled-source.json",
+      "bytes": 169,
+      "sha256": "bd9395c5ca8e020f43af45b59dcbbb365b704127820e5eefca89b5e258f4ad66"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/late-session-scope-invalidation/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/late-session-scope-invalidation/execution.log",
+      "bytes": 165,
+      "sha256": "6f9fc330de29cedf094603d3c077080400ef5b17acd4f22534589c929bf8502f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/late-session-scope-invalidation/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/late-session-scope-invalidation/tests.json",
+      "bytes": 11244,
+      "sha256": "3d483a5dce5be9a8cf9a0f8498c289d17abac9726da67e1152176877931ed826"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/late-session-scope-invalidation/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/late-session-scope-invalidation/vitest.config.mjs",
+      "bytes": 664589,
+      "sha256": "529762a30b165c14334f637f49d3b2a1b65c481f65f2286fc589eb92381be45c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/notify-before-scope-installed/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/notify-before-scope-installed/compiled-source.json",
+      "bytes": 169,
+      "sha256": "fa14bd8e22b9a229a39a9794c6198766362b1c0d85b0dfb1fbc84169a1ef898c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/notify-before-scope-installed/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/notify-before-scope-installed/execution.log",
+      "bytes": 163,
+      "sha256": "33920f294239fef47d35cc957103a2ecb5137cced590360798a858e9532648ec"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/notify-before-scope-installed/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/notify-before-scope-installed/tests.json",
+      "bytes": 14069,
+      "sha256": "97e0a903b53340c20ded9bf53c9696ebdfa3fc25fcf98b95a96d28a71e353b7f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/notify-before-scope-installed/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/notify-before-scope-installed/vitest.config.mjs",
+      "bytes": 664538,
+      "sha256": "17a261b1c6e1f291dc31cbe44b4f94c6dc1099abc608035469d36c831c4d3bf7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/receipt.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/receipt.json",
+      "bytes": 9043,
+      "sha256": "e73ab4bfff16cd00bcf6ea36ed9ce19ccdb1efed8d21a7e6045eddd50fce3100"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/reuse-visibility-activation/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/reuse-visibility-activation/compiled-source.json",
+      "bytes": 169,
+      "sha256": "329ed6b2e79b1f51ac50c5c33e4544a31ecad554526db66db40c3903fb4d7a89"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/reuse-visibility-activation/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/reuse-visibility-activation/execution.log",
+      "bytes": 161,
+      "sha256": "867b7ad92645278dbb4565471a026a2ac3b35ae903bfd26201892516ec588400"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/reuse-visibility-activation/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/reuse-visibility-activation/tests.json",
+      "bytes": 11222,
+      "sha256": "009a00990c9908f848407543ebac717519f4990cb867e64e5a98d00c1b56b85f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/reuse-visibility-activation/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/reuse-visibility-activation/vitest.config.mjs",
+      "bytes": 664602,
+      "sha256": "e3c37272ef3d73cd5e0d1712cf1ff2b94e4688f4cca46e0e9cc883e9defef3d7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-inactive-owner-read/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-inactive-owner-read/compiled-source.json",
+      "bytes": 169,
+      "sha256": "d5b505d1db2b82503c08b02b3d27008c91ec6211cb0a357d66b205157f2f7fb8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-inactive-owner-read/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-inactive-owner-read/execution.log",
+      "bytes": 158,
+      "sha256": "bea9a1c04ac14dcb660505b0423294358b861865c3a27a616d14484f25cac821"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-inactive-owner-read/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-inactive-owner-read/tests.json",
+      "bytes": 12117,
+      "sha256": "2b56ba53b00e42e1100f603a1f800a34f54035345df83597781f9a17b92077b6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-inactive-owner-read/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-inactive-owner-read/vitest.config.mjs",
+      "bytes": 664549,
+      "sha256": "bfa6655a974aefc69dcddba76ccf5faf59ab9460f5ace871c2e9b1af6dc8cfa9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-scope-observer/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-scope-observer/compiled-source.json",
+      "bytes": 169,
+      "sha256": "1bbec65b98654fdf18a4bb6698e034bf4aac46c7346fb09d84f107d63fb422fb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-scope-observer/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-scope-observer/execution.log",
+      "bytes": 153,
+      "sha256": "9444b605c863b2d1543184a2d1f0cf13add91c0d91be3eb0f11b3534e0e70082"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-scope-observer/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-scope-observer/tests.json",
+      "bytes": 14069,
+      "sha256": "22b78fa1aa1ab13d8942f1d2456be3bcc9e5ba5df775b3d12ef98bd31b54381f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-scope-observer/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-scope-observer/vitest.config.mjs",
+      "bytes": 664141,
+      "sha256": "979cd579c95d59690cb6065c73324d3a68f293dc8046aa0431b422ad39bd86af"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-watch-restart/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-watch-restart/compiled-source.json",
+      "bytes": 169,
+      "sha256": "d7a2544cf5e5bec173ca95fe7ae292c3ba53d37e582fe7434213918743fd15d1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-watch-restart/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-watch-restart/execution.log",
+      "bytes": 152,
+      "sha256": "d2fbb059086c00ab91fdc614626cc4049b8d9538380bcc30dbfdb34093a0e119"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-watch-restart/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-watch-restart/tests.json",
+      "bytes": 12664,
+      "sha256": "fed1c32dbcb52a49e9011224a755042f89dd495fbe9650b60349e3f9890adfb0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-watch-restart/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/skip-watch-restart/vitest.config.mjs",
+      "bytes": 664556,
+      "sha256": "cbd048327614f457fa2b8bd3f3a860333451b3b6dd879a7448801ef2784c3321"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/tie-cache-to-connection/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/tie-cache-to-connection/compiled-source.json",
+      "bytes": 169,
+      "sha256": "6ca74ef5031688543c83ed1985543394b51d6bd91c5ad7acaa7bcadbea2d978a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/tie-cache-to-connection/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/tie-cache-to-connection/execution.log",
+      "bytes": 157,
+      "sha256": "d65f574309d28969498bb7075bcad3780a54466b5cd8c0837bcf7aed30b91dbc"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/tie-cache-to-connection/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/tie-cache-to-connection/tests.json",
+      "bytes": 11237,
+      "sha256": "0afed989f279b9ea57e0011eb01d3314dce35ead2cafa881ef3a3adbde6d2a4f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/tie-cache-to-connection/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/tie-cache-to-connection/vitest.config.mjs",
+      "bytes": 664539,
+      "sha256": "162ef21a0fca64311ffdf770321646d33d518a6c7b8c90766a237e235d7fb0be"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-data-notification/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-data-notification/compiled-source.json",
+      "bytes": 169,
+      "sha256": "9da449fb9078d6bec6e3980036ca8a0fb9e6cc7af0d6d5d3fec347936fc682df"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-data-notification/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-data-notification/execution.log",
+      "bytes": 160,
+      "sha256": "c82ea97a13a5f59089b9a5b379b728c15a17a2c363043bc685fa6e195e176e53"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-data-notification/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-data-notification/tests.json",
+      "bytes": 11188,
+      "sha256": "bd9554f3f3079589586cc0c8ef00bdca97207e8de0940c728d3325e10de56589"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-data-notification/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-data-notification/vitest.config.mjs",
+      "bytes": 664547,
+      "sha256": "2de051ebd521ff3b360175d5b883fc792cae6f4c8805f6e7f46dceca880d2d60"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-initial-notification/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-initial-notification/compiled-source.json",
+      "bytes": 169,
+      "sha256": "6be8a505fefc1ee9ef9098d06c3701d6430ac0c51e995c1af3d037111c08c21c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-initial-notification/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-initial-notification/execution.log",
+      "bytes": 163,
+      "sha256": "ae5dd050cd6e103c5c414f162d2d3e9256afeeec90e40dc884ac083b33236144"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-initial-notification/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-initial-notification/tests.json",
+      "bytes": 11191,
+      "sha256": "2320ecad639fe8ec6b2efab381355d04b63632d96ddb165ed0d38c34a65d3fef"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-initial-notification/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control/unfenced-initial-notification/vitest.config.mjs",
+      "bytes": 664572,
+      "sha256": "35c4b2f2d5f56320b69d2fbc154b15be1d29e48dd2e18efc1afd18a249b958e7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control-headroom.log",
+      "bytes": 112,
+      "sha256": "994a9adf8afa03c5f18014893ab2fc17919ba3c17c620b5269c244072bf8d75d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-control.log",
+      "bytes": 102,
+      "sha256": "613f040f0755132b1eddbac0d36692b50f138eafac8cf2a1e523a68f4120723d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-cycles-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-cycles-headroom.log",
+      "bytes": 112,
+      "sha256": "c753d3aa318166d501f5d622f5394d7f5750f084942fc058ade25c17895618de"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-cycles.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-cycles.json",
+      "bytes": 5812,
+      "sha256": "242621026500f11962b049e241eed7f6e6f43dab58e1c6e7aeac655dde79d439"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-cycles.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-cycles.log",
+      "bytes": 103,
+      "sha256": "f22bba61c13e57b08cfca481f18231594d020deb483f5d3f910f390fd6f0e553"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "f4bb775be73d39a2392d6e014e3192247e1d2432c5edc474dfb20ab8dab8d8b1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-native-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-native-headroom.log",
+      "bytes": 112,
+      "sha256": "1f386dd135819fcd606f7e41f49bb63cd13ae577f18abde5c778492b31926d5a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-native.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-native.json",
+      "bytes": 3937,
+      "sha256": "8500e6257589975c744dcbbd340e10bf66b8aca10eecdcaa1c8408d5dfa906e8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-native.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-native.log",
+      "bytes": 2893,
+      "sha256": "7544342c79ee296edc59741e1aa1b0ed487c03af53b0299ca11f462944cb710f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-negative-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-negative-headroom.log",
+      "bytes": 112,
+      "sha256": "2c8a0283042dfdb7ecc121a8ac7cb8ea210d37e6ee9feb9f6698f0192d470654"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-negative.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-negative.json",
+      "bytes": 19064,
+      "sha256": "d68b83f23bf87890c735fe08b5bebe53cc1e610005b701dcea3ac38dc0aa3071"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-negative.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-negative.log",
+      "bytes": 128,
+      "sha256": "7995e62cd8f275c368ed2efc0184e166e412ae067f22ec85078e0b31d4cca19a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "25fa4408dad601a8367829fdd06f08469729a618384f0c76321f51769c7e37ff"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-read-only-algorithms.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-read-only-algorithms.json",
+      "bytes": 17154,
+      "sha256": "8dba0c27738247c7ea10279c7338e0de85c4da3ce7c3a3704b4c894bb9634166"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-resources.log",
+      "bytes": 2860,
+      "sha256": "0f70f3671188d854e493d0311cf5cee7fe2df570c173053fc23845ae77c13e74"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-sdk-full-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-sdk-full-headroom.log",
+      "bytes": 112,
+      "sha256": "a9e535f3c4f26150d805788ae25b98f62d3219ec60ddb8734b40e356a75ea072"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-sdk-full.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-sdk-full.json",
+      "bytes": 403566,
+      "sha256": "a3643498970159b38072e66e2f62872bbb211e0600a5a3007d4fafcf624cb6e7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-sdk-full.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-sdk-full.log",
+      "bytes": 812,
+      "sha256": "fac62ccecf5ff0c22fa7063dc3ba3dbd63b39af5b18d563a28fa9a13c781cd77"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-settlement.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-settlement.json",
+      "bytes": 453,
+      "sha256": "58e4462d46715e712f4c6c8b56d82e62ed960c93d9e2351d2fbeafe1daf603c1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-source-audit-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-source-audit-headroom.log",
+      "bytes": 112,
+      "sha256": "099f635e10b4f5a09e98273a6c7dd39deffd33236c8b4e5a132d851f9988b0be"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-source-audit.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-source-audit.log",
+      "bytes": 332,
+      "sha256": "944d370e98abab565539db44d9b252ffbd9c566bed65473a7baba907e30d73c4"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-types-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-types-headroom.log",
+      "bytes": 112,
+      "sha256": "4550c58332c1d2eb0e7b4a81f75f5458f42490c9dcd9f872fd1c9b8960672711"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-types.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-types.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/candidate/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/candidate/compiled-source.json",
+      "bytes": 169,
+      "sha256": "4af42d961a0f523d89024bdb96ae692b1347efbe694be90fe67ab8b3fab0f498"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/candidate/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/candidate/execution.log",
+      "bytes": 316,
+      "sha256": "2a64e80acbcc63ce4062d857158bb2198af1b89197d65d526171b642067fb03f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/candidate/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/candidate/tests.json",
+      "bytes": 31371,
+      "sha256": "ecf8d012bcded2afd26f891b035b97abcc4235054aaafdb7539e30655b221b8e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/candidate/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/candidate/vitest.config.mjs",
+      "bytes": 335947,
+      "sha256": "5b5c78064fe3278bea5842779c564824fc7867c2c22c107eb2e5d64e69b57bef"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-post-await-guard/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-post-await-guard/compiled-source.json",
+      "bytes": 169,
+      "sha256": "977faa2ac94fa2574275710775ed7a581b1c268301ee8988fd020a477db0e35a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-post-await-guard/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-post-await-guard/execution.log",
+      "bytes": 331,
+      "sha256": "970b12fae0653857bf6b2a876a8c046ed3e31609a0ec5143527f2ced863d485d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-post-await-guard/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-post-await-guard/tests.json",
+      "bytes": 32772,
+      "sha256": "2abc56a36f739f861bfc997bd4bb6abf63fba74a24c134efa7f9cfff89b79f29"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-post-await-guard/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-post-await-guard/vitest.config.mjs",
+      "bytes": 335778,
+      "sha256": "55c042ff6443e8d75155e773b098b0628efb0713ae340fad8fac931fbac97f95"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-ready-publication-guard/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-ready-publication-guard/compiled-source.json",
+      "bytes": 169,
+      "sha256": "2d3e191ea70325120d45a3a41212aea52fe6915e5ba15a53fa7358599c32de51"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-ready-publication-guard/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-ready-publication-guard/execution.log",
+      "bytes": 338,
+      "sha256": "52cf09b5ae22659d926a3432b3af3f95b0f4f0d8f723558eb875f9f223ee3c48"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-ready-publication-guard/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-ready-publication-guard/tests.json",
+      "bytes": 32771,
+      "sha256": "2e855b01e46f017aafc2c903065e0e2c3aae926b8e44c2ad615a90a570789746"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-ready-publication-guard/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-ready-publication-guard/vitest.config.mjs",
+      "bytes": 339343,
+      "sha256": "f81ff734b489767260c838604ec79767ebdc8ddabdd5cf08408d706fb18e5279"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-return-activation/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-return-activation/compiled-source.json",
+      "bytes": 169,
+      "sha256": "8b5742b5be3fc8e00766bbee54ffd010ca62524875343d49aff4e391d75e816c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-return-activation/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-return-activation/execution.log",
+      "bytes": 332,
+      "sha256": "76afe09f17dde1f7c09013d2a6957892536185dec756b1c9d50008cf27b219c1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-return-activation/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-return-activation/tests.json",
+      "bytes": 32600,
+      "sha256": "802769fd977e9d9db20400d89cbb71e1a2d90d2aa7a790ee9203a8ec6761b785"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-return-activation/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/missing-return-activation/vitest.config.mjs",
+      "bytes": 335917,
+      "sha256": "03b5efa9992c436facc55f00a5474528bca6bb3b3ab31f1ff74e2af075eda3fe"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/receipt.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark/receipt.json",
+      "bytes": 1785,
+      "sha256": "4b734833455408f1f91fb6bac02a36e4a7b1917f6416c7902e6e7de74522e630"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark-headroom.log",
+      "bytes": 112,
+      "sha256": "1dad74185bca3e90d47c69f85299d001a08924bbbed7982b1cc82dc61dd41628"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-guard-watermark.log",
+      "bytes": 120,
+      "sha256": "ce67674e2b20ec83d1827c82184f6819cedd87969eccb600ed4766269d44bc70"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-send-guard-change.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-send-guard-change.json",
+      "bytes": 442,
+      "sha256": "503f5e5cf021f07ba2a873cee7f3ba51ee68434e5ac614098725d82ce676b5ce"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-shape-probe.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/receipt-shape-probe.json",
+      "bytes": 187,
+      "sha256": "663e6b485ebc854b5e358c48716ed3ed56645541e381da58402450472b5dd994"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/registration.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/registration.json",
+      "bytes": 272,
+      "sha256": "39e18e131b5b87ab1d9d3628f3d41fd4a08832983f5f0b39f5b63ef91a8435d8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/resolved-links-final.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/resolved-links-final.json",
+      "bytes": 586,
+      "sha256": "1180503ff1896f9d058d5fbde14a9a2755630ec93d240980d85f6f82948125a4"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/schema-check-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/schema-check-headroom.log",
+      "bytes": 112,
+      "sha256": "ddff3d3a026eb95cb4079cbe094eb18a9448bcb04e30e5c025f2b617baa3a1a0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/schema-check.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/schema-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/schema-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/schema-headroom.log",
+      "bytes": 112,
+      "sha256": "5af39fe99ef7b20c1257ab21548208814d7b1ce2167feb5ff10b9998faae1d9e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/schema.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/schema.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full-current-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full-current-headroom.log",
+      "bytes": 112,
+      "sha256": "fef53eac47d0a1fa0033899029ffb349fc7805164e56bb76f94fc958d333db1a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full-current.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full-current.json",
+      "bytes": 403116,
+      "sha256": "6c4383bcfe9a74f9cb286e619475022deffaec23c10f207f22a609c693a14729"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full-current.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full-current.log",
+      "bytes": 806,
+      "sha256": "936342bdd9d64619d5e7af5928112c39a2c2c2580444f28985149faec94577fd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full-headroom.log",
+      "bytes": 112,
+      "sha256": "013278a11bf927e0592861fe3583c046ca869a22898ffb49f802e3cc0d993649"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full.json",
+      "bytes": 403354,
+      "sha256": "7642e10c17e1845b03bd1fbf61ae6a042c3ee600e63e08aaa9e9410fd9430725"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/sdk-full.log",
+      "bytes": 798,
+      "sha256": "122d43a6ddaa51be86f5c7be311f07caff0c1f3f7f62ea510848264f614d1ae6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/setup-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/setup-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "b28a8c9438e26b02a796dbca3ec6ad5fa98e6f8b43e4af285c87a7d07b42c691"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/setup-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/setup-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "a47e7df83ce612d7ee2c5db48d9c5e651e7d590354e5599ada3a82b54b711561"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/setup-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/setup-resources.log",
+      "bytes": 2449,
+      "sha256": "29e0bc3f536b9b7562ceda19214b600d483998e50c901c143e5c3c8986d31248"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/source-manifest.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/source-manifest.json",
+      "bytes": 3734,
+      "sha256": "87d6a54032b3f6b4fc6ec05ba079ccfea3e192d0a1deb13334287549a624a313"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tail-controls-inner-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tail-controls-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "312d4fe424467ed4212d5b71cf1a4812c69fa5a1cfc2b9bf557a9ea1fd028fdb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tail-controls-outer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tail-controls-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "d1a804ecf71e9603268e9a808bb324613d897216096b3c12eb4fe80de6510f1e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tail-controls-resources.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tail-controls-resources.log",
+      "bytes": 2532,
+      "sha256": "81421c04ca8f176d8005b6ab4a2f1a15df2eef0120972cf4289f440c4f2b69e7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tail-controls-steps.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tail-controls-steps.json",
+      "bytes": 3039,
+      "sha256": "af0ce893b0927d12e8de586cc0acde2448f1af911d273bdd652b29c137a5e5a5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-check-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-check-headroom.log",
+      "bytes": 112,
+      "sha256": "be0120da25daf9eeb7361449a60ef716c38971a72b70678cde3038fe091451d7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-check.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-codegen-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-codegen-headroom.log",
+      "bytes": 112,
+      "sha256": "af4717de3721e422cf84e29f5b98c8aa5501908deea6198197fed8956e45543f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-codegen.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-codegen.log",
+      "bytes": 293,
+      "sha256": "6c3f42d0e2a23751c34562cd64b126d80c5a65133591f8b24655a5babf10dc5f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-ndjson-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-ndjson-headroom.log",
+      "bytes": 112,
+      "sha256": "01a6fc1fd45da2daddf356d2a47726c2108db1ba0e57230e179a257b1fb31279"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-ndjson.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-ndjson.log",
+      "bytes": 110,
+      "sha256": "e1300333525e3d661e2623217c4fe791a466e018dad81af016482e541e4252ff"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-typescript-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-typescript-headroom.log",
+      "bytes": 112,
+      "sha256": "591725f5131d0339bd2d64bed731bef8ae711a6c717138632df23050812ea46c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-typescript.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/template-typescript.log",
+      "bytes": 108,
+      "sha256": "92ed508e810da7dc67ffa7b3f5b85b19444c8cdb086e4872ed2610bce3331eae"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tool-links.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tool-links.json",
+      "bytes": 31315,
+      "sha256": "2316bbacfa90515ed7c21a5cafd2d8476ab1d38435ec6db0a24e4783b16bc095"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tools.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/tools.json",
+      "bytes": 3691,
+      "sha256": "a02619c234b56cfe47b0ee2db9362cd3ae9c3583176ec5b50579a71e93008ffe"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/typed-generated-consumer-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/typed-generated-consumer-headroom.log",
+      "bytes": 112,
+      "sha256": "b48f51bca4c6caa3a54ee07c2ec43f7ad449c4e4dc1fd13f871f67a65d6450a8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/typed-generated-consumer.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/typed-generated-consumer.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/types-cloudflare-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/types-cloudflare-headroom.log",
+      "bytes": 112,
+      "sha256": "cb8c2ae1832b477e47aeaa2b8a9b20ef97d80fd94d91203205a31405c7f92fa9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/types-cloudflare.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/types-cloudflare.log",
+      "bytes": 919,
+      "sha256": "1dd39c6b17c6cd711b50316e098bd7e9a0c85dbca821f78752d1a8caa68d1fa4"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/types-context-correction.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/types-context-correction.json",
+      "bytes": 416,
+      "sha256": "4007cb9c68a617958b87331baeb15daef2da3b09df9f629392a4a9fa66db07e1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-controls-direct-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-controls-direct-headroom.log",
+      "bytes": 112,
+      "sha256": "ba4d44f79879512cb6d06405ff55d5653259e97bc795616cacd3763767dc6110"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-controls-direct.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-controls-direct.log",
+      "bytes": 120,
+      "sha256": "ce67674e2b20ec83d1827c82184f6819cedd87969eccb600ed4766269d44bc70"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-controls-headroom.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-controls-headroom.log",
+      "bytes": 112,
+      "sha256": "9f8bca2b12c72849c72329305b1fe0a69d3954cecbf59bf9057d08010b736299"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-controls.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-controls.log",
+      "bytes": 908,
+      "sha256": "c7db410b268dbeb021e1ac5f88af0330cd2df85219a4c08366a27f1ae0a09cc2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime/candidate/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime/candidate/execution.log",
+      "bytes": 2357,
+      "sha256": "55315648f4ae1d2a2cb8d589d20859b18c231fb6474f1e987e2107260c034a69"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime/candidate/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime/candidate/vitest.config.mjs",
+      "bytes": 335857,
+      "sha256": "25582f2caa4aa78bbb3451758e8eca8dcf557bb90cc4228efe7d4d73f880a964"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/candidate/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/candidate/compiled-source.json",
+      "bytes": 169,
+      "sha256": "30ceed41981ea30ed561e0a30835b618db5d8bd5b543bb22ac7128aac277aad9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/candidate/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/candidate/execution.log",
+      "bytes": 317,
+      "sha256": "a459ca85f754f4b536d46f1997d89fa51dab40bc608a56772a6e60357c7f746c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/candidate/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/candidate/tests.json",
+      "bytes": 31379,
+      "sha256": "c6c736f3344b915e3a4c05f7f02d2b02645750d0a67b666d380c27b092fc6f44"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/candidate/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/candidate/vitest.config.mjs",
+      "bytes": 335864,
+      "sha256": "81e49a42eb27d76795c784beb8c82660f281d713c82bf594e568811baf5bf023"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-post-await-guard/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-post-await-guard/compiled-source.json",
+      "bytes": 169,
+      "sha256": "be88f2d1b58b0a88194fc725166aaee82ce259c2403d0e82a8424f73fc68bf62"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-post-await-guard/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-post-await-guard/execution.log",
+      "bytes": 332,
+      "sha256": "85f2103a2006148a7b8f229d20467bdb6c8e70856526d4862f47aca9a4d09268"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-post-await-guard/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-post-await-guard/tests.json",
+      "bytes": 32771,
+      "sha256": "5c9a60d7dc51daff9bdc69e7b780648122f77c6ab6d7dba083108b4cb5ac6225"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-post-await-guard/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-post-await-guard/vitest.config.mjs",
+      "bytes": 335695,
+      "sha256": "d134def4c6c93812412e9ea7688f19bc408052c3ad70ff35c04f8427c2eeab4e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-ready-publication-guard/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-ready-publication-guard/compiled-source.json",
+      "bytes": 169,
+      "sha256": "6319c05732df357b99fb058022ad332982e337f5d5571221fc16f52386483eb2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-ready-publication-guard/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-ready-publication-guard/execution.log",
+      "bytes": 339,
+      "sha256": "bf31aecb23daa4f69e0ece21f8629eba39498ea9213aac91c03508bf706b6a84"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-ready-publication-guard/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-ready-publication-guard/tests.json",
+      "bytes": 32763,
+      "sha256": "61ad9bb4d15815c380daa77505bdead6353a8782dd4047681c63def475f3fb6e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-ready-publication-guard/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-ready-publication-guard/vitest.config.mjs",
+      "bytes": 339260,
+      "sha256": "69ed7e8d0c901a94b1e46e4de8067c80253314b5206f74ebfd7960fb6b3b2209"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-return-activation/compiled-source.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-return-activation/compiled-source.json",
+      "bytes": 169,
+      "sha256": "267314450920a512ae6f0ffcd776bd51d8222d5ba5e0311472654c2cb1765c5c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-return-activation/execution.log",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-return-activation/execution.log",
+      "bytes": 333,
+      "sha256": "5fc8afe36b33513f79b5ea981759373379938112f0c3b1c7523a106930fd4e2f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-return-activation/tests.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-return-activation/tests.json",
+      "bytes": 32598,
+      "sha256": "cfcddbe6466840e7d354f8f052dc65777a0142286d1d8e95f28f3f3b2655fed6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-return-activation/vitest.config.mjs",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/missing-return-activation/vitest.config.mjs",
+      "bytes": 335834,
+      "sha256": "08127cd98e4c4268b8f197e45009e18c6782c3328f4dc5d190eb6de2747a25f5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/receipt.json",
+      "resolved": "/mnt/data/work/gonvex-m05-foundation/explicit-server-evidence-b9c4/artifacts/watermark-runtime-direct/receipt.json",
+      "bytes": 1785,
+      "sha256": "8944705688d7d8d3d106df500d34ff56679eb475a604f0ea9d8be1a1a8588b96"
+    }
+  ],
+  "unexecuted": [
+    "Whagons application build/read/write/applied-client/effects",
+    "hosted or staging/prod",
+    "full serving bundle/performance",
+    "Chromium/browser/Container/CPU/K22 campaign",
+    "drills/continuous uptime/14d30d"
+  ],
+  "independentReview": "NEW lead-owned review required"
+}
