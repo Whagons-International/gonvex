@@ -757,7 +757,10 @@ impl PoolRegistry {
         let writer_objects = Arc::new(WriterObjects::default());
         let (connected, acquiring) = (
             writer_objects.clone(),
-            (writer_objects.clone(), statements.clone()),
+            // Pool callbacks can outlive the Database. A strong cache owner
+            // here would prevent its raw statements from finalizing before
+            // SQLx closes the writer connection on implicit registry drop.
+            (writer_objects.clone(), Arc::downgrade(&statements)),
         );
         // The writer creates the file and switches it to WAL before any reader
         // opens it; a read-only connection cannot change the journal mode.
@@ -822,7 +825,9 @@ impl PoolRegistry {
                             // finalized first); the pool opens a new one,
                             // whose connect installs them or fails.
                             eprintln!("gonvex-store: writer-only schema install failed; reopening the writer: {error}");
-                            statements.retire();
+                            if let Some(statements) = statements.upgrade() {
+                                statements.retire();
+                            }
                             return Ok(false);
                         }
                         objects.installed.store(true, Ordering::Relaxed);
@@ -1216,6 +1221,50 @@ impl PoolRegistry {
 #[cfg(test)]
 mod idle_snapshot_regression {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_registry_finalizes_cached_statements_before_the_writer_pool() {
+        let dir = crate::transaction_commit_tests::TestDir::new("direct-cache-drop");
+        let url = crate::database_url(&dir.0.join("tenant.db"));
+        let registry = PoolRegistry::new(PoolLimits::default());
+        let database = registry.database(&url).await.unwrap();
+        // A public pool handle may outlive its registry. Its callbacks must
+        // not retain raw statements past the last database/transaction owner.
+        let pool = database.writer.clone();
+        let mut connection = pool.acquire().await.unwrap();
+        let mut handle = connection.lock_handle().await.unwrap();
+        let session = crate::direct::DirectSession::new(
+            handle.as_raw_handle(),
+            Some(database.statements.clone()),
+            Arc::default(),
+        );
+        assert_eq!(
+            session
+                .run(|conn| conn.query_i64("SELECT 41", &[]))
+                .unwrap()
+                .unwrap(),
+            Some(41)
+        );
+        session.release();
+        drop(session);
+        drop(handle);
+        assert!(database.statements.stats().cached > 0);
+        let statements = Arc::downgrade(&database.statements);
+        drop(database);
+        drop(registry);
+        let retained = statements.upgrade().is_some();
+        // Clean up the faulty implementation too, so the regression reports
+        // the ownership error instead of double-panicking in sqlite3_close.
+        if let Some(statements) = statements.upgrade() {
+            statements.close();
+        }
+        drop(connection);
+        pool.close().await;
+        assert!(
+            !retained,
+            "pool callbacks retained raw statements after their database owner dropped"
+        );
+    }
 
     #[tokio::test]
     async fn bootstrap_cleanup_keeps_the_writer_schema_and_direct_statements() {
