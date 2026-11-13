@@ -1,6 +1,7 @@
 //! Loaded TypeScript module contracts keyed by project.
 
 use std::collections::BTreeMap;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use gonvex_module_host::protocol::{
     ReducerBundleWire, ResponsePayload,
 };
 use gonvex_store::RuntimeManifestRecord;
+use serde::Serialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -537,6 +539,14 @@ pub fn verify_standalone_module_artifact(module: Value) -> Result<String, Module
     Ok(hash)
 }
 
+// The HTTP artifact budget also bounds the aggregate decoded migration bytes.
+// A compressed artifact cannot bypass it with an expanding payload.
+pub(crate) const MAX_ARTIFACT_BYTES: usize = 64 << 20;
+
+fn decode_migration_file(encoded: &str, remaining: &mut usize) -> Result<Vec<u8>, String> {
+    gonvex_store::migration_encoding::decode_file(encoded, remaining)
+}
+
 fn migrations_from_module(
     module: &Map<String, Value>,
 ) -> Result<Vec<gonvex_store::SqlMigration>, String> {
@@ -544,6 +554,7 @@ fn migrations_from_module(
         return Ok(Vec::new());
     };
     let mut migrations = Vec::new();
+    let mut remaining = MAX_ARTIFACT_BYTES;
     for (path, encoded) in files {
         if !is_migration_file(path) {
             continue;
@@ -569,8 +580,7 @@ fn migrations_from_module(
             .as_str()
             .ok_or_else(|| format!("migration {name} must be base64 text"))?;
         let source = String::from_utf8(
-            STANDARD
-                .decode(encoded)
+            decode_migration_file(encoded, &mut remaining)
                 .map_err(|error| format!("decode migration {name}: {error}"))?,
         )
         .map_err(|_| format!("migration {name} must be UTF-8"))?;
@@ -635,14 +645,14 @@ impl ProjectModule {
             if let Some(epoch) = epochs.get(database_url) {
                 epoch.clone()
             } else {
-                let epoch = hash_json(&serde_json::json!({
-                    "protocolVersion": 1,
-                    "project": self.project_id,
-                    "database": database_url,
-                    "functions": self.manifest_functions,
-                    "schema": self.schema,
-                    "moduleHash": self.artifact_hash,
-                }));
+                let epoch = hash_replica_epoch(&ReplicaEpochInput {
+                    protocol_version: 1,
+                    project: &self.project_id,
+                    database: database_url,
+                    functions: &self.manifest_functions,
+                    schema: &self.schema,
+                    module_hash: &self.artifact_hash,
+                });
                 if epochs.len() >= 1024 {
                     epochs.clear();
                 }
@@ -679,6 +689,47 @@ impl ProjectModule {
             epoch,
         }
     }
+}
+
+// Keep the existing insertion order (serde_json/preserve_order is enabled by
+// the runtime). Borrow the immutable manifest instead of cloning its full JSON
+// tree for every database's first login. The compatibility test checks bytes
+// through the legacy hash, including nested insertion order and escaping.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplicaEpochInput<'a> {
+    protocol_version: u8,
+    project: &'a str,
+    database: &'a str,
+    functions: &'a Value,
+    schema: &'a Value,
+    module_hash: &'a str,
+}
+
+struct DigestWriter<'a>(&'a mut Sha256);
+
+impl Write for DigestWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn hash_replica_epoch(input: &ReplicaEpochInput<'_>) -> String {
+    let mut digest = Sha256::new();
+    {
+        let mut writer = BufWriter::new(DigestWriter(&mut digest));
+        // A JSON Value and these primitive fields always serialize; the digest
+        // writer accepts every byte. Buffering bounds scratch and avoids a hash
+        // update for every small JSON token, without retaining another manifest.
+        serde_json::to_writer(&mut writer, input).expect("JSON epoch input is serializable");
+        writer.flush().expect("digest writes cannot fail");
+    }
+    format!("{:x}", digest.finalize())
 }
 
 fn hash_json(value: &Value) -> String {
@@ -1296,6 +1347,144 @@ mod tests {
             module.replica_directive("tenant-b", "database-b", "account-a", &Value::Null);
         assert_ne!(first.epoch, other_database.epoch);
         assert_eq!(module.replica_epochs.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn streamed_replica_epochs_preserve_legacy_json_bytes() {
+        let functions = serde_json::json!({
+            "z": {"second": [null, true, 1.25, "é\n\"\\"], "first": false},
+            "a": {"kind": "reducer"},
+        });
+        for database in ["", "sqlite:/tmp/a.db", "sqlite:/tmp/é?quote=\"\\\n"] {
+            for schema in [Value::Null, serde_json::json!({"z": 2, "a": [1, null]})] {
+                let input = ReplicaEpochInput {
+                    protocol_version: 1,
+                    project: "project\n\"é",
+                    database,
+                    functions: &functions,
+                    schema: &schema,
+                    module_hash: "hash\\\"",
+                };
+                let legacy = serde_json::json!({
+                    "protocolVersion": 1, "project": input.project, "database": database,
+                    "functions": functions, "schema": schema, "moduleHash": input.module_hash,
+                });
+                assert_eq!(hash_replica_epoch(&input), hash_json(&legacy));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires GONVEX_EPOCH_BENCH_MANIFEST; diagnostic, not a timing assertion"]
+    fn benchmark_replica_epoch_hash() {
+        let path = std::env::var_os("GONVEX_EPOCH_BENCH_MANIFEST")
+            .expect("supply a representative manifest");
+        let manifest: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let functions = &manifest["functions"];
+        let schema = &manifest["schema"];
+        let mut legacy_ns = Vec::new();
+        let mut streamed_ns = Vec::new();
+        for repeat in 0..20 {
+            let database = format!("sqlite:/isolated/tenant-{repeat}.db");
+            let input = ReplicaEpochInput {
+                protocol_version: 1,
+                project: "project",
+                database: &database,
+                functions,
+                schema,
+                module_hash: "artifact",
+            };
+            let legacy = || {
+                hash_json(&serde_json::json!({
+                    "protocolVersion": 1, "project": input.project, "database": input.database,
+                    "functions": functions, "schema": schema, "moduleHash": input.module_hash,
+                }))
+            };
+            let timed = |operation: &dyn Fn() -> String| {
+                let at = std::time::Instant::now();
+                let value = std::hint::black_box(operation());
+                (value, at.elapsed().as_nanos())
+            };
+            let (before, after) = if repeat % 2 == 0 {
+                (timed(&legacy), timed(&|| hash_replica_epoch(&input)))
+            } else {
+                let after = timed(&|| hash_replica_epoch(&input));
+                (timed(&legacy), after)
+            };
+            assert_eq!(before.0, after.0);
+            legacy_ns.push(before.1);
+            streamed_ns.push(after.1);
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "diagnosticOnly": true, "functionsBytes": serde_json::to_vec(functions).unwrap().len(),
+                "legacyNs": legacy_ns, "streamedNs": streamed_ns,
+            })
+        );
+    }
+
+    fn deflated_migration(bytes: &[u8]) -> (String, Vec<u8>) {
+        use std::io::Write;
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+        (
+            format!(
+                "deflate-raw-v1:{}:{}",
+                bytes.len(),
+                STANDARD.encode(&compressed)
+            ),
+            compressed,
+        )
+    }
+
+    #[test]
+    fn compressed_migrations_preserve_bytes_checksums_and_flags() {
+        let sql = "-- gonvex:scope tenant\r\n-- gonvex:foreign-key-rebuild\r\nCREATE TABLE items(_id TEXT PRIMARY KEY); -- café ☀\r\n".repeat(100);
+        let (compressed, _) = deflated_migration(sql.as_bytes());
+        let mut parsed = Vec::new();
+        for encoded in [STANDARD.encode(sql.as_bytes()), compressed] {
+            let module = serde_json::json!({"files":{"migrations/0001_fixture.sql":encoded}});
+            let migrations = migrations_from_module(module.as_object().unwrap()).unwrap();
+            assert_eq!(migrations[0].sql(), Some(sql.as_str()));
+            assert!(migrations[0].foreign_key_rebuild());
+            parsed.push(migrations);
+        }
+        assert_eq!(parsed[0], parsed[1]);
+        let mut remaining = 5;
+        assert_eq!(
+            decode_migration_file("deflate-raw-v1:5:y0jNyckHAA==", &mut remaining).unwrap(),
+            b"hello"
+        );
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn compressed_migrations_reject_incomplete_trailing_and_expanding_payloads() {
+        let (valid, bytes) = deflated_migration(b"hello");
+        let encode =
+            |length, body: &[u8]| format!("deflate-raw-v1:{length}:{}", STANDARD.encode(body));
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        for invalid in [
+            "deflate-raw-v1:99999999999999999999999999:AA==".into(),
+            "deflate-raw-v1:4:y0jNyckHAA==".into(),
+            "deflate-raw-v1:6:y0jNyckHAA==".into(),
+            "deflate-raw-v1:5:not base64!".into(),
+            encode(5, &bytes[..bytes.len() - 1]),
+            encode(5, &trailing),
+        ] {
+            assert!(
+                decode_migration_file(&invalid, &mut 100).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(decode_migration_file(&valid, &mut 4).is_err());
+        let mut remaining = 7;
+        assert!(decode_migration_file(&valid, &mut remaining).is_ok());
+        assert!(decode_migration_file(&valid, &mut remaining).is_err());
     }
 
     #[test]

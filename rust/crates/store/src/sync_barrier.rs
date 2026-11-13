@@ -97,10 +97,17 @@ impl SyncBarrier {
             self.syncs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let wal = self.wal.clone();
-            let result = tokio::task::spawn_blocking(move || sync_file(&wal))
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|result| result.map_err(|error| error.to_string()));
+            let mut timer = gonvex_profiler::Timer::start();
+            let result = tokio::task::spawn_blocking(move || {
+                use gonvex_profiler::{Label, Stage};
+                timer.lap(Stage::WalSyncQueue, Label::None);
+                let result = sync_file(&wal);
+                timer.lap(Stage::WalSyncIo, Label::None);
+                result
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.map_err(|error| error.to_string()));
             self.synced.send_replace(Synced {
                 ticket: target,
                 error: result.err(),

@@ -29,7 +29,7 @@ export async function projectSchemaInspection(root: string): Promise<{schema:Loc
   const names = (await readdir(migrationDirectory).catch(() => [] as string[])).filter((name) => name.endsWith(".sql")).sort();
   const migrations = await Promise.all(names.map(async (name) => ({ name, sql: await readFile(join(migrationDirectory, name), "utf8") })));
   const tenantMigrations = migrations.filter(({ sql }) => !/gonvex:scope\s+(control|landlord)/.test(sql));
-  const digest = createHash("sha256").update("local-schema-v5-inspection").update(JSON.stringify(tenantMigrations)).digest("hex");
+  const digest = createHash("sha256").update("local-schema-v6-reference-requests").update(JSON.stringify(tenantMigrations)).digest("hex");
   const cacheFile = join(root, "gonvex", "_build", `local-schema-${digest}.json`);
   let result: {schema:LocalSchema;inspection:SchemaInspection};
   try { result = JSON.parse(await readFile(cacheFile, "utf8")) as typeof result; }

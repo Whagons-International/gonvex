@@ -1209,6 +1209,22 @@ export class LocalReplica implements LocalReplicaView {
     return window ? cloneWindow(window) : undefined;
   }
 
+  /** Internal transport metadata: no membership, rows or result copies. Hash
+   * maps are immutable after publication and replaced on every integrity edit.
+   * Keep this off LocalReplicaView; public getWindow returns defensive copies. */
+  windowProtocolState(signature: string) {
+    const window = this.liveQueries.get(signature);
+    if (!window) return undefined;
+    if (window.hashes && !window.aggregateDigest) window.aggregateDigest = replicaAggregateDigest(window.hashes);
+    const { ids: _ids, ...metadata } = window;
+    return {
+      ...metadata,
+      cursor: window.cursor ? { ...window.cursor } : undefined,
+      subscriptionRevision: window.subscriptionRevision ? { ...window.subscriptionRevision } : undefined,
+      hashes: window.hashes as Readonly<Record<string, string>> | undefined,
+    };
+  }
+
   listWindows(): ReplicaWindow[] {
     return [...this.liveQueries.values()].map(cloneWindow);
   }
@@ -1354,6 +1370,12 @@ export class LocalReplica implements LocalReplicaView {
       aggregateDigest: input.hashes ? replicaAggregateDigest(input.hashes) : undefined,
       hashes: input.hashes ? { ...input.hashes } : undefined,
     };
+    const membershipChanged = !sameWindowRowDefinition(previous, window);
+    // A row edit usually leaves ordered membership unchanged. Share that
+    // immutable ID array so publishing does not rebuild reverse memberships
+    // and repin every unrelated row in the collection.
+    // Hash-map presence also contributes to membership memory accounting.
+    if (!membershipChanged && Boolean(window.hashes) === Boolean(previous!.hashes)) window.ids = previous!.ids;
     nextQueries.set(input.signature, window);
     const presentIDs = new Set(ids);
     for (const id of input.removedIDs ?? []) {
@@ -1371,7 +1393,6 @@ export class LocalReplica implements LocalReplicaView {
       ? { epoch: input.cursor.epoch, revision: 0 } : this.cursorValue;
     const nextCursor = replicaTransactionFloor(floorStart, nextQueries);
     const snapshot = storageSnapshotFrom(nextCursor, nextEntities, nextQueries);
-    const membershipChanged = !sameWindowRowDefinition(previous, window);
     const rowsChanged = membershipChanged || changedRowIDs.size > 0;
     const writeScope = this.scopeValue;
     let metadataCommit: void | ReplicaWriteReceipt = undefined;

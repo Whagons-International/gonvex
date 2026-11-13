@@ -430,13 +430,15 @@ pub async fn read_clock(
     pools: &PoolRegistry,
     route: &TenantRoute,
 ) -> Result<ReplicaClock, gonvex_store::DatabaseError> {
-    let pool = pools.reader(&route.database_url).await?;
-    let _admission = pools.admit(&route.database_url).await?;
+    // Admission just returned its reader. Use the shared read path so its
+    // asynchronous release can finish instead of parsing another full schema.
+    let mut transaction = gonvex_store::begin_transaction(pools, &route.database_url, true).await?;
     let row = sqlx::query(
         "SELECT epoch, revision, retained_revision FROM _gonvex_sync_clock WHERE singleton = 1",
     )
-    .fetch_one(&pool)
+    .fetch_one(&mut **transaction.transaction())
     .await?;
+    transaction.commit().await?;
     let revision: i64 = row.get("revision");
     let retained: i64 = row.get("retained_revision");
     Ok(ReplicaClock {
@@ -517,4 +519,63 @@ pub(crate) fn log_change_from_row(
             agent_execution_id: row.try_get("agent_execution_id")?,
         },
     })
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn clock_read_waits_for_a_warm_reader_instead_of_opening_another() {
+        // Match production's initialization order before SQLite creates worker
+        // threads. Keep V8's common parent alive for later in-process tests.
+        crate::in_process::tests::run(async {
+            let directory = tempfile::tempdir().unwrap();
+            let route = TenantRoute {
+                project_id: "reader-test".to_owned(),
+                tenant_id: "tenant".to_owned(),
+                database_url: gonvex_store::database_url(&directory.path().join("tenant.db")),
+            };
+            let pools = PoolRegistry::new(gonvex_store::PoolLimits {
+                max_connections_per_database: 4,
+                reader_patience: Duration::from_secs(1),
+                ..Default::default()
+            });
+            let writer = pools.pool(&route.database_url).await.unwrap();
+            sqlx::query("CREATE TABLE _gonvex_sync_clock(singleton INTEGER PRIMARY KEY,epoch TEXT,revision INTEGER,retained_revision INTEGER)")
+            .execute(&writer).await.unwrap();
+            sqlx::query("INSERT INTO _gonvex_sync_clock VALUES(1,'unchanged-epoch',17,3)")
+                .execute(&writer)
+                .await
+                .unwrap();
+            let mut held = gonvex_store::begin_transaction(&pools, &route.database_url, true)
+                .await
+                .unwrap();
+            sqlx::query("SELECT revision FROM _gonvex_sync_clock")
+                .fetch_one(&mut **held.transaction())
+                .await
+                .unwrap();
+            let readers = pools.reader(&route.database_url).await.unwrap();
+            assert_eq!(readers.size(), 1);
+
+            // Poll while that warm reader is busy, then release it. A raw pool
+            // acquire starts opening a second connection before the first yields;
+            // the shared read path instead gives the short read time to finish.
+            let mut clock = Box::pin(read_clock(&pools, &route));
+            assert!(futures_util::poll!(&mut clock).is_pending());
+            held.commit().await.unwrap();
+            let clock = tokio::time::timeout(Duration::from_secs(2), clock)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(clock.epoch, "unchanged-epoch");
+            assert_eq!((clock.revision, clock.retained_revision), (17, 3));
+            let opened = readers.size();
+            pools.close().await;
+            assert_eq!(
+                opened, 1,
+                "a clock read must reuse the returning warm reader"
+            );
+        });
+    }
 }

@@ -519,12 +519,39 @@ impl Runtime {
             )
             .await?;
             for head in control.runtime_manifest_heads().await? {
+                let mut released_cold_history = false;
                 let project = head.project_id.clone();
+                let started = std::time::Instant::now();
+                let trace_startup = |stage: &str| {
+                    tracing::debug!(
+                        target: "gonvex_runtime::startup_trace", project = %project, stage,
+                        elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                        "module startup stage"
+                    );
+                    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                    if tracing::enabled!(target: "gonvex_runtime::startup_trace", tracing::Level::DEBUG)
+                    {
+                        // These counters cover system C allocations (SQLite),
+                        // not Rust's mimalloc or profiling allocator.
+                        // SAFETY: mallinfo2 returns a read-only allocator snapshot.
+                        let memory = unsafe { libc::mallinfo2() };
+                        tracing::debug!(target: "gonvex_runtime::startup_trace", project = %project, stage,
+                            allocator = "system-C", sqlite_bytes = gonvex_store::sqlite_memory_used(),
+                            sqlite_connection_bytes = gonvex_store::sqlite_connection_heap(),
+                            sqlite_reader_opens = gonvex_store::sqlite_reader_opens(),
+                            sqlite_writer_schema_bytes = gonvex_store::sqlite_writer_schema_heap(),
+                            arena_bytes = memory.arena, mmap_bytes = memory.hblkhd,
+                            allocated_bytes = memory.uordblks, free_bytes = memory.fordblks,
+                            "module startup allocation");
+                    }
+                };
                 // The stored artifact skips reading, hashing and decoding the
                 // migration history; without one (first boot of this runtime,
                 // or a manifest saved by an older one) boot reads the complete
                 // manifest and stores the artifact for the next boot.
-                let installed = match control.stored_artifact(&head).await? {
+                let stored = control.stored_artifact(&head).await?;
+                trace_startup("artifact_lookup");
+                let installed = match stored {
                     Some(stored) => {
                         self.inner
                             .modules
@@ -535,8 +562,10 @@ impl Runtime {
                         let Some(record) = control.runtime_manifest(&project).await? else {
                             continue;
                         };
+                        trace_startup("manifest_read");
                         match modules::validate_manifest_record(&record) {
                             Ok(mut validated) => {
+                                trace_startup("manifest_validated");
                                 if store_migration_history(
                                     &control,
                                     &record,
@@ -546,7 +575,9 @@ impl Runtime {
                                 .await
                                 {
                                     release_migration_bodies(&mut validated.migrations);
+                                    released_cold_history = true;
                                 }
+                                trace_startup("history_stored");
                                 self.inner
                                     .modules
                                     .install_validated(&self.inner.module_host, &record, validated)
@@ -565,12 +596,24 @@ impl Runtime {
                         return Err(error.into());
                     }
                 };
+                trace_startup("module_activated");
+                if released_cold_history {
+                    // Return artifact scratch before tenant schema objects
+                    // reuse its free allocator pages and pin them until idle.
+                    release_artifact_scratch("artifact");
+                }
                 control
                     .clone()
                     .apply_control_migrations(module.migrations.clone())
                     .await?;
+                trace_startup("control_migrated");
                 provision_startup_tenants(&control, &project, &module.migrations).await?;
+                trace_startup("tenants_provisioned");
             }
+            let before = gonvex_store::sqlite_memory_used();
+            let statements = self.inner.pools.release_bootstrap_memory().await?;
+            tracing::debug!(target:"gonvex_runtime::startup_trace",statements,sqlite_before=before,sqlite_after=gonvex_store::sqlite_memory_used(),"released bootstrap memory");
+            release_artifact_scratch("bootstrap");
             *self.inner.control_plane.write().await = Some(control);
             self.start_control_event_listener().await?;
             self.inner.membership_projector.start(self.clone());
@@ -606,7 +649,7 @@ impl Runtime {
                 axum::routing::delete(delete_tenant_shard),
             )
             .route("/dev/internal/e2e/members", post(provision_e2e_member))
-            .layer(DefaultBodyLimit::max(64 << 20))
+            .layer(DefaultBodyLimit::max(modules::MAX_ARTIFACT_BYTES))
             .layer(middleware::from_fn(dev_cors))
             .layer(middleware::from_fn_with_state(
                 self.clone(),
@@ -1642,6 +1685,47 @@ async fn store_migration_history(
 fn release_migration_bodies(migrations: &mut [gonvex_store::SqlMigration]) {
     for migration in migrations {
         *migration = migration.without_body();
+    }
+}
+
+/// Cold artifact validation/history storage has finished and its temporary
+/// buffers are gone. SQLite and V8 use the system C allocator even though Rust
+/// uses mimalloc; release unused C pages at the artifact and completed-bootstrap
+/// lifecycle boundaries. Ordinary requests never take this path.
+fn release_artifact_scratch(_phase: &str) {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let started = std::time::Instant::now();
+        let debug =
+            tracing::enabled!(target: "gonvex_runtime::startup_trace", tracing::Level::DEBUG);
+        let anonymous_kib = || {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status.lines().find_map(|line| {
+                        line.strip_prefix("RssAnon:")?
+                            .split_whitespace()
+                            .next()?
+                            .parse::<u64>()
+                            .ok()
+                    })
+                })
+        };
+        let before = debug.then(anonymous_kib).flatten();
+        // SAFETY: glibc's thread-safe trim only returns unused allocator pages;
+        // it does not free live SQLite, V8 or application allocations.
+        let released = unsafe { libc::malloc_trim(0) };
+        #[cfg(not(any(feature = "system-alloc", feature = "jemalloc-prof")))]
+        // SAFETY: collect returns only unused pages in this thread's mimalloc
+        // heap. The startup thread is about to become idle after allocating
+        // and releasing large one-time artifact buffers.
+        unsafe {
+            libmimalloc_sys::mi_collect(true);
+        }
+        if debug {
+            tracing::debug!(target: "gonvex_runtime::startup_trace", phase=_phase, ?before, after = ?anonymous_kib(), released,
+                elapsed_ms = started.elapsed().as_secs_f64()*1_000.0, "released cold artifact scratch");
+        }
     }
 }
 
@@ -4278,6 +4362,7 @@ impl FeedFirstScheduler {
     }
 
     fn selected_socket(&mut self) {
+        self.remaining_snapshot_feed_events = 0;
         self.socket_turn = false;
     }
 
@@ -4308,9 +4393,21 @@ where
     S: Stream + Unpin,
 {
     if scheduler.remaining_snapshot_feed_events > 0 {
-        let event = next_feed_event_or_wake(receiver, wake).await;
-        scheduler.selected_snapshot_feed();
-        return ScheduledTransport::Feed(event);
+        // FeedReceiver::len is an upper bound. Stale signals and catch-up
+        // merging can exhaust the queued events before this budget reaches
+        // zero. Give ready feed work priority, but never wait for a future
+        // commit while its caller is already queued on the socket.
+        return tokio::select! {
+            biased;
+            event = next_feed_event_or_wake(receiver, wake) => {
+                scheduler.selected_snapshot_feed();
+                ScheduledTransport::Feed(event)
+            }
+            message = socket.next() => {
+                scheduler.selected_socket();
+                ScheduledTransport::Socket(message)
+            }
+        };
     }
 
     if scheduler.socket_turn {
@@ -6808,6 +6905,35 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             ),
             "call-two"
         );
+    }
+
+    #[tokio::test]
+    async fn estimated_feed_backlog_cannot_block_a_queued_socket_call() {
+        let (sender, receiver) = broadcast::channel(8);
+        let mut feed = Some(change_feed::FeedReceiver::from(receiver));
+        let mut socket = futures_util::stream::iter(["queued-call"]);
+        let mut scheduler = FeedFirstScheduler::default();
+
+        // HubReceiver::len is an upper bound: duplicate/stale signals and
+        // catch-up merging can leave fewer events than this snapshot counted.
+        scheduler.selected_first_feed(2);
+        sender.send(feed_transaction(51)).unwrap();
+        assert_eq!(
+            scheduled_feed_revision(
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await
+            ),
+            51
+        );
+        assert_eq!(scheduler.remaining_snapshot_feed_events, 1);
+
+        let next = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None),
+        )
+        .await
+        .expect("queued RPC must not wait for a future commit");
+        assert_eq!(scheduled_socket(next), "queued-call");
+        assert_eq!(scheduler.remaining_snapshot_feed_events, 0);
     }
 
     #[tokio::test]

@@ -883,7 +883,10 @@ impl SnapshotCache {
                 .build
                 .clone()
         };
-        let _building = build_lock.lock().await;
+        // A single-flight follower owns no read clock yet. Waiting for the
+        // builder must not defer feed delivery on this follower's socket.
+        // Restore the fence before the builder closure can start its SQL read.
+        let _building = crate::replica_open_queue::admission_wait(build_lock.lock()).await;
         if let Some(entry) = self.current(&owned).filter(fresh) {
             self.count_hit(&owned);
             return Ok(Some(entry));
@@ -1421,6 +1424,84 @@ pub(crate) async fn source_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_build_follower_does_not_hold_a_socket_read_fence() {
+        use futures_util::FutureExt;
+        use std::sync::atomic::AtomicBool;
+
+        crate::in_process::tests::run(async {
+            let cache = Arc::new(SnapshotCache::default());
+            let args = serde_json::json!({});
+            let request_key = cache_key("waiting", &args);
+            let slot = Slot::empty();
+            let build_lock = slot.build.clone();
+            cache
+                .slots
+                .lock()
+                .unwrap()
+                .insert(request_key.owned(), slot);
+            let held = build_lock.lock_owned().await;
+            let mut queue = crate::replica_open_queue::ReplicaOpenQueue::default();
+            let progress = queue.progress();
+            let builder_was_reading = Arc::new(AtomicBool::new(false));
+            let builder_reading = builder_was_reading.clone();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let follower_progress = progress.clone();
+            queue
+                .push(
+                    "follower".into(),
+                    128,
+                    false,
+                    async move {
+                        let args = serde_json::json!({});
+                        let cache_key = cache_key("waiting", &args);
+                        entered.send(()).unwrap();
+                        cache
+                            .entry(&cache_key, || async {
+                                builder_reading.store(follower_progress.reading(), Relaxed);
+                                Ok(None)
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    .boxed(),
+                )
+                .unwrap();
+            {
+                let next = queue.next();
+                tokio::pin!(next);
+                tokio::select! {
+                    _ = &mut next => panic!("cache follower passed the held build lock"),
+                    ready = started => ready.unwrap(),
+                }
+            }
+            let released_read_fence = tokio::time::timeout(Duration::from_secs(1), async {
+                while progress.reading() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok();
+            drop(held);
+            tokio::time::timeout(Duration::from_secs(1), queue.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                released_read_fence,
+                "cache mutex wait blocked socket feed delivery"
+            );
+            assert!(
+                builder_was_reading.load(Relaxed),
+                "builder must reacquire its read fence before reading SQL"
+            );
+            assert!(
+                !progress.reading(),
+                "completed follower retained its read fence"
+            );
+        });
+    }
 
     #[cfg(feature = "perf-fixture")]
     #[global_allocator]

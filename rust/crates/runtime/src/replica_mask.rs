@@ -14,6 +14,95 @@
 use super::*;
 use crate::visibility::{grant_contribution, GrantContribution, VisibilityExpression};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grant_updates_ignore_columns_no_set_reads() {
+        let plan: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "version": 2, "table": "spaces", "key": "_id",
+            "permissionTables": ["memberTeams"],
+            "sets": {"taskSpaces": {
+                "kind":"grant", "table":"assignments", "alias":"assignment", "select":"spaceId",
+                "joins":[{"table":"memberTeams","leftColumn":"teamId","rightColumn":"teamId"}],
+                "where":[{"table":"memberTeams","column":"memberId","context":"member.id"},
+                    {"table":"assignment","column":"deletedAt","value":{"literal":null}}]
+            }},
+            "where":{"operator":"inSet","column":"_id","set":"taskSpaces"}
+        }))
+        .unwrap();
+        plan.validate().unwrap();
+        let resolved = ResolvedVisibility {
+            ephemeral_member: false,
+            revision: 1,
+            direct: BTreeMap::from([("member.id".into(), "m".into())]).into(),
+            role: "member".into(),
+            permissions: Value::Null.into(),
+            sets: BTreeMap::new().into(),
+            fingerprint: String::new(),
+            inherited: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+        };
+        let row = serde_json::json!({"_id":"a","spaceId":"s","teamId":"t","deletedAt":null,"name":"before"});
+        // Missing resolved join tokens deliberately require reconciliation
+        // when a grant input moves. Unrelated edits need no such evaluation.
+        assert_eq!(
+            grant_contribution("taskSpaces", &plan.sets["taskSpaces"], &resolved, &row),
+            GrantContribution::Unknown
+        );
+        let change = |operation: &str, columns: &[&str]| LogChange {
+            revision: 2,
+            ordinal: 0,
+            origin_command_id: String::new(),
+            table: "assignments".into(),
+            row_id: "a".into(),
+            operation: operation.into(),
+            changed_columns: columns.iter().map(|c| (*c).to_owned()).collect(),
+            old_value: Arc::new(row.clone()),
+            new_value: Arc::new(
+                serde_json::json!({"_id":"a","spaceId":"s","teamId":"t","deletedAt":null,"name":"after"}),
+            ),
+            provenance: Default::default(),
+        };
+        assert!(
+            matches!(
+                grant_delta(&plan, &resolved, &change("update", &["name"])),
+                GrantDelta::None
+            ),
+            "unread fields must not reopen the collection"
+        );
+        for (operation, columns) in [
+            ("update", vec!["spaceId"]),
+            ("update", vec!["teamId"]),
+            ("update", vec!["deletedAt"]),
+            ("update", vec!["name", "spaceId"]),
+            ("update", vec![]),
+            ("insert", vec!["name"]),
+            ("delete", vec!["name"]),
+        ] {
+            assert!(
+                matches!(
+                    grant_delta(&plan, &resolved, &change(operation, &columns)),
+                    GrantDelta::Rebuild
+                ),
+                "{operation} {columns:?} must retain reconciliation"
+            );
+        }
+        assert!(
+            plan.principal_change_concerns(
+                &resolved,
+                "memberTeams",
+                "update",
+                &["teamId".into()],
+                &row,
+                &row
+            ),
+            "joined relationship changes still invalidate the principal"
+        );
+    }
+}
+
 // `Apply` is built once per subscription per transaction and matched in
 // place; boxing it would add an allocation on the fan-out hot path.
 #[allow(clippy::large_enum_variant)]
@@ -147,6 +236,12 @@ fn grant_delta(
     let mut added = Vec::new();
     for (name, set) in plan.active_grant_sets_iter(resolved) {
         if set.table != change.table {
+            continue;
+        }
+        // A missing/SQL-only join resolution is not evidence that an unrelated
+        // source column changed this grant. Filter by the declared inputs
+        // before asking the conservative contribution evaluator to rebuild.
+        if !plan.grant_source_change_affects(name, &change.operation, &change.changed_columns) {
             continue;
         }
         let old = grant_contribution(name, set, resolved, &change.old_value);

@@ -10,7 +10,10 @@
 //! runtimes boot from it). Alongside it, `gonvex_runtime_artifacts` keeps the
 //! same manifest without migration bodies, the migrations' names, flags and
 //! checksums, and the SHA-256 of that text; `gonvex_runtime_migration_bodies`
-//! keeps each body once, by checksum. A boot whose stored artifact still
+//! keeps each body once, by checksum, using the bounded artifact encoding when
+//! smaller than plain SQL. Existing plain entries remain readable and are not
+//! rewritten on boot. A runtime predating the encoding refuses a pending encoded
+//! body at its checksum check; deploy the decoding runtime before new artifacts. A boot whose stored artifact still
 //! matches the manifest row (same module hash and `updated_at`) verifies the
 //! text's SHA-256, parses only it and provisions with bodiless migrations
 //! ([`SqlMigration::stored`]): tenants compare checksums as before, and a
@@ -233,11 +236,12 @@ impl ControlPlane {
         }
         let mut transaction = self.pool.begin().await?;
         for (checksum, sql) in missing {
+            let sql = crate::migration_encoding::encode_stored(sql).map_err(protocol)?;
             sqlx::query(
                 "INSERT INTO gonvex_runtime_migration_bodies(checksum,sql) VALUES($1,$2) ON CONFLICT(checksum) DO NOTHING",
             )
             .bind(checksum)
-            .bind(sql)
+            .bind(sql.as_ref())
             .execute(&mut *transaction)
             .await?;
         }
@@ -335,6 +339,7 @@ impl ControlPlane {
             } else {
                 HashSet::new()
             };
+        let mut remaining = crate::migration_encoding::MAX_DECODED_BYTES;
         for migration in migrations.iter_mut().filter(|migration| {
             migration.scope == scope
                 && migration.sql().is_none()
@@ -352,6 +357,8 @@ impl ControlPlane {
                     migration.name
                 ))
             })?;
+            let sql =
+                crate::migration_encoding::decode_stored(sql, &mut remaining).map_err(protocol)?;
             if sql_checksum(&sql) != migration.checksum {
                 return Err(protocol(format!(
                     "stored body of migration {} does not match its checksum",
@@ -446,6 +453,104 @@ mod tests {
             .fetch_one(&f.control.reader)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn compressed_archive_preserves_sql_and_accepts_existing_plain_bodies() {
+        let f = fixture("gonvex-encoded-archive").await;
+        let sql = format!(
+            "{}CREATE TABLE archived(id TEXT PRIMARY KEY);",
+            "-- café ☀\r\n".repeat(10_000)
+        );
+        let migration = migration("0001_archive.sql", &sql);
+        let head = store(&f, "hash", std::slice::from_ref(&migration)).await;
+        let encoded: String = sqlx::query_scalar("SELECT sql FROM gonvex_runtime_migration_bodies")
+            .fetch_one(&f.control.reader)
+            .await
+            .unwrap();
+        assert!(encoded.starts_with("deflate-raw-v1:"));
+        assert!(encoded.len() < sql.len() / 10);
+        assert_ne!(
+            sql_checksum(&encoded),
+            migration.checksum,
+            "an older runtime must refuse encoded SQL at its checksum check"
+        );
+        let stored = f.control.stored_artifact(&head).await.unwrap().unwrap();
+        f.control
+            .clone()
+            .provision_tenant_database(f.route.clone(), stored.migrations.clone())
+            .await
+            .unwrap();
+        let mut ledger = f.control.pool.acquire().await.unwrap();
+        let decoded = f
+            .control
+            .load_pending_bodies(
+                &mut ledger,
+                stored.migrations.clone(),
+                MigrationScope::Tenant,
+            )
+            .await
+            .unwrap();
+        assert_eq!(decoded[0].sql(), Some(sql.as_str()));
+        drop(ledger);
+
+        // Existing archives are not rewritten on a repeated push, and remain
+        // valid inputs to a runtime that now stores compressed bodies.
+        sqlx::query("UPDATE gonvex_runtime_migration_bodies SET sql=$1")
+            .bind(&sql)
+            .execute(&f.control.pool)
+            .await
+            .unwrap();
+        f.control
+            .store_migration_bodies(std::slice::from_ref(&migration))
+            .await
+            .unwrap();
+        let plain: String = sqlx::query_scalar("SELECT sql FROM gonvex_runtime_migration_bodies")
+            .fetch_one(&f.control.reader)
+            .await
+            .unwrap();
+        assert_eq!(plain, sql);
+        let mut ledger = f.control.pool.acquire().await.unwrap();
+        let decoded = f
+            .control
+            .load_pending_bodies(&mut ledger, stored.migrations, MigrationScope::Tenant)
+            .await
+            .unwrap();
+        assert_eq!(decoded[0].sql(), Some(sql.as_str()));
+        drop(ledger);
+        f.pools.close().await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_encoded_archive_cannot_apply_or_change_a_migration() {
+        let f = fixture("gonvex-corrupt-archive").await;
+        let migration = migration("0001_archive.sql", "CREATE TABLE forbidden(id INTEGER);");
+        let head = store(&f, "hash", std::slice::from_ref(&migration)).await;
+        let stored = f.control.stored_artifact(&head).await.unwrap().unwrap();
+        for invalid in [
+            "deflate-raw-v1:67108865:AA==".to_owned(),
+            "deflate-raw-v1:5:y0jNyckHAA==".to_owned(),
+        ] {
+            sqlx::query("UPDATE gonvex_runtime_migration_bodies SET sql=$1")
+                .bind(invalid)
+                .execute(&f.control.pool)
+                .await
+                .unwrap();
+            assert!(f
+                .control
+                .clone()
+                .provision_tenant_database(f.route.clone(), stored.migrations.clone())
+                .await
+                .is_err());
+            let reader = f.pools.pool(&f.route.database_url).await.unwrap();
+            let count: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM sqlite_schema WHERE name='forbidden'")
+                    .fetch_one(&reader)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 0);
+        }
+        f.pools.close().await;
     }
 
     #[tokio::test]

@@ -1,6 +1,8 @@
 //! Provision and exercise an application's migrations in a fresh disposable
 //! directory using the same store and commit path as the runtime.
-//! Usage: schema_probe MIGRATIONS_DIR NEW_OUTPUT_DIR [TRANSACTION_SQL ...]
+//! Usage: schema_probe [--seed-sqlite BACKUP] MIGRATIONS_DIR NEW_OUTPUT_DIR [TRANSACTION_SQL ...]
+//! A script starting `-- gonvex-probe:reject TEXT` must fail with TEXT. All
+//! other scripts must commit. Follow a refusal with SQL assertions for rollback.
 use gonvex_store::{
     ControlPlane, MigrationScope, PoolLimits, PoolRegistry, SqlMigration, TenantRoute,
 };
@@ -24,15 +26,42 @@ async fn run(args: Vec<OsString>, pools: &PoolRegistry) -> ProbeResult {
 }
 
 async fn probe(args: Vec<OsString>, pools: &PoolRegistry) -> ProbeResult {
+    let (seed, args) = if args.first().is_some_and(|arg| arg == "--seed-sqlite") {
+        if args.len() < 4 {
+            return Err("--seed-sqlite needs a backup, migrations and new output directory".into());
+        }
+        (Some(PathBuf::from(&args[1])), &args[2..])
+    } else {
+        (None, args.as_slice())
+    };
     if args.len() < 2 {
         return Err(
-            "usage: schema_probe MIGRATIONS_DIR NEW_OUTPUT_DIR [TRANSACTION_SQL ...]".into(),
+            "usage: schema_probe [--seed-sqlite BACKUP] MIGRATIONS_DIR NEW_OUTPUT_DIR [TRANSACTION_SQL ...]".into(),
         );
     }
     let source = PathBuf::from(&args[0]);
     let output = PathBuf::from(&args[1]);
     // Never accept an existing tenant directory as a probe destination.
     std::fs::create_dir(&output)?;
+    if let Some(seed) = &seed {
+        // A copied main file is consistent only for a finalized backup, not
+        // a live WAL database. Never open the source with a writable handle.
+        for suffix in ["-wal", "-journal"] {
+            let mut companion = seed.as_os_str().to_owned();
+            companion.push(suffix);
+            match std::fs::metadata(companion) {
+                Ok(info) if info.len() > 0 => {
+                    return Err(
+                        "seed must be a consistent SQLite backup without a pending journal".into(),
+                    )
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        std::fs::copy(seed, output.join("tenant.sqlite"))?;
+    }
     let mut files = std::fs::read_dir(source)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -83,12 +112,37 @@ async fn probe(args: Vec<OsString>, pools: &PoolRegistry) -> ProbeResult {
     let reprovision_ms = started.elapsed().as_millis();
     let mut revisions = Vec::new();
     let mut transaction_ms = Vec::new();
+    let mut rejected_transactions = Vec::new();
     for script in &args[2..] {
         let sql = std::fs::read_to_string(script)?;
         let started = std::time::Instant::now();
-        let mut transaction = control.begin_tenant_transaction(&route, false).await?;
-        gonvex_store::execute_script(transaction.transaction(), &sql).await?;
-        revisions.push(transaction.commit_with_revision().await?);
+        // Test-only probe directives, never interpreted by the production
+        // migration runner. Subsequent scripts can assert atomic rollback.
+        let expected_error = sql
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("-- gonvex-probe:reject "));
+        let result = async {
+            let mut transaction = control.begin_tenant_transaction(&route, false).await?;
+            gonvex_store::execute_script(transaction.transaction(), &sql).await?;
+            transaction.commit_with_revision().await
+        }
+        .await;
+        match (expected_error, result) {
+            (None, result) => revisions.push(result?),
+            (Some(expected), Err(error))
+                if !expected.is_empty() && error.to_string().contains(expected) =>
+            {
+                rejected_transactions.push(script.to_string_lossy().into_owned());
+                revisions.push(None);
+            }
+            (Some(expected), result) => {
+                return Err(format!(
+                    "{} expected rejection containing {expected:?}, got {result:?}",
+                    script.to_string_lossy()
+                )
+                .into())
+            }
+        }
         transaction_ms.push(started.elapsed().as_millis());
     }
     let pool = pools.pool(&route.database_url).await?;
@@ -106,7 +160,7 @@ async fn probe(args: Vec<OsString>, pools: &PoolRegistry) -> ProbeResult {
         .await?;
     println!(
         "{}",
-        serde_json::json!({"migrations":migrations.len(),"records":records,"changes":changes,"revisions":revisions,"provisionMs":provision_ms,"reprovisionMs":reprovision_ms,"transactionMs":transaction_ms,"frameworkRevision":option_env!("GONVEX_BUILD_COMMIT"),"output":output})
+        serde_json::json!({"migrations":migrations.len(),"records":records,"changes":changes,"revisions":revisions,"rejectedTransactions":rejected_transactions,"provisionMs":provision_ms,"reprovisionMs":reprovision_ms,"transactionMs":transaction_ms,"frameworkRevision":option_env!("GONVEX_BUILD_COMMIT"),"output":output})
     );
     Ok(())
 }
@@ -150,6 +204,24 @@ mod tests {
                 Some("no such table"),
                 0,
             ),
+            (
+                "expected-refusal",
+                "-- gonvex-probe:reject FOREIGN KEY\nINSERT INTO sources VALUES('invalid','missing');",
+                None,
+                0,
+            ),
+            (
+                "unexpected-acceptance",
+                "-- gonvex-probe:reject FOREIGN KEY\nINSERT INTO sources VALUES('valid','p');",
+                Some("expected rejection"),
+                1,
+            ),
+            (
+                "wrong-refusal",
+                "-- gonvex-probe:reject FOREIGN KEY\nINSERT INTO absent VALUES('x');",
+                Some("expected rejection"),
+                0,
+            ),
         ];
         for (name, sql, expected, rows) in cases {
             let pools = PoolRegistry::new(PoolLimits::default());
@@ -188,6 +260,52 @@ mod tests {
             assert_eq!(stored, rows, "{name}: unexpected persisted rows");
             pools.close().await;
         }
+        let seed = directory.join("success/tenant.sqlite");
+        let before = std::fs::read(&seed).unwrap();
+        let output = directory.join("seeded");
+        let pools = PoolRegistry::new(PoolLimits::default());
+        run(
+            vec![
+                "--seed-sqlite".into(),
+                seed.clone().into(),
+                migrations.clone().into(),
+                output.clone().into(),
+            ],
+            &pools,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&seed).unwrap(),
+            before,
+            "the seed is read-only"
+        );
+        let pool = pools
+            .pool(&gonvex_store::database_url(&output.join("tenant.sqlite")))
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sources")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        pools.close().await;
+        // A main file with an outstanding WAL is not a complete backup.
+        std::fs::write(directory.join("success/tenant.sqlite-wal"), b"pending").unwrap();
+        let error = run(
+            vec![
+                "--seed-sqlite".into(),
+                seed.into(),
+                migrations.into(),
+                directory.join("unsafe-seed").into(),
+            ],
+            &pools,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("consistent SQLite backup"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
