@@ -190,9 +190,13 @@ stages! {
     HostOther => "host.other", "reducer", "Non-database host calls (storage, scheduler, outbox)";
     FnFinish => "fn.finish", "reducer", "Reducer commit or rollback (finish_with_revision) including the four commit stages";
     CommitFinalize => "commit.finalize", "reducer", "Reference-integrity flush + change-feed finalize inside the transaction";
+    ReferenceCompile => "reference.compile", "store", "Load and compile the installed reference policy on a cache miss";
+    ReferenceFlush => "reference.flush", "reducer", "Validate and maintain reference state for staged application changes";
     CommitSql => "commit.commit", "reducer", "SQLite COMMIT";
     CommitFsync => "commit.fsync", "reducer", "Durability barrier (WAL sync) before acknowledging";
     CommitPublish => "commit.publish", "reducer", "Change-feed notification publish";
+    WalSyncQueue => "wal.sync_queue", "store", "WAL sync submitted -> blocking worker started";
+    WalSyncIo => "wal.sync_io", "store", "Open WAL file and fdatasync on the blocking worker";
     // Store (unlabelled).
     DbAdmission => "db.admission", "store", "Process-wide pool admission semaphore wait (every transaction)";
     WriterAcquire => "db.writer_acquire", "store", "Writer connection acquire + BEGIN (single writer per tenant database)";

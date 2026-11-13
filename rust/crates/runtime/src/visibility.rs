@@ -1362,6 +1362,24 @@ impl VisibilityPlan {
         })
     }
 
+    /// Whether a source edit can change one grant's contribution. Reuse the
+    /// cached alias/join/filter projection used for principal invalidation.
+    /// Inserts, deletes and updates without column evidence stay conservative.
+    pub(crate) fn grant_source_change_affects(
+        &self,
+        name: &str,
+        operation: &str,
+        changed_columns: &[String],
+    ) -> bool {
+        !operation.eq_ignore_ascii_case("update")
+            || changed_columns.is_empty()
+            || self.principal_inputs()[name].dependencies.change_affects(
+                &self.sets[name].table,
+                operation,
+                changed_columns,
+            )
+    }
+
     /// [`Self::active_grant_sets`] without collecting.
     pub fn active_grant_sets_iter<'a>(
         &'a self,

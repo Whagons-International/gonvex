@@ -24,6 +24,7 @@ gonvex-profiler = { path = "../profiler" }
 # Process allocator: lower fragmentation under bursty multi-threaded snapshot
 # work, and freed memory is returned to the OS promptly.
 mimalloc = { version = "=0.1.48", default-features = false }
+libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["extended"] }
 # Fast seeded hasher for per-event/per-row maps (see `fast_hash`).
 foldhash = { version = "=0.1.5" }
 tikv-jemallocator = { version = "=0.7.0", features = ["profiling"], optional = true }

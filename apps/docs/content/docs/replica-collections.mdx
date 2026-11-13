@@ -54,3 +54,15 @@ into snapshot and Live Query SQL, caches its revisioned context, derives its
 dependency tables, and evaluates committed old/new rows before sending INSERT,
 PATCH, or visibility DELETE changes. Equivalent resolved contexts share one
 Live Query group; fingerprints are an optimization and never an authority.
+
+Snapshot-cache followers release the socket's read fence while waiting for a
+shared builder, before they own a SQL read clock. They reacquire it before
+reading. Existing subscriptions can therefore receive commits and watermarks
+while other collection opens wait. The cold-open quota is unchanged;
+`/dev/metrics` exposes its limit, active count, peak and refusals under
+`memory.snapshotCache` for load-test diagnosis.
+
+Grant-source updates use the compiled alias, join and filter dependencies to
+skip unrelated changed columns. Inserts, deletes, relevant updates and updates
+without column evidence remain conservative. This avoids broad reconciliation
+for an unrelated edit without weakening permission-change delivery.

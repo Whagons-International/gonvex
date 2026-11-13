@@ -28,6 +28,12 @@ const { rows, source, completeness, freshness, supported } =
 ordering, so a task displayed by several components cannot diverge into
 separate cached copies.
 
+Transport checks read window metadata without copying the full ID list or hash
+map. Published integrity maps and unchanged ordered memberships are shared
+internally as immutable values. A row edit that preserves membership does not
+repin every other row. Public window reads still return defensive copies, and
+hash retention remains part of the replica's memory accounting.
+
 ## Offline contract
 
 Portable Live Query expressions can run over cached rows. Gonvex reports:

@@ -172,7 +172,9 @@ const OPTIMIZE_AT_OPEN: &str = "PRAGMA analysis_limit=400; PRAGMA optimize=0x100
 /// Periodic form (tables used since the connection opened).
 const OPTIMIZE_PERIODIC: &str = "PRAGMA analysis_limit=400; PRAGMA optimize;";
 
-async fn optimize_at_open(connection: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
+pub(crate) async fn optimize_planner_statistics(
+    connection: &mut sqlx::SqliteConnection,
+) -> Result<(), sqlx::Error> {
     for statement in OPTIMIZE_AT_OPEN.split_inclusive(';') {
         sqlx::query(statement.trim())
             .execute(&mut *connection)
@@ -582,6 +584,7 @@ pub(crate) struct Database {
     pub(crate) statements: Arc<crate::direct::WriterStatements>,
     pub(crate) writer: SqlitePool,
     pub(crate) writer_stats: Arc<WriterStats>,
+    pub(crate) reference_catalog: Arc<crate::reference_integrity::CompiledCatalogCache>,
     pub(crate) reader: SqlitePool,
     /// When a reader connection was last released ([`now_ms`]).
     reader_used: Arc<AtomicU64>,
@@ -619,6 +622,7 @@ pub struct PoolRegistry {
     // initializer, never across file I/O, so a slow or suspended open of one
     // file cannot block lookups of every other database.
     databases: Arc<std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::OnceCell<Database>>>>>,
+    reference_programs: Arc<crate::reference_integrity::CompiledCatalogPrograms>,
     /// Set once the reader sweeper task runs (started by the first open).
     sweeper: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -673,6 +677,7 @@ impl PoolRegistry {
             admission_wait_us: Arc::default(),
             admission_wait_max_us: Arc::default(),
             databases: Arc::default(),
+            reference_programs: Arc::default(),
             sweeper: Arc::default(),
             durability,
             limits,
@@ -752,7 +757,10 @@ impl PoolRegistry {
         let writer_objects = Arc::new(WriterObjects::default());
         let (connected, acquiring) = (
             writer_objects.clone(),
-            (writer_objects.clone(), statements.clone()),
+            // Pool callbacks can outlive the Database. A strong cache owner
+            // here would prevent its raw statements from finalizing before
+            // SQLx closes the writer connection on implicit registry drop.
+            (writer_objects.clone(), Arc::downgrade(&statements)),
         );
         // The writer creates the file and switches it to WAL before any reader
         // opens it; a read-only connection cannot change the journal mode.
@@ -777,7 +785,7 @@ impl PoolRegistry {
                     // Planner statistics: ANALYZE the tables whose size
                     // changed a lot since their last statistics (stale
                     // `sqlite_stat1` rows made indexed lookups full scans).
-                    optimize_at_open(connection).await?;
+                    optimize_planner_statistics(connection).await?;
                     crate::capture::install(connection)
                         .await
                         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -817,7 +825,9 @@ impl PoolRegistry {
                             // finalized first); the pool opens a new one,
                             // whose connect installs them or fails.
                             eprintln!("gonvex-store: writer-only schema install failed; reopening the writer: {error}");
-                            statements.retire();
+                            if let Some(statements) = statements.upgrade() {
+                                statements.retire();
+                            }
                             return Ok(false);
                         }
                         objects.installed.store(true, Ordering::Relaxed);
@@ -856,6 +866,9 @@ impl PoolRegistry {
             statements,
             writer,
             writer_stats: Arc::default(),
+            reference_catalog: Arc::new(crate::reference_integrity::CompiledCatalogCache::new(
+                self.reference_programs.clone(),
+            )),
             reader,
             reader_used,
             reader_open: Arc::new(Semaphore::new(1)),
@@ -1160,6 +1173,38 @@ impl PoolRegistry {
         }
     }
 
+    /// Release provisioning/inspection statements and discardable SQLite pages
+    /// once startup has finished. Keep connections, parsed schemas, direct
+    /// application statements, compiled policy and cache capacity unchanged.
+    /// Call at the startup boundary, never per request or periodically.
+    pub async fn release_bootstrap_memory(&self) -> Result<usize, DatabaseError> {
+        use sqlx::Connection;
+        let mut released = 0;
+        for database in self.open_databases() {
+            let mut writer = database.writer.acquire().await?;
+            released += writer.cached_statements_size();
+            writer.clear_cached_statements().await?;
+            sqlx::query("PRAGMA shrink_memory")
+                .persistent(false)
+                .execute(&mut *writer)
+                .await?;
+            drop(writer);
+            let mut readers = Vec::new();
+            while let Some(reader) = database.reader.try_acquire() {
+                readers.push(reader);
+            }
+            for mut reader in readers {
+                released += reader.cached_statements_size();
+                reader.clear_cached_statements().await?;
+                sqlx::query("PRAGMA shrink_memory")
+                    .persistent(false)
+                    .execute(&mut *reader)
+                    .await?;
+            }
+        }
+        Ok(released)
+    }
+
     pub async fn close_database(&self, database_url: &str) {
         let cell = self.databases.lock().unwrap().remove(&key(database_url));
         if let Some(database) = cell.and_then(|cell| cell.get().cloned()) {
@@ -1176,6 +1221,169 @@ impl PoolRegistry {
 #[cfg(test)]
 mod idle_snapshot_regression {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_registry_finalizes_cached_statements_before_the_writer_pool() {
+        let dir = crate::transaction_commit_tests::TestDir::new("direct-cache-drop");
+        let url = crate::database_url(&dir.0.join("tenant.db"));
+        let registry = PoolRegistry::new(PoolLimits::default());
+        let database = registry.database(&url).await.unwrap();
+        // A public pool handle may outlive its registry. Its callbacks must
+        // not retain raw statements past the last database/transaction owner.
+        let pool = database.writer.clone();
+        let mut connection = pool.acquire().await.unwrap();
+        let mut handle = connection.lock_handle().await.unwrap();
+        let session = crate::direct::DirectSession::new(
+            handle.as_raw_handle(),
+            Some(database.statements.clone()),
+            Arc::default(),
+        );
+        assert_eq!(
+            session
+                .run(|conn| conn.query_i64("SELECT 41", &[]))
+                .unwrap()
+                .unwrap(),
+            Some(41)
+        );
+        session.release();
+        drop(session);
+        drop(handle);
+        assert!(database.statements.stats().cached > 0);
+        let statements = Arc::downgrade(&database.statements);
+        drop(database);
+        drop(registry);
+        let retained = statements.upgrade().is_some();
+        // Clean up the faulty implementation too, so the regression reports
+        // the ownership error instead of double-panicking in sqlite3_close.
+        if let Some(statements) = statements.upgrade() {
+            statements.close();
+        }
+        drop(connection);
+        pool.close().await;
+        assert!(
+            !retained,
+            "pool callbacks retained raw statements after their database owner dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_cleanup_keeps_the_writer_schema_and_direct_statements() {
+        use sqlx::{Connection, SqliteConnection};
+        async fn memory_status(connection: &mut SqliteConnection, kind: i32) -> i32 {
+            let mut handle = connection.lock_handle().await.unwrap();
+            let (mut current, mut high) = (0, 0);
+            // SAFETY: the SQLx handle guard excludes its worker while sampling.
+            unsafe {
+                assert_eq!(
+                    libsqlite3_sys::sqlite3_db_status(
+                        handle.as_raw_handle().as_ptr(),
+                        kind,
+                        &mut current,
+                        &mut high,
+                        0,
+                    ),
+                    libsqlite3_sys::SQLITE_OK
+                );
+            }
+            current
+        }
+        let dir = crate::transaction_commit_tests::TestDir::new("bootstrap-statements");
+        let url = crate::database_url(&dir.0.join("tenant.db"));
+        let registry = PoolRegistry::new(PoolLimits::default());
+        let database = registry.database(&url).await.unwrap();
+        let mut connection = database.writer.acquire().await.unwrap();
+        sqlx::query("CREATE TABLE records(id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO records VALUES('kept')")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE bootstrap_payload(payload BLOB NOT NULL)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bootstrap_payload VALUES(zeroblob(1048576))")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        assert!(connection.cached_statements_size() > 0);
+        let pointer = connection
+            .lock_handle()
+            .await
+            .unwrap()
+            .as_raw_handle()
+            .as_ptr() as usize;
+        drop(connection);
+        let mut transaction = crate::begin_transaction(&registry, &url, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            transaction
+                .direct()
+                .await
+                .unwrap()
+                .run(|conn| conn.query_i64("SELECT count(*) FROM records", &[]))
+                .unwrap()
+                .unwrap(),
+            Some(1)
+        );
+        transaction.commit().await.unwrap();
+        let direct = database.statements.stats().cached;
+        assert!(direct > 0);
+        let mut connection = database.writer.acquire().await.unwrap();
+        let pages_before =
+            memory_status(&mut connection, libsqlite3_sys::SQLITE_DBSTATUS_CACHE_USED).await;
+        let schema_before =
+            memory_status(&mut connection, libsqlite3_sys::SQLITE_DBSTATUS_SCHEMA_USED).await;
+        let budget_before: i64 = sqlx::query_scalar("PRAGMA cache_size")
+            .persistent(false)
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        assert!(registry.release_bootstrap_memory().await.unwrap() > 0);
+        let mut connection = database.writer.acquire().await.unwrap();
+        assert!(
+            memory_status(&mut connection, libsqlite3_sys::SQLITE_DBSTATUS_CACHE_USED).await
+                < pages_before,
+            "bootstrap pages must be released, not just their prepared statements"
+        );
+        assert_eq!(
+            memory_status(&mut connection, libsqlite3_sys::SQLITE_DBSTATUS_SCHEMA_USED).await,
+            schema_before,
+            "the parsed schema must remain warm"
+        );
+        assert_eq!(connection.cached_statements_size(), 0);
+        assert_eq!(
+            connection
+                .lock_handle()
+                .await
+                .unwrap()
+                .as_raw_handle()
+                .as_ptr() as usize,
+            pointer,
+            "cleanup must keep the opened writer, not defer its schema parse to the first user"
+        );
+        assert_eq!(database.statements.stats().cached, direct);
+        let budget_after: i64 = sqlx::query_scalar("PRAGMA cache_size")
+            .persistent(false)
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            budget_after, budget_before,
+            "cache capacity must not change"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM records")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(connection);
+        registry.close().await;
+    }
 
     #[test]
     fn invalid_sqlx_idle_sample_is_unavailable_not_a_connection_count() {

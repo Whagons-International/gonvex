@@ -52,6 +52,7 @@ pub use registry::{
     PoolRegistrySnapshot, WriterQueue, WriterStats,
 };
 
+pub mod migration_encoding;
 mod provision;
 pub mod reader_priority;
 pub mod reference_integrity;
@@ -1495,6 +1496,7 @@ pub struct TenantTransaction {
     _writer_held: Option<gonvex_profiler::GaugeGuard>,
     /// The writer's per-database stats (carries the change-feed flag).
     writer_stats: Option<Arc<registry::WriterStats>>,
+    reference_catalog: Arc<reference_integrity::CompiledCatalogCache>,
     /// An Action-outbox row was written in this transaction.
     outbox_written: bool,
 }
@@ -1582,6 +1584,7 @@ pub async fn begin_transaction(
         profile_label: Label::None,
         _writer_held: writer_held,
         writer_stats,
+        reference_catalog: database.reference_catalog,
         outbox_written: false,
     })
 }
@@ -1837,7 +1840,10 @@ impl TenantTransaction {
     async fn finalize(&mut self) -> Result<Option<CommitNotice>, DatabaseError> {
         let staged = self.with_direct(reference_integrity::staged_direct).await?;
         if staged {
-            reference_integrity::flush(&mut *self.transaction()).await?;
+            let mut timer = gonvex_profiler::Timer::start();
+            let cache = self.reference_catalog.clone();
+            reference_integrity::flush_cached(&mut *self.transaction(), &cache).await?;
+            timer.lap(gonvex_profiler::Stage::ReferenceFlush, self.profile_label);
         }
         let provenance = self.provenance.clone();
         let stats = self.writer_stats.clone();
@@ -1882,12 +1888,18 @@ impl TenantTransaction {
             }
         };
         timer.lap(Stage::CommitFinalize, label);
+        let needs_durability = if self.publisher.is_some() {
+            self.with_direct(|connection| Ok(connection.main_write_transaction()))
+                .await?
+        } else {
+            false
+        };
         self.release_direct();
         self.transaction.commit().await?;
         timer.lap(Stage::CommitSql, label);
         // Acknowledge and publish only once the commit is on disk; one WAL
         // sync covers every commit that finished before it started.
-        if let Some((pools, database_url)) = &self.publisher {
+        if let Some((pools, database_url)) = self.publisher.as_ref().filter(|_| needs_durability) {
             pools.durable(database_url).await?;
             timer.lap(Stage::CommitFsync, label);
         }

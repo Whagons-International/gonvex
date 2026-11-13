@@ -36,7 +36,7 @@ export function extractReadyPublication(source) {
   assert.deepEqual(method.modifiers?.map(n => n.kind), [ts.SyntaxKind.PrivateKeyword, ts.SyntaxKind.AsyncKeyword]);
   assert(!method.asteriskToken && !method.questionToken && !method.typeParameters && !method.type);
   assert.deepEqual(method.parameters.map(n => compact(n, file)), [
-    'subscription:ReplicaSubscription', 'message:ReplicaReadyMessage', 'hashes:Record<string,string>',
+    'subscription:ReplicaSubscription', 'message:ReplicaReadyMessage', 'hashes:Readonly<Record<string,string>>',
     'hashesWereStored:boolean', 'scope=this.replicaScope',
   ]);
   const body = method.body.statements; assert.equal(body.length, 14, 'ready publication control flow changed');
@@ -44,7 +44,7 @@ export function extractReadyPublication(source) {
     'constpublicationId=subscription.id;', 'constgeneration=subscription.verificationGeneration;',
     'constsocketGeneration=this.socketGeneration;', 'this.clearReplicaRetry(subscription,true);',
     'subscription.forceFullIntegrity=false;', 'subscription.isUpToDate=true;', 'subscription.opening=false;',
-    'raiseReplicaCursorFloor(subscription,message.cursor);', 'constwindow=this.replica.getWindow(subscription.key);',
+    'raiseReplicaCursorFloor(subscription,message.cursor);', 'constwindow=this.replica.windowProtocolState(subscription.key);',
   ]);
   const window = body[9]; assert(ts.isIfStatement(window) && !window.elseStatement && ts.isBlock(window.thenStatement));
   assert.equal(compact(window.expression, file), 'window');

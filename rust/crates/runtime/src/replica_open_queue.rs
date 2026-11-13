@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 ///
 /// A preparation counts as *reading* from its first poll until the socket
 /// takes its result (and installs the subscription in the same step), except
-/// while it waits for snapshot admission ([`admission_wait`]): no read
+/// while it waits for snapshot admission or a cache builder ([`admission_wait`]): no read
 /// transaction or clock of this open exists then. The socket applies feed
 /// events to its installed subscriptions while no preparation is reading,
 /// so a connection whose opens queue for seconds behind the process-wide
@@ -93,7 +93,7 @@ tokio::task_local! {
     static OPEN: Arc<OpenState>;
 }
 
-/// Awaits `admission` (a snapshot permit) with the calling preparation, if
+/// Awaits admission or a cache build lock with the calling preparation, if
 /// any, counted as not reading. Call it only where the preparation holds no
 /// read transaction or clock of its own.
 pub(crate) async fn admission_wait<F: Future>(admission: F) -> F::Output {

@@ -42,6 +42,44 @@ it("restores persisted aggregate metadata and upgrades legacy hash-only windows"
   expect(legacy.windowResumeState("tasks")).toEqual({ cursor, digest: replicaAggregateDigest(hashes) });
 });
 
+it("keeps borrowed transport integrity stable and public window copies isolated", async () => {
+  const replica = new LocalReplica();
+  const rows = [{id:"a",value:1}];
+  const hashes = await replicaRowsHashes(rows, "id");
+  await replica.replaceWindow({signature:"tasks",kind:"replica",entity:"tasks",key:"id",rows,
+    hashes,cursor:{epoch:"e",revision:1},completeness:"complete",source:"server"});
+  const prior = replica.windowProtocolState("tasks")!;
+  const copy = replica.getWindow("tasks")!;
+  copy.ids.push("fake"); copy.hashes!.a = "fake"; copy.cursor!.revision = 99;
+  prior.cursor!.revision = 98;
+  expect(replica.getWindow("tasks")).toMatchObject({ids:["a"],hashes,cursor:{epoch:"e",revision:1}});
+  const upserts = [{id:"a",value:2}];
+  const next = await replicaRowsHashes(upserts, "id");
+  await replica.applyWindowDelta({signature:"tasks",kind:"replica",entity:"tasks",key:"id",upserts,deleted:[],
+    hashes:next,cursor:{epoch:"e",revision:2}});
+  expect(prior.hashes).toEqual(hashes);
+  expect(replica.windowProtocolState("tasks")!.hashes).toEqual(next);
+  expect(replica.windowProtocolState("tasks")!.hashes).not.toBe(prior.hashes);
+  const value = client();
+  expect("windowProtocolState" in value.localReplica).toBe(false);
+  replica.dispose();
+});
+
+it("preserves retained metadata when ready upgrades a cached window", async () => {
+  const state = client() as any;
+  const rows = [{id:"a",value:1}];
+  const hashes = await replicaRowsHashes(rows, "id");
+  const metadata = {resultSkeleton:{items:[],total:1},resultPath:["items"],scalar:{count:1},
+    windowRevision:"retained",subscriptionRevision:{epoch:"e",sequence:1}};
+  await state.replica.replaceWindow({signature:"tasks",kind:"replica",entity:"tasks",key:"id",rows,
+    hashes,cursor:{epoch:"e",revision:1},completeness:"partial",source:"cache",...metadata});
+  const subscription = {key:"tasks",id:"r",path:"tasks.list",retiredEpochs:new Set(),verificationGeneration:1,scope:state.replicaScope};
+  state.replicaSubscriptions.set(subscription.key,subscription);
+  state.emitReplicaMessage = vi.fn();
+  await state.handleReplicaMessage(subscription,{type:"replica.ready",id:"r",cursor:{epoch:"e",revision:1},digest:replicaAggregateDigest(hashes)});
+  expect(state.replica.getWindow("tasks")).toMatchObject({...metadata,source:"server",completeness:"complete"});
+});
+
 it("uploads a cached aggregate without copying membership, with legacy and needHashes fallback", async () => {
   const value = client();
   const rows = Array.from({ length: 20_000 }, (_, i) => ({ id: `row-${i}`, value: i }));
@@ -105,8 +143,14 @@ it("persists the aggregate of committed delta rows for the next resume", async (
   state.emitReplicaMessage = vi.fn();
   const upserts = [{ id: "a", value: 3 }, { id: "c", value: 4 }];
   const expected = await replicaRowsHashes(upserts, "id");
+  const copying = vi.spyOn(state.replica, "getWindow").mockImplementation(() => { throw Error("transport must not copy full membership and integrity metadata"); });
   await state.handleReplicaMessage(subscription, { type: "replica.delta", id: "r",
     cursor: { epoch: "e", revision: 2 }, upserts, deleted: ["b"] });
+  await state.handleReplicaMessage(subscription, { type: "replica.ready", id: "r",
+    cursor: { epoch: "e", revision: 2 }, digest: replicaAggregateDigest(expected) });
+  expect(subscription.isUpToDate).toBe(true);
+  expect(copying).not.toHaveBeenCalled();
+  copying.mockRestore();
   expect(state.replica.getWindow("tasks")).toMatchObject({ hashes: expected, aggregateDigest: replicaAggregateDigest(expected) });
   state.serverCapabilities = { replicaResume: 1 };
   expect(state.replicaOpenRequest(subscription)).toMatchObject({ cursor: { epoch: "e", revision: 2 }, digest: replicaAggregateDigest(expected) });

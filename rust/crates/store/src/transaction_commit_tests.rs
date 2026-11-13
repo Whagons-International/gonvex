@@ -1,5 +1,7 @@
 use super::*;
 
+// Each test closes its pools before Tokio shuts down, finalizing the direct
+// statement cache while the writer connection is still alive.
 struct Fixture {
     _dir: TestDir,
     pools: PoolRegistry,
@@ -85,10 +87,96 @@ async fn failed_statements_do_not_commit_their_own_effects() {
         transaction.rollback().await.unwrap();
         assert_eq!(fixture.count("records").await, 0, "after {statement}");
     }
+    fixture.pools.close().await;
 }
 
 async fn self_pool(fixture: &Fixture) -> SqlitePool {
     fixture.pools.pool(&fixture.url).await.unwrap()
+}
+
+#[tokio::test]
+async fn writable_reads_skip_wal_sync_but_untracked_writes_do_not() {
+    let fixture = Fixture::new().await;
+    let before = fixture.pools.wal_sync_count(&fixture.url).await.unwrap();
+    let mut transaction = fixture.begin(false).await;
+    sqlx::query("SELECT * FROM records")
+        .fetch_all(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        fixture.pools.wal_sync_count(&fixture.url).await.unwrap(),
+        before
+    );
+
+    // A framework metadata write has no application change-feed notice. Its
+    // acknowledged commit still must pass the same FULL durability barrier.
+    let mut transaction = fixture.begin(false).await;
+    sqlx::query("CREATE TABLE metadata_receipts(id TEXT PRIMARY KEY)")
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        fixture.pools.wal_sync_count(&fixture.url).await.unwrap(),
+        before + 1
+    );
+    let mut transaction = fixture.begin(false).await;
+    sqlx::query("INSERT INTO metadata_receipts VALUES('acknowledged')")
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        fixture.pools.wal_sync_count(&fixture.url).await.unwrap(),
+        before + 2
+    );
+    // Reading an existing receipt needs no new durability dependency for a
+    // later, unrelated writer.
+    let mut transaction = fixture.begin(false).await;
+    sqlx::query("SELECT count(*) FROM metadata_receipts")
+        .fetch_one(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        fixture.pools.wal_sync_count(&fixture.url).await.unwrap(),
+        before + 2
+    );
+    fixture.pools.close().await;
+}
+
+#[tokio::test]
+async fn duplicate_receipt_claims_keep_the_durability_barrier() {
+    let fixture = Fixture::new().await;
+    sqlx::query(
+        "CREATE TABLE _gonvex_reducer_idempotency (
+            subject TEXT, idempotency_key TEXT, path TEXT, result JSON,
+            PRIMARY KEY(subject,idempotency_key))",
+    )
+    .execute(&self_pool(&fixture).await)
+    .await
+    .unwrap();
+    let before = fixture.pools.wal_sync_count(&fixture.url).await.unwrap();
+    for first in [true, false] {
+        let mut transaction = fixture.begin(false).await;
+        assert_eq!(
+            transaction
+                .claim_reducer("account", "intent", "write")
+                .await
+                .unwrap(),
+            first
+        );
+        // A duplicate may observe a receipt whose original commit is still
+        // waiting for sync. INSERT ... DO NOTHING still takes a main write
+        // transaction, so replay must retain its durability dependency.
+        transaction.commit().await.unwrap();
+    }
+    assert_eq!(
+        fixture.pools.wal_sync_count(&fixture.url).await.unwrap(),
+        before + 2
+    );
+    fixture.pools.close().await;
 }
 
 #[tokio::test]
@@ -108,6 +196,7 @@ async fn healthy_commit_and_explicit_rollback_keep_their_semantics() {
         }
         assert_eq!(fixture.count("records").await, expected);
     }
+    fixture.pools.close().await;
 }
 
 #[tokio::test]
@@ -129,6 +218,7 @@ async fn snapshot_can_rollback_after_a_caught_sql_error() {
         transaction.rollback().await.unwrap();
         assert_eq!(fixture.count("records").await, 0);
     }
+    fixture.pools.close().await;
 }
 
 #[tokio::test]
@@ -149,6 +239,7 @@ async fn deferred_constraints_still_fail_at_commit() {
         .unwrap();
     transaction.commit().await.unwrap();
     assert_eq!(fixture.count("records").await, 1);
+    fixture.pools.close().await;
 }
 
 #[tokio::test]
@@ -172,6 +263,7 @@ async fn readers_keep_one_snapshot_while_the_writer_commits() {
     assert_eq!(before, during, "a read transaction sees one WAL snapshot");
     snapshot.commit().await.unwrap();
     assert_eq!(fixture.count("records").await, 1);
+    fixture.pools.close().await;
 }
 
 #[tokio::test]
@@ -196,4 +288,5 @@ async fn aborted_transaction_cannot_report_successful_commit() {
         "a transaction SQLite already rolled back reported a successful commit"
     );
     assert_eq!(fixture.count("records").await, 1);
+    fixture.pools.close().await;
 }

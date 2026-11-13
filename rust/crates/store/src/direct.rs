@@ -444,6 +444,15 @@ pub struct Conn<'a> {
 }
 
 impl Conn<'_> {
+    /// A connection admitted to the writer may still have executed only reads.
+    /// Check the main database itself, not application change-feed rows: receipts,
+    /// outbox records and DDL must retain their durability barrier too.
+    pub(crate) fn main_write_transaction(&self) -> bool {
+        let state = unsafe { ffi::sqlite3_txn_state(self.db, c"main".as_ptr()) };
+        // Unknown state is conservative: never skip a required sync.
+        state != ffi::SQLITE_TXN_NONE && state != ffi::SQLITE_TXN_READ
+    }
+
     /// A cached prepared statement for `sql` (one statement; trailing text
     /// after it is ignored). It is reset and returned to the cache on drop.
     pub fn prepare(&mut self, sql: &str) -> Result<Stmt<'_>, sqlx::Error> {
