@@ -98,6 +98,25 @@ actual `sdkApplication` pre-connect refusal. Conformance tests remain unchanged.
 Exact check exits, resource receipts, file/tool hashes, full-diff classification and cycle comparison
 are recorded alongside this report. Existing 445/493/1b/a59 evidence and failures are not rewritten.
 
+| Local check | Result |
+| --- | --- |
+| Monitoring suite | 132 passed (115 unchanged originals, 17 new); no skips/failures |
+| Conformance unit suite | 29 passed; unchanged |
+| SQLite schema generator + freshness check | passed, no tracked output changes |
+| Docs metadata / Next typegen / TypeScript | passed via explicit existing owned executables |
+| Runtime import cycles against exact `8851` base blobs | existing 1 → 1; 430 base / 432 head graph nodes; unresolved-import warnings retained |
+| Built-in disabled config / replay | passed within their declared offline domains |
+| Binding audit | BLOCKED, expected exit 2; no operations or availability emitted |
+| Source verification | 24 immutable app blobs, 9 catalog/generated refs, 4 framework inputs checked; 34 original files preserved |
+
+The first source verifier truncated a generated reference before its replica bounds and failed;
+its corrected parser includes the full object. The first cycle verifier omitted package nodes
+reachable through workspace aliases from its source-only baseline and failed 0 → 1. The corrected
+baseline supplies every existing graph node from exact Git blobs, without resolving mutable
+workspace dependencies. Both initial failures, logs and resource receipts are retained under
+`/mnt/data/work/gonvex-m05-foundation/binding-preparation/artifacts-initial`, separately from passes.
+No implementation assertion was removed or weakened to obtain these results.
+
 Serving bundle, tenant rows/bytes, production memory, hosted CPU and app latency/overhead were
 **not executed or measured**: no serving code imports this foundation. The audit itself does not
 read/write application rows. Local test resource usage is tool-process evidence, not serving gains.
