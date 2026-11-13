@@ -28,7 +28,7 @@ use sqlx::{Connection, Row, SqliteConnection};
 
 use self::jsonpath::JsonPath;
 use crate::provision::{application_tables, column_exists, table_exists, BoxFuture};
-use crate::rows::{json_object_expr, quote_identifier, table_columns, ColumnInfo};
+use crate::rows::{json_object_expr, quote_identifier, table_columns, ColumnInfo, JsonKind};
 use crate::DatabaseError;
 
 const STATES: [&str; 2] = ["exists", "live"];
@@ -1433,7 +1433,7 @@ pub(crate) async fn refresh_from_change_feed(
         .await?;
     let signature = |cookie| {
         format!(
-            "reference-feed-v2:{cookie}:{digest}:{:x}",
+            "reference-feed-v3:{cookie}:{digest}:{:x}",
             Sha256::digest(FEED_STAGING_TRIGGER.as_bytes())
         )
     };
@@ -1560,6 +1560,7 @@ async fn refresh_triggers(connection: &mut SqliteConnection) -> Result<(), Datab
             return Err(violation(format!("declared reference table {table} lost its public key; update its declaration in the same migration")));
         }
         let columns = table_columns(connection, table).await?;
+        validate_public_key_encoding(table, &declaration.key, &columns)?;
         let required = declaration
             .keys
             .iter()
@@ -1582,6 +1583,26 @@ async fn refresh_triggers(connection: &mut SqliteConnection) -> Result<(), Datab
             }
         }
         install_staging_triggers(connection, table, &ledger, captured.contains(table)).await?;
+    }
+    Ok(())
+}
+
+fn validate_public_key_encoding(
+    table: &str,
+    key: &str,
+    columns: &[ColumnInfo],
+) -> Result<(), DatabaseError> {
+    // Boolean projection collapses arbitrary stored values to true/false.
+    // JSON decoding also loses the original storage spelling. Neither can be
+    // inverted into a bounded indexed lookup, even for an initially empty table.
+    if columns
+        .iter()
+        .find(|column| column.name == key)
+        .is_none_or(|column| matches!(column.kind(), JsonKind::Boolean | JsonKind::Json))
+    {
+        return Err(violation(format!(
+            "reference table {table} public key encoding must preserve scalar SQL identity; BOOLEAN and JSON keys are unsupported"
+        )));
     }
     Ok(())
 }
@@ -1627,8 +1648,10 @@ impl DocumentScan {
         ledger: &Ledger,
     ) -> Result<Self, DatabaseError> {
         let needed = ledger.columns_for(table);
-        let kinds = table_columns(connection, table)
-            .await?
+        let key = ledger.tables[table].key.clone();
+        let columns = table_columns(connection, table).await?;
+        validate_public_key_encoding(table, &key, &columns)?;
+        let kinds = columns
             .into_iter()
             .filter(|column| {
                 needed
@@ -1641,7 +1664,6 @@ impl DocumentScan {
             })
             .collect::<Vec<_>>();
         let projection = json_object_expr("", &kinds);
-        let key = ledger.tables[table].key.clone();
         let table = quote_identifier(table);
         Ok(Self {
             point_sql: format!(

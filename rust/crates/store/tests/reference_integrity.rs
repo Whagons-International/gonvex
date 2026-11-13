@@ -1613,3 +1613,89 @@ async fn review_runtime_upgrade_rebuilds_older_capture_projections() {
     );
     assert_eq!(note.as_deref(), Some("before"));
 }
+
+#[tokio::test]
+async fn review_noninvertible_public_key_encodings_are_refused_atomically() {
+    for kind in ["BOOLEAN", "JSON"] {
+        for populated in [false, true] {
+            let f = Fixture::new().await;
+            f.ok(&format!(
+                "CREATE TABLE reviewEncodedKeys(_id {kind} PRIMARY KEY,ref TEXT)"
+            ))
+            .await;
+            if populated {
+                f.ok("INSERT INTO reviewEncodedKeys VALUES(1,'before')")
+                    .await;
+            }
+            let previous = f.catalog().await;
+            let previous_edges = f
+                .scalar("SELECT count(*) FROM _gonvex_reference_edges")
+                .await;
+            let catalog = json!({"version":2,"existing":"reject","tables":[
+                {"name":"teams","key":"_id","live":"true"},
+                {"name":"reviewEncodedKeys","key":"_id","live":"true"}],
+                "references":[{"name":"review.encoded","source":"reviewEncodedKeys","path":"$.ref","target":"teams","state":"exists"}]});
+            let outcome = f.declare(&catalog).await;
+            let unchanged = f.catalog().await == previous;
+            let edges = f
+                .scalar("SELECT count(*) FROM _gonvex_reference_edges")
+                .await;
+            let rows = f.scalar("SELECT count(*) FROM reviewEncodedKeys").await;
+            f.pools.close().await;
+            let error = outcome.expect_err("noninvertible public key encoding was accepted");
+            assert!(error.to_string().contains("public key encoding"), "{error}");
+            assert!(
+                unchanged,
+                "failed declaration replaced the previous catalog"
+            );
+            assert_eq!(
+                edges, previous_edges,
+                "failed declaration changed existing edges"
+            );
+            assert_eq!(
+                rows,
+                i64::from(populated),
+                "declaration changed application rows"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn review_schema_cannot_change_an_enforced_key_to_boolean() {
+    let f = Fixture::new().await;
+    f.ok("CREATE TABLE reviewTypedKeys(_id INTEGER PRIMARY KEY,ref TEXT); INSERT INTO reviewTypedKeys VALUES(1,'before')").await;
+    let catalog = json!({"version":2,"existing":"reject","tables":[
+        {"name":"teams","key":"_id","live":"true"},
+        {"name":"reviewTypedKeys","key":"_id","live":"true"}],
+        "references":[{"name":"review.typed","source":"reviewTypedKeys","path":"$.ref","target":"teams","state":"exists"}]});
+    f.declare(&catalog).await.unwrap();
+    let migrations = vec![
+        SqlMigration::new("0001_references.sql".into(), MigrationScope::Tenant, false,
+            include_str!("reference_integrity/fixture.sql").into()),
+        SqlMigration::new("0002_boolean_key.sql".into(), MigrationScope::Tenant, false,
+            "ALTER TABLE reviewTypedKeys RENAME TO reviewOldKeys; CREATE TABLE reviewTypedKeys(_id BOOLEAN PRIMARY KEY,ref TEXT); INSERT INTO reviewTypedKeys SELECT * FROM reviewOldKeys; DROP TABLE reviewOldKeys;".into())];
+    let outcome = f
+        .control
+        .clone()
+        .provision_tenant_database(f.route.clone(), migrations)
+        .await;
+    let kind = f
+        .text("SELECT type FROM pragma_table_info('reviewTypedKeys') WHERE name='_id'")
+        .await;
+    let journal = f
+        .scalar("SELECT count(*) FROM gonvex_migrations WHERE name='0002_boolean_key.sql'")
+        .await;
+    let rejected = f
+        .run("UPDATE reviewTypedKeys SET ref='missing' WHERE _id=1")
+        .await
+        .is_err();
+    let reference = f.text("SELECT ref FROM reviewTypedKeys WHERE _id=1").await;
+    f.pools.close().await;
+    let error = outcome.expect_err("schema changed an enforced key to a noninvertible encoding");
+    assert!(error.to_string().contains("public key encoding"), "{error}");
+    assert_eq!(kind.as_deref(), Some("INTEGER"));
+    assert_eq!(journal, 0, "failed schema change was recorded");
+    assert!(rejected, "failed migration disabled previous enforcement");
+    assert_eq!(reference.as_deref(), Some("before"));
+}

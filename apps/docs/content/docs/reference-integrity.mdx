@@ -36,6 +36,12 @@ INSERT INTO _gonvex_reference_requests(declaration) VALUES('{
 }');
 ```
 
+Primary key declarations support integer, real, text and binary identities.
+Boolean and JSON key encodings are refused, including on empty tables: their
+row images can collapse distinct stored values or lose their storage spelling.
+Use a separate scalar identity column; Boolean and JSON value columns remain
+supported. Schema changes cannot convert an enforced key to these encodings.
+
 New selected IDs must resolve. Deleting the final target, changing its key, or
 making it non-live fails if incoming references would remain. A transaction can
 explicitly remove or reassign all incoming references and then delete the
