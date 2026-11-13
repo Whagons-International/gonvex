@@ -254,3 +254,5 @@ to configured clock uncertainty, rather than claiming unsynchronized sub-millise
 All full M05/real application/hosted/trace/drill/status/security/capacity/cost/actual-duration holds remain.
 No provider, sender, account, resource or serving instrumentation was activated. A NEW independent recheck
 of the resulting pin belongs to lead; completed reviewers are never reused by this implementation.
+
+The generic SDK adapter now refuses generated `localExecution` or `optimistic` refs before authentication and rechecks them before a mutation or cleanup. It passes supported refs unchanged. An explicit `execution:'server'` option remains a proposal; it is not implemented here. The genuine historical Whagons refs and native preparation results are recorded in [M05 real-app evidence](../../docs/cloudflare/verification/M05-real-app-evidence/report.md). Full app compilation and native activation remain blocked, and monitoring remains disabled.
