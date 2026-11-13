@@ -31,6 +31,7 @@ import { acceptsClientArtifact, type ProjectModule } from "./module.ts";
 import type { PermissionBits } from "./permissions.ts";
 import { AmbiguousReceiptsError, ensureReceipts, readReceipt, receiptTables, RECEIPT_QUERY, storeReceipt } from "./receipts.ts";
 import type { ReducerStorage } from "./storage.ts";
+import { writeAdmissionError } from "./admission.ts";
 
 /** Rust's Q/R execution deadline (GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS), installed into the provenance. */
 export const EXECUTION_TIMEOUT_MS = 10_000;
@@ -291,7 +292,8 @@ export class ReducerPath {
     const invocation = invocationInfoOf(session, commandId, module.artifactHash, access.channel);
     const deadlineUnixMs = this.clock() + EXECUTION_TIMEOUT_MS;
     if (request.intentEntropy !== undefined && !ENTROPY.test(request.intentEntropy)) return fail(errors.invalidArguments(path, "Invalid reducer entropy"));
-    if (this.options.gateClosed?.()) return fail(errors.migrationInProgress());
+    const admissionError = writeAdmissionError(this.options.gateClosed);
+    if (admissionError) return fail(admissionError);
 
     // Receipt claim: a committed key replays its stored result instead of running again.
     if (key !== undefined) {

@@ -134,9 +134,12 @@ export class LiveQueries {
 
   /** `query.subscribe` from a socket; `tenant` is null without a tenant session. Control-scope frames are K06's and never reach here. */
   async subscribe(connectionId: string, tenant: TenantSession | null, request: SubscribeRequest): Promise<string> {
-    if (!tenant) return queryError(request.id, request.path, UNAUTHENTICATED.subscribe);
-    const [frame] = await this.options.run((db) => [this.open(db, connectionId, tenant, request)]);
-    return frame!;
+    return this.options.run((db) => this.subscribeSnapshot(db, connectionId, tenant, request));
+  }
+
+  /** The assembled tenant already owns the invocation queue and snapshot. */
+  subscribeSnapshot(db: StorageSession, connectionId: string, tenant: TenantSession | null, request: SubscribeRequest): string {
+    return tenant ? this.open(db, connectionId, tenant, request) : queryError(request.id, request.path, UNAUTHENTICATED.subscribe);
   }
 
   /** `query.subscribeMany`: one frame per entry, in order, in one snapshot. */
@@ -295,11 +298,17 @@ export class LiveQueries {
    * subscription-id order. Sockets without frames are absent.
    */
   async applyFeed(event: FeedEvent, stats?: FeedStats): Promise<Map<string, string[]>> {
+    return this.options.run((db) => this.applyFeedSnapshot(db, event, stats));
+  }
+
+  /** K22: delivery already owns this read snapshot; never open a nested storage invocation. */
+  applyFeedSnapshot(db: StorageSession, event: FeedEvent, stats?: FeedStats, only?: ReadonlySet<string>): Map<string, string[]> {
     const reset = event.kind === "reset";
     const revision = event.kind === "transaction" ? event.revision : 0;
     const changes = event.kind === "transaction" ? event.changes : [];
     const due: Array<{ connection: Connection; connectionId: string; subscription: Subscription }> = [];
     for (const [connectionId, connection] of this.connections) {
+      if (only && !only.has(connectionId)) continue;
       for (const id of [...connection.subscriptions.keys()].sort(byteOrder)) {
         const subscription = connection.subscriptions.get(id)!;
         if (!reset && revision <= subscription.computedRevision) continue;
@@ -315,7 +324,7 @@ export class LiveQueries {
     }
     const out = new Map<string, string[]>();
     if (!due.length) return out;
-    await this.options.run((db) => {
+    {
       // One execution per (account, path, args) in this snapshot; one encoding per reason.
       const shared = new Map<string, { snapshot?: Snapshot; error?: string; tail?: string }>();
       for (const { connection, connectionId, subscription } of due) {
@@ -354,7 +363,7 @@ export class LiveQueries {
         frames.push(liveResult(subscription.id, entry.tail));
         out.set(connectionId, frames);
       }
-    });
+    }
     return out;
   }
 }

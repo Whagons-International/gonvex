@@ -48,7 +48,7 @@ class CallError extends Error {}
 export async function callQuery(ports: CallPorts, tenant: TenantSession | null, id: string, path: string, args: unknown): Promise<string> {
   if (!tenant) return queryError(id, path, UNAUTHENTICATED.query);
   try {
-    const value = await execute(ports, tenant, path, args);
+    const value = await executeQuery(ports, tenant, path, args);
     return callResult(id, path, value);
   } catch (error) {
     return queryError(id, path, error instanceof Error ? error.message : String(error));
@@ -61,7 +61,7 @@ async function settle(outcome: Promise<CallOutcome>): Promise<string> {
   return result.text;
 }
 
-async function execute(ports: CallPorts, session: TenantSession, path: string, args: unknown): Promise<string> {
+export async function executeQuery(ports: CallPorts, session: TenantSession, path: string, args: unknown, access: { allowInternal?: boolean; delegatedAgent?: boolean } = {}): Promise<string> {
   if (path === REDUCER_RECEIPT_QUERY) {
     if (!ports.receipt) throw new CallError(`function ${rustDebug(path)} is not registered`);
     return settle(ports.receipt(session, args));
@@ -70,14 +70,14 @@ async function execute(ports: CallPorts, session: TenantSession, path: string, a
   if (!module) throw new CallError(`project ${rustDebug(session.identity.projectId)} has no active TypeScript module`);
   const fn = module.functions.get(path);
   if (!fn) throw new CallError(`function ${rustDebug(path)} is not registered`);
-  if (fn.internal) throw new CallError(`internal function ${rustDebug(path)} cannot be called by a client`);
+  if (fn.internal && !access.allowInternal) throw new CallError(`internal function ${rustDebug(path)} cannot be called by a client`);
   if (fn.kind !== "query") throw new CallError(`function ${rustDebug(path)} is a ${fn.kind}, not a query`);
   if (session.anonymous && (!fn.public || fn.replica !== null || fn.delivery === "live" || fn.delivery === "replica")) {
     throw new CallError(hostCall("authenticate with an active tenant before calling a non-public query"));
   }
   const mismatch = ports.validateArgs(fn.argsSchema, args);
   if (mismatch !== null) throw new CallError(`function ${rustDebug(path)} arguments do not match its schema: ${mismatch}`);
-  if (fn.delivery && fn.delivery !== "oneShot") {
+  if (!access.delegatedAgent && fn.delivery && fn.delivery !== "oneShot") {
     throw new CallError(hostCall(`query ${rustDebug(path)} is delivered as ${fn.delivery} and cannot be called as a one-shot Query`));
   }
   const plan = fn.liveQueryPlan;

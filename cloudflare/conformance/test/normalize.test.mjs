@@ -221,6 +221,18 @@ test('ruling 0015: error messages stay exact, JavaScript stack lines are strippe
   assert.equal(normalizeValue({ error: rust }).error, error(rust));
 });
 
+test('0015 captured host errors lose only JS stack lines, while arbitrary application text stays exact', () => {
+  const captured = (duplicate) => normalizeSession([rec('in', { type: 'action.result', id: 'a', result: { duplicate } })])[0].frame.result.duplicate;
+  const first = 'GonvexHostError: host call failed: action_tools failed 17ms 00000000-0000-4000-8000-000000000001 gvx_session_sample';
+  assert.equal(captured(first + '\n    at rust (gonvex:bootstrap.js:1:2)'), first);
+  assert.equal(captured(first + '\n    at worker (worker.js:3:4)'), first);
+  assert.notEqual(captured(first), captured(first.replace('17ms', '18ms')));
+  assert.notEqual(captured(first), captured(first.replace('failed', 'refused')));
+  assert.equal(captured(first + '\nmeaningful non-stack detail\n    at worker (w.js:1:2)'), first + '\nmeaningful non-stack detail');
+  const app = 'Application text\n    at a place\nmore text';
+  assert.equal(captured(app), app);
+});
+
 test('RFC 3339 clock strings under clock keys are masked; other strings and keys are kept', () => {
   const [{ frame }] = normalizeSession([{ dir: 'in', socket: 1, frame: { type: 'query.result', id: 'q1', result: [{ expiresAt: '2026-11-18T00:00:00.123+00:00', createdAt: '2026-11-11T09:30:00Z', name: '2026-11-11T09:30:00Z', state: 'pending' }] } }]);
   assert.deepEqual(frame.result, [{ createdAt: '<time>', expiresAt: '<time>', name: '2026-11-11T09:30:00Z', state: 'pending' }]);

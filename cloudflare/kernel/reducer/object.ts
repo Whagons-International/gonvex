@@ -16,7 +16,7 @@ import type { Member, SocketView } from "../session/ports";
 import { type GatewayRpc, rpc } from "../session/rpc";
 import type { CommittedCall } from "./path.ts";
 import { RECEIPT_PRUNE_INTERVAL_MS } from "./receipts.ts";
-import { KernelTenant } from "./tenant.ts";
+import { KernelTenant, type KernelTenantOptions, type StoredModule } from "./tenant.ts";
 import type { ServiceTenantCall, ServiceTenantOutcome } from "../principals/frames.ts";
 import type { ServiceGrant } from "../principals/grant.ts";
 import { serviceTenantCall } from "../principals/tenant.ts";
@@ -47,11 +47,14 @@ export abstract class ReducerTenantObject<E extends ReducerTenantEnv = ReducerTe
   /** Where this Worker version reads release plans. */
   protected abstract plans(): PlanStore;
 
+  protected composition(): Pick<KernelTenantOptions, "files" | "restoreManifest" | "tenantOnly" | "beforeInvoke" | "afterInvoke"> { return {}; }
+
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
     this.gateways = new TenantGateways(ctx.storage, (name) => rpc<GatewayRpc>(env.GATEWAY, name));
     this.kernel = new KernelTenant({
       ctx,
+      ...this.composition(),
       bundle: (hash) => this.bundle(hash),
       plans: this.plans(),
       onCommit: (call) => this.committed(call),

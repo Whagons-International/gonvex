@@ -2,7 +2,7 @@
 // same objects as cloudflare/wrangler.jsonc, with small public limits.
 {
   "name": "gonvex-cf-dev-k16-public-test",
-  "main": "../../../src/index.ts",
+  "main": "../../../test/legacy-worker.ts",
   "compatibility_date": "2026-10-23",
   "durable_objects": {
     "bindings": [

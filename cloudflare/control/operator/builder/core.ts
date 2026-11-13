@@ -33,6 +33,7 @@ export interface VersionTarget {
 
 /** The module the kernel Worker imports for the active releases (the `gonvex:releases` alias). */
 export const RELEASES_ENTRY = "releases.js";
+export const ACTION_RELEASES_ENTRY = "action-releases.js";
 
 /**
  * The specifier stored bundles import K04's prelude from. The kernel's build
@@ -169,13 +170,17 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
     const storedManifest: Json = {
       project,
       generatedAt: manifest.generatedAt ?? null,
-      functions: Object.fromEntries([...facts].map(([path, fact]) => [path, { kind: fact.kind, internal: fact.internal }])),
+      functions: module.functions,
+      schema: manifest.schema ?? {},
+      visibility: module.visibility ?? manifest.visibility ?? {},
       module: {
         language: module.language ?? "typescript",
         generation: module.generation ?? null,
         hash,
         entrypoint: module.entrypoint,
         invitationAcceptanceReducer: module.invitationAcceptanceReducer ?? "",
+        // K22: the serving host needs schemas, public/interactive flags, plans and client contract.
+        files: Object.fromEntries(Object.entries((module.files ?? {}) as Json).filter(([name]) => name === "client-contract.json")),
         crons: module.crons ?? [],
         ...(module.permissionGrants !== undefined ? { permissionGrants: module.permissionGrants } : {}),
         release: { pieces: `releases/${encodeURIComponent(project)}/${hash}/`, planId: plan.id },
@@ -200,6 +205,8 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
     await this.options.blobs.put(releaseKey(project, hash, "manifest.json"), JSON.stringify(manifest));
     await this.options.blobs.put(releaseKey(project, hash, "view.json"), JSON.stringify({ functions: manifest.functions ?? {}, schema: manifest.schema ?? {}, visibility: module.visibility ?? manifest.visibility ?? {} }));
     await this.options.blobs.put(releaseKey(project, hash, "app.js"), app);
+    const actions = wrapBundle(decodeBase64Utf8(String((module.javascript as Json).code)), this.options.preludeSpecifier);
+    await this.options.blobs.put(releaseKey(project, hash, "actions.js"), actions);
     await this.options.blobs.put(`releases/${encodeURIComponent(project)}/${hash}/functions.json`, JSON.stringify(contracts));
     // Written last: a release is prepared only when every piece is.
     await this.options.blobs.put(releaseKey(project, hash, "release.json"), JSON.stringify(summary));
@@ -212,6 +219,8 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
       const files = new Map<string, string>();
       const imports: string[] = [];
       const entries: string[] = [];
+      const actionImports: string[] = [];
+      const actionEntries: string[] = [];
       for (const [index, release] of releases.entries()) {
         const base = `releases/${encodeURIComponent(release.project)}/${release.hash}`;
         const app = await this.options.blobs.get(`${base}/app.js`);
@@ -219,16 +228,23 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
         const summary = await this.options.blobs.get(`${base}/release.json`);
         if (!app || !functions || !summary) throw new Error(`release ${release.project}/${release.hash} is not prepared`);
         const facts = JSON.parse(await summary.text()) as ReleaseSummary;
+        const actions = await this.options.blobs.get(`${base}/actions.js`);
+        if (!actions) throw new Error(`release ${release.project}/${release.hash} has no Action bundle; sync it again`);
+        files.set(`${base}/actions.js`, await actions.text());
+        files.set(`${base}/manifest.json`, JSON.stringify(facts.storedManifest));
+        actionImports.push(`import * as app${index} from "./${base}/actions.js";`, `import manifest${index} from "./${base}/manifest.json";`);
+        actionEntries.push(`  ${JSON.stringify(release.project)}: { manifest: manifest${index}, exports: app${index} },`);
         files.set(`${base}/app.js`, await app.text());
         files.set(`${base}/functions.json`, await functions.text());
-        imports.push(`import * as app${index} from "./${base}/app.js";`, `import functions${index} from "./${base}/functions.json";`);
+        imports.push(`import * as app${index} from "./${base}/app.js";`, `import functions${index} from "./${base}/functions.json";`, `import manifest${index} from "./${base}/manifest.json";`);
         entries.push(
           `  ${JSON.stringify(release.project)}: { project: ${JSON.stringify(release.project)}, hash: ${JSON.stringify(release.hash)}, generation: ${release.generation}, ` +
-            `clientContract: ${JSON.stringify(facts.clientContract?.version ?? null)}, functions: functions${index}, exports: app${index} },`,
+            `clientContract: ${JSON.stringify(facts.clientContract?.version ?? null)}, functions: functions${index}, manifest: manifest${index}, exports: app${index} },`,
         );
       }
       const body = `// Generated by the K19 release builder. Do not edit.\n${imports.join("\n")}\nexport const releases = {\n${entries.join("\n")}\n};\n`;
-      const version = (await sha256Hex(body + [...files.values()].map((f) => f.length).join(","))).slice(0, 16);
+      files.set(ACTION_RELEASES_ENTRY, `// Generated by K19.\n${actionImports.join("\n")}\nexport const releases = {\n${actionEntries.join("\n")}\n};\n`);
+      const version = (await sha256Hex(body + [...files].map(([name, content]) => `${name.length}:${name}${content.length}:${content}`).join(""))).slice(0, 16);
       files.set(RELEASES_ENTRY, `${body.replace("// Generated", `// Version ${version}. Generated`)}export const version = ${JSON.stringify(version)};\n`);
       await this.options.target.stage(files, version);
       return { ok: true, version };

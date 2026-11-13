@@ -11,6 +11,10 @@
 // that land while a task runs coalesce into the next wake, as Rust's feed
 // task does. Nothing here is written to SQLite (brief: nothing ephemeral).
 
+import { captureRecoveryInitials, recoveryInitialCleanup, type RecoveryInitialCapture } from "./recovery-initials";
+import { AuthorityAdmission } from "./authority";
+import { type RecoveryDelivery, type RecoveryReceipt, type ScopedSocketWork } from "./recovery";
+import type { LiveQueries } from "../query/live.ts";
 import type { ClientFrame } from "../session/decode.ts";
 import type { Negotiated } from "../session/capabilities.ts";
 import type { SocketView, TenantSession } from "../session/ports.ts";
@@ -22,7 +26,7 @@ import type { ReplicaModule } from "./definition.ts";
 import { applyTransaction, EventShare, TransactionReads, type FeedFrame } from "./feed.ts";
 import { compactTransaction, deltaBody, deltaFrame, deltaTail, errorFrame, needHashesFrame, readyFrame, resetFrame, transactionFrame, watermarkFrame } from "./frames.ts";
 import { CollapsedChanges, readClock, readTransactions, type FeedTransaction } from "./log.ts";
-import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt, type SocketOp, type SocketWork } from "./protocol.ts";
+import { REPLICA_DELIVERY_VERSION, initialCompletion, type InitialCompletion, type ReplicaDelivery, type ReplicaReceipt, type InitialRequestRef, type SocketOp, type SocketWork } from "./protocol.ts";
 import type { ScanProgress } from "./scan.ts";
 import { openReplica, sqlOf, type OpenRequest, type Subscription } from "./subscription.ts";
 
@@ -49,41 +53,46 @@ const opChars = (op: SocketOp): number => op.reduce<number>((n, part) => n + (ty
  * over the platform's outbound limit, 0018).
  */
 export function splitPayload(payload: ReplicaDelivery, limit = MAX_PAYLOAD_CHARS): ReplicaDelivery[] {
-  const size = (ops: readonly SocketOp[]) => ops.reduce((n, op) => n + opChars(op) + (op[0] === "i" ? payload.shared[op[1]]!.length : op[0] === "d" ? payload.shared[op[3]]!.length : 0), 0);
-  const total = Object.values(payload.sockets).reduce((n, work) => n + size(work.ops), 0);
+  const opSize = (op: SocketOp) => opChars(op) + (op[0] === "i" ? payload.shared[op[1]]!.length : op[0] === "d" ? payload.shared[op[3]]!.length : 0);
+  const completionSize = (c: InitialCompletion) => c.request.id.length + c.request.path.length + c.request.kind.length + 256;
+  const total = Object.values(payload.sockets).reduce((n, work) => n + work.ops.reduce((m, op) => m + opSize(op), 0) + (work.initialCompletions ?? []).reduce((m, c) => m + completionSize(c), 0) + (work.initialScope?work.initialScope.id.length+work.initialScope.path.length+256:0), 0);
   if (total <= limit) return [payload];
   type Part = { sockets: Record<string, SocketWork>; chars: number };
   const parts: Part[] = [{ sockets: {}, chars: 0 }];
   for (const [id, work] of Object.entries(payload.sockets)) {
-    let current: SocketOp[] = [];
-    for (const op of work.ops) {
-      const chars = size([op]);
+    let current: SocketOp[] = [], start = 0;
+    const completions = work.initialCompletions ?? [];
+    const own = (ops: SocketOp[], from: number): SocketWork => ({ ops, ...(work.subscriptionEpoch === undefined ? {} : { subscriptionEpoch: work.subscriptionEpoch }), ...(work.initialScope?{initialScope:work.initialScope}:{}),
+      initialCompletions: completions.filter(c => c.opIndex >= from && c.opIndex < from + ops.length).map(c => ({ ...c, opIndex: c.opIndex - from })) });
+    for (let index = 0; index < work.ops.length; index++) {
+      const op = work.ops[index]!;
+      const chars = opSize(op) + completions.filter(c => c.opIndex === index).reduce((n, c) => n + completionSize(c), 0);
       let part = parts[parts.length - 1]!;
       if (part.chars + chars > limit && (part.chars > 0 || current.length)) {
-        if (current.length) part.sockets[id] = { ops: current };
+        if (current.length) part.sockets[id] = own(current, start);
         parts.push((part = { sockets: {}, chars: 0 }));
-        current = [];
+        current = []; start = index;
       }
-      current.push(op);
-      part.chars += chars;
+      current.push(op); part.chars += chars;
     }
-    const { ops: _ops, ...rest } = work;
-    parts[parts.length - 1]!.sockets[id] = { ops: current, ...rest };
+    const { ops: _ops, initialCompletions: _completions, ...rest } = work;
+    const final = { ...rest, ...own(current, start) };
+    parts[parts.length - 1]!.sockets[id] = final;
+    if(work.initialScope && (final.initialCompletions?.length!==completions.length || !completions.length)){
+      for(const part of parts){const item=part.sockets[id];if(!item)continue;
+        const {watermark:_watermark,...without}=item;
+        part.sockets[id]={...without,ops:item.ops.filter(op=>op[0]!=="f"||!op[1].startsWith('{"type":"replica.watermark"'))};
+      }
+    }
   }
   return parts.map((part, index) => {
-    const shared: string[] = [];
-    const at = new Map<number, number>();
+    const shared: string[] = [], at = new Map<number, number>();
     const ref = (i: number) => { let j = at.get(i); if (j === undefined) { j = shared.length; shared.push(payload.shared[i]!); at.set(i, j); } return j; };
     const sockets: Record<string, SocketWork> = {};
-    for (const [id, work] of Object.entries(part.sockets)) {
-      sockets[id] = { ...work, ops: work.ops.map((op): SocketOp => (op[0] === "i" ? ["i", ref(op[1])] : op[0] === "d" ? ["d", op[1], op[2], ref(op[3]), op[4]] : op)) };
-    }
+    for (const [id, work] of Object.entries(part.sockets)) sockets[id] = { ...work, ops: work.ops.map((op): SocketOp => op[0] === "i" ? ["i", ref(op[1])] : op[0] === "d" ? ["d", op[1], op[2], ref(op[3]), op[4]] : op) };
     const last = index === parts.length - 1;
-    return {
-      v: payload.v, instance: payload.instance, shared, sockets,
-      ...(last && payload.watermark !== undefined ? { watermark: payload.watermark } : {}),
-      ...(last && payload.membership ? { membership: payload.membership } : {}),
-    };
+    return { v: payload.v, instance: payload.instance, ...(payload.scopeFence ? { scopeFence: payload.scopeFence } : {}), shared, sockets,
+      ...(last && payload.watermark !== undefined ? { watermark: payload.watermark } : {}), ...(last && payload.membership ? { membership: payload.membership } : {}) };
   });
 }
 
@@ -93,6 +102,10 @@ export interface DeliveryOutlet {
   send(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
   /** Payloads queued for `host` and not yet accepted. */
   queued(host: string): number;
+  /** X01: holder-specific byte/count pressure; the reset still uses this engine's ordered channel. */
+  backlogged?(host: string): boolean;
+  /** X01: same ordered channel, constant-size recovery reserve; an ordinary receipt is never an ack. */
+  reset?(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
   /** Drops what is queued for `host` (lag), keeping order for what comes next. */
   discard(host: string): void;
   /** Resolves once everything queued for `host` was accepted. */
@@ -112,6 +125,7 @@ interface Connection {
   epoch: number;
   readonly subscriptions: Map<string, Subscription>;
   readonly pending: OpenRequest[];
+  readonly initials: Map<number, InitialRequestRef>;
   /** A subscription opened since the last bootstrap watermark (`opening_cohort_dirty`). */
   openingCohort: boolean;
   /** `sent_replica_revision`. */
@@ -131,6 +145,8 @@ export interface DeliveryOptions {
   readonly registry?: VisibilityRegistry;
   /** After each committed transaction is delivered (K19 `operatorDataChanged`). */
   readonly delivered?: (revision: number) => void;
+  /** K22: live queries share the commit snapshot and this ordered outlet. */
+  readonly live?: LiveQueries | undefined;
 }
 
 export interface DeliveryStats {
@@ -143,9 +159,15 @@ export interface DeliveryStats {
   /** Reads of the commit feed (clock, change log, affected rows), across every connection. */
   commitStatements: number;
   commitRowsRead: number;
+  recoveryInitialsOffered: number;
+  recoveryInitialsOmitted: number;
+  recoveryInitialFactsRejected: number;
+  recoveryInitialsCleared: number;
 }
 
 const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+interface HostBarrier { pending: boolean; retryAt: number; catchup: boolean; owed?: boolean }
+interface DeferredQuery { readonly socket: SocketView; readonly id: string; readonly snapshot: (db: StorageSession) => string }
 
 /** FNV-1a 64 of path and arguments: the stream identity (any per-socket-unique token works, A.4 row 2). */
 export function streamIdentity(path: string, argsText: string): string {
@@ -160,18 +182,30 @@ export function streamIdentity(path: string, argsText: string): string {
 export class ReplicaDeliveryEngine {
   readonly instance = crypto.randomUUID();
   readonly registry: VisibilityRegistry;
-  readonly stats: DeliveryStats = { opens: 0, commits: 0, payloads: 0, statements: 0, rowsRead: 0, resets: 0, commitStatements: 0, commitRowsRead: 0 };
+  readonly stats: DeliveryStats = { opens: 0, commits: 0, payloads: 0, statements: 0, rowsRead: 0, resets: 0, commitStatements: 0, commitRowsRead: 0, recoveryInitialsOffered:0, recoveryInitialsOmitted:0, recoveryInitialFactsRejected:0, recoveryInitialsCleared:0 };
   private readonly connections = new Map<string, Connection>();
+  /** Reset fences also cover a request already in flight when its connection was dropped. */
+  private readonly epochs = new Map<string, number>();
+  private readonly authority = new AuthorityAdmission();
   private delivered: { epoch: string; revision: number } | undefined;
   private wanted = 0;
   private running: Promise<void> | undefined;
   /** Highest revision whose payload each holder accepted. */
   private readonly accepted = new Map<string, number>();
+  private readonly recovering = new Map<string, HostBarrier>();
+  private readonly fencing = new Map<string, HostBarrier>();
+  private readonly deferredQueries = new Map<string, DeferredQuery[]>();
   private waitingOpens = 0;
   private lastOpened: string | undefined;
 
   constructor(private readonly options: DeliveryOptions) {
     this.registry = options.registry ?? new VisibilityRegistry();
+  }
+
+  /** Bounded metadata count for explicit dev evidence, never progress authority. */
+  pendingInitialCount():number {
+    let count=0;for(const connection of this.connections.values())count+=connection.initials.size;
+    return count;
   }
 
   // ---- frames from sockets ---------------------------------------------------------------
@@ -182,42 +216,123 @@ export class ReplicaDeliveryEngine {
     const session = socket.tenant;
     if (!session) return [];
     const connection = this.connection(socket, session);
+    if (!connection) return [];
+    const internalRecovery = (socket as SocketView & { queryRecovery?: boolean }).queryRecovery === true;
+    if (!internalRecovery) this.retryBarriers(connection.host);
     if (frame.type === "replica.close") {
       this.removePending(connection, frame.id);
       this.remove(connection, frame.id);
+      for (const [generation,ref] of connection.initials) if (ref.kind === "replica" && ref.id === frame.id) connection.initials.delete(generation);
       return [];
     }
     const opens = frame.type === "replica.open" ? [frame] : frame.opens;
-    const refused: string[] = [];
+    // Session's real scope registration is an observation, not an opening
+    // cohort, a write/progress event, or a fresh external retry allowance.
+    if (internalRecovery && opens.length === 0) return [];
+    const refused: SocketOp[] = [];
+    const refusedCompletions: InitialCompletion[] = [];
     connection.openingCohort = true;
-    for (const raw of opens) {
+    for (const [openIndex,raw] of opens.entries()) {
+      const candidate=socket.initialRequests?.[openIndex];
+      const initial=candidate?.kind==="replica"&&candidate.id===raw.id&&candidate.path===raw.path&&candidate.epoch===connection.epoch?candidate:undefined;
       const request: OpenRequest = {
         id: raw.id, path: raw.path, args: raw.args as JsonValue, keys: raw.keys, hashes: raw.hashes, fullIntegrity: raw.fullIntegrity,
         ...(raw.cursor ? { cursor: raw.cursor } : {}), ...(raw.digest !== undefined ? { digest: raw.digest } : {}),
       };
       this.removePending(connection, request.id);
       this.remove(connection, request.id);
+      for (const [generation,ref] of connection.initials) if (ref.kind === "replica" && ref.id === request.id) connection.initials.delete(generation);
       if (JSON.stringify(request).length * 2 + 1024 > OPEN_REQUEST_MAX_BYTES) {
-        refused.push(errorFrame(request.id, request.path, "individual replica open request is too large"));
+        const op: SocketOp = ["f", errorFrame(request.id, request.path, "individual replica open request is too large")];
+        const ref = initial;
+        if (ref) refusedCompletions.push(initialCompletion(ref, op, refused.length)!);
+        refused.push(op);
         continue;
       }
       if (this.waitingOpens >= MAX_WAITING_OPENS || connection.pending.length >= OPEN_BATCH_LIMIT) {
-        refused.push(errorFrame(request.id, request.path, "too many pending replica opens"));
+        const op: SocketOp = ["f", errorFrame(request.id, request.path, "too many pending replica opens")];
+        const ref = initial;
+        if (ref) refusedCompletions.push(initialCompletion(ref, op, refused.length)!);
+        refused.push(op);
         continue;
       }
+      if (initial) { (request as { initial?: InitialRequestRef }).initial = initial; connection.initials.set(initial.generation, initial); }
       connection.pending.push(request);
       this.waitingOpens += 1;
     }
-    if (refused.length) this.post(connection, { ops: refused.map((text) => ["f", text] as const) });
+    if (refused.length) this.post(connection, { ops: refused, initialCompletions: refusedCompletions });
     this.kick();
     return [];
   }
 
+  /** Live-query-only sockets also participate in the single commit channel. */
+  externalEvent(host: string): void { this.retryBarriers(host); }
+
+  observe(socket: SocketView, notify = true): boolean {
+    if (socket.tenant) {
+      const connection = this.connection(socket, socket.tenant);
+      if (!connection) return false;
+      if (notify) this.post(connection, { ops: [] });
+      return true;
+    }
+    return false;
+  }
+
+  /** Called while the assembled tenant still owns the snapshot's invocation turn. */
+  queryReply(socket: SocketView, replies: readonly string[]): void {
+    if (!socket.tenant) return;
+    const connection = this.connection(socket, socket.tenant);
+    if (!connection) return;
+    const computed = this.options.live?.computedRevisions(connection.id) ?? [];
+    const initial = socket.initialRequests?.find(ref => ref.kind === "query" && ref.epoch === connection.epoch);
+    const ops = replies.map((text): SocketOp => ["f", text]);
+    const initialCompletions = initial ? ops.flatMap((op, index) => { const c = initialCompletion(initial, op, index); return c ? [c] : []; }) : [];
+    this.post(connection, { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(computed.length&&initialCompletions.some(c=>c.outcome==="accepted") ? { watermark: Math.min(...computed) } : {}) });
+  }
+
+  /** Initial LQ snapshots and their enqueue share the reducer/commit serialization turn. */
+  querySubscribe(socket: SocketView, snapshot: (db: StorageSession) => string, recovery = false): Promise<string[]> {
+    return this.options.serial(async () => {
+      if (socket.tenant && !this.observe(socket, false)) throw new Error("stale tenant subscription scope");
+      const connection = this.connections.get(socket.connectionId);
+      for (const initial of socket.initialRequests ?? []) if (connection && initial.epoch === connection.epoch) connection.initials.set(initial.generation, initial);
+      if (!recovery) this.retryBarriers(socket.host);
+      if (!recovery && this.paused(socket.host)) {
+        const pending = this.deferredQueries.get(socket.connectionId) ?? [];
+        // This stores only the semantic request/plan, never a retained row result.
+        pending.push({ socket, id: (socket as SocketView & { queryId?: string }).queryId ?? "", snapshot });
+        this.deferredQueries.set(socket.connectionId, pending);
+        return [];
+      }
+      const replies = await this.options.read((db) => [snapshot(db)]);
+      if (recovery) return replies;
+      this.queryReply(socket, replies);
+      return [];
+    });
+  }
+
+  queryUnsubscribe(socket: SocketView, id: string): boolean {
+    if ((socket.subscriptionEpoch ?? 0) < (this.epochs.get(socket.connectionId) ?? 0)) return false;
+    const pending = this.deferredQueries.get(socket.connectionId);
+    if (pending) this.deferredQueries.set(socket.connectionId, pending.filter((query) => query.id !== id));
+    this.options.live?.unsubscribe(socket.connectionId, id);
+    const connection = this.connections.get(socket.connectionId);
+    for (const [generation,ref] of connection?.initials ?? []) if (ref.kind === "query" && ref.id === id) connection!.initials.delete(generation);
+    return true;
+  }
+
   /** The socket's session changed (re-auth without preservation, discard, close): its subscriptions go. */
   reset(connectionId: string, epoch: number): void {
+    if (Number.isSafeInteger(epoch) && epoch < (this.epochs.get(connectionId) ?? 0)) return;
+    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error("invalid tenant subscription epoch");
+    this.authority.set(connectionId, 1024 + connectionId.length * 8);
+    this.epochs.set(connectionId, epoch);
+    this.deferredQueries.delete(connectionId);
     const connection = this.connections.get(connectionId);
     if (!connection || epoch < connection.epoch) return;
+    this.options.live?.clear(connectionId);
     this.drop(connection);
+    this.accepted.delete(connectionId);
     this.connections.delete(connectionId);
   }
 
@@ -237,8 +352,13 @@ export class ReplicaDeliveryEngine {
   /** K07's call watermark rule: undefined without subscriptions, else the revision this socket's holder accepted. */
   subscriptionFloor(socket: SocketView): number | undefined {
     const connection = this.connections.get(socket.connectionId);
-    if (!connection || (!connection.subscriptions.size && !connection.pending.length)) return undefined;
-    return this.accepted.get(connection.host) ?? 0;
+    if (connection && connection.epoch !== (socket.subscriptionEpoch ?? 0)) return undefined;
+    if (!connection) return undefined;
+    // Recovery cleared the old subscriptions; their absence cannot bypass an
+    // unresolved holder barrier or certify a quiet writer's revision.
+    if (this.recovering.has(connection.host) || this.fencing.has(connection.host)) return 0;
+    if (!connection.subscriptions.size && !connection.pending.length && !connection.initials.size && !this.options.live?.subscriptionIds(connection.id).length) return undefined;
+    return Math.min(this.accepted.get(connection.id) ?? 0, ...(this.options.live?.computedRevisions(connection.id) ?? []));
   }
 
   /** Subscriptions of a connection (tests). */
@@ -257,6 +377,7 @@ export class ReplicaDeliveryEngine {
 
   /** A commit was published (K03 `ChangeWake`): deliver everything up to `revision`. */
   wake(revision: number): void {
+    for (const host of new Set([...this.recovering.keys(), ...this.fencing.keys()])) this.retryBarriers(host);
     this.wanted = Math.max(this.wanted, revision);
     this.kick();
   }
@@ -268,19 +389,25 @@ export class ReplicaDeliveryEngine {
 
   // ---- connections -----------------------------------------------------------------------
 
-  private connection(socket: SocketView, session: TenantSession): Connection {
+  private connection(socket: SocketView, session: TenantSession): Connection | undefined {
     const epoch = (socket as SocketView & { subscriptionEpoch?: number }).subscriptionEpoch ?? 0;
+    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error("invalid tenant subscription epoch");
+    if (epoch < (this.epochs.get(socket.connectionId) ?? 0)) return undefined;
+    this.authority.set(socket.connectionId, 1024 + (socket.connectionId.length + socket.host.length + (socket.replica?.scope.length??0) + (socket.replica?.visibilityScope.length??0) + JSON.stringify(session).length) * 8);
+    this.epochs.set(socket.connectionId, epoch);
     let connection = this.connections.get(socket.connectionId);
     if (connection && epoch > connection.epoch) {
       this.drop(connection);
+      this.accepted.delete(connection.id);
       connection = undefined;
     }
     const replica = (socket as SocketView & { replica?: { scope: string; visibilityScope: string } | null }).replica ?? null;
     if (!connection) {
+      this.accepted.delete(socket.connectionId);
       connection = {
         id: socket.connectionId, host: socket.host, session, negotiated: socket.negotiated, epoch,
         scope: replica?.scope ?? "", visibilityScope: replica?.visibilityScope ?? "",
-        subscriptions: new Map(), pending: [], openingCohort: false, sentRevision: 0, tokens: new Map(),
+        subscriptions: new Map(), pending: [], initials: new Map(), openingCohort: false, sentRevision: 0, tokens: new Map(),
       };
       this.connections.set(socket.connectionId, connection);
     } else {
@@ -292,9 +419,10 @@ export class ReplicaDeliveryEngine {
     return connection;
   }
 
-  private drop(connection: Connection): void {
+  private drop(connection: Connection, clearLive = true): void {
     for (const subscription of connection.subscriptions.values()) subscription.mask.clear();
     connection.subscriptions.clear();
+    if (clearLive) this.options.live?.clear(connection.id);
     this.waitingOpens -= connection.pending.length;
     connection.pending.length = 0;
     connection.tokens.clear();
@@ -351,7 +479,7 @@ export class ReplicaDeliveryEngine {
 
   /** Round robin over connections with pending opens (one open per turn, as Rust pages one subscription per turn). */
   private nextOpen(): { connection: Connection; request: OpenRequest } | undefined {
-    const ids = [...this.connections.keys()].filter((id) => this.connections.get(id)!.pending.length).sort(byId);
+    const ids = [...this.connections.keys()].filter((id) => { const c = this.connections.get(id)!; return c.pending.length && !this.paused(c.host); }).sort(byId);
     if (!ids.length) return undefined;
     const id = ids.find((candidate) => this.lastOpened === undefined || candidate > this.lastOpened) ?? ids[0]!;
     this.lastOpened = id;
@@ -366,9 +494,10 @@ export class ReplicaDeliveryEngine {
     // Every commit up to now is delivered before the snapshot is read, so the subscription joins at the clock.
     await this.deliverCommits();
     const ops: SocketOp[] = [];
+    const current = () => this.connections.get(connection.id) === connection && (!request.initial || connection.initials.has(request.initial.generation));
     const flush = () => {
-      if (!ops.length) return;
-      this.post(connection, { ops: ops.splice(0) });
+      if (!ops.length || !current()) return;
+      this.post(connection, { ops: ops.splice(0), ...(request.initial?{initialScope:request.initial}:{}) });
     };
     const progress: ScanProgress = { statements: 0, rowsRead: 0 };
     const subscription = await openReplica(request, {
@@ -387,7 +516,7 @@ export class ReplicaDeliveryEngine {
     this.stats.opens += 1;
     this.stats.statements += progress.statements;
     this.stats.rowsRead += progress.rowsRead;
-    if (this.connections.get(connection.id) !== connection) return;
+    if (!current()) return;
     const opened: Record<string, string> = {};
     if (subscription) {
       // The connection may have closed or reopened the id while this open ran.
@@ -397,9 +526,9 @@ export class ReplicaDeliveryEngine {
     }
     // Mixed database epochs cannot share a numeric certificate: Rust ends the connection, and the client's
     // reconnect re-admits every subscription in the current epoch (lib.rs 1859-1866).
-    if (!connection.pending.length && connection.openingCohort && new Set([...connection.subscriptions.values()].map((s) => s.cursor.epoch)).size > 1) {
+    if (!connection.pending.length && connection.openingCohort && new Set([...connection.subscriptions.values()].map((s) => s.cursor.epoch).concat(this.options.live?.epochs(connection.id) ?? [])).size > 1) {
       ops.push(["x"]);
-      this.post(connection, { ops: ops.splice(0) });
+      this.post(connection, { ops: ops.splice(0), ...(request.initial?{initialScope:request.initial}:{}) });
       this.drop(connection);
       this.connections.delete(connection.id);
       return;
@@ -416,7 +545,8 @@ export class ReplicaDeliveryEngine {
         }
       }
     }
-    this.post(connection, { ops: ops.splice(0), ...(subscription ? { opened } : { removed: [request.id] }) });
+    const initialCompletions = request.initial ? ops.flatMap((op, index) => { const c = initialCompletion(request.initial!, op, index); return c ? [c] : []; }) : [];
+    this.post(connection, { ops: ops.splice(0), initialCompletions, ...(request.initial?{initialScope:request.initial}:{}), ...(subscription ? { opened } : { removed: [request.id] }) });
   }
 
   /** Reads and delivers every committed transaction after the delivery's cursor. True when more arrived meanwhile. */
@@ -449,7 +579,7 @@ export class ReplicaDeliveryEngine {
       if (clock.revision < this.delivered.revision || clock.retained > this.delivered.revision) {
         // FeedEvent::Reset: the log no longer holds what follows the delivery's cursor (pruned, or the
         // database was replaced by one at an earlier revision); nothing can say what each client holds.
-        const payloads = this.resetAll("change-feed-reset");
+        const payloads = this.resetAll("change-feed-reset", this.options.live?.applyFeedSnapshot(db, { kind: "reset" }));
         this.delivered = { epoch: clock.epoch, revision: clock.revision };
         return { payloads, clock };
       }
@@ -469,18 +599,18 @@ export class ReplicaDeliveryEngine {
   }
 
   /** Every subscription of every connection gets `replica.reset` (lib.rs 2367-2386, replica.rs 1340-1355). */
-  private resetAll(reason: string): Array<[string, ReplicaDelivery, number]> {
+  private resetAll(reason: string, live?: ReadonlyMap<string, string[]>): Array<[string, ReplicaDelivery, number]> {
     const byHost = new Map<string, Record<string, SocketWork>>();
     for (const connection of this.connections.values()) {
-      const ops: SocketOp[] = [...connection.subscriptions.values()].sort((a, b) => byId(a.id, b.id)).map((s) => ["f", resetFrame(s.id, s.path, reason)] as const);
+      const ops: SocketOp[] = [...(live?.get(connection.id) ?? []).map((text): SocketOp => ["f", text]), ...[...connection.subscriptions.values()].sort((a, b) => byId(a.id, b.id)).map((s) => ["f", resetFrame(s.id, s.path, reason)] as const)];
       const removed = [...connection.subscriptions.keys()];
       this.stats.resets += removed.length;
-      this.drop(connection);
+      this.drop(connection, false);
       connection.sentRevision = 0;
       if (!ops.length) continue;
       let sockets = byHost.get(connection.host);
       if (!sockets) byHost.set(connection.host, (sockets = {}));
-      sockets[connection.id] = { ops, removed };
+      sockets[connection.id] = { ops, removed, subscriptionEpoch: connection.epoch } as ScopedSocketWork;
     }
     return [...byHost].map(([host, sockets]) => [host, this.payload([], sockets), 0]);
   }
@@ -488,6 +618,14 @@ export class ReplicaDeliveryEngine {
   /** One committed transaction for every connection: frames per socket, shared texts once. */
   private deliverTransaction(db: StorageSession, transaction: FeedTransaction): Array<[string, ReplicaDelivery, number]> {
     this.stats.commits += 1;
+    // Ruling 0048(a): evaluate first, then prepend frames to each socket's replica work.
+    const live = this.options.live?.applyFeedSnapshot(db, {
+      kind: "transaction", epoch: transaction.epoch, revision: transaction.revision,
+      changes: transaction.changes.map((change) => ({ ...change,
+        oldValue: change.oldValue && typeof change.oldValue === "object" && !Array.isArray(change.oldValue) ? change.oldValue : null,
+        newValue: change.newValue && typeof change.newValue === "object" && !Array.isArray(change.newValue) ? change.newValue : null,
+      })),
+    });
     const collapsed = new CollapsedChanges(transaction.changes);
     const shared: string[] = [];
     const index = new Map<string, number>();
@@ -507,7 +645,7 @@ export class ReplicaDeliveryEngine {
     const byHost = new Map<string, Record<string, SocketWork>>();
     const lagged = new Set<string>();
     for (const host of new Set([...this.connections.values()].map((c) => c.host))) {
-      if (this.options.outlet.queued(host) >= MAX_QUEUED_PAYLOADS) lagged.add(host);
+      if (this.options.outlet.queued(host) >= MAX_QUEUED_PAYLOADS || this.options.outlet.backlogged?.(host)) lagged.add(host);
     }
     for (const connection of [...this.connections.values()].sort((a, b) => byId(a.id, b.id))) {
       const session = connection.session;
@@ -519,30 +657,23 @@ export class ReplicaDeliveryEngine {
         continue;
       }
       if (lagged.has(connection.host)) {
-        // `RecvError::Lagged`: the holder fell behind; every subscription resets and resyncs.
-        const ops = [...connection.subscriptions.values()].map((s) => ["f", resetFrame(s.id, s.path, "change-feed-lagged")] as const);
-        const removed = [...connection.subscriptions.keys()];
-        this.stats.resets += removed.length;
-        this.drop(connection);
-        let sockets = byHost.get(connection.host);
-        if (!sockets) byHost.set(connection.host, (sockets = {}));
-        sockets[connection.id] = { ops, removed, watermark: transaction.revision };
+        this.requestRecovery(connection.host);
         continue;
       }
-      if (!connection.subscriptions.size) continue;
+      const queryFrames = live?.get(connection.id) ?? [];
       const { frames, removed } = applyTransaction(connection.subscriptions, transaction, collapsed, reads, eventShare, this.options.tenantId);
       for (const subscription of removed) {
         subscription.mask.clear();
         connection.tokens.delete(subscription.id);
       }
       connection.sentRevision = Math.max(connection.sentRevision, transaction.revision);
-      if (!frames.length) continue;
-      const ops = frames.map((frame) => this.op(connection, frame, share));
+      const ops: SocketOp[] = [...queryFrames.map((text): SocketOp => ["f", text]), ...frames.map((frame) => this.op(connection, frame, share))];
       let sockets = byHost.get(connection.host);
       if (!sockets) byHost.set(connection.host, (sockets = {}));
-      sockets[connection.id] = { ops, watermark: transaction.revision, ...(removed.length ? { removed: removed.map((s) => s.id) } : {}) };
+      const watermark = Math.min(transaction.revision, ...(this.options.live?.computedRevisions(connection.id) ?? []));
+      sockets[connection.id] = { ops, watermark, subscriptionEpoch: connection.epoch, ...(removed.length ? { removed: removed.map((s) => s.id) } : {}) } as ScopedSocketWork;
     }
-    for (const host of lagged) this.options.outlet.discard(host);
+
     // A commit's watermark reaches every holder, including those with no work this time; each gets only its texts.
     const out: Array<[string, ReplicaDelivery, number]> = [];
     const hosts = new Set([...byHost.keys(), ...this.knownHosts]);
@@ -581,14 +712,14 @@ export class ReplicaDeliveryEngine {
 
   private payload(shared: readonly string[], sockets: Record<string, SocketWork>, watermark?: number, membership?: ReplicaDelivery["membership"]): ReplicaDelivery {
     return {
-      v: REPLICA_DELIVERY_VERSION, instance: this.instance, shared, sockets,
+      v: REPLICA_DELIVERY_VERSION, instance: this.instance, scopeFence: 1, shared, sockets,
       ...(watermark !== undefined ? { watermark } : {}), ...(membership ? { membership } : {}),
     };
   }
 
   /** Work for one socket outside a commit (opens, refusals). */
   private post(connection: Connection, work: SocketWork): void {
-    void this.send(connection.host, this.payload([], { [connection.id]: work }), 0);
+    void this.send(connection.host, this.payload([], { [connection.id]: { ...work, subscriptionEpoch: connection.epoch } as ScopedSocketWork }), 0);
   }
 
   private async sendAll(payloads: Array<[string, ReplicaDelivery, number]>): Promise<void> {
@@ -596,25 +727,254 @@ export class ReplicaDeliveryEngine {
   }
 
   private send(host: string, payload: ReplicaDelivery, revision: number): Promise<void> {
+    if (this.paused(host)) {
+      // Auth invalidation must not disappear behind a capacity/restart barrier.
+      if (payload.membership) return this.sendOne(host, this.payload([], {}, undefined, payload.membership), 0, true);
+      return Promise.resolve();
+    }
     const parts = splitPayload(payload);
     for (const part of parts.slice(0, -1)) void this.sendOne(host, part, 0);
     return this.sendOne(host, parts[parts.length - 1]!, revision);
   }
 
-  private sendOne(host: string, payload: ReplicaDelivery, revision: number): Promise<void> {
-    this.stats.payloads += 1;
-    return this.options.outlet.send(host, payload).then((receipt) => {
-      if (revision) this.accepted.set(host, Math.max(this.accepted.get(host) ?? 0, revision));
-      for (const id of receipt?.missing ?? []) {
-        const connection = this.connections.get(id);
-        if (connection && connection.host === host) {
-          this.drop(connection);
-          this.connections.delete(id);
+  private accept(host: string, payload: ReplicaDelivery, receipt: ReplicaReceipt, revision: number): void {
+    if (this.paused(host) || Object.keys(receipt.scopeRequired ?? {}).length) return;
+    const missing = new Set(receipt.missing ?? []);
+    for (const connection of this.connections.values()) {
+      if (connection.host !== host) continue;
+      if (missing.has(connection.id)) { this.drop(connection); this.connections.delete(connection.id); continue; }
+      const work = payload.sockets[connection.id] as ScopedSocketWork | undefined;
+      if (!work || work.subscriptionEpoch !== connection.epoch) continue;
+      const watermark = work.watermark;
+      if (watermark !== undefined) this.accepted.set(connection.id, Math.max(this.accepted.get(connection.id) ?? 0, watermark));
+    }
+    if (revision) this.options.delivered?.(revision);
+  }
+
+  private paused(host: string): boolean {
+    return [this.recovering.get(host), this.fencing.get(host)].some((state) => state && !state.catchup);
+  }
+
+  /** Exactly one coalesced allowance per fresh external client/commit event.
+   * Internal registration, error output, catch-up and timers never call this. */
+  private retryBarriers(host: string): void {
+    const recovery = this.recovering.get(host), fence = this.fencing.get(host);
+    const state = recovery ?? fence;
+    if (!state) return;
+    if (state.pending) { state.owed = true; return; }
+    if (recovery) this.requestRecovery(host);
+    else this.requestScopeFence(host);
+  }
+
+  private failInitials(host: string): Promise<void> {
+    const requests: Record<string, InitialRequestRef[]> = Object.create(null);
+    for (const connection of this.connections.values()) if (connection.host === host && connection.initials.size) requests[connection.id] = [...connection.initials.values()];
+    if (!Object.keys(requests).length) return Promise.resolve();
+    // Normal admission only. A recovery-required/capacity/old-holder failure
+    // stays explicitly undeliverable; it cannot bypass the shared byte fence.
+    const payload: ReplicaDelivery = { v: REPLICA_DELIVERY_VERSION, instance: this.instance, shared: [], sockets: {},
+      initialFailure: { v: 1, reason: "delivery-recovery-failed", requests: Object.fromEntries(Object.entries(requests)) } };
+    return this.options.outlet.send(host, payload).then(receipt => {
+      if (receipt?.initialFailureAck !== 1) throw new Error("GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED");
+      for (const [id, refs] of Object.entries(requests)) for (const ref of refs) {
+        const connection = this.connections.get(id), current = connection?.initials.get(ref.generation);
+        if (current?.epoch === ref.epoch && current.kind === ref.kind && current.id === ref.id && current.path === ref.path) connection!.initials.delete(ref.generation);
+      }
+    });
+  }
+
+  private async barrierFailed(host: string, state: HostBarrier, owners: Map<string, HostBarrier>, error: unknown): Promise<void> {
+    if (owners.get(host) !== state) return;
+    // Still single-flight while errors use the same ordered queue. Do not
+    // clear suppression, advance progress, or spend another retry internally.
+    try { await this.failInitials(host); }
+    catch (failure) { console.error(`delivery: initial failures for ${host} remain undeliverable`, failure); }
+    if (owners.get(host) !== state) return;
+    state.pending = false; state.catchup = false; state.retryAt = Date.now() + 1000;
+    console.error(`delivery: barrier for ${host} requires a fresh event`, error);
+    if (state.owed) {
+      state.owed = false;
+      if (owners === this.recovering) this.requestRecovery(host);
+      else this.requestScopeFence(host);
+    }
+  }
+
+  private dropHost(host: string): void {
+    for (const connection of this.connections.values()) if (connection.host === host) {
+      this.stats.resets += connection.subscriptions.size;
+      this.drop(connection);
+      this.accepted.delete(connection.id);
+    }
+  }
+
+  private captureRecoveryInitials(host:string,scopes?:Readonly<Record<string,number>>):RecoveryInitialCapture<Connection> {
+    const entries=[...this.connections.values()].filter(connection=>connection.host===host
+      &&(!scopes||(Object.hasOwn(scopes,connection.id)&&scopes[connection.id]===connection.epoch)))
+      .map(connection=>({id:connection.id,owner:connection,epoch:connection.epoch,refs:connection.initials}));
+    const capture=captureRecoveryInitials(entries);
+    this.stats.recoveryInitialsOffered+=capture.offered;
+    this.stats.recoveryInitialsOmitted+=capture.omitted;
+    return capture;
+  }
+  private applyRecoveryInitialFacts(capture:RecoveryInitialCapture<Connection>,receipt:ReplicaReceipt):void {
+    const cleanup=recoveryInitialCleanup(capture,receipt.initialCompletions,id=>{
+      const connection=this.connections.get(id);
+      return connection?{id,owner:connection,epoch:connection.epoch,refs:connection.initials}:undefined;
+    });
+    if(!cleanup){this.stats.recoveryInitialFactsRejected++;return;}
+    // One synchronous validated plan; these processing facts grant NO progress.
+    for(const {id,request} of cleanup)this.connections.get(id)!.initials.delete(request.generation);
+    this.stats.recoveryInitialsCleared+=cleanup.length;
+  }
+
+  /** The challenge's authoritative epochs stamp EMPTY work only. */
+  private requestScopeFence(host: string, supplied?: Readonly<Record<string, number>>): void {
+    if (this.recovering.has(host) || this.fencing.get(host)?.pending) return;
+    const state: HostBarrier = { pending: true, retryAt: 0, catchup: false };
+    this.fencing.set(host, state);
+    void this.options.serial(async () => {
+      this.dropHost(host);
+      this.options.outlet.discard(host);
+      return { challenge: supplied ? Promise.resolve({ scopeRequired: supplied }) : this.options.outlet.send(host, this.payload([], {})) };
+    }).then(async ({ challenge }) => {
+      const challenged = await challenge;
+      const scopes = challenged?.scopeRequired;
+      if (!scopes) throw new Error("delivery scope challenge was not understood");
+      const capture=this.captureRecoveryInitials(host,scopes);
+      const sockets: Record<string, SocketWork> = {};
+      for (const [id, epoch] of Object.entries(scopes)) {
+        if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error("invalid delivery scope challenge");
+        sockets[id] = { ops: [], subscriptionEpoch: epoch,
+          ...(capture.requests[id]?{recoveryInitials:capture.requests[id]}:{}) } as ScopedSocketWork;
+      }
+      const receipt = await this.options.outlet.send(host, this.payload([], sockets));
+      if (!receipt || Object.keys(receipt.scopeRequired ?? {}).length) throw new Error("delivery scope fence was not applied");
+      const missing = new Set(receipt.missing ?? []);
+      for (const [id, epoch] of Object.entries(scopes)) if (!missing.has(id) && receipt.scopeAck?.[id] !== epoch) throw new Error("delivery scope fence was not acknowledged");
+      this.applyRecoveryInitialFacts(capture,receipt);
+      await this.finishBarrier(host, state, this.fencing);
+    }).catch(error => this.barrierFailed(host, state, this.fencing, error));
+  }
+
+  /** Catch-up is enqueued in one invocation turn; later normal sends stay behind its RPC acknowledgment. */
+  private async finishBarrier(host: string, state: HostBarrier, owners: Map<string, HostBarrier>): Promise<void> {
+    const catchup = await this.options.serial(async () => {
+      if (owners.get(host) !== state) throw new Error("delivery barrier superseded");
+      const result = await this.options.read((db) => {
+        const ids = new Set([...this.connections.values()].filter((c) => c.host === host).map((c) => c.id));
+        const frames = this.options.live?.applyFeedSnapshot(db, { kind: "reset" }, undefined, ids);
+        const clock = readClock(sqlOf(db));
+        const sockets: Record<string, SocketWork> = {};
+        for (const id of ids) {
+          const computed = this.options.live?.computedRevisions(id) ?? [];
+          sockets[id] = { ops: (frames?.get(id) ?? []).map((text) => ["f", text] as const), subscriptionEpoch: this.connections.get(id)!.epoch, watermark: computed.length ? Math.min(...computed) : 0 } as ScopedSocketWork;
+        }
+        // Catch-up concerns only the freshly authorized known connections.
+        // A global zero watermark would challenge unrelated quiet sockets.
+        return { payload: Object.keys(sockets).length ? this.payload([], sockets) : undefined, revision: clock.revision };
+      });
+      // All actual receivers already acknowledged the real reset/rebuild.
+      // With no remaining recipient/work, no receipt or progress is invented.
+      if (!result.payload) return { ...result, receipt: undefined };
+      const receipt = this.options.outlet.send(host, result.payload);
+      // The outlet runs exactly one RPC per host: normals may now enqueue,
+      // but cannot be delivered before catch-up was acknowledged. Floors stay
+      // zero until the barrier's receipt resolves and ownership is cleared.
+      state.catchup = true;
+      for (const [id, queries] of [...this.deferredQueries]) {
+        const own = queries.filter((query) => query.socket.host === host);
+        if (!own.length) continue;
+        this.deferredQueries.delete(id);
+        for (const query of own) {
+          if ((query.socket.subscriptionEpoch ?? 0) !== this.epochs.get(id)) continue;
+          const replies = await this.options.read((db) => [query.snapshot(db)]);
+          this.queryReply(query.socket, replies);
         }
       }
-      if (revision) this.options.delivered?.(revision);
-    }, (error) => console.error(`delivery: payload to ${host} failed`, error));
+      return { ...result, receipt };
+    });
+    if (!catchup.payload) {
+      if (owners.get(host) === state) { owners.delete(host); this.kick(); }
+      return;
+    }
+    const accepted = await catchup.receipt;
+    if (!accepted || Object.keys(accepted.scopeRequired ?? {}).length) throw new Error("delivery catch-up was discarded or unscoped");
+    if (owners.get(host) !== state) return;
+    owners.delete(host);
+    this.accept(host, catchup.payload, accepted, catchup.revision);
+    this.kick();
   }
+
+  private requestRecovery(host: string): void {
+    const existing = this.recovering.get(host);
+    if (existing?.pending) return;
+    const state: HostBarrier = { pending: true, retryAt: 0, catchup: false };
+    this.fencing.delete(host);
+    this.recovering.set(host, state); // Suppress immediately, before the serialized reset job can run.
+    void this.options.serial(async () => {
+      this.dropHost(host);
+      const capture=this.captureRecoveryInitials(host);
+      const payload: RecoveryDelivery = { ...this.payload([], {}), recovery: { reason: "change-feed-lagged" },
+        ...(capture.offered?{recoveryInitials:capture.requests}:{}) };
+      if (this.options.outlet.reset) return { recovery: this.options.outlet.reset(host, payload),capture };
+      this.options.outlet.discard(host);
+      return { recovery: this.options.outlet.send(host, payload),capture };
+    }).then(async ({ recovery,capture }) => {
+      const receipt = await recovery as RecoveryReceipt | undefined;
+      if (receipt?.recoveryAck !== 1) throw new Error("GONVEX_DELIVERY_RECOVERY_UNSUPPORTED");
+      this.applyRecoveryInitialFacts(capture,receipt);
+      await this.finishBarrier(host, state, this.recovering);
+    }).catch(error => this.barrierFailed(host, state, this.recovering, error));
+  }
+
+  private sendOne(host: string, payload: ReplicaDelivery, revision: number, membershipOnly = false): Promise<void> {
+    if (!membershipOnly && this.paused(host)) return Promise.resolve();
+    this.stats.payloads += 1;
+    const owners = new Map(Object.keys(payload.sockets).map(id => [id, this.connections.get(id)]));
+    return this.options.outlet.send(host, payload).then((receipt) => {
+      if (Object.keys(receipt?.scopeRequired ?? {}).length) { this.requestScopeFence(host, receipt!.scopeRequired); return; }
+      if (!receipt) return; // discarded work certifies nothing
+      const expected = new Map(Object.entries(payload.sockets).filter(([,work])=>work.initialCompletions?.length));
+      const answered = receipt.initialCompletions ?? {};
+      if (Object.keys(answered).some(id=>!expected.has(id))) throw new Error("unmatched initial completion receipt");
+      const sockets: Record<string, SocketWork> = { ...payload.sockets };
+      let initialProgress = true;
+      for (const [id, work] of expected) {
+        const offered = new Map(work.initialCompletions!.map(c=>[c.request.generation,c]));
+        const statuses = answered[id];
+        if (!Array.isArray(statuses) || statuses.length !== offered.size) throw new Error("GONVEX_INITIAL_COMPLETION_UNSUPPORTED");
+        const seen = new Set<number>();
+        let progress = true;
+        const current = this.connections.get(id), sameOwner = !!current && current === owners.get(id) && current.epoch === work.subscriptionEpoch;
+        for (const status of statuses) {
+          const completion = offered.get(status.generation);
+          if (!completion || seen.has(status.generation) || (status.status !== "enqueued" && status.status !== "obsolete")) throw new Error("invalid initial completion receipt");
+          seen.add(status.generation);
+          if (completion.outcome !== "accepted" || status.status !== "enqueued" || !sameOwner) progress = false;
+        }
+        if (!progress) {
+          const {watermark:_watermark,...without}=work; sockets[id]=without; initialProgress=false;
+        }
+      }
+      // No obsolete/refused completion may donate its watermark to another
+      // accepted completion in a mixed/split initial payload.
+      const {watermark:_global,...withoutGlobal}=payload;
+      this.accept(host, initialProgress ? payload : {...withoutGlobal,sockets}, receipt, initialProgress ? revision : 0);
+      for (const [id, work] of expected) {
+        const current = this.connections.get(id);
+        if (!current || current !== owners.get(id) || current.epoch !== work.subscriptionEpoch) continue;
+        for (const completion of work.initialCompletions!) {
+          const ref = current.initials.get(completion.request.generation);
+          if (ref?.epoch === completion.request.epoch && ref.kind === completion.request.kind && ref.id === completion.request.id && ref.path === completion.request.path) current.initials.delete(ref.generation);
+        }
+      }
+    }).catch((error) => {
+      console.error(`delivery: payload to ${host} failed`, error);
+      this.requestRecovery(host);
+    });
+  }
+
+
 }
 
 /** lib.rs `membership_affects`: a `members` change in the access columns, by Member id and account id. */

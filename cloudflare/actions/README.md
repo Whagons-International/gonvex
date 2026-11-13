@@ -61,10 +61,12 @@ direct action.call (K05/K07) ─► ActionWorker.call ─┬─ standard / publi
   `attempts+1`. A renewal extends the lease in memory and writes `locked_at` only when less than half of the 5-minute
   lease is left. The persisted `locked_at` alone decides when a lease has expired, so an alarm that wakes a fresh object
   instance still recovers a dead runner on time (S4's platform bug).
-- **Exactly-once answers.** `completeCall` is fenced on the attempt and applied in one statement; a replay answers
-  `duplicate`, a zombie attempt's answer `rejected`. A direct call is answered once and never retried (Rust answers the
-  socket once); only a runner that died runs it again, and the call fails after 8 such runs. The answer reaches K05/K07
-  through `onFinished`.
+- **Execution completion and reply settlement.** `completeCall` fences execution on the attempt. A duplicate
+  retries any retained terminal reply without running the Action again; a zombie attempt is rejected. K22 stores
+  the whole answer and reply locator in private 64-KiB binary chunks until the actual gateway reports server enqueue
+  or authoritative obsolescence. A transport error retains them for a Workflow retry or the bounded alarm cadence.
+  Server enqueue does not prove client receipt. After8 known failed automatic delivery attempts, the complete reply is retained for explicit operator recovery; alarms and receipt pruning do not discard it. The assembled path uses a server generation to fence same-id reuse;
+  pre-generation live runs and already-lost legacy rows remain an explicit deployment/migration gap (0068).
 - **Recovery.** `ActionCalls.alarmSource()` is registered on K11's `TenantAlarm`. Its sweep hands off again a hand-off
   not claimed within one lease (a lost `create()`), and an expired lease. A failed `create()` is retried after one
   renewal interval. The Workflow engine's own step retries cover a crash: the same instance retries, so the same owner
@@ -138,11 +140,12 @@ scheduler on the tenant alarm and handed to the Workflow, which renews K11's 5-m
   - the tenant side (`calls.ts`, `tenant.ts`) is 8.8 KB, 3.2 KB gzip.
 - **Tenant rows written** (SQLite `rowsWritten`, index entries included):
   - **direct agent call** (asserted in `calls.test.ts`): begin and hand-off 4, claim 1, renewals 20 per running hour (one
-    write every 180 s), completion 2;
+    write every 180 s), completion **9** after K22 (previously2): terminal reply persistence/settlement adds7;
   - **outbox Action:** K11's rows, plus about 36 renewal writes per running hour, because K12 renews every 100 s and K11
     writes `locked_at` on each. Rust renews every 30 s: 120 row writes per hour, plus their index entries.
-- **Rows read:** one run read per direct-call claim, renewal and completion. The sweep reads only live runs (the open
-  direct calls of one tenant) and pages them by 100.
+- **Reads:** claim and renewal read their run. Completion also reads its durable reply manifest and paged binary chunks;
+  the sweep pages live runs and due reply settlements separately by100. Current measured commands/results live in
+  `docs/cloudflare/K22-evidence.md`; no large-result isolate-fit claim follows from the chunk size.
 - **Memory:** response bodies stream. Only a non-stream body up to 8 MiB is held, as in Rust.
 
 ## Not here

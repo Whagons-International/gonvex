@@ -1,0 +1,144 @@
+{
+  "status": "INCOMPLETE: explicit missing assembled cases must be implemented; none waived",
+  "base": "e72d3a437b65bea5a8524064e3e04904fc4a1f7b",
+  "comparisons": [
+    {
+      "source": "cloudflare/actions/test/golden/actions-rust.json",
+      "sha256": "9b3e00270e2ddbbd7e2d4a891dba2866ba89c7c68cca55e0dbe05d046e3eb547",
+      "sections": {
+        "steps": 10
+      },
+      "classification": "Package captured Rust golden/replay or vectors; not assembled deployment proof",
+      "assembledStatus": "Mapping individual golden cases to assembled transcript/assertions remains OPEN"
+    },
+    {
+      "source": "cloudflare/actions/test/golden/fixture-functions.json",
+      "sha256": "2ab0faa7ec33507a323f8dd8c74c492d1694d69125ae7cf565a6218fae78ccb0",
+      "sections": {
+        "functions": 23
+      },
+      "classification": "Fixture function definitions; not a Rust comparison result",
+      "assembledStatus": "Mapping individual golden cases to assembled transcript/assertions remains OPEN"
+    },
+    {
+      "source": "cloudflare/kernel/capture/test/golden/rust-change-capture.json",
+      "sha256": "5c3d46484945636bdb02dd840eb6e0db1883c9fbae8713081ebc6404ced7b8c5",
+      "sections": {
+        "transactions": 18,
+        "replies": 18,
+        "bootstrap": 14,
+        "triggers": 31,
+        "log": 4
+      },
+      "classification": "Package captured Rust golden/replay or vectors; not assembled deployment proof",
+      "assembledStatus": "Mapping individual golden cases to assembled transcript/assertions remains OPEN"
+    },
+    {
+      "source": "cloudflare/kernel/query/test/golden/rust-task-grid.json",
+      "sha256": "ad40817b5a9562799ae2cfd1cea649e408f52e0130b6bd647dd11619b737aff5",
+      "sections": {
+        "keys": 9,
+        "functions": 4,
+        "visibility": 8,
+        "members": 3,
+        "unattributed": 0,
+        "revisions": 54,
+        "steps": 13,
+        "actions": 86,
+        "frames": 2,
+        "rawIds": 8
+      },
+      "classification": "Package captured Rust golden/replay or vectors; not assembled deployment proof",
+      "assembledStatus": "Mapping individual golden cases to assembled transcript/assertions remains OPEN"
+    },
+    {
+      "source": "cloudflare/kernel/scheduler/test/golden/rust-vectors.json",
+      "sha256": "0ce35d22273d4955afb81e6fa876a9e483507605f24e8b26cd14bf62a1040ddf",
+      "sections": {
+        "cronIds": 5,
+        "expressions": 56,
+        "retryDelayMs": 35,
+        "staggerKeys": 3,
+        "staggered": 260,
+        "wakeKeys": 15,
+        "whagonsDays": 2
+      },
+      "classification": "Package captured Rust golden/replay or vectors; not assembled deployment proof",
+      "assembledStatus": "Mapping individual golden cases to assembled transcript/assertions remains OPEN"
+    },
+    {
+      "source": "cloudflare/kernel/telemetry/test/golden/rust-error-telemetry.json",
+      "sha256": "566f531f6fa17e62759bc680f9b88062c4ce1274765e6f7481ab3ed42fbee5e5",
+      "sections": {
+        "script": 15,
+        "http": 3,
+        "steps": 15
+      },
+      "classification": "Package captured Rust golden/replay or vectors; not assembled deployment proof",
+      "assembledStatus": "Mapping individual golden cases to assembled transcript/assertions remains OPEN"
+    }
+  ],
+  "gaps": [
+    {
+      "package": "K02",
+      "sources": [
+        "cloudflare/kernel/migrate/test/"
+      ],
+      "gap": "Real assembled migration interruption/fault cases beyond the deploy scenario require explicit case mapping and private-platform proof"
+    },
+    {
+      "package": "K11",
+      "sources": [
+        "cloudflare/kernel/scheduler/test/golden/rust-vectors.json"
+      ],
+      "gap": "Formal scheduler scenario covers runAfter/runAt/wakeAt/32 hops; exact cron/retry/stagger vector cases require assembled execution, not a package-golden substitution"
+    },
+    {
+      "package": "K12",
+      "sources": [
+        "cloudflare/actions/test/scenarios.test.ts",
+        "cloudflare/actions/test/golden/actions-rust.json"
+      ],
+      "gap": "Formal actions scenario covers its 10 golden steps. Package 12 crash/timeout/cancel/zombie/lease cases require actual assembled Workflow scenarios, distinguishing platform-kill stand-ins"
+    },
+    {
+      "package": "K13",
+      "sources": [
+        "cloudflare/kernel/files/test/",
+        "cloudflare/kernel/files/README.md"
+      ],
+      "gap": "26 package cases use real local R2 but no formal Rust/assembled HTTP+Action file matrix exists; implement owner/refusal/upload/download/store/finalize/limits through actual serving handlers"
+    },
+    {
+      "package": "K17",
+      "sources": [
+        "cloudflare/kernel/principals/verify/gateway-contract.mjs"
+      ],
+      "gap": "Real Whagons committed-release gateway consumer probe must target the final assembled handler, with source provenance and unchanged assertions"
+    },
+    {
+      "package": "K18",
+      "sources": [
+        "cloudflare/router/ingress/test/"
+      ],
+      "gap": "Actual assembled ingress service-grant/routing/refusal probes need mapping; unit-route success does not certify deployed composition"
+    },
+    {
+      "package": "K20",
+      "sources": [
+        "cloudflare/sandbox/test/rust.test.ts",
+        "cloudflare/sandbox/test/whagons.ts",
+        "cloudflare/sandbox/README.md"
+      ],
+      "gap": "Seven Whagons/Rust+DuckDB scenarios and legal limits must run via real assembled Actions ctx.sandbox, Container and K13 owners. Current package protocol-stub skips are not proof"
+    },
+    {
+      "package": "K21",
+      "sources": [
+        "cloudflare/bridge-support/README.md",
+        "cloudflare/conformance/scenarios/bridge-upstream.mjs"
+      ],
+      "gap": "Part1 upstream formal scenario only; real app/device bridge remains V02 and is not waived"
+    }
+  ]
+}

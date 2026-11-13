@@ -258,6 +258,20 @@ describe("budgets and caps", () => {
     expect(isPlatformOverrun(new Error("no such table: x"))).toBe(false);
   });
 
+  it("binds K22 quarantine to command, path and artifact without poisoning unrelated calls", async () => {
+    const t = tenant();
+    await t.within((instance) => instance.host.quarantine.add("scoped-command", "notes.add", "fixture-1"));
+    const blocked = await t.call("notes.add", "reducer", { id: "never", body: "x" }, { invocation: { commandId: "scoped-command" } });
+    expect(blocked.error?.class).toBe("transient");
+    expect(await t.rows("SELECT * FROM notes")).toEqual([]);
+    expect((await t.call("notes.list", "query", {}, { invocation: { commandId: "scoped-command" } })).ok).toBe(true);
+    const { MemoryQuarantine } = await import("../src/invoke.js");
+    const scoped = new MemoryQuarantine(); scoped.add("id", "path", "old-artifact");
+    expect(scoped.has("id", "path", "old-artifact")).toBe(true);
+    expect(scoped.has("id", "path", "new-artifact")).toBe(false);
+    expect(scoped.has("id", "other", "old-artifact")).toBe(false);
+  });
+
   it("fails a denied capability even when the module catches it", async () => {
     const { ModuleEngine, ModuleError } = await import("../src/index.js");
     const { fixtureFunctions } = await import("./worker.js");

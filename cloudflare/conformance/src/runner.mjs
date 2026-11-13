@@ -23,6 +23,8 @@ import { normalizeSession, normalizeValue, Names } from './normalize.mjs';
 import { checksumRows } from './checksum.mjs';
 import { checkDigests } from './digest-check.mjs';
 import { checkWatermarks } from './watermark-check.mjs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 export const PASSWORD = 'conformance-password-1';
 /** Client contract both SDKs announce (the fixture generates no local executor). */
@@ -198,6 +200,10 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
   } catch (error) {
     trace.failures.push(`scenario aborted: ${error?.stack ?? error}`);
   } finally {
+    // Optional read-only deployment diagnostics. They never replace a serving
+    // handler or normalize the compared transcript; a failed check is a failure.
+    try { await backend.captureEvidence?.({ scenario: scenario.name, project: projectId }); }
+    catch (error) { trace.failures.push(`runtime evidence failed: ${error?.message ?? error}`); }
     for (const c of clients) { try { c.close(); } catch {} }
     await quiesce();
   }
@@ -229,6 +235,13 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
   }
 
   // ---- normalize ----------------------------------------------------------------
+  if (process.env.GONVEX_CONFORMANCE_RAW_DIR) {
+    const directory = process.env.GONVEX_CONFORMANCE_RAW_DIR;
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    // Private synthetic-fixture evidence: may contain session credentials.
+    // Never publish this file or substitute it for the unchanged comparison.
+    await writeFile(join(directory, `${backend.name}-${scenario.name}.json`), JSON.stringify({ records: recorder.records, steps: trace.steps, checksums: trace.checksums }), { mode: 0o600 });
+  }
   const byTag = new Map();
   for (const r of recorder.records) (byTag.get(r.tag) ?? byTag.set(r.tag, []).get(r.tag)).push({ ...r, frame: aliases.mask(r.frame) });
   const normalized = new Map([...byTag].map(([tag, records]) => [tag, normalizeSession(records)]));

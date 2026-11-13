@@ -40,6 +40,7 @@ export function tenantPort(namespace: DurableObjectNamespace | undefined, grant:
 /** K17's outcome as the ingress reads it: the result text parsed once. */
 export function reportOf(outcome: ServiceTenantOutcome): ServiceActionReport {
   if (!outcome.ok) return { ok: false, error: outcome.error };
+  if (outcome.pending) return { ok: false, error: "the tenant has not completed the Action", transient: true };
   try {
     return { ok: true, value: JSON.parse(outcome.result) };
   } catch {

@@ -15,8 +15,11 @@ import { Aggregate, stableJson } from "../canonical.ts";
 import { parseDefinition, type ReplicaModule } from "../definition.ts";
 import { ReplicaDeliveryEngine } from "../engine.ts";
 import { LocalOutlet } from "../outlet.ts";
-import type { ReplicaDelivery } from "../protocol.ts";
+import type { ReplicaDelivery, ReplicaReceipt } from "../protocol.ts";
+import type { ScopedSocketWork } from "../recovery.ts";
 import { SocketDelivery, type TrackedReplicas } from "../socket.ts";
+import { LiveQueries, snapshotRunner, kernelVisibility, moduleFromManifest } from "../../query/index";
+import { VisibilityRegistry } from "../../visibility";
 import { PAGE_BYTES, PAGE_ROWS } from "../subscription.ts";
 
 let objects = 0;
@@ -53,11 +56,14 @@ const MODULE: ReplicaModule = {
 
 interface Harness {
   engine: ReplicaDeliveryEngine;
+  live: LiveQueries;
   payloads: Array<[string, ReplicaDelivery]>;
+  receiver: { deliver?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt> };
+  delivered: number[];
   commit(statements: Array<[string, unknown[]]>): Promise<number>;
 }
 
-async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE): Promise<T> {
+async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false): Promise<T> {
   const stub = env.HELLO.getByName(`k10-${++objects}-${Math.random()}`);
   return runInDurableObject(stub, async (_instance, state) => {
     const sql = directSql(state.storage.sql);
@@ -76,16 +82,28 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     const context = { state: new CaptureState(), wake: new ChangeWake() };
     let queue: Promise<unknown> = Promise.resolve();
     const payloads: Array<[string, ReplicaDelivery]> = [];
+    const receiver: Harness["receiver"] = {};
+    const delivered: number[] = [];
+    const liveModule = moduleFromManifest("p", {
+      functions: { "items.live": { kind: "query", delivery: "live", dependencies: { liveQueryPlan: {
+        table: "items", key: "id", columns: ["id", "rank", "label"],
+      } } } },
+      visibility: { items: { table: "items", key: "id", where: { operator: "public" } } },
+    });
+    const live = new LiveQueries({ run: snapshotRunner(storage), module: () => liveModule, visibility: kernelVisibility(new VisibilityRegistry()) });
+    const receive = (host:string,payload:ReplicaDelivery) => { payloads.push([host,payload]); return (receiver.deliver?.(host,payload) ?? {v:1,sockets:Object.keys(payload.sockets).length}) as ReplicaReceipt; };
     const engine = new ReplicaDeliveryEngine({
+      ...(composeLive ? { live } : {}),
       tenantId: "t",
+      delivered: (revision) => delivered.push(revision),
       serial: <R>(fn: () => Promise<R>) => { const next = queue.then(fn, fn); queue = next.catch(() => undefined); return next; },
       read: async (fn) => { const r = await storage.invoke("query", async (s) => fn(s)); if (!r.ok) throw r.error; return r.value; },
       module: () => module,
-      outlet: new LocalOutlet((host, payload) => { payloads.push([host, payload]); return { v: 1, sockets: Object.keys(payload.sockets).length }; }, () => ["h1"]),
+      outlet: new LocalOutlet(receive, () => ["h1"], undefined, receive),
     });
     let commands = 0;
     return body({
-      engine, payloads,
+      engine, live, payloads, receiver, delivered,
       async commit(statements) {
         const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (s) => {
           for (const [text, parameters] of statements) s.run(text, parameters);
@@ -360,8 +378,8 @@ describe("payload limits", () => {
     const payload: ReplicaDelivery = {
       v: 1, instance: "A", shared: [big, `{"type":"replica.delta","id":"~t"${big}`], watermark: 9,
       sockets: {
-        a: { ops: [["i", 0], ["d", "s", "~t", 1, "}"], ["f", big], ["f", big]], watermark: 9, opened: { s: "p" } },
-        b: { ops: [["i", 0], ["f", big]], watermark: 9 },
+        a: { ops: [["i", 0], ["d", "s", "~t", 1, "}"], ["f", big], ["f", big]], watermark: 9, opened: { s: "p" }, subscriptionEpoch: 7 } as ScopedSocketWork,
+        b: { ops: [["i", 0], ["f", big]], watermark: 9, subscriptionEpoch: 8 } as ScopedSocketWork,
       },
     };
     const parts = splitPayload(payload, 1000);
@@ -372,6 +390,7 @@ describe("payload limits", () => {
     expect(parts.slice(0, -1).every((p) => p.watermark === undefined)).toBe(true);
     expect(parts.at(-1)!.watermark).toBe(9);
     expect(parts.filter((p) => p.sockets.a?.opened).length).toBe(1);
+    for (const part of parts) for (const [id, work] of Object.entries(part.sockets)) expect((work as ScopedSocketWork).subscriptionEpoch).toBe(id === "a" ? 7 : 8);
     expect(splitPayload({ ...payload, sockets: {} }, 1000)).toHaveLength(1);
   });
 });
@@ -412,5 +431,138 @@ describe("design rule: no SQL per subscriber", () => {
     console.log(`K10 commit reads (statements / rows read): 1 subscriber ${one.statements} / ${one.rowsRead}, 10: ${ten.statements} / ${ten.rowsRead}, 100: ${hundred.statements} / ${hundred.rowsRead}`);
     expect(ten).toEqual(one);
     expect(hundred).toEqual(one);
+  });
+});
+
+
+describe("K22 ordered query and replica commits", () => {
+  // Receiver controls below test the engine/barrier wiring; actual holder
+  // scope validation and rebuilding are covered separately on Gateway/Session.
+  it("0061 uses challenge epochs only for empty work and keeps deferred query replies behind acknowledged catch-up", async () => {
+    await withEngine(async ({ engine, live, payloads, receiver, delivered, commit }) => {
+      await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);
+      let acknowledge!: (receipt: ReplicaReceipt) => void;
+      let fence: ReplicaDelivery | undefined;
+      receiver.deliver = (_host, payload) => {
+        if (!Object.keys(payload.sockets).length && payload.watermark! > 0) return { v: 1, sockets: 1, scopeRequired: { restored: 7 } };
+        if (Object.values(payload.sockets).some((work) => !work.ops.length && work.watermark === undefined)) {
+          fence = payload;
+          return new Promise((resolve) => { acknowledge = resolve; });
+        }
+        return { v: 1, sockets: Object.keys(payload.sockets).length };
+      };
+      await commit([["UPDATE items SET label='after' WHERE id='i1'", []]]);
+      for (let i = 0; i < 50 && !fence; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      expect(fence).toBeDefined();
+      expect(fence!.shared).toEqual([]);
+      expect(fence!.sockets.restored!.ops).toEqual([]);
+      expect((fence!.sockets.restored as ScopedSocketWork).subscriptionEpoch).toBe(7);
+      expect(delivered).toEqual([]); // Challenge receipt is not commit acceptance.
+      const view = { ...socket("late"), subscriptionEpoch: 7, queryId: "live" };
+      let executed = false;
+      await engine.querySubscribe(view, (db) => { executed = true; return live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }); });
+      expect(executed).toBe(false);
+      expect(engine.subscriptionFloor(view)).toBe(0); // Unacknowledged holder fence also blocks this not-yet-installed query.
+      acknowledge({ v: 1, sockets: 1, scopeAck: { restored: 7 } });
+      for (let i = 0; i < 100 && !executed; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      expect(executed).toBe(true);
+      await engine.settled();
+      const query = payloads.findIndex(([, payload]) => payload.sockets.late?.ops.some((op) => op[0] === "f" && op[1].includes('"type":"query.result"')));
+      expect(query).toBeGreaterThan(payloads.findIndex(([, payload]) => payload === fence));
+      expect(JSON.stringify(payloads[query]![1])).toContain("after");
+    }, MODULE, true);
+  });
+
+  it("does not accept an older holder's ordinary receipt as an empty-scope fence acknowledgment", async () => {
+    await withEngine(async ({ engine, live, receiver, delivered, commit }) => {
+      await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);
+      let fences = 0;
+      receiver.deliver = (_host, payload) => {
+        if (!Object.keys(payload.sockets).length && payload.watermark! > 0) return { v: 1, sockets: 1, scopeRequired: { restored: 4 } };
+        fences++; return { v: 1, sockets: 1 }; // Old sender/holder skew: no explicit ack.
+      };
+      await commit([["UPDATE items SET label='after' WHERE id='i1'", []]]);
+      for (let i = 0; i < 25; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      const view = { ...socket("late"), subscriptionEpoch: 4, queryId: "live" };
+      let executed = false;
+      await engine.querySubscribe(view, (db) => { executed = true; return live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }); });
+      expect(executed).toBe(false);
+      expect(fences).toBe(1);
+      expect(delivered).toEqual([]);
+    }, MODULE, true);
+  });
+  it("queues an initial query snapshot before a later commit and fences delayed requests after scope reset", async () => {
+    await withEngine(async ({ engine, live, payloads, commit }) => {
+      await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);
+      const view = socket("initial");
+      const request = { id: "live", path: "items.live", args: {} };
+      expect(await engine.querySubscribe(view, (db) => live.subscribeSnapshot(db, view.connectionId, view.tenant, request))).toEqual([]);
+      const revision = await commit([["UPDATE items SET label='after' WHERE id='i1'", []]]);
+      const replies = frames(payloads, view.connectionId).filter((f) => f.type === "query.result");
+      expect(replies.map((f) => f.reason)).toEqual(["initial", "change"]);
+      expect(replies.map((f) => f.result[0].label)).toEqual(["before", "after"]);
+      const commitPayload = payloads.find(([, p]) => p.watermark === revision)![1];
+      expect((commitPayload.sockets.initial as ScopedSocketWork).subscriptionEpoch).toBe(0);
+      engine.reset(view.connectionId, 2);
+      let ran = false;
+      await expect(engine.querySubscribe(view, () => { ran = true; return "stale"; })).rejects.toThrow("stale tenant subscription scope");
+      expect(ran).toBe(false);
+      expect(live.subscriptionIds(view.connectionId)).toEqual([]);
+      view.subscriptionEpoch = 2;
+      await engine.querySubscribe(view, (db) => live.subscribeSnapshot(db, view.connectionId, view.tenant, request));
+      expect((payloads.at(-1)![1].sockets.initial as ScopedSocketWork).subscriptionEpoch).toBe(2);
+    }, MODULE, true);
+  });
+  it("requires exact terminal enqueue receipts before initial progress; malformed or missing ACKs retain suppression",async()=>{
+    for(const mode of ["enqueued","obsolete","missing","duplicate","foreign","extra"]){
+      await withEngine(async({engine,live,receiver,commit,payloads,delivered})=>{
+        await commit([["INSERT INTO items VALUES ('i1',1,'before')",[]]]);delivered.length=0;payloads.length=0;
+        const view={...socket(`ack-${mode}`),initialRequests:[{kind:"query" as const,id:"q",path:"items.live",epoch:0,generation:1}]};
+        let recoverySeen!:()=>void;
+        const recovering=new Promise<void>(resolve=>{recoverySeen=resolve;});
+        receiver.deliver=(_host,payload)=>{
+          if(payload.recovery){recoverySeen();return {v:1,sockets:1};} // unsupported recovery stays blocked, never synthetic ACK
+          const status={generation:mode==="foreign"?999:1,status:mode==="obsolete"?"obsolete" as const:"enqueued" as const};
+          return {v:1,sockets:1,...(mode==="missing"?{}:{initialCompletions:{[view.connectionId]:mode==="duplicate"?[status,status]:[status],...(mode==="extra"?{unoffered:[status]}:{})}})};
+        };
+        await engine.querySubscribe(view,db=>live.subscribeSnapshot(db,view.connectionId,view.tenant,{id:"q",path:"items.live",args:{}}));
+        await engine.settled();
+        if(!["enqueued","obsolete"].includes(mode))await Promise.race([recovering,new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error(`missing recovery after ${mode} receipt`)),1000))]);
+        if(mode==="enqueued")expect(engine.subscriptionFloor(view)).toBeGreaterThan(0);
+        else expect(engine.subscriptionFloor(view)).toBe(0);
+        expect(delivered).toEqual([]);
+        if(!["enqueued","obsolete"].includes(mode)){
+          expect(payloads.some(([,p])=>!!p.recovery)).toBe(true);
+          const quiet=socket(`quiet-${mode}`);engine.observe(quiet);
+          expect(engine.subscriptionFloor(quiet)).toBe(0);
+        }
+      },MODULE,true);
+    }
+  });
+  it("puts live-query results before replica frames in the same commit payload, including live-only sockets", async () => {
+    await withEngine(async ({ engine, live, payloads, commit }) => {
+      await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);
+      for (const id of ["both", "live-only"]) {
+        const view = socket(id);
+        engine.observe(view);
+        const initial = JSON.parse(await live.subscribe(id, view.tenant, { id: "live", path: "items.live", args: {} }));
+        expect(initial.type).toBe("query.result");
+      }
+      engine.dispatch(socket("both"), { type: "replica.open", id: "replica", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      payloads.length = 0;
+      const revision = await commit([["UPDATE items SET label='after' WHERE id='i1'", []]]);
+      const payload = payloads.find(([, p]) => p.watermark === revision)![1];
+      const ops = payload.sockets.both!.ops;
+      expect(ops[0]![0]).toBe("f");
+      const query = JSON.parse(ops[0]![1] as string);
+      expect(query).toMatchObject({ type: "query.result", id: "live", reason: "change" });
+      expect(JSON.stringify(query.result)).toContain("after");
+      expect(ops.slice(1).some((op) => op[0] === "f" && JSON.parse(op[1]).type.startsWith("replica."))).toBe(true);
+      expect(JSON.parse(payload.sockets["live-only"]!.ops[0]![1] as string)).toEqual(query);
+      expect(engine.subscriptionFloor(socket("live-only"))).toBeGreaterThanOrEqual(revision);
+      engine.reset("live-only", 1);
+      expect(live.subscriptionIds("live-only")).toEqual([]);
+    }, MODULE, true);
   });
 });

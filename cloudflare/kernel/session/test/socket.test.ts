@@ -12,6 +12,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { SocketHost } from "../host";
 import { handleWebSocketUpgrade, validExtensionsField } from "../router";
+import { HolderRecoveryStore, attachmentRecord } from "../recovery-store";
 
 const BASE = "https://gonvex.test";
 const KEY = "test-key";
@@ -101,6 +102,7 @@ const gateway = (name: string) => (env as unknown as { GATEWAY: { getByName(name
 /** `runInDurableObject` on a gateway, typed loosely for the same reason. */
 const inGateway = (name: string, fn: (instance: any) => unknown): Promise<unknown> =>
   (runInDurableObject as unknown as (stub: unknown, fn: (instance: any) => unknown) => Promise<unknown>)(gateway(name), fn);
+const inGatewayState = runInDurableObject as unknown as (stub: unknown, fn: (instance: any, state: DurableObjectState) => any) => Promise<any>;
 
 /** Runs `fn` against the host of every gateway shard that holds a socket of `tenant`. */
 async function onGateways(tenant: string, fn: (host: SocketHost) => void | Promise<void>) {
@@ -149,6 +151,214 @@ describe("handshake", () => {
 });
 
 describe("gateway placement", () => {
+  it("0063 targets only A on a shared A/B/C holder, including an auth arrival during empty bootstrap", async () => {
+    const w = await world({ a: ["ana", "ben"] });
+    const clients = await Promise.all(Array.from({ length: 17 }, () => signedIn(w, "ana", "a")));
+    try {
+      const names = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+      let selected: { name: string; sockets: Array<{ id: string; epoch: number }> } | undefined;
+      for (const name of names) {
+        const sockets = await inGateway(name, (instance) => [...instance.host.sessions.values()].filter((s: any) => s.record.tenant?.route.tenantId === w.tenants.a).map((s: any) => ({ id: s.record.connectionId, epoch: s.record.subscriptionEpoch }))) as Array<{ id: string; epoch: number }>;
+        if (sockets.length >= 3) { selected = { name, sockets }; break; }
+      }
+      expect(selected).toBeDefined();
+      const { name, sockets: [a, b, c] } = selected!;
+      const before = await inGateway(name, (instance) => [...instance.host.sessions.values()].filter((s: any) => [b!.id, c!.id].includes(s.record.connectionId)).map((s: any) => JSON.stringify(s.record)));
+      const targeted = { v: 1, scopeFence: 1, instance: "targeted-instance", shared: [], sockets: { [a!.id]: { subscriptionEpoch: a!.epoch, ops: [["f", '{"type":"targeted-probe","owner":"A"}']] } } };
+      const receipt = await gateway(name).deliverReplica(w.tenants.a, targeted);
+      expect(receipt.scopeRequired).toBeUndefined();
+      expect(receipt.scopeAck).toBeUndefined();
+      expect(await inGateway(name, (instance) => [...instance.host.sessions.values()].filter((s: any) => [b!.id, c!.id].includes(s.record.connectionId)).map((s: any) => JSON.stringify(s.record)))).toEqual(before);
+      // This is a deterministic source-boundary stall around the ACTUAL hook,
+      // not evidence of a platform/network fault or assembled deployment.
+      await inGateway(name, (instance) => {
+        const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === a!.id) as any;
+        const actual = session.bootstrapReplica.bind(session);
+        const held = new Promise<void>(resolve => { instance.__releaseBootstrap = resolve; });
+        instance.__bootstrapEntered = false;
+        session.bootstrapReplica = async (...args: any[]) => { instance.__bootstrapEntered = true; await held; return actual(...args); };
+      });
+      const bootstrap = gateway(name).deliverReplica(w.tenants.a, { ...targeted, sockets: { [a!.id]: { subscriptionEpoch: a!.epoch, ops: [] } } });
+      for (let i = 0; i < 50 && !await inGateway(name, (instance) => instance.__bootstrapEntered); i++) await new Promise(resolve => setTimeout(resolve, 1));
+      expect(await inGateway(name, (instance) => instance.__bootstrapEntered)).toBe(true);
+      await inGateway(name, async (instance) => {
+        const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === c!.id) as any;
+        await session.receive(JSON.stringify({ type: "auth", id: "during-fence", clientContract: 1, project: w.projectId, tenant: w.tenants.a, token: w.tokens.ben }));
+      });
+      await inGateway(name, (instance) => instance.__releaseBootstrap());
+      const ack = await bootstrap;
+      expect(ack.scopeAck).toEqual({ [a!.id]: a!.epoch });
+      expect(ack.scopeRequired).toBeUndefined();
+      const state = await inGateway(name, (instance) => [...instance.host.sessions.values()].filter((s: any) => [b!.id, c!.id].includes(s.record.connectionId)).map((s: any) => ({ id: s.record.connectionId, epoch: s.record.subscriptionEpoch, instance: s.record.replicaInstance, watermark: s.record.watermark }))) as any[];
+      expect(state.every(s => s.instance !== "targeted-instance")).toBe(true);
+      // A global watermark is applicable even when A's instance already matches.
+      const global = await gateway(name).deliverReplica(w.tenants.a, { ...targeted, sockets: {}, watermark: 50 });
+      expect(global.scopeAck).toBeUndefined();
+      expect(global.scopeRequired[a!.id]).toBe(a!.epoch);
+      for (const s of state) expect(global.scopeRequired[s.id]).toBe(s.epoch);
+    } finally {
+      // Close server endpoints in their owning Durable Object I/O context.
+      for (const name of await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[]) await inGateway(name, (instance) => {
+        instance.__releaseBootstrap?.();
+        for (const session of instance.host.sessions.values()) if (session.record.tenant?.route.tenantId === w.tenants.a) session.close({ code: 1000, reason: "test complete" });
+      });
+    }
+  });
+
+  it("0067 native sink drops a held initial page after same-epoch close/idreuse on the same ordered outlet",async()=>{
+    const w=await world({a:["ana"]});const c=await signedIn(w,"ana","a");
+    const [name]=await stub("GET",`gateways?tenant=${w.tenants.a}`) as string[];
+    let release=false,releaseInitial!:()=>void;
+    const initialGate=new Promise<void>(resolve=>{releaseInitial=resolve;});
+    let entered=false,held:Promise<unknown>|undefined;
+    try{
+      await inGateway(name!,instance=>{
+        const session=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+        const actual=session.ports.tenants.dispatch;
+        session.ports.tenants.dispatch=(view:any,frame:any)=>frame.type==="replica.open"?Promise.resolve([]):actual(view,frame);
+      });
+      c.send({type:"replica.open",id:"r",path:"items.all",args:{version:"A"}});
+      let origin:any;
+      for(let i=0;i<50&&!origin;i++){
+        origin=await inGateway(name!,instance=>{const session=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+          const ref=Object.values(session.record.initialRequests??{})[0];return ref?{id:session.record.connectionId,ref}:null;});
+        if(!origin)await new Promise(r=>setTimeout(r,1));
+      }
+      expect(origin).toBeTruthy();
+      const {GatewayOutlet}=await import('../../delivery/outlet');
+      // Synthetic delay at the transport boundary; after release the actual
+      // additive DO method and native Session/sink perform all application.
+      const outlet=new GatewayOutlet(w.tenants.a!,()=>({
+        deliverReplica:(tenant,payload)=>gateway(name!).deliverReplica(tenant,payload),
+        deliverReplicaInitial:async(tenant,payload)=>{entered=true;await initialGate;return gateway(name!).deliverReplicaInitial(tenant,payload);},
+      }),async()=>[name!]);
+      const page=JSON.stringify({type:"replica.snapshotPage",snapshotId:"held",sequence:0,last:false,id:"r",result:[{id:"stale-row",path:"application value"}],cursor:{epoch:"e",revision:1},key:"id",maxBytes:262144,maxRows:512,mode:"eager",orderBy:"id",orderDirection:"asc",path:"items.all",scope:"s",truncated:false,visibilityScope:"v"});
+      held=outlet.send(name!,{v:1,instance:"must-not-install",shared:[],sockets:{[origin.id]:{subscriptionEpoch:origin.ref.epoch,initialScope:origin.ref,ops:[["f",page]]}}});
+      void held.catch(()=>{});
+      for(let i=0;i<50&&!entered;i++)await new Promise(r=>setTimeout(r,1));
+      expect(entered).toBe(true);
+      c.send({type:"replica.close",id:"r"});c.send({type:"replica.open",id:"r",path:"items.all",args:{version:"B"}});
+      let changed=false;
+      for(let i=0;i<50&&!changed;i++){
+        changed=await inGateway(name!,instance=>{const session=[...instance.host.sessions.values()].find((s:any)=>s.record.connectionId===origin.id) as any;
+          return Object.values(session.record.initialRequests??{}).some((ref:any)=>ref.generation!==origin.ref.generation);}) as boolean;
+        if(!changed)await new Promise(r=>setTimeout(r,1));
+      }
+      expect(changed).toBe(true);
+      const before=await inGateway(name!,instance=>{const s=[...instance.host.sessions.values()].find((s:any)=>s.record.connectionId===origin.id) as any;return JSON.stringify(s.record);});
+      releaseInitial();release=true;await held;
+      const after=await inGateway(name!,instance=>{const s=[...instance.host.sessions.values()].find((s:any)=>s.record.connectionId===origin.id) as any;return JSON.stringify(s.record);});
+      expect(after).toBe(before);expect(c.raw.some(text=>text.includes('stale-row'))).toBe(false);
+    }finally{
+      if(!release)releaseInitial();
+      if(held)await Promise.allSettled([held]);
+      c.ws.close(1000);await c.closed();
+    }
+  });
+
+  it("returns native RPC initial ENQUEUED/obsolete receipts as plain own-key records",async()=>{
+    const w=await world({a:["ana"]}),c=await signedIn(w,"ana","a");
+    const [name]=await stub("GET",`gateways?tenant=${w.tenants.a}`) as string[];
+    try{
+      await inGateway(name!,instance=>{
+        const session=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+        const actual=session.ports.tenants.dispatch;
+        session.ports.tenants.dispatch=(view:any,frame:any)=>frame.type==="query.subscribe"?Promise.resolve([]):actual(view,frame);
+      });
+      c.send({type:"query.subscribe",id:"q",path:"items.live",args:{}});
+      let origin:any;
+      for(let i=0;i<50&&!origin;i++){
+        origin=await inGateway(name!,instance=>{const s=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+          const ref=Object.values(s.record.initialRequests??{}).find((r:any)=>r.kind==="query"&&r.id==="q");return ref?{id:s.record.connectionId,ref}:null;});
+        if(!origin)await new Promise(r=>setTimeout(r,1));
+      }
+      expect(origin).toBeTruthy();
+      const text=JSON.stringify({type:"query.result",id:"q",path:"items.live",reason:"initial",result:[]});
+      const work={subscriptionEpoch:origin.ref.epoch,initialScope:origin.ref,ops:[["f",text]],initialCompletions:[{request:origin.ref,opIndex:0,outcome:"accepted"}]};
+      const payload={v:1,instance:"native-initial",shared:[],sockets:{[origin.id]:work}};
+      // This is an actual DO stub RPC, including result serialization.
+      const receipt=await gateway(name!).deliverReplicaInitial(w.tenants.a,payload);
+      expect(receipt.initialCompletions).toEqual({[origin.id]:[{generation:origin.ref.generation,status:"enqueued"}]});
+      expect(Object.getPrototypeOf(receipt.initialCompletions)).toBe(Object.prototype);
+      await c.next(f=>f.type==="query.result"&&f.id==="q");
+      const obsolete=await gateway(name!).deliverReplicaInitial(w.tenants.a,payload);
+      expect(obsolete.initialCompletions).toEqual({[origin.id]:[{generation:origin.ref.generation,status:"obsolete"}]});
+      const normal=await gateway(name!).deliverReplica(w.tenants.a,{v:1,instance:"native-initial",shared:[],sockets:{[origin.id]:{subscriptionEpoch:origin.ref.epoch,ops:[]}}});
+      expect(normal.initialCompletions).toBeUndefined();
+      const special=await gateway(name!).deliverReplicaInitial(w.tenants.a,{...payload,sockets:Object.fromEntries([['__proto__',work],['constructor',work]])});
+      expect(Object.hasOwn(special.initialCompletions,'__proto__')).toBe(true);
+      expect(Object.hasOwn(special.initialCompletions,'constructor')).toBe(true);
+      expect(special.initialCompletions.__proto__).toEqual([{generation:origin.ref.generation,status:"obsolete"}]);
+      expect(c.frames.some(f=>f.type==="query.result"&&f.id==="q")).toBe(false);
+    }finally{c.ws.close(1000);await c.closed();}
+  });
+
+  it("0070 returns processing facts through the real ordered outlet and native recovery RPC",async()=>{
+    const w=await world({a:["ana"]}),c=await signedIn(w,"ana","a");
+    const [name]=await stub("GET",`gateways?tenant=${w.tenants.a}`) as string[];
+    try{
+      await inGateway(name!,instance=>{
+        const session=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+        const actual=session.ports.tenants.dispatch;
+        session.ports.tenants.dispatch=(view:any,frame:any)=>frame.type==="query.subscribe"?Promise.resolve(view.queryRecovery?[JSON.stringify({type:'query.progress',id:frame.id,path:frame.path,throughRevision:{epoch:'e',sequence:2}})]:[]):actual(view,frame);
+      });
+      c.send({type:'query.subscribe',id:'q',path:'items.live',args:{}});let origin:any;
+      for(let i=0;i<50&&!origin;i++){
+        origin=await inGateway(name!,instance=>{const s=[...instance.host.sessions.values()].find((s:any)=>s.record.tenant?.route.tenantId===w.tenants.a) as any;
+          const ref=Object.values(s.record.initialRequests??{}).find((r:any)=>r.id==='q');return ref?{id:s.record.connectionId,ref}:null;});
+        if(!origin)await new Promise(r=>setTimeout(r,1));
+      }
+      expect(origin).toBeTruthy();
+      const {GatewayOutlet}=await import('../../delivery/outlet');
+      const outlet=new GatewayOutlet(w.tenants.a!,()=>gateway(name!),async()=>[name!]);
+      const receipt=await outlet.reset(name!,{v:1,instance:'recovered',shared:[],sockets:{},recovery:{reason:'change-feed-lagged'},recoveryInitials:{[origin.id]:[origin.ref,{...origin.ref,generation:777,id:'unknown'}]}});
+      expect(receipt?.recoveryAck).toBe(1);
+      expect(receipt?.initialCompletions).toEqual({[origin.id]:[{generation:origin.ref.generation,status:'enqueued'}]});
+      expect(Object.getPrototypeOf(receipt!.initialCompletions)).toBe(Object.prototype);
+      await c.next(f=>f.type==='query.progress'&&f.id==='q');
+      const old=await outlet.reset(name!,{v:1,instance:'without-offer',shared:[],sockets:{},recovery:{reason:'change-feed-lagged'}});
+      expect(old?.recoveryAck).toBe(1);expect(old?.initialCompletions).toBeUndefined();
+    }finally{c.ws.close(1000);await c.closed();}
+  });
+
+  it("0061 challenges a restarted sender without mutation, rejects a stale Member fence, then acknowledges only real empty bootstrap", async () => {
+    const w = await world({ a: ["ana", "ben"] });
+    const c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const before = await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any;
+      session.record.replicaInstance = "before";
+      session.delivery.opening("pending-open", "items.all");
+      return { id: session.record.connectionId, epoch: session.record.subscriptionEpoch, watermark: session.record.watermark ?? 0 };
+    }) as { id: string; epoch: number; watermark: number };
+    const payload = { v: 1, scopeFence: 1, instance: "after", shared: [], sockets: {}, watermark: 90 };
+    const challenge = await gateway(name!).deliverReplica(w.tenants.a, payload);
+    expect(challenge.scopeRequired).toEqual({ [before.id]: before.epoch });
+    await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === before.id) as any;
+      expect(session.record.replicaInstance).toBe("before");
+      expect(session.record.watermark ?? 0).toBe(before.watermark);
+    });
+    await c.auth({ id: "switch", project: w.projectId, tenant: w.tenants.a, token: w.tokens.ben });
+    const fence = (epoch: number) => ({ v: 1, scopeFence: 1, instance: "after", shared: [], sockets: { [before.id]: { ops: [], subscriptionEpoch: epoch } } });
+    const stale = await gateway(name!).deliverReplica(w.tenants.a, fence(before.epoch));
+    expect(stale.scopeAck).toBeUndefined();
+    expect(stale.scopeRequired[before.id]).toBeGreaterThan(before.epoch);
+    const current = await gateway(name!).deliverReplica(w.tenants.a, payload);
+    const epoch = current.scopeRequired[before.id];
+    expect(epoch).toBeGreaterThan(before.epoch);
+    const ack = await gateway(name!).deliverReplica(w.tenants.a, fence(epoch));
+    expect(ack.scopeAck).toEqual({ [before.id]: epoch });
+    await gateway(name!).deliverReplica(w.tenants.a, { ...payload, watermark: 100, sockets: { [before.id]: { ops: [["f", '{"type":"private-old-scope"}']], subscriptionEpoch: before.epoch } } });
+    await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === before.id) as any;
+      expect(session.record.replicaInstance).toBe("after");
+      expect(session.record.watermark ?? 0).toBe(0);
+    });
+    expect(c.frames.some((f) => f.type === "private-old-scope")).toBe(false);
+    c.ws.close(1000);
+  });
+
   it("registers each gateway once with the tenant and delivers each commit once per gateway", async () => {
     const w = await world({ a: ["ana", "ben"] });
     const clients = await Promise.all(Array.from({ length: 12 }, (_, i) => signedIn(w, i % 2 ? "ben" : "ana", "a")));
@@ -261,6 +471,85 @@ describe("alarms", () => {
 });
 
 describe("hibernation", () => {
+  for (const publish of [false, true]) it(`recovers the ${publish ? "new" : "old"} semantic generation after eviction ${publish ? "after" : "before"} attachment publication`, async () => {
+    const w = await world({ a: ["ana"] }), c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const transition = await inGatewayState(gateway(name!), (instance, state) => {
+      const [ws, session] = [...instance.host.sessions].find(([, s]: any) => s.record.tenant?.route.tenantId === w.tenants.a)! as [WebSocket, any];
+      const old = ws.deserializeAttachment() as any;
+      const nextRecord = structuredClone(session.record);
+      nextRecord.pendingActions = { correlation: "agent.waiting" };
+      const next = new HolderRecoveryStore(state.storage).write(nextRecord, old.recovery);
+      if (publish) ws.serializeAttachment({ session: attachmentRecord(nextRecord), recovery: next });
+      // Intentionally no commit. Real hibernation discards the host's memory;
+      // the verified native attachment selects which transition was accepted.
+      return { old: old.recovery.generation, next: next.generation, owner: next.socketOwner };
+    });
+    await evictDurableObject(gateway(name!));
+    await inGatewayState(gateway(name!), (instance, state) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any;
+      expect(session.record.pendingActions ?? {}).toEqual(publish ? { correlation: "agent.waiting" } : {});
+      expect(state.storage.kv.get<any>(`session-recovery-owner/${transition.owner}`)?.current).toBe(publish ? transition.next : transition.old);
+      expect([...state.storage.kv.list({ prefix: `session-recovery/${publish ? transition.old : transition.next}/` })]).toEqual([]);
+    });
+    c.ws.close(1000); await c.closed();
+    await runInDurableObject(gateway(name!), (_instance, state) => {
+      expect(state.storage.kv.get(`session-recovery-owner/${transition.owner}`)).toBeUndefined();
+    });
+  });
+
+  it("serializes large recovery requests and private identity, restores them after eviction and cleans on close", async () => {
+    const w = await world({ a: ["ana"] });
+    const c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const generation = await inGateway(name!, (instance) => {
+      const host = instance.host;
+      const [ws, session] = [...host.sessions].find(([, s]: any) => s.record.tenant?.route.tenantId === w.tenants.a)!;
+      session.record.tenant.member.permissions = { legalLargeFixture: "x".repeat(100_000) };
+      session.record.connection.tenant = session.record.tenant;
+      session.record.liveQueries = { q: { type: "query.subscribe", id: "q", path: "items.live", args: { text: "漢".repeat(100_000) } } };
+      session.record.pendingActions = { pending: "agent.run" };
+      host.recoveryDirty.add(ws);
+      host.persist(ws, session);
+      const attachment = ws.deserializeAttachment();
+      expect(attachment.session.privateIdentity).toBe(1);
+      expect(attachment.session.tenant).toBeUndefined();
+      expect(attachment.session.liveQueries).toBeUndefined();
+      expect(JSON.stringify(attachment).length).toBeLessThan(16_384);
+      return attachment.recovery.generation;
+    }) as string;
+    await evictDurableObject(gateway(name!));
+    await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any;
+      expect(session.record.tenant.member.permissions.legalLargeFixture.length).toBe(100_000);
+      expect(session.record.liveQueries.q.args.text.length).toBe(100_000);
+      expect(session.record.pendingActions).toEqual({ pending: "agent.run" });
+    });
+    c.ws.close(1000); await c.closed();
+    await runInDurableObject(gateway(name!), (_instance, state) => {
+      expect([...state.storage.kv.list({ prefix: `session-recovery/${generation}/` })]).toEqual([]);
+    });
+  });
+
+  it("fails closed and abandons the unpublished generation when attachment publication fails", async () => {
+    const w = await world({ a: ["ana"] });
+    const c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    await inGateway(name!, (instance) => {
+      const host = instance.host;
+      const [ws, session] = [...host.sessions].find(([, s]: any) => s.record.tenant?.route.tenantId === w.tenants.a)!;
+      const original = ws.serializeAttachment;
+      try {
+        ws.serializeAttachment = () => { throw new Error("injected attachment publication failure"); };
+        session.record.pendingActions = { pending: "agent.run" };
+        host.recoveryDirty.add(ws);
+        host.persist(ws, session);
+        expect(session.closed).toBe(true);
+      } finally { ws.serializeAttachment = original; }
+    });
+    expect((await c.closed()).code).toBe(1012);
+  });
+
   it("restores sessions from attachments after the gateway is evicted", async () => {
     const w = await world({ a: ["ana"] });
     const c = await signedIn(w, "ana", "a");

@@ -1,0 +1,15 @@
+{
+  "name": "gonvex-cf-dev-x01-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "durable_objects": { "bindings": [
+    { "name": "HELLO", "class_name": "HelloObject" },
+    { "name": "GATEWAY", "class_name": "GatewayObject" },
+    { "name": "GATEWAY_CONTROLLER", "class_name": "GatewayControllerObject" },
+    { "name": "CONTROL_STUB", "class_name": "ControlStubObject" },
+    { "name": "TENANT_STUB", "class_name": "TenantStubObject" },
+    { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" }
+  ] },
+  "vars": { "GONVEX_RUNTIME_VERSION": "x01-test", "GONVEX_STUB_ADMIN_KEY": "test-key", "GONVEX_PRESENCE": "1" },
+  "migrations": [{ "tag": "x01-test-v1", "new_sqlite_classes": ["HelloObject", "GatewayObject", "GatewayControllerObject", "ControlStubObject", "TenantStubObject", "PublicLimiterObject"] }]
+}
