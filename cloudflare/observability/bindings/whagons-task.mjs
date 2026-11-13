@@ -1,4 +1,5 @@
 import source from './whagons-task.json' with { type: 'json' };
+import { ordinaryCommitEvidenceSupport } from './commit-evidence.mjs';
 
 const freeze = value => {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
@@ -39,8 +40,9 @@ export function auditTaskBinding(candidate = proposedTaskBinding()) {
     version:1, status:'BLOCKED', domain:'offline-source-audit', executionAllowed:false,
     applicationCommit:source.application.commit, frameworkCommit:source.framework.commit,
     integrity, sourceAudit:integrity==='valid' && !issues.size ? 'consistent' : 'blocked',
+    commitEvidenceSupport:ordinaryCommitEvidenceSupport(),
     issues:[...issues].sort(),
-    blockers:['offline-only','sdk-read-delivery', ...source.missingPrerequisites.map(key => `unverified:${key}`)],
+    blockers:['offline-only','sdk-read-delivery',ordinaryCommitEvidenceSupport().reason, ...source.missingPrerequisites.map(key => `unverified:${key}`)],
   });
   try {
     if (!keys(candidate,['version','enabled','mode','applicationCommit','frameworkCommit','refs','methods','argumentFields','sdkPolicy','prerequisites'])

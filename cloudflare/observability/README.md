@@ -28,6 +28,18 @@ three regions or continuous monitoring. It creates no tenant/account and sends n
 
 ## Bind the real application later
 
+At framework `5c5fa3795d821d5995179e19b712c89bfa0eb8d8`, the general proposed
+`reducerWithCommitEvidence` port is **unsupported** from ordinary result plus receipt lookup.
+The audit now reports `command-bound-commit-cursor-unavailable` and `executionAllowed:false`.
+Receipt lookup authenticates the subject/key/path and atomically observes completion, then
+returns the current clock fence, which can advance after unrelated writes. That recovery
+contract remains intact. It does not supply the original command's full commit cursor.
+The historical proposal below is preserved, not authorized for implementation. See the
+[scoped decision and actual native witness](../../docs/cloudflare/verification/M05-commit-evidence-contract/report.md).
+No SDK stub, private-field access, later-epoch/older-revision pairing or capability assertion
+fills this gap. Fresh tenant-SQLite read and a separate authorized same-epoch applied client
+remain two independent missing prerequisites.
+
 The [Whagons task preparation](bindings/whagons-task.json) pins cached app source
 `73276b5589d363c1190a6d028413a21559226631` separately from framework source
 `8851a125dbd7316e6de30717bbcaf807ee2f5eb7`. It contains function/argument metadata,

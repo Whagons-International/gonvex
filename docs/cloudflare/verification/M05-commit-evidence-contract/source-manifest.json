@@ -1,0 +1,108 @@
+{
+  "at": "2026-11-13T08:00:12.068811+00:00",
+  "framework": "5c5fa3795d821d5995179e19b712c89bfa0eb8d8",
+  "sources": [
+    {
+      "path": "docs/cloudflare/verification/M05-binding-preparation/port-proposal.md",
+      "blob": "38f64adf52713b0bde1a5c1d02a0b6b4cffd2707",
+      "bytes": 3783,
+      "sha256": "39a1bba1b774b474283939107c01f339387d7b41eb366f500945449f183ae85d"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "blob": "d910fb4c01fb00e797fbd6d82b8cbf089b48aa73",
+      "bytes": 307878,
+      "sha256": "c3eec92e964522f18dbf2e8a5e7249261207a91c9eccff5ad409b9c2a96b76d5"
+    },
+    {
+      "path": "packages/protocol/src/index.ts",
+      "blob": "4775cb60387d81c99799091f45074b0b1bc0308b",
+      "bytes": 23753,
+      "sha256": "1aa211b8367cd6e7a066576bef501b15cfea54548976f0405fbe480b29aa9bae"
+    },
+    {
+      "path": "rust/crates/runtime/src/execution.rs",
+      "blob": "439de5eb1a5f5cd9dc4658b5274dec8737a12c3c",
+      "bytes": 86245,
+      "sha256": "ebef0a3e2370dd3c829c2bc4a900e0f190bee16fd116241d75234e0a07273e3b"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/path.ts",
+      "blob": "3267c437e752e218b5845c87a2ad5c7acf840fb4",
+      "bytes": 21311,
+      "sha256": "3753791b7d653bd60677d04866349e572ed03aff5e81703ec902a06454c80d66"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/receipts.ts",
+      "blob": "385a0cf77b0c0496533a92272e41ecf1549e1e22",
+      "bytes": 10207,
+      "sha256": "b0330ef732b79798cb1f1a6c7ef67c5a6dc0a2e351d7e677ed49678817b31e6c"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/receipts.spec.ts",
+      "blob": "0e79fad388ffa76460a8d8403e6a15efff244e4b",
+      "bytes": 15201,
+      "sha256": "6af723e7c0057af781dfb053bf4931fbf5665041a92d8882a2d82036998b6cb8"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/client.ts",
+      "blob": "1f01663d2418bfb9339157f69adb17fb133b1e66",
+      "bytes": 6361,
+      "sha256": "1cea9a58d5a0463ffb4ba514c93d54a2ae538a67efb56e9083bf0a879fb1ebe8"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/fixture.ts",
+      "blob": "5615e84d91d2e6392f42d4871cb0f4286e581c7e",
+      "bytes": 5127,
+      "sha256": "d3af26613c4a040d0318e0c956be1eced1e7e4ce50e5d7e78810bf38b446eccc"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/worker.ts",
+      "blob": "a86b44a8655242df61f5193b49bfeb1040bf0ecf",
+      "bytes": 1066,
+      "sha256": "dd8f44324074dc76a3b436b18c10e26a500c514821501e3c86b81b0c8a0c6fa2"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/wrangler.jsonc",
+      "blob": "b5696f7c84b0195c89e410293423c49b5cd4a627",
+      "bytes": 1040,
+      "sha256": "d490f5d2ecf8f5d9a27a7e3be0c6cce86daf59770718d8e5347156166a53862c"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/vitest.config.mjs",
+      "blob": "dcaf0fe264549491e4f87f0b13e46b2447071d6a",
+      "bytes": 1696,
+      "sha256": "702ea7132ac00ce2057c245eff73748091cb9dcd06d84244096a638f7688c9b4"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/frames.ts",
+      "blob": "4ecd5c7c60d73ed55c5cd8679059646579742c24",
+      "bytes": 3305,
+      "sha256": "d4a050b8d15458b12e5d5c752aff8c7b32735d820f06f5e18c4626c39d3b74f4"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/storage.ts",
+      "blob": "33e5e1114fb58e0a4fab03aea0c167f4ef5f09e6",
+      "bytes": 3950,
+      "sha256": "edc277f5c9a4a5ccb5c7b1f1e23738e242c3176463d2c1a9c5834d275b168595"
+    },
+    {
+      "path": "rust/crates/store/src/lib.rs",
+      "blob": "c7aa99aefcb506a273e299855f7757502db43c02",
+      "bytes": 79965,
+      "sha256": "b404b05c4492ae50ebe11ae3abd055dc1b74943bd3d5372f8d51c84525345da7"
+    },
+    {
+      "path": "tsconfig.base.json",
+      "blob": "eb51220828872976c0f07d2b045215f71d3b7785",
+      "bytes": 331,
+      "sha256": "7f7457aba9ede6e0486088770d7c68f387dc88cce1ce34d1bf6bee393e7a0cc9"
+    }
+  ],
+  "equivalenceToHistorical8851": {
+    "packages/client/src/index.ts": true,
+    "packages/protocol/src/index.ts": true,
+    "cloudflare/kernel/reducer/path.ts": true,
+    "cloudflare/kernel/reducer/receipts.ts": true
+  }
+}
