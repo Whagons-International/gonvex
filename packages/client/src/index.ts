@@ -3823,7 +3823,8 @@ export class GonvexClient {
   private async applyReplicaTransaction(message: Extract<ServerMessage, { type: "replica.transaction" }>, scope: ReplicaScope) {
     const watermark = this.serverCapabilities.replicaWatermark === 1;
     const generation = this.socketGeneration;
-    await this.replica.applyTransaction({
+    const evidence = this.transactionEvidence?.id === message.originCommandId ? this.transactionEvidence : undefined;
+    const transaction = {
       cursor: message.cursor,
       originCommandId: message.originCommandId,
       provenance: message.provenance,
@@ -3832,9 +3833,14 @@ export class GonvexClient {
         oldValue: asReplicaRow(change.oldValue),
         newValue: asReplicaRow(change.newValue),
       })),
-    }, scope);
-    if(scope===this.replicaScope && generation===this.socketGeneration && message.originCommandId)
-      this.transactionEvidence?.applied(message.originCommandId,message.cursor.epoch,message.cursor.revision);
+    };
+    let applied = false;
+    if (evidence) applied = await this.replica.applyTransactionWithOutcome(transaction, scope);
+    else await this.replica.applyTransaction(transaction, scope);
+    if (evidence && this.transactionEvidence === evidence && scope === this.replicaScope && generation === this.socketGeneration) {
+      if (applied) evidence.applied(evidence.id, message.cursor.epoch, message.cursor.revision);
+      else evidence.fail('conflicting-evidence');
+    }
     // On capable runtimes the data frame is not the commit's full barrier.
     // Keep its intent until the result/watermark path retires it, even if it
     // has no optimistic patches. Negotiation belongs to the original owner.

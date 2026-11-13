@@ -127,6 +127,32 @@ the correction's checks. Earlier author source-equivalence receipts describe
 their original validated head; this correction requires its own exact-head
 validation and fresh independent review.
 
+### Lead R1 correction: application outcome
+
+The independent review of `fdd3e27c` found that a resolved Local Replica
+application promise also covers transactions skipped as stale. A matching R4
+could therefore receive applied confirmation after an unrelated R5 without R4
+ever reaching storage. The controlled reordered-wire reproduction is preserved;
+native production reordering was not demonstrated.
+
+The conditional call now uses an internal Local Replica application outcome
+from the actual serialized operation. It becomes true only after the existing
+non-skipped persistence, state publication and notification path finishes.
+Stale or wrong-scope operations return false. Only the same captured evidence
+call may consume the result; a skipped matching transaction refuses UNKNOWN
+without a receipt query or another write. The ordinary void-returning
+`applyTransaction` method keeps its existing invocation and settlement path.
+No numeric cursor comparison substitutes for this application outcome.
+
+Two additive schedules preserve the review's R5-before-R4 case and cover an
+unrelated equal R4 before the matching R4. Both fail the old source's positive
+confirmation assertion; they also require one write and zero receipt queries
+after a correct early refusal. All original tests and the immutable review
+reproduction remain unchanged. This expands the reserved local SDK scope to
+`local-replica.ts`; no protocol, server, Rust or application module changes.
+The correction requires its own exact-source checks and a NEW independent
+review. Earlier test receipts retain their original source domains.
+
 Lead owns ONE NEW independent review and any integration/API acceptance. No author reviewer,
 watch, merge or automatic next task follows. A fresh authoritative tenant-SQLite application read
 and an independent authorized same-epoch applied client are still two missing prerequisites.

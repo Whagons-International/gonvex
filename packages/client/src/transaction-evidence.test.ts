@@ -122,3 +122,30 @@ it('multiple active observation windows are refused before allocating call proof
   await expect(c.reducerWithTransactionEvidence(reducer,{},options)).rejects.toMatchObject({possibleWriteApplied:false,reason:'precondition'});
   expect(writes(s)).toHaveLength(0);
 });
+
+for (const priorRevision of [4,5]) it(`late same-epoch transaction R4 skipped after R${priorRevision} is not applied evidence`,async()=>{
+  class CountingStorage extends MemoryLocalReplicaStorage {
+    applied:number[]=[];
+    override async applyTransaction(...args:Parameters<MemoryLocalReplicaStorage['applyTransaction']>){
+      this.applied.push(args[0].cursor.revision);
+      return super.applyTransaction(...args);
+    }
+  }
+  const storage=new CountingStorage(),{c,s}=await setup(storage),pending=begin(c),id=writes(s)[0].id;
+  let settled=false;void pending.then(()=>{settled=true;});
+  s.receive(transaction('unrelated',{cursor:{epoch:'db',revision:priorRevision},changes:[{entity:'board',id:'other',operation:'update',newValue:{id:'other',title:'later'}}]}));
+  s.receive({type:'replica.watermark',revision:priorRevision});
+  await vi.waitFor(()=>expect(storage.applied).toEqual([priorRevision]));
+  s.receive(result(id));s.receive(transaction(id));
+  // Preserve the reviewer's old-head schedule, including its receipt if the
+  // faulty implementation requests one. A correct early refusal needs none.
+  await vi.waitFor(()=>expect(settled || s.sent.some(x=>x.type==='query.call' && x.path==='__gonvex.reducerReceipt')).toBe(true));
+  const query=s.sent.find(x=>x.type==='query.call' && x.path==='__gonvex.reducerReceipt');
+  if(query)s.receive({type:'query.result',id:query.id,path:query.path,result:{found:true,cursor:{epoch:'db',revision:priorRevision}}});
+  const actual=await pending;
+  expect(storage.applied).toEqual([priorRevision]);
+  expect(actual.value).toBeUndefined();
+  expect(actual.error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});
+  expect(writes(s)).toHaveLength(1);
+  expect(s.sent.filter(x=>x.type==='query.call')).toHaveLength(0);
+});
