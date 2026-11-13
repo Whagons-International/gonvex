@@ -1367,3 +1367,249 @@ async fn only_referenced_configurations_and_requested_target_states_are_stored()
     );
     fixture.pools.close().await;
 }
+
+// Review regressions: a batch cursor must retain SQLite storage class, even
+// though the public row image deliberately normalizes identities to JSON.
+async fn review_inventory_keyset(expression: &str) {
+    let f = Fixture::new().await;
+    f.ok(&format!("CREATE TABLE reviewTargets(_id PRIMARY KEY); CREATE TABLE reviewSources(_id TEXT PRIMARY KEY, refs JSON); WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<599) INSERT INTO reviewTargets SELECT {expression} FROM n; INSERT INTO reviewSources VALUES('source','[]');")).await;
+    let catalog = json!({"version":2,"existing":"reject","tables":[
+        {"name":"reviewTargets","key":"_id","live":"true"},
+        {"name":"reviewSources","key":"_id","live":"true"}],
+        "references":[{"name":"review.targets","source":"reviewSources","path":"$.refs[*]","target":"reviewTargets","state":"exists"}]});
+    let installed =
+        tokio::time::timeout(std::time::Duration::from_secs(3), f.declare(&catalog)).await;
+    let count = if matches!(installed, Ok(Ok(()))) {
+        f.scalar("SELECT count(*) FROM _gonvex_reference_targets WHERE table_name='reviewTargets'")
+            .await
+    } else {
+        0
+    };
+    f.pools.close().await;
+    assert!(
+        matches!(installed, Ok(Ok(()))),
+        "typed inventory did not finish: {installed:?}"
+    );
+    assert_eq!(count, 600, "typed inventory skipped keys for {expression}");
+}
+
+#[tokio::test]
+async fn review_inventory_integer_keys_without_affinity() {
+    review_inventory_keyset("i").await;
+}
+#[tokio::test]
+async fn review_inventory_real_keys_without_affinity() {
+    review_inventory_keyset("i+0.5").await;
+}
+#[tokio::test]
+async fn review_inventory_blob_keys() {
+    review_inventory_keyset("CAST(printf('%04d',i) AS BLOB)").await;
+}
+#[tokio::test]
+async fn review_inventory_mixed_storage_classes() {
+    review_inventory_keyset("CASE WHEN i<200 THEN i WHEN i<400 THEN printf('text-%04d',i) ELSE CAST(printf('blob-%04d',i) AS BLOB) END").await;
+}
+
+#[tokio::test]
+async fn review_root_entry_dependencies_enforce_lookups_predicates_and_assertions() {
+    let f = Fixture::new().await;
+    f.ok("CREATE TABLE reviewParents(_id TEXT PRIMARY KEY,kind TEXT); CREATE TABLE reviewChildren(_id TEXT PRIMARY KEY,targetId TEXT,parentId TEXT,secondaryParentId TEXT,expected TEXT,targetKind TEXT,assertParentId TEXT,assertion TEXT); INSERT INTO reviewParents VALUES('p','teams'),('p2','teams'); INSERT INTO reviewChildren VALUES('child','before','p','p2','teams','teams','p','teams');").await;
+    let catalog = json!({"version":2,"existing":"reject","tables":[
+        {"name":"teams","key":"_id","live":"$.deletedAt == null"},
+        {"name":"reviewParents","key":"_id","live":"true"},
+        {"name":"reviewChildren","key":"_id","live":"true"}],
+        "bindings":[{"name":"reviewDomain","source":"reviewParents","columns":["kind"]}],
+        "references":[
+          {"name":"review.ref","source":"reviewChildren","path":"$.targetId","state":"exists",
+           "lookup":[{"binding":"reviewDomain","key":"$entry.parentId","when":"$.kind == $entry.expected"},
+                     {"binding":"reviewDomain","from":"configuration","key":"$entry.secondaryParentId","when":"$.kind == $entry.expected"}],
+           "discriminator":"$entry.targetKind","targets":{"teams":"teams"}},
+          {"name":"review.assert","source":"reviewChildren","state":"exists",
+           "lookup":{"binding":"reviewDomain","key":"$entry.assertParentId"},"assert":"$entry.assertion == $.kind"}]});
+    let installed = f.declare(&catalog).await;
+    let edges = f
+        .scalar("SELECT count(*) FROM _gonvex_reference_edges WHERE source_table='reviewChildren'")
+        .await;
+    let invalid_target = f
+        .run("UPDATE reviewChildren SET targetId='missing'")
+        .await
+        .is_err();
+    let invalid_assertion = f
+        .run("UPDATE reviewChildren SET assertion='wrong'")
+        .await
+        .is_err();
+    let invalid_discriminator = f
+        .run("UPDATE reviewChildren SET targetKind='unknown'")
+        .await
+        .is_err();
+    let invalid_parent = f
+        .run("UPDATE reviewParents SET kind='wrong' WHERE _id='p'")
+        .await
+        .is_err();
+    f.pools.close().await;
+    assert!(
+        installed.is_ok(),
+        "valid root entry rule rejected: {installed:?}"
+    );
+    assert_eq!(
+        edges, 4,
+        "optional root entry lookups silently omitted edges"
+    );
+    assert!(invalid_target && invalid_assertion && invalid_discriminator && invalid_parent);
+}
+
+#[tokio::test]
+async fn review_storage_decoding_preserves_literal_ids_without_explicit_normalization() {
+    let f = Fixture::with_migration(include_str!("reference_integrity/aliases.sql")).await;
+    f.ok("INSERT INTO aliasTeams VALUES(' a,b ','literal-code',NULL)")
+        .await;
+    let object = f
+        .run("UPDATE aliasLinks SET payload=json_object('first',' a,b ','other','builtin')")
+        .await;
+    let serialized = f.run("UPDATE aliasLinks SET payload=json_quote(json_object('first',' a,b ','other','builtin'))").await;
+    let protected = f
+        .run("DELETE FROM aliasTeams WHERE _id=' a,b '")
+        .await
+        .is_err();
+    f.pools.close().await;
+    assert!(object.is_ok(), "literal JSON ID changed: {object:?}");
+    assert!(
+        serialized.is_ok(),
+        "serialized literal ID changed: {serialized:?}"
+    );
+    assert!(protected, "literal ID was not protected from deletion");
+}
+
+#[tokio::test]
+async fn review_non_text_source_keys_and_configuration_lookups_use_indexed_typed_probes() {
+    for key in ["17", "CAST('child' AS BLOB)"] {
+        let f = Fixture::new().await;
+        f.ok("CREATE TABLE reviewParents(_id PRIMARY KEY,allowed BOOLEAN); CREATE TABLE reviewChildren(_id PRIMARY KEY,ref TEXT,parentId TEXT); INSERT INTO reviewParents VALUES(CAST('p' AS BLOB),1);").await;
+        let catalog = json!({"version":2,"existing":"reject","tables":[
+            {"name":"teams","key":"_id","live":"$.deletedAt == null"},
+            {"name":"reviewParents","key":"_id","live":"true"},
+            {"name":"reviewChildren","key":"_id","live":"true"}],
+            "bindings":[{"name":"reviewAllowed","source":"reviewParents","columns":["allowed"]}],
+            "references":[
+              {"name":"review.ref","source":"reviewChildren","path":"$.ref","target":"teams","state":"exists"},
+              {"name":"review.assert","source":"reviewChildren","state":"exists","lookup":{"binding":"reviewAllowed","key":"$.parentId","required":true},"assert":"$.allowed == true"}]});
+        f.declare(&catalog).await.unwrap();
+        let valid = f
+            .run(&format!(
+                "INSERT INTO reviewChildren VALUES({key},'before','70')"
+            ))
+            .await;
+        let invalid = f
+            .run("UPDATE reviewChildren SET ref='missing'")
+            .await
+            .is_err();
+        let parent = f.run("UPDATE reviewParents SET allowed=0").await.is_err();
+        let target = f.run("DELETE FROM teams WHERE _id='before'").await.is_err();
+        let identity = if key == "17" { "17" } else { "6368696c64" };
+        let ambiguous = f
+            .run(&format!(
+                "INSERT INTO reviewChildren VALUES('{identity}','before','70')"
+            ))
+            .await
+            .is_err();
+        let remaining = f.scalar("SELECT count(*) FROM reviewChildren").await;
+        f.pools.close().await;
+        assert!(valid.is_ok(), "valid typed-key write rejected: {valid:?}");
+        assert!(
+            invalid && parent && target,
+            "typed-key point lookup lost enforcement"
+        );
+        assert!(
+            ambiguous,
+            "ambiguous normalized source identity was accepted"
+        );
+        assert_eq!(remaining, 1, "ambiguous insertion was not rolled back");
+    }
+}
+
+#[tokio::test]
+async fn review_runtime_upgrade_rebuilds_older_capture_projections() {
+    use sha2::{Digest, Sha256};
+
+    let f = Fixture::new().await;
+    let catalog = json!({"version":2,"existing":"reject","tables":[
+        {"name":"teams","key":"_id","live":"true"},
+        {"name":"workspaces","key":"_id","live":"true"}],
+        "bindings":[{"name":"reviewTeam","source":"teams","columns":["deletedAt"]}],
+        "references":[{"name":"review.root","source":"workspaces","state":"exists","sourceWhen":"$._id == \"before\"",
+            "lookup":{"binding":"reviewTeam","key":"$entry.note","required":true},
+            "assert":"$.deletedAt == null"}]});
+    f.declare(&catalog).await.unwrap();
+    let migration = SqlMigration::new(
+        "0001_references.sql".to_owned(),
+        MigrationScope::Tenant,
+        false,
+        include_str!("reference_integrity/fixture.sql").to_owned(),
+    );
+    f.control
+        .clone()
+        .provision_tenant_database(f.route.clone(), vec![migration.clone()])
+        .await
+        .unwrap();
+
+    // Reproduce the previous compiler's persisted projection and otherwise
+    // valid receipt. Neither the schema cookie nor catalog changed.
+    let mut transaction = f
+        .control
+        .begin_tenant_transaction(&f.route, false)
+        .await
+        .unwrap();
+    let connection: &mut sqlx::SqliteConnection = transaction.transaction();
+    sqlx::query("UPDATE _gonvex_reference_tables SET capture_columns='[\"_id\"]' WHERE table_name='workspaces'")
+        .execute(&mut *connection).await.unwrap();
+    let cookie: i64 = sqlx::query_scalar("PRAGMA main.schema_version")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    let digest: String = sqlx::query_scalar(
+        "SELECT digest FROM _gonvex_reference_catalog_revision WHERE singleton=1",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    let trigger: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE name='_gonvex_reference_from_feed'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    let old_receipt = format!(
+        "reference-feed-v1:{cookie}:{digest}:{:x}",
+        Sha256::digest(trigger.as_bytes())
+    );
+    sqlx::query("UPDATE _gonvex_sync_bootstrap SET digest=$1 WHERE name='reference-capture'")
+        .bind(old_receipt)
+        .execute(connection)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    f.control
+        .clone()
+        .provision_tenant_database(f.route.clone(), vec![migration])
+        .await
+        .unwrap();
+    let repaired = f.scalar("SELECT EXISTS(SELECT 1 FROM _gonvex_reference_tables,json_each(capture_columns) WHERE table_name='workspaces' AND value='note')").await;
+    let rejected = f
+        .run("UPDATE workspaces SET note='missing' WHERE _id='before'")
+        .await
+        .is_err();
+    let note = f
+        .text("SELECT note FROM workspaces WHERE _id='before'")
+        .await;
+    f.pools.close().await;
+    assert_eq!(
+        repaired, 1,
+        "old compiler projection survived runtime upgrade"
+    );
+    assert!(
+        rejected,
+        "upgraded capture projection omitted root entry validation"
+    );
+    assert_eq!(note.as_deref(), Some("before"));
+}

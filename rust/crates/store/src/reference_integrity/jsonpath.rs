@@ -104,12 +104,16 @@ impl JsonPath {
 
     /// Document fields this expression may read. An unconstrained root or
     /// wildcard needs the full row; caller must not guess a smaller projection.
-    pub(crate) fn document_members(&self, root_is_document: bool) -> Option<BTreeSet<String>> {
-        fn visit(expr: &Expr, root: bool, names: &mut BTreeSet<String>) -> Option<()> {
+    pub(crate) fn document_members(
+        &self,
+        root_is_document: bool,
+        entry_is_document: bool,
+    ) -> Option<BTreeSet<String>> {
+        fn visit(expr: &Expr, root: bool, entry: bool, names: &mut BTreeSet<String>) -> Option<()> {
             match expr {
                 Expr::Path(primary, steps) => {
                     let document = matches!(primary, Primary::Root) && root
-                        || matches!(primary, Primary::Variable(name) if name == "document");
+                        || matches!(primary, Primary::Variable(name) if name == "document" || entry && name == "entry");
                     if document {
                         match steps.first() {
                             Some(Step::Member(name)) => {
@@ -119,11 +123,11 @@ impl JsonPath {
                         }
                     }
                     if let Primary::Nested(inner) = primary {
-                        visit(inner, root, names)?;
+                        visit(inner, root, entry, names)?;
                     }
                     for step in steps {
                         if let Step::Filter(inner) = step {
-                            visit(inner, root, names)?;
+                            visit(inner, root, entry, names)?;
                         }
                     }
                 }
@@ -131,15 +135,15 @@ impl JsonPath {
                 | Expr::StartsWith(left, right)
                 | Expr::And(left, right)
                 | Expr::Or(left, right) => {
-                    visit(left, root, names)?;
-                    visit(right, root, names)?;
+                    visit(left, root, entry, names)?;
+                    visit(right, root, entry, names)?;
                 }
-                Expr::Not(inner) | Expr::Exists(inner) => visit(inner, root, names)?,
+                Expr::Not(inner) | Expr::Exists(inner) => visit(inner, root, entry, names)?,
             }
             Some(())
         }
         let mut names = BTreeSet::new();
-        visit(&self.expr, root_is_document, &mut names)?;
+        visit(&self.expr, root_is_document, entry_is_document, &mut names)?;
         Some(names)
     }
 

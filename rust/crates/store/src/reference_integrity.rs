@@ -289,20 +289,9 @@ async fn flush_inner(
         for (table, id) in dirty {
             if !point_queries.contains_key(&table) {
                 let scan = DocumentScan::new(connection, &table, &ledger).await?;
-                point_queries.insert(
-                    table.clone(),
-                    format!("{} WHERE {}=$1", scan.select, quote_identifier(&scan.key)),
-                );
+                point_queries.insert(table.clone(), scan);
             }
-            let document: Option<String> = sqlx::query_scalar(&point_queries[&table])
-                .bind(&id)
-                .fetch_optional(&mut *connection)
-                .await?;
-            let document = document
-                .as_deref()
-                .map(serde_json::from_str::<Value>)
-                .transpose()
-                .map_err(|error| violation(error.to_string()))?;
+            let document = point_queries[&table].document(connection, &id).await?;
             ledger
                 .sync_edges(connection, &table, &id, document.as_ref())
                 .await?;
@@ -567,7 +556,7 @@ impl Ledger {
     fn derive_columns(&self, source: &str) -> Option<BTreeSet<String>> {
         let table = self.tables.get(source)?;
         let mut columns = BTreeSet::from([table.key.clone()]);
-        columns.extend(table.live.document_members(true)?);
+        columns.extend(table.live.document_members(true, false)?);
         columns.extend(table.keys.iter().map(|(_, column)| column.clone()));
         for binding in &table.bindings {
             columns.extend(binding.paths.iter().map(|path| path[0].clone()));
@@ -577,30 +566,33 @@ impl Ledger {
                 columns.insert(column.to_owned());
             }
             if let Some(when) = &rule.source_when {
-                columns.extend(when.document_members(true)?);
+                columns.extend(when.document_members(true, false)?);
             }
             let at_root = rule.at.is_root();
             if !at_root {
-                columns.extend(rule.at.document_members(true)?);
+                columns.extend(rule.at.document_members(true, false)?);
             }
             for path in &rule.paths {
-                columns.extend(path.document_members(at_root)?);
+                columns.extend(path.document_members(at_root, false)?);
             }
             if let Some(steps) = &rule.lookup {
                 for step in steps {
                     columns.extend(step.key.document_members(
                         step.from == "document" || step.from == "container" && at_root,
+                        at_root,
                     )?);
                     if let Some(when) = &step.when {
-                        columns.extend(when.document_members(false)?);
+                        columns.extend(when.document_members(false, at_root)?);
                     }
                 }
             }
             if let Some(discriminator) = &rule.discriminator {
-                columns.extend(discriminator.document_members(rule.lookup.is_none() && at_root)?);
+                columns.extend(
+                    discriminator.document_members(rule.lookup.is_none() && at_root, at_root)?,
+                );
             }
             if let Some(assertion) = &rule.assertion {
-                columns.extend(assertion.document_members(false)?);
+                columns.extend(assertion.document_members(false, at_root)?);
             }
         }
         Some(columns)
@@ -750,20 +742,9 @@ impl Ledger {
             .find(|binding| binding.name == binding_name)
             .ok_or_else(|| violation("undeclared configuration binding"))?;
         let scan = DocumentScan::new(connection, source, self).await?;
-        let sql = format!("{} WHERE {}=$1", scan.select, quote_identifier(&scan.key));
-        let Some(text) = sqlx::query_scalar::<_, String>(&sql)
-            .bind(row_id)
-            .fetch_optional(&mut *connection)
-            .await?
-        else {
+        let Some(document) = scan.document(connection, row_id).await? else {
             return Ok(None);
         };
-        let document: Value =
-            serde_json::from_str(&text).map_err(|error| violation(error.to_string()))?;
-        // Do not let SQLite affinity invent an alternate public identity.
-        if field_text(&document, &table.key).as_deref() != Some(row_id) {
-            return Ok(None);
-        }
         let projected = configuration(&document, &binding.paths);
         let version = next_version(connection).await?;
         sqlx::query("INSERT INTO _gonvex_reference_configurations(binding_name,row_id,document,version) VALUES($1,$2,$3,$4)")
@@ -987,10 +968,7 @@ impl Ledger {
             }
             for path in &rule.paths {
                 for item in path.query(container, None) {
-                    let normalization = str_field(&rule.declaration, "normalize").or_else(|| {
-                        (str_field(&rule.declaration, "encoding") == Some("json-or-value"))
-                            .then_some("csv-or-json-list")
-                    });
+                    let normalization = str_field(&rule.declaration, "normalize");
                     for mut identifier in decode(item, normalization)? {
                         if identifier.is_null() {
                             continue;
@@ -1427,6 +1405,8 @@ async fn install_feed_staging(connection: &mut SqliteConnection) -> Result<(), D
 /// newly captured tables). Reuse its transactional receipt store; a native
 /// schema cookie plus catalog digest invalidates this derived plan on DDL,
 /// redeclaration and rollback, without compiling every policy at each boot.
+/// Bump the compiler version when dependency discovery changes: a runtime
+/// upgrade must rebuild persisted column projections even without schema DDL.
 pub(crate) async fn refresh_from_change_feed(
     connection: &mut SqliteConnection,
 ) -> Result<(), DatabaseError> {
@@ -1453,7 +1433,7 @@ pub(crate) async fn refresh_from_change_feed(
         .await?;
     let signature = |cookie| {
         format!(
-            "reference-feed-v1:{cookie}:{digest}:{:x}",
+            "reference-feed-v2:{cookie}:{digest}:{:x}",
             Sha256::digest(FEED_STAGING_TRIGGER.as_bytes())
         )
     };
@@ -1609,9 +1589,35 @@ async fn refresh_triggers(connection: &mut SqliteConnection) -> Result<(), Datab
 /// Keyset batches keep inventory memory bounded. An OFFSET scan would make
 /// each successive batch revisit the rows already processed.
 struct DocumentScan {
-    select: String,
+    projection: String,
+    table: String,
+    point_sql: String,
     key: String,
-    after: Option<String>,
+    after: Option<InventoryKey>,
+}
+
+/// JSON row images normalize BLOB IDs to hex and numeric values to JSON.
+/// Pagination must instead compare the original SQLite storage value.
+#[derive(Debug)]
+enum InventoryKey {
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl InventoryKey {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, DatabaseError> {
+        // typeof describes the value, independent of declared column affinity.
+        // Decode only as that known storage class, including no-affinity keys.
+        Ok(match row.try_get::<String, _>(2)?.as_str() {
+            "integer" => Self::Integer(row.try_get_unchecked(1)?),
+            "real" => Self::Real(row.try_get_unchecked(1)?),
+            "text" => Self::Text(row.try_get_unchecked(1)?),
+            "blob" => Self::Blob(row.try_get_unchecked(1)?),
+            _ => return Err(violation("reference inventory needs non-null row keys")),
+        })
+    }
 }
 
 impl DocumentScan {
@@ -1634,15 +1640,65 @@ impl DocumentScan {
                 (column.name, kind)
             })
             .collect::<Vec<_>>();
+        let projection = json_object_expr("", &kinds);
+        let key = ledger.tables[table].key.clone();
+        let table = quote_identifier(table);
         Ok(Self {
-            select: format!(
-                "SELECT {} FROM {}",
-                json_object_expr("", &kinds),
-                quote_identifier(table)
+            point_sql: format!(
+                "SELECT {projection} FROM {table} WHERE {} IN ($1,$2,$3,$4)",
+                quote_identifier(&key)
             ),
-            key: ledger.tables[table].key.clone(),
+            projection,
+            table,
+            key,
             after: None,
         })
+    }
+
+    async fn document(
+        &self,
+        connection: &mut SqliteConnection,
+        id: &str,
+    ) -> Result<Option<Value>, DatabaseError> {
+        // Row images use public text identities. Probe the original storage
+        // classes through the primary-key index, never CAST the indexed column
+        // or scan the table once per dirty row. Confirm the public identity so
+        // SQLite affinity cannot invent aliases or merge distinct source rows.
+        let number = serde_json::from_str::<serde_json::Number>(id).ok();
+        let blob: Option<Vec<u8>> = if id.len().is_multiple_of(2) {
+            id.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    char::from(pair[0])
+                        .to_digit(16)
+                        .zip(char::from(pair[1]).to_digit(16))
+                        .map(|(a, b)| ((a << 4) | b) as u8)
+                })
+                .collect()
+        } else {
+            None
+        };
+        let rows: Vec<String> = sqlx::query_scalar(&self.point_sql)
+            .bind(id)
+            .bind(number.as_ref().and_then(serde_json::Number::as_i64))
+            .bind(number.as_ref().and_then(serde_json::Number::as_f64))
+            .bind(blob)
+            .fetch_all(connection)
+            .await?;
+        let mut found = None;
+        for row in rows {
+            let document: Value =
+                serde_json::from_str(&row).map_err(|error| violation(error.to_string()))?;
+            if field_text(&document, &self.key).as_deref() == Some(id) {
+                if found.is_some() {
+                    return Err(violation(
+                        "reference source keys have an ambiguous public identity",
+                    ));
+                }
+                found = Some(document);
+            }
+        }
+        Ok(found)
     }
 
     async fn next(
@@ -1651,32 +1707,33 @@ impl DocumentScan {
     ) -> Result<Vec<Value>, DatabaseError> {
         let key = quote_identifier(&self.key);
         let sql = format!(
-            "{}{} ORDER BY {key} LIMIT 256",
-            self.select,
+            "SELECT {},{key},typeof({key}) FROM {}{} ORDER BY {key} LIMIT 256",
+            self.projection,
+            self.table,
             if self.after.is_some() {
                 format!(" WHERE {key} > $1")
             } else {
                 String::new()
             }
         );
-        let query = sqlx::query_scalar::<_, String>(&sql);
+        let query = sqlx::query(&sql);
         let query = match &self.after {
-            Some(after) => query.bind(after),
+            Some(InventoryKey::Integer(after)) => query.bind(*after),
+            Some(InventoryKey::Real(after)) => query.bind(*after),
+            Some(InventoryKey::Text(after)) => query.bind(after),
+            Some(InventoryKey::Blob(after)) => query.bind(after),
             None => query,
         };
-        let rows: Vec<Value> = query
-            .fetch_all(connection)
-            .await?
-            .into_iter()
-            .map(|row| serde_json::from_str(&row).map_err(|error| violation(error.to_string())))
-            .collect::<Result<_, _>>()?;
+        let rows = query.fetch_all(connection).await?;
         if let Some(last) = rows.last() {
-            self.after = Some(
-                field_text(last, &self.key)
-                    .ok_or_else(|| violation("reference inventory needs non-null row keys"))?,
-            );
+            self.after = Some(InventoryKey::from_row(last)?);
         }
-        Ok(rows)
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_str(&row.get::<String, _>(0))
+                    .map_err(|error| violation(error.to_string()))
+            })
+            .collect()
     }
 }
 

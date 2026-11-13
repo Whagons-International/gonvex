@@ -66,6 +66,9 @@ Polymorphic references declare a discriminator and a closed `targets` map.
 Alternate keys use `targetKeys`; a nonunique alias requires `multipleOwners`
 and a reason. Explicit sentinel, numeric, serialized-JSON and selector-decoder
 policies must document the existing consumer behavior they represent.
+Storage decoding with `encoding:"json-or-value"` does not split CSV or trim
+identifiers. Only an explicit `normalize` policy may do that; commas and
+whitespace otherwise remain part of an identity.
 Paths support recursive `.**` traversal. The default is lax array access;
 the `strict` prefix requires explicit array steps. `valuePrefix` with
 `prefixReason` selects tagged values and removes the tag. `ignoreContainingAll`
@@ -125,8 +128,9 @@ has a native FK to the feed row and a deferred guard FK; row images remain owned
 by the feed instead of being copied into a second queue. Statement and savepoint
 rollback remove the capture and validation work together. The runtime owns the
 compiled input-column projection on the existing reference-table metadata and
-rebuilds it from the catalog. Bootstrap receipts include the schema cookie and
-catalog digest, so DDL and redeclaration invalidate the installed plan.
+rebuilds it from the catalog. Bootstrap receipts include the schema cookie,
+catalog digest and dependency-compiler version, so DDL, redeclaration and
+compiler upgrades invalidate the installed plan.
 
 A declared table without change capture retains three row-image staging
 triggers. Their images contain only declared inputs where dependencies are
@@ -144,6 +148,10 @@ state remain in the tenant's transaction. Target-only tables do not enter the
 outgoing-reference work queue. Installation scans target identities and
 then source edges in bounded keyset batches. Only target namespaces used by the
 policy are stored; live-state tokens are stored only when a rule needs them.
+Inventory cursors retain the original SQLite key storage class rather than its
+JSON representation. Source and configuration point lookups use a bounded set
+of indexed typed probes, then confirm the exact public identity. Ambiguous
+normalized source identities refuse the write instead of selecting a row.
 Configuration lookups copy only referenced projections. Commit flushes also process
 bounded batches, while the whole application transaction remains atomic.
 
