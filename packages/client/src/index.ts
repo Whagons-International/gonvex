@@ -3778,6 +3778,7 @@ export class GonvexClient {
     const scope = this.replicaScope;
     const generation = this.socketGeneration;
     const socket = this.socket;
+    const evidence = this.transactionEvidence;
     // Any entity/window frame seals the adjacent watermark batch. Advancing
     // across that barrier could make an unapplied transaction look stale.
     if (!watermark) this.queuedReplicaWatermark = undefined;
@@ -3785,6 +3786,7 @@ export class GonvexClient {
       await operation();
       if (this.snapshotDeferredFrames.length > 0) await this.drainSnapshotFrames();
       await this.drainOpeningReplicaWatermark();
+      if (this.transactionEvidence === evidence) evidence?.pump();
     });
     this.replicaFrames = processing.catch(() => {
       this.handleReplicaFrameFailure(scope, generation, socket, watermark);
@@ -3982,7 +3984,6 @@ export class GonvexClient {
       this.processedReplicaWatermarkRevision,
       revision,
     );
-    this.transactionEvidence?.pump();
     for (const pending of this.pendingCalls.values()) {
       if (
         (pending.kind !== "reducer" && pending.kind !== "action")
@@ -5558,9 +5559,9 @@ export class GonvexClient {
   }
 
   private resetReplicaScopeState() {
-    this.transactionEvidence?.fail();
     this.receiptReconciliationGeneration = Symbol();
     this.sessionScopeGeneration = Symbol();
+    this.transactionEvidence?.fail();
     this.receiptReconciliations.clear();
     this.openingReplicaWatermark = undefined;
     this.snapshotDeferredFrames = [];

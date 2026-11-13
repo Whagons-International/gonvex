@@ -112,6 +112,19 @@ only. Earlier 610-package/global-store-history limitations are retained, not re-
 
 ## Handoff and holds
 
+### Lead CI integration correction
+
+Head `2811337c` failed the existing Control-watch and watermark publication proof
+extractors. Their assertions and semantics remain unchanged. Scope reset keeps
+its two original Symbol allocations first, then invalidates transaction evidence
+before any observer. `persistReplicaWatermark` keeps its original closed publication
+path; the captured evidence call is pumped only after the frame operation,
+deferred frames and opening-watermark drain finish, and only if it is still the
+same installed call. The original CI failures remain recorded separately from
+the correction's checks. Earlier author source-equivalence receipts describe
+their original validated head; this correction requires its own exact-head
+validation and fresh independent review.
+
 Lead owns ONE NEW independent review and any integration/API acceptance. No author reviewer,
 watch, merge or automatic next task follows. A fresh authoritative tenant-SQLite application read
 and an independent authorized same-epoch applied client are still two missing prerequisites.
