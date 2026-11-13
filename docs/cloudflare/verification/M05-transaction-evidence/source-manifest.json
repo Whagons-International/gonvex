@@ -1,0 +1,202 @@
+{
+  "framework": {
+    "commit": "ceb10028c090fc38ad1d361376885adb8117f79e",
+    "files": [
+      {
+        "path": "packages/client/src/index.ts",
+        "blob": "d910fb4c01fb00e797fbd6d82b8cbf089b48aa73",
+        "bytes": 307878,
+        "sha256": "c3eec92e964522f18dbf2e8a5e7249261207a91c9eccff5ad409b9c2a96b76d5"
+      },
+      {
+        "path": "packages/client/src/local-replica.ts",
+        "blob": "71d791f368651252b3b14922d21cbdecc3478e95",
+        "bytes": 122672,
+        "sha256": "f1e533e4134e7a3357737237312cace14bc17a99f9b0be34f9cb890e8981647e"
+      },
+      {
+        "path": "packages/protocol/src/index.ts",
+        "blob": "4775cb60387d81c99799091f45074b0b1bc0308b",
+        "bytes": 23753,
+        "sha256": "1aa211b8367cd6e7a066576bef501b15cfea54548976f0405fbe480b29aa9bae"
+      },
+      {
+        "path": "cloudflare/kernel/reducer/path.ts",
+        "blob": "3267c437e752e218b5845c87a2ad5c7acf840fb4",
+        "bytes": 21311,
+        "sha256": "3753791b7d653bd60677d04866349e572ed03aff5e81703ec902a06454c80d66"
+      },
+      {
+        "path": "cloudflare/kernel/reducer/frames.ts",
+        "blob": "4ecd5c7c60d73ed55c5cd8679059646579742c24",
+        "bytes": 3305,
+        "sha256": "d4a050b8d15458b12e5d5c752aff8c7b32735d820f06f5e18c4626c39d3b74f4"
+      },
+      {
+        "path": "cloudflare/kernel/reducer/receipts.ts",
+        "blob": "385a0cf77b0c0496533a92272e41ecf1549e1e22",
+        "bytes": 10207,
+        "sha256": "b0330ef732b79798cb1f1a6c7ef67c5a6dc0a2e351d7e677ed49678817b31e6c"
+      },
+      {
+        "path": "cloudflare/kernel/reducer/storage.ts",
+        "blob": "33e5e1114fb58e0a4fab03aea0c167f4ef5f09e6",
+        "bytes": 3950,
+        "sha256": "edc277f5c9a4a5ccb5c7b1f1e23738e242c3176463d2c1a9c5834d275b168595"
+      },
+      {
+        "path": "cloudflare/kernel/capture/invoke.ts",
+        "blob": "c2bc213252f99d0d6ddf4456a781eb98289053ca",
+        "bytes": 3235,
+        "sha256": "87546ba1fd08186f0c809326d0982ef062912babee8314afb4b4695b2c779e6d"
+      },
+      {
+        "path": "cloudflare/kernel/capture/finalize.ts",
+        "blob": "0493bd62da95322f73b23777484f04c7cd8b58a4",
+        "bytes": 9024,
+        "sha256": "7e5ce1b6721e6eda8bd18bbc52fc2cea218a03dfdab68d835443868d8ea2168e"
+      },
+      {
+        "path": "cloudflare/kernel/capture/provenance.ts",
+        "blob": "6b4c3d3abdccd01542a8e49e7bf34366873bccf2",
+        "bytes": 2346,
+        "sha256": "b4bb40e39c4772962cfd5c6d996d3490e7c5f957835ad09c391cee652a51c6da"
+      },
+      {
+        "path": "cloudflare/kernel/delivery/feed.ts",
+        "blob": "2865c3de343d5aac290a2e41cf0cf32fc397a55a",
+        "bytes": 32709,
+        "sha256": "40422434e1a05b0ebea1f54ba1c8566a785adb0926f5a143afeb59d3ed476d34"
+      },
+      {
+        "path": "cloudflare/kernel/delivery/log.ts",
+        "blob": "dd470ba7c6009edd2511240dff5db197a01aee24",
+        "bytes": 7626,
+        "sha256": "2d8754ea0b65d6a01cbe4079e1b0949feed688f067dfdb08c32f7d29b524081b"
+      },
+      {
+        "path": "rust/crates/runtime/src/execution.rs",
+        "blob": "439de5eb1a5f5cd9dc4658b5274dec8737a12c3c",
+        "bytes": 86245,
+        "sha256": "ebef0a3e2370dd3c829c2bc4a900e0f190bee16fd116241d75234e0a07273e3b"
+      },
+      {
+        "path": "rust/crates/runtime/src/replica.rs",
+        "blob": "60f8930a9ea2dc5b3356eef1c7b1f432bd8d1b44",
+        "bytes": 173309,
+        "sha256": "0d5177cc13036c28187a2f093da26415d8c39907f9b55da8939d23dfe358e096"
+      },
+      {
+        "path": "rust/crates/store/src/lib.rs",
+        "blob": "c7aa99aefcb506a273e299855f7757502db43c02",
+        "bytes": 79965,
+        "sha256": "b404b05c4492ae50ebe11ae3abd055dc1b74943bd3d5372f8d51c84525345da7"
+      },
+      {
+        "path": "rust/crates/store/src/feed.rs",
+        "blob": "0fc25e5ff022e7fd554a7abe983361164193e739",
+        "bytes": 22427,
+        "sha256": "638830d1c439b72f48fb1674e1ce1c6c67170d1a8857e1d8fb00fe72ab146f4d"
+      }
+    ]
+  },
+  "cachedApplication": {
+    "commit": "73276b5589d363c1190a6d028413a21559226631",
+    "files": [
+      {
+        "path": "gonvex/tasks/createCommands.ts",
+        "blob": "0483f5abd7b0c2a833f84e14db88f88e1f98c635",
+        "bytes": 16575,
+        "sha256": "2e505fc644f08a90e09f987bcaad93efa9f00a5b07117b6bb7d9c204a74b2b0a"
+      },
+      {
+        "path": "gonvex/tasks/createPolicy.ts",
+        "blob": "0144d6cedc9ddf964abcdb0842bc2af2ddb1364f",
+        "bytes": 22732,
+        "sha256": "f800c0e7f7989004fc06a6f09b96f1f720f3219e39792f14b2f38784453dfaf1"
+      },
+      {
+        "path": "gonvex/tasks/bulkCommands.ts",
+        "blob": "fd9ef1d1ad958bcafd671b2bb9312cc232f340ef",
+        "bytes": 24771,
+        "sha256": "6e28278cff096a2281aa730c41f928f0d7f1d6d4dd24d19df480a2f864058fc6"
+      },
+      {
+        "path": "gonvex/tasks/replicaQueries.ts",
+        "blob": "74a6ed89d08eef3595e94787d7243c8fd05c4bd8",
+        "bytes": 30946,
+        "sha256": "77461d35c0d24f88a51bd53a4f93c5d4e68a475e901cb0d464c37598e6c42120"
+      }
+    ],
+    "workingTreeOrDependencyRead": false,
+    "deployedCompatibility": "UNVERIFIED"
+  },
+  "nativeAssemblySources": [
+    {
+      "path": "cloudflare/kernel/delivery/object.ts",
+      "blob": "5f35dddb3174e14ea5e2aeb6527391557bc9ddc0",
+      "bytes": 5408,
+      "sha256": "9ea1facd7d5f925b3b4821f1be7db4cd43b795a3fcacb227d46b24336b998371"
+    },
+    {
+      "path": "cloudflare/kernel/delivery/engine.ts",
+      "blob": "cef6a7e6362949a64907671529c0065f60087809",
+      "bytes": 31899,
+      "sha256": "ffa627e54832c64b6887b03863b477599405fb39bb627ef6c58b74331f2ab514"
+    },
+    {
+      "path": "cloudflare/kernel/delivery/harness/index.ts",
+      "blob": "e3430dd791b1346c8f77a603c34365583eb3cdb0",
+      "bytes": 3993,
+      "sha256": "2e95ff79e3224a18064df1668b52db1096a13e4644aed4ac9f1411db27c5dfd5"
+    },
+    {
+      "path": "cloudflare/kernel/delivery/definition.ts",
+      "blob": "f317195640548c4b2c4a20b6dd863aee17f2fd93",
+      "bytes": 3641,
+      "sha256": "3d7f872a57a3f03b589336cc10e89ad69b718d58feb9cf835300ca928eac3f71"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/receipts.spec.ts",
+      "blob": "0e79fad388ffa76460a8d8403e6a15efff244e4b",
+      "bytes": 15201,
+      "sha256": "6af723e7c0057af781dfb053bf4931fbf5665041a92d8882a2d82036998b6cb8"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/fixture.ts",
+      "blob": "5615e84d91d2e6392f42d4871cb0f4286e581c7e",
+      "bytes": 5127,
+      "sha256": "d3af26613c4a040d0318e0c956be1eced1e7e4ce50e5d7e78810bf38b446eccc"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/client.ts",
+      "blob": "1f01663d2418bfb9339157f69adb17fb133b1e66",
+      "bytes": 6361,
+      "sha256": "1cea9a58d5a0463ffb4ba514c93d54a2ae538a67efb56e9083bf0a879fb1ebe8"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/worker.ts",
+      "blob": "a86b44a8655242df61f5193b49bfeb1040bf0ecf",
+      "bytes": 1066,
+      "sha256": "dd8f44324074dc76a3b436b18c10e26a500c514821501e3c86b81b0c8a0c6fa2"
+    },
+    {
+      "path": "cloudflare/kernel/reducer/test/wrangler.jsonc",
+      "blob": "b5696f7c84b0195c89e410293423c49b5cd4a627",
+      "bytes": 1040,
+      "sha256": "d490f5d2ecf8f5d9a27a7e3be0c6cce86daf59770718d8e5347156166a53862c"
+    },
+    {
+      "path": "cloudflare/conformance/fixtures/app/gonvex/board.ts",
+      "blob": "0d4e801df0168737e09cd30480111413af572690",
+      "bytes": 3725,
+      "sha256": "4b57cbebda3082131c566a257140b7f271bbbf29678eb35b10d5ccfb95431365"
+    },
+    {
+      "path": "cloudflare/conformance/fixtures/app/gonvex/notes.ts",
+      "blob": "0e74f4d8262be9844447d0f0039348e0ed361812",
+      "bytes": 3450,
+      "sha256": "61f0e529d30fdd03e15595e015e9c747eb11ef0aca471dd37c499c4aae128b16"
+    }
+  ]
+}

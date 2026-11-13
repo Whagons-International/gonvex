@@ -1,0 +1,45 @@
+{
+  "sourceFramework": "ceb10028c090fc38ad1d361376885adb8117f79e",
+  "environment": "local-controlled-synthetic",
+  "deployment": "private-source-archive-not-deployed",
+  "region": "local",
+  "executor": "workerd/vitest with public SDK memory replica",
+  "sdkSourceHashes": {
+    "packages/client/src/index.ts": {
+      "bytes": 315165,
+      "sha256": "3a52db00eedf7d24357f54a0e86b65ed8a1d0d64a83cfe3a81e91e866079d1fc"
+    },
+    "packages/client/src/transaction-evidence.ts": {
+      "bytes": 6316,
+      "sha256": "4426b2b98230984f50b682124cb093bbaf0cfbed257543fd4d77eb322e3eeb57"
+    }
+  },
+  "observation": {
+    "domain": "controlled-auth-native-sdk-workerd-sqlite-do-socket",
+    "operations": [
+      "create",
+      "rename",
+      "synthetic-retained-row-archive"
+    ],
+    "revisions": [
+      4,
+      6,
+      7
+    ],
+    "confirmedCandidateWriteInvocations": 3,
+    "refusedCandidateWriteInvocations": 2,
+    "noOpAndUnsubscribedEntityRefused": true,
+    "ordinarySdkWrites": 1,
+    "receiptReads": 3,
+    "distinctCommands": 3,
+    "matchingTransactionCursors": true,
+    "firstTransactionRevision": 4,
+    "laterReceiptFence": 5,
+    "unrelatedWrites": 1,
+    "realWhagons": false,
+    "syntheticSoftArchiveExecuted": true,
+    "whagonsSoftArchiveExecuted": false,
+    "ordinarySdkPhysicalDeleteResult": null,
+    "separateExplicitReplayPreserved": true
+  }
+}
