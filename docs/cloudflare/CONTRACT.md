@@ -1794,6 +1794,8 @@ new note and waits for the lead.
 | 0082 | Matched cleanup authorization versus final sync acknowledgment | post-authorization atomic GC need not resurrect witness; ambiguous completion remains UNKNOWN with exact credit reconciliation | K22 |
 | 0083 | Native admission-authority result consumer | conditional exact-data/disposal permission after native proof; stored-binding/physical-scope checks and other lifetime boundaries unchanged | K22 |
 | 0084 | Owner retirement proof domains | correct local319's tokenless-closed to HMAC-retired conversion; bounded distinct duplicate proofs and fresh verification remain required | K22 |
+| 0085 | Owned-dispatch and T-retirement result consumers | conditional native exact-data/disposal consumers only; actual assembly/quiescence plan precedes wiring and serving activation remains separate | K22 |
+| 0086 | Private authority publication and issuer finalization | bounded known/UNKNOWN publication before dispatch; explicit durable revocation/witness is distinct from wake and remote quiescence | K22 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

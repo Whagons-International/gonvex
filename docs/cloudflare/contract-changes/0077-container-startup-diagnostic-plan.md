@@ -81,3 +81,21 @@ proper ownership, immutable artifact, NEW independent verification and original 
 No startup-only success accepts K22/X01, proves module/CPU behavior, replaces the full local/dev matrix,
 or waives enabled-file/eight-package, autoscale 26-tenant/1,000-user, capacity/security/uptime or actual-duration
 gates. No staging/production deployment, load, monitor activation, purchase or public publication is allowed.
+
+## Durable prepared-record handoff clarification (2026-11-12)
+
+`recordSha256` identifies the exact UTF8 bytes durably published as private `record.json`, not a different
+raw HTTP representation or a hash echo. The helper serializes once, fsyncs/renames/dirsyncs those bytes,
+then offers their hash. Raw-observed body/hash, if retained, is separate bounded evidence.
+
+Before arming or the third ACK, the guardian independently reads the canonical private bounded file from
+its anchored artifact capability, compares the actual byte hash and validates the FULL frozen prepared
+record, objectId and current namespace/app binding. Missing/altered/malformed/wrong-hash/partial records
+remain UNKNOWN with no ACK/start. Recheck the publication after awaited arming/journal IO before ACK.
+Valid JSON whitespace, key order and Unicode escapes need not equal a reserialization. The hash and
+objectId are integrity/correlation data, never peer/account authority. No new channel or schema is added.
+
+Outside checkpoint `eaaadb59` omitted this independent read; its55 passing local tests do not prove it.
+The lead's bounded source correction retains that artifact and its failures, adds real-filesystem adverse
+tests and fixture-data corrections, and requires a new joint pinned artifact/fresh review with K22's helper.
+No live release, actual wrapper/account cleanup, deadline or host-loss proof follows from this correction.
