@@ -167,12 +167,12 @@ scope checks. It does not cover dispatchOwned/drainOwner or activate serving own
 review requires a bounded proof-domain correction under0084: tokenless closed cannot become HMAC-only
 retired evidence. Its qualified synthetic Proxy observation is separate from native exploitability.
 M05's finite disabled34b6 foundation passed fresh independent review and merged as c11b7740; full M05,
-original five-drill source definitions and all hosted/application/duration gates remain UNMET. The outside
-0077 adapter's4f7538 preparation still requires concrete cross-unit/wrapper integration before review/release.
+original five-drill source definitions and all hosted/application/duration gates remain UNMET. Historical
+0077 preparation and review findings remain retained; the current outcome is recorded below.
 The freshLOCAL5e review now clears scoped R1/R2/0083 source fixes, without serving activation or acceptance.
 Separate79b helper and corrected outsideee977385 require refreshed joint pins and NEW independent review;
 0077 clarifies exact durable-byte verification before arm/ACK. See verification/K22-owner-review-5e.md.
-No live diagnostic is released; actual wrapper/account/deadline and all original gates remain unproven.
+That preparation alone released no live diagnostic or original acceptance gate.
 0085 conditionally permits only the actual owned-dispatch and T-retirement result consumers after native
 proof. The same K22 owner advances those boundaries and an actual Engine/Session/rebuild/quiescence plan
 before candidate wiring; legacy admission fallback, blanket serving activation and progress inference
@@ -181,9 +181,14 @@ remain forbidden. The independent0077 joint review does not block that separate 
 private-issuer revocation transition. Wake/absence is never terminal or quiescent evidence; fresh exact
 witness, tenant fencing/settlement and matched cleanup remain mandatory. Concrete Engine/rebuild ports
 still require lead review before wiring; public auth/subscriptions and all original gates are preserved.
-The fresh47aa/ee0077 joint review requires two P2 corrections: coherent wrapper file delivery/authentication
-and uploaded Worker-source verification before start. Its durable-record check is independently supported;
-LIVE remains held. The qualified per-frame contract observation is not a demonstrated account exploit.
+The historical47aa/ee0077 review required two P2 corrections. Fresh d420/6d review supports those
+corrections; one lead-released default-lane attempt then FAILED before identified/prepared/start, with
+removal by ten minutes unproved. Post-deadline exact-name reads found Worker404/app list empty; they do
+not prove historical zero mutation or on-time removal. No retry is released. See verification/K22-4e-and-startup-attempt.md.
+Fresh4e/source728d review is source-clear only for its UNACTIVATED foundation. The same owner continues
+actual local Engine/Assembly/SDK integration.0087 permits private rebuild books/one-use refresh and exact
+retained semantic obligations; no CLOSED-as-initial/progress or absence-based quiescence. Subsequent
+source needs a new exact review; all original platform/application/capacity/duration gates remain OPEN.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 

@@ -99,3 +99,20 @@ Outside checkpoint `eaaadb59` omitted this independent read; its55 passing local
 The lead's bounded source correction retains that artifact and its failures, adds real-filesystem adverse
 tests and fixture-data corrections, and requires a new joint pinned artifact/fresh review with K22's helper.
 No live release, actual wrapper/account cleanup, deadline or host-loss proof follows from this correction.
+
+## Offline failure-observation correction after the spent attempt
+
+The default d420/6d attempt failed before start; see verification/K22-4e-and-startup-attempt.md.
+Permit prospective optional SafeFailure metadata only on existing cleanup and UNKNOWN recovery-result
+messages, plus a synchronous optional runWrangler observer. No new frame, ACK, start/retry or authority.
+Use fixed own-DATA stage/code enums, child-present/actually-settled booleans, observed integer exit0–255
+or null, fixed signal enum and observed HTTP100–599 or null; at most1024 bytes within existing limits.
+Absent/unsettled children cannot claim exit or settlement. Exit0 does not prove remote/account success.
+No arbitrary errors/messages/bodies/argv/env/paths/stacks/credentials or stdout/stderr capture.
+
+Guardian starts cached stop/reap BEFORE projecting optional metadata or new IO. Malformed/missing/late
+metadata degrades to UNKNOWN without delaying/refusing cleanup; mandatory auth/source/ownership checks
+remain strict. Observer failure/return values cannot alter the operation, await or reenter cleanup. Fold
+into existing post-stop records; preserve the original safe failure stage if cleanup observation fails.
+No lifecycle/timer/buffer expansion. New source needs fresh joint pins/review and a separately reasoned
+release; this is OFFLINE implementation permission, not renewal of the spent attempt.
