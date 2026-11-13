@@ -1,0 +1,19 @@
+{
+  "base": {
+    "modules": 43,
+    "esmBytes": 792059,
+    "sumPerFileGzipBytes": 176787
+  },
+  "candidate": {
+    "modules": 44,
+    "esmBytes": 807212,
+    "sumPerFileGzipBytes": 180489
+  },
+  "domain": "tsc ESM outputs; not a tree-shaken/browser/serving bundle",
+  "delta": {
+    "modules": 1,
+    "esmBytes": 15153,
+    "sumPerFileGzipBytes": 3702
+  },
+  "servingLatencyCpuMemoryCostOverhead": "not benchmarked"
+}

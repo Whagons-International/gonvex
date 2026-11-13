@@ -1,4 +1,6 @@
 import { isReplicaRevision } from "./revision-policy.js";
+import { TransactionEvidenceCall, TransactionEvidenceError, evidenceIdentity, type TransactionEvidenceResult } from './transaction-evidence.js';
+export { TransactionEvidenceError, type TransactionEvidenceResult } from './transaction-evidence.js';
 import { REDUCER_RECEIPT_QUERY, expandReplicaBatch } from "@gonvex/protocol";
 import { ownsCurrentScope } from "./ownership-policy.js";
 import { RowPatchDecoder } from "./row-patch.js";
@@ -651,6 +653,7 @@ export class GonvexClient {
   private intentsRefreshRunning = false;
   private intentsRefreshDirty = false;
   private socket: WebSocket | undefined;
+  private transactionEvidence:TransactionEvidenceCall|undefined;
   private readonly handlers = new Map<string, SubscriptionHandler>();
   private readonly querySubscriptions = new Map<string, QuerySubscription>();
   private readonly replicaSubscriptions = new Map<string, ReplicaSubscription>();
@@ -2069,6 +2072,7 @@ export class GonvexClient {
   }
 
   private publishTenantAdmission(value: TenantAdmission | undefined) {
+    this.transactionEvidence?.fail();
     if (this.tenantAdmissionValue === value) return;
     this.tenantAdmissionValue = value;
     for (const listener of this.tenantAdmissionHandlers) {
@@ -2077,6 +2081,7 @@ export class GonvexClient {
   }
 
   private applyAuth(auth: GonvexClientAuth) {
+    this.transactionEvidence?.fail();
     this.publishTenantAdmission(undefined);
     this.flushTelemetry();
     if (this.publicTenant && (auth.token || auth.fetchToken || auth.identity || auth.tenant !== undefined && auth.tenant !== this.publicTenant || auth.project !== undefined && auth.project !== this.auth.project)) {
@@ -2138,6 +2143,7 @@ export class GonvexClient {
     const isReconnect = this.socket !== undefined;
     this.manuallyClosed = false;
     const generation = this.socketGeneration = Symbol();
+    this.transactionEvidence?.fail();
     let transportUrl = this.url;
     if (this.publicTenant) {
       const publicUrl = new URL(this.url);
@@ -2168,6 +2174,7 @@ export class GonvexClient {
       this.notifyConnectionState();
     });
     socket.addEventListener("close", () => {
+      if(this.socket===socket)this.transactionEvidence?.fail();
       rowPatches.clear();
       if (this.socket !== socket || this.manuallyClosed) return;
       this.presenceFeed.disconnected();
@@ -2202,6 +2209,7 @@ export class GonvexClient {
       this.notifyConnectionState();
     });
     // Delivery v2 batches re-enter with already parsed frames (`parsed`).
+    socket.addEventListener('error',()=>{if(this.socket===socket)this.transactionEvidence?.fail();});
     const onMessage = (event: { data?: unknown; parsed?: ServerMessage }) => {
       if (this.socket !== socket) return;
       let message: ServerMessage;
@@ -2237,6 +2245,10 @@ export class GonvexClient {
         if (message.type === "auth.result") rowPatches.clear();
       } catch {
         return;
+      }
+      if (this.transactionEvidence) {
+        if (['auth.result','auth.error','session.ready','system.reload','client.updateRequired','replica.reset','replica.error','replica.needHashes','replica.syncing'].includes(message.type)) this.transactionEvidence.fail();
+        this.transactionEvidence?.observe(message);
       }
       if (message.type === "session.ready") {
         const presenceChanged = (message.capabilities?.presence === 1) !== (this.serverCapabilities.presence === 1);
@@ -2513,6 +2525,7 @@ export class GonvexClient {
       if (message.type === "replica.readyMany") {
         for (const ready of message.ready) {
           const readyMessage = { type: "replica.ready", ...ready } as ReplicaReadyMessage;
+          this.transactionEvidence?.observe(readyMessage);
           this.handlers.get(ready.id)?.(readyMessage);
         }
         return;
@@ -2553,6 +2566,7 @@ export class GonvexClient {
 			if (message.type === "query.fanout") {
 				const { ids, queryType, ...shared } = message;
 				for (const id of ids) {
+					this.transactionEvidence?.observe({ ...shared, type: queryType, id } as ServerMessage);
 					this.handlers.get(id)?.({ ...shared, type: queryType, id } as ServerMessage);
 				}
 				return;
@@ -2562,12 +2576,14 @@ export class GonvexClient {
 					if (nested.type === "query.fanout") {
 						const { ids, queryType, ...shared } = nested;
 						for (const id of ids) {
+							this.transactionEvidence?.observe({ ...shared, type: queryType, id } as ServerMessage);
 							this.handlers.get(id)?.({ ...shared, type: queryType, id } as ServerMessage);
 						}
 						continue;
 					}
 					if (nested.type !== "query.batch") {
 						const nestedID = "id" in nested ? nested.id : "system";
+						this.transactionEvidence?.observe(nested);
 						this.handlers.get(nestedID)?.(nested);
 					}
 				}
@@ -2580,6 +2596,7 @@ export class GonvexClient {
   }
 
   close() {
+        this.transactionEvidence?.fail();
         this.receiptReconciliationGeneration = Symbol();
         this.receiptReconciliations.clear();
         this.openingReplicaWatermark = undefined;
@@ -3499,6 +3516,7 @@ export class GonvexClient {
       }
       return;
     }
+    if(this.transactionEvidence && (message.type==='replica.reset'||message.type==='replica.error'||message.type==='replica.needHashes'))this.transactionEvidence.fail();
     const resetGeneration = subscription.resetGeneration;
     const verificationGeneration = subscription.verificationGeneration;
     const deferredApply = () => this.ownsReplicaSubscription(subscription)
@@ -3746,6 +3764,7 @@ export class GonvexClient {
   private handleReplicaFrameFailure(scope: ReplicaScope, generation: symbol, socket: WebSocket | undefined, watermark = false) {
     if (this.manuallyClosed || scope !== this.replicaScope || generation !== this.socketGeneration
       || socket !== this.socket || !this.isWebSocketConnected) return;
+    this.transactionEvidence?.fail('processing-failed');
     // Fence before notifying observers: close events may arrive later, and an
     // observer may synchronously replace this connection.
     if (!watermark) this.isWebSocketConnected = false;
@@ -3759,6 +3778,7 @@ export class GonvexClient {
     const scope = this.replicaScope;
     const generation = this.socketGeneration;
     const socket = this.socket;
+    const evidence = this.transactionEvidence;
     // Any entity/window frame seals the adjacent watermark batch. Advancing
     // across that barrier could make an unapplied transaction look stale.
     if (!watermark) this.queuedReplicaWatermark = undefined;
@@ -3766,6 +3786,7 @@ export class GonvexClient {
       await operation();
       if (this.snapshotDeferredFrames.length > 0) await this.drainSnapshotFrames();
       await this.drainOpeningReplicaWatermark();
+      if (this.transactionEvidence === evidence) evidence?.pump();
     });
     this.replicaFrames = processing.catch(() => {
       this.handleReplicaFrameFailure(scope, generation, socket, watermark);
@@ -3802,7 +3823,8 @@ export class GonvexClient {
   private async applyReplicaTransaction(message: Extract<ServerMessage, { type: "replica.transaction" }>, scope: ReplicaScope) {
     const watermark = this.serverCapabilities.replicaWatermark === 1;
     const generation = this.socketGeneration;
-    await this.replica.applyTransaction({
+    const evidence = this.transactionEvidence?.id === message.originCommandId ? this.transactionEvidence : undefined;
+    const transaction = {
       cursor: message.cursor,
       originCommandId: message.originCommandId,
       provenance: message.provenance,
@@ -3811,7 +3833,14 @@ export class GonvexClient {
         oldValue: asReplicaRow(change.oldValue),
         newValue: asReplicaRow(change.newValue),
       })),
-    }, scope);
+    };
+    let applied = false;
+    if (evidence) applied = await this.replica.applyTransactionWithOutcome(transaction, scope);
+    else await this.replica.applyTransaction(transaction, scope);
+    if (evidence && this.transactionEvidence === evidence && scope === this.replicaScope && generation === this.socketGeneration) {
+      if (applied) evidence.applied(evidence.id, message.cursor.epoch, message.cursor.revision);
+      else evidence.fail('conflicting-evidence');
+    }
     // On capable runtimes the data frame is not the commit's full barrier.
     // Keep its intent until the result/watermark path retires it, even if it
     // has no optimistic patches. Negotiation belongs to the original owner.
@@ -4777,6 +4806,69 @@ export class GonvexClient {
     }, delay);
   }
 
+  /** Conditional evidence from this socket's matching committed transaction, not a later receipt fence.
+   * Requires an already admitted, ready tenant observation; never connects, queues or retries.
+   * Rejection after send is UNKNOWN/possibly applied. Do not automatically retry it.
+   */
+  reducerWithTransactionEvidence<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(
+    ref:FunctionReference<Args,T>, args:Args,
+    options:{offline:'reject';optimistic:[];timeoutMs:number},
+  ):Promise<TransactionEvidenceResult<T>> {
+    const startedAt=performance.now();
+    const refuse=()=>Promise.reject(new TransactionEvidenceError('precondition',false));
+    try {
+    const timeoutMs=options?.timeoutMs,path=ref.path;
+    const admission=this.tenantAdmissionValue,socket=this.socket,cursor=this.replica.cursor();
+    if(this.transactionEvidence || !admission || !socket || !cursor || this.publicTenant || this.controlOnly
+      || ref.kind!=='reducer' || (ref.scope!==undefined && ref.scope!=='tenant') || ref.authorization==='public'
+      || ref.localExecution!==undefined || ref.optimistic!==undefined || (ref.receiptPath!==undefined && ref.receiptPath!==path)
+      || !evidenceIdentity(path) || !options || options.offline!=='reject' || !Array.isArray(options.optimistic) || options.optimistic.length!==0
+      || Object.keys(options).some(k=>!['offline','optimistic','timeoutMs'].includes(k))
+      || !Number.isFinite(timeoutMs) || timeoutMs<=0 || timeoutMs>60_000
+      || ![admission.accountId,admission.memberId,admission.project,admission.tenantId,cursor.epoch].every(evidenceIdentity)
+      || !isReplicaRevision(cursor.revision)) return refuse();
+    const scope=this.replicaScope,generation=this.socketGeneration,auth=this.activeAuthFrameId,
+      session=this.sessionScopeGeneration,outbox=this.outboxScopeGeneration,outboxScope=this.outboxScope,
+      reconciliation=this.receiptReconciliationGeneration,activation=this.replicaReady,definition=this.replicaDefinitionEpoch,
+      project=this.auth.project,tenant=this.auth.tenant,epoch=cursor.epoch;
+    // This finite candidate supports one isolated observation window, not an unbounded scope snapshot.
+    const windows:ReplicaSubscription[]=[];
+    for(const s of this.replicaSubscriptions.values()) if(s.listeners.size>0) {
+      if(windows.length===1)return refuse();
+      windows.push(s);
+    }
+    const windowOwners=windows.map(s=>({verification:s.verificationGeneration,reset:s.resetGeneration,id:s.id}));
+    const current=()=>!this.manuallyClosed && this.socket===socket && socket.readyState===WebSocket.OPEN && this.isWebSocketConnected
+      && this.socketGeneration===generation && this.authenticatedSocketGeneration===generation && !this.authInFlight
+      && !!auth && this.activeAuthFrameId===auth && this.latestAuthFrameId===undefined && !this.authResendRequired
+      && this.tenantAdmissionValue===admission && this.auth.project===project && this.auth.tenant===tenant
+      && this.sessionScopeGeneration===session && this.outboxScopeGeneration===outbox && this.outboxScope===outboxScope
+      && reconciliation===this.receiptReconciliationGeneration && this.hasAuthoritativeReplicaScope && this.replicaScope===scope
+      && this.replicaDefinitionEpoch===definition && this.replicaReady===activation && this.hydratedReplicaReady===activation
+      && !this.outboxRecoveryPending && this.localSessionStateValue==='authenticated' && this.replica.freshness()==='current' && this.replica.cursor()?.epoch===epoch
+      && this.serverCapabilities.replicaWatermark===1 && this.serverCapabilities.reducerReceiptLookup===1
+      && windows.length>0 && windows.every((s,i)=>s.verificationGeneration===windowOwners[i].verification && s.resetGeneration===windowOwners[i].reset && s.id===windowOwners[i].id && this.replicaSubscriptions.get(s.key)===s && s.listeners.size>0
+        && s.isUpToDate && !s.opening && s.scope===scope && s.socketGeneration===generation && s.readyCursor?.epoch===epoch
+        && this.replica.getWindow(s.key)?.completeness==='complete' && this.replica.getWindow(s.key)?.source==='server');
+    if(!current())return refuse();
+    const id=randomID(),receiptId=randomID();
+    const call=new TransactionEvidenceCall(id,receiptId,path,{epoch,revision:cursor.revision,accountId:admission.accountId,memberId:admission.memberId},
+      timeoutMs,current,()=>this.processedReplicaWatermarkRevision,
+      ()=>{if(!current())throw new Error('superseded');socket.send(JSON.stringify({type:'query.call',id:receiptId,path:REDUCER_RECEIPT_QUERY,args:{idempotencyKey:id,receiptPath:path}}));},
+      r=>this.replica.acknowledgeCommand(id,r),()=>{if(this.transactionEvidence===call)this.transactionEvidence=undefined;},startedAt);
+    this.transactionEvidence=call;
+    try {
+      // Serialize first: user toJSON behavior cannot change scope and still send on the old socket.
+      const payload=JSON.stringify({type:'reducer.call',id,path,args,idempotencyKey:id,receiptPath:path,trace:{clientSentAtMs:nowMs()},
+        ...(ref.artifactHash?{artifactHash:ref.artifactHash}:{}),...(ref.intentEntropy?{intentEntropy:ref.intentEntropy}:{}),
+        ...(this.clientContract?{clientContract:this.clientContract.version}:{})});
+      if(!current())call.fail();
+      else call.send(()=>socket.send(payload));
+    } catch {call.fail();}
+    return call.promise as Promise<TransactionEvidenceResult<T>>;
+    } catch {return refuse();}
+  }
+
   reducer<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(
     ref: FunctionReference<Args, T>,
     args: Args,
@@ -5475,6 +5567,7 @@ export class GonvexClient {
   private resetReplicaScopeState() {
     this.receiptReconciliationGeneration = Symbol();
     this.sessionScopeGeneration = Symbol();
+    this.transactionEvidence?.fail();
     this.receiptReconciliations.clear();
     this.openingReplicaWatermark = undefined;
     this.snapshotDeferredFrames = [];
@@ -5678,6 +5771,7 @@ export class GonvexClient {
   }
 
   private sendAuth(force: boolean, options: { useFetcher?: boolean } = {}) {
+    this.transactionEvidence?.fail();
     this.flushTelemetry();
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
@@ -5693,6 +5787,7 @@ export class GonvexClient {
   }
 
   private sendAuthFrame() {
+    this.transactionEvidence?.fail();
     const id = randomID();
     this.latestAuthFrameId = id;
     this.managedAuthAttempt?.ids.add(id);
