@@ -78,7 +78,9 @@ pub struct SqlMigration {
     pub checksum: String,
     pub scope: MigrationScope,
     pub no_transaction: bool,
-    body: Option<Arc<str>>,
+    // Keep the decoded String's allocation. Converting a large String into
+    // Arc<str> copies its entire body before releasing the original buffer.
+    body: Option<Arc<String>>,
     /// Whether the body carries `-- gonvex:foreign-key-rebuild`.
     foreign_key_rebuild: bool,
 }
@@ -94,7 +96,7 @@ impl SqlMigration {
             checksum,
             scope,
             no_transaction,
-            body: Some(sql.into()),
+            body: Some(Arc::new(sql)),
             foreign_key_rebuild,
         }
     }
@@ -120,7 +122,7 @@ impl SqlMigration {
 
     /// The SQL, when this copy holds it.
     pub fn sql(&self) -> Option<&str> {
-        self.body.as_deref()
+        self.body.as_deref().map(String::as_str)
     }
 
     pub fn foreign_key_rebuild(&self) -> bool {
@@ -1516,6 +1518,9 @@ pub(crate) fn install_change_feed_locked(
             }
         }
 
+        // The same captured row images also feed declared reference checks.
+        // Keep plan repair and its receipt atomic with capture bootstrap.
+        crate::reference_integrity::refresh_from_change_feed(&mut tx).await?;
         tx.commit().await?;
         // The writer's capture hook must know the tables it now captures.
         crate::capture::refresh(connection).await?;

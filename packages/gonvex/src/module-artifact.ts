@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { builtinModules } from "node:module";
+import { deflateRawSync } from "node:zlib";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { rolldown, type OutputChunk, type RolldownPlugin } from "rolldown";
@@ -40,7 +41,7 @@ import type {
 } from "./manifest-types.js";
 
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
-export const moduleArtifactGeneration = 8;
+export const moduleArtifactGeneration = 9;
 
 /** Deterministic ESM output when gonvex.json does not name one. */
 const defaultBundlePath = join("_build", "module.js");
@@ -124,6 +125,13 @@ export async function moduleSourceFiles(backendDir: string): Promise<string[]> {
   return walkFiles(backendDir, isModuleSourceFile);
 }
 
+/** Migration payloads stay in the signed files map. Plain base64 remains valid. */
+export function encodeMigrationFile(contents: Buffer): string {
+  const plain = contents.toString("base64");
+  const compressed = `deflate-raw-v1:${contents.length}:${deflateRawSync(contents, { level: 1 }).toString("base64")}`;
+  return compressed.length < plain.length ? compressed : plain;
+}
+
 export async function buildModuleArtifact(options: ModuleArtifactOptions): Promise<ModuleArtifact> {
   const sources = [...options.files].sort();
   const entrypoint = resolveEntrypoint(options.root, options.backendDir, sources, options.entrypoint);
@@ -163,7 +171,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   // Versioned SQL migrations travel with the artifact so the runtime applies
   // the same schema changes as the source module.
   for (const file of [...options.migrations].sort()) {
-    files[projectPath(options.root, file)] = (await readFile(file)).toString("base64");
+    files[projectPath(options.root, file)] = encodeMigrationFile(await readFile(file));
   }
   if (Object.values(functions).some((entry) => entry.localExecution === 1)) {
     const schema = await projectLocalSchema(options.root);

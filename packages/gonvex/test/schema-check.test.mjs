@@ -34,7 +34,6 @@ test('native FKs and explicit reference requests declare relationships without i
   const before=await inspect('CREATE TABLE targets(_id TEXT PRIMARY KEY);');
   const after=await inspect(`CREATE TABLE targets(_id TEXT PRIMARY KEY);
 CREATE TABLE links(_id TEXT PRIMARY KEY,targetId TEXT REFERENCES targets(_id),targets JSON);
-CREATE TABLE _gonvex_reference_requests(declaration JSON NOT NULL);
 INSERT INTO _gonvex_reference_requests(declaration) VALUES('{"version":1,"references":[{"source":"links","path":"$.targets[*]","target":"targets"}]}');`);
   assert.equal(after.tables.links.columns.targetId.declared,true);
   assert.equal(after.tables.links.columns.targets.declared,true);

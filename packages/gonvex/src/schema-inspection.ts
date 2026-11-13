@@ -53,9 +53,10 @@ export function inspectSchemaDesign(db: DatabaseSync, schema: LocalSchema, migra
   for (const table of ['_gonvex_reference_catalog','_gonvex_reference_requests']) {
     if (!db.prepare('SELECT 1 FROM sqlite_schema WHERE type=\'table\' AND name=?').get(table)) continue;
     for (const row of db.prepare(`SELECT declaration FROM ${table}`).all() as {declaration:string}[]) {
-      const catalog = JSON.parse(row.declaration) as {references?: {source:string; path?:string; at?:string}[]};
+      const catalog = JSON.parse(row.declaration) as {references?: {source:string; column?:string; path?:string; at?:string}[]};
       for (const ref of catalog.references ?? []) {
-        const column = /^\$\.(?:"([^"]+)"|([\w]+))/.exec(ref.at ?? ref.path ?? '');
+        if (ref.column) explicit.add(`${ref.source}.${ref.column}`);
+        const column = /^(?:(?:strict|lax)\s+)?\$\.(?:"([^"]+)"|([\w]+))/.exec(ref.at ?? ref.path ?? '');
         if (column) explicit.add(`${ref.source}.${column[1] ?? column[2]}`);
       }
     }

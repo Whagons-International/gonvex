@@ -10,13 +10,12 @@ applying application migrations. Applications own table names,
 selection paths, lifecycle predicates and deletion policy; the runtime contains
 no application-specific relationship list.
 
-The Rust runner installs and enforces this capability. The current Node local
-schema compiler does not bootstrap or execute the ledger installer; a migration
-that writes the request table cannot yet pass that compiler unchanged. This is
-an authoring/local-execution integration gap, not a reason to claim that catalog
-metadata enforces relationships. The diagnostic can inspect existing request or
-catalog tables when present. Do not enable a declaration broadly without testing
-the actual app's codegen, local replay and authoritative runtime path.
+The Rust runner installs and enforces this capability. Node schema compilation
+retains migration requests for codegen and design diagnostics, without installing
+or executing the ledger. A partial Local Replica cannot prove that an uncached
+target is missing. Authoritative commit validation remains in Rust; optimistic
+local writes may therefore be rejected on replay. This is not local write-time
+enforcement, and applications must test their actual codegen and replay path.
 
 A version 1 declaration contains `tables` and `references`. Each table declares
 its single primary `key` and a JSONPath `live` predicate. Each reference declares
@@ -42,9 +41,10 @@ making it non-live fails if incoming references would remain. A transaction can
 explicitly remove or reassign all incoming references and then delete the
 target. There is no automatic cascade that could silently change access.
 Reducers and bulk row operations use the same `TenantTransaction::commit` path.
-The installed staging triggers leave a deferred guard FK pending until the
-shared runtime flush runs; an ordinary SQLite writer that omits that flush
-cannot commit a declared-table write. Metadata without these guards and the
+The installed staging guard leaves a deferred FK pending until the
+shared runtime flush runs; a SQLite writer with foreign keys enabled that omits that flush
+cannot commit a relationship-affecting write. Unrelated content edits do not
+need a reference flush. Metadata without these guards and the
 runtime commit path is not enforcement.
 
 Enforcement uses transactionally maintained target tokens and reference edges
@@ -52,8 +52,9 @@ with a deferred foreign key checked at commit. Each tenant database has one
 writer at a time, so no concurrent writer can act on a stale snapshot. A failed
 transaction leaves the application state unchanged.
 
-Installation inventories existing references without repairing application
-rows. Existing violations are recorded rather than rejected: they remain visible,
+Installation never repairs application rows. Version 2 declarations can choose
+`"existing":"reject"` to refuse the entire upgrade if any selected target is
+missing. The default, `"existing":"inventory"`, records existing violations: they remain visible,
 unchanged legacy edges survive unrelated edits, and new edges are enforced.
 `SELECT * FROM gonvex_reference_violations` returns violations for an operator
 to review. Its results contain application identifiers and need the same access
@@ -65,12 +66,43 @@ Polymorphic references declare a discriminator and a closed `targets` map.
 Alternate keys use `targetKeys`; a nonunique alias requires `multipleOwners`
 and a reason. Explicit sentinel, numeric, serialized-JSON and selector-decoder
 policies must document the existing consumer behavior they represent.
+Paths support recursive `.**` traversal. The default is lax array access;
+the `strict` prefix requires explicit array steps. `valuePrefix` with
+`prefixReason` selects tagged values and removes the tag. `ignoreContainingAll`
+with `ignoreReason` declares literal markers that together identify non-ID
+expressions. These policies are explicit; the runtime does not infer them from
+field names or guess expression syntax. Unknown rule policy fields are rejected.
 
 When a value's domain depends on another row, declare a `bindings` projection
 and reference `lookup` steps. Each selected configuration version is itself a
-referenced token. A parent edit cannot silently reinterpret dependent values;
-remove/rewrite the dependents in the same transaction. Configuration lookups
-can chain through parents and use the selected container's local keys.
+referenced token. A parent edit must leave every dependent reference valid;
+otherwise reassign or remove the dependents in the same transaction. Lookups
+can chain through parents and use the selected container's local keys. A
+configuration change queues only its incoming dependents for revalidation
+against the transaction's final configuration and row values. Valid edits and
+same-transaction reassignments work in either statement order; invalid edits
+roll back. Unknown legacy configuration domains still require explicit repair.
+
+Version 2 also supports the following explicit policies. Older runtimes reject
+version 2, so deploy a supporting runtime before an application migration uses it.
+
+- A binding's `paths` selects exact object members, such as
+  `["$.data.poll.options","$.data.poll.multiple"]`, instead of whole `columns`.
+  The projection preserves nesting. Wildcards, arrays and overlapping paths are
+  rejected. Updating poll tallies does not version the option domain or enqueue
+  other voters. The ledger owns this derived projection and rebuilds it on
+  declaration; application code never maintains it. A projection is created by
+  an indexed lookup when first referenced. Removing its last reference removes
+  the projection, so unused configuration rows do not become duplicate storage.
+- An `assert` rule declares a configuration predicate instead of `path`/`target`.
+  It requires a lookup, can select containers with `at`, and can compare the
+  configuration with `$entry` and `$document`. The configuration token protects
+  the parent and revalidates incoming dependents on change. Invalid refinements
+  refuse installation, even in inventory mode; they are not grandfathered edges.
+- `singleOwner:true` with `ownerReason` requires exactly one physical owner of
+  the selected target token. Creating another owner revalidates existing
+  incoming references; deleting or moving the last owner still fails the FK.
+  Shared aliases without that rule retain their existing multiple-owner policy.
 
 Adding `exclusions` opts into strict storage coverage. Every text, JSON or array
 column needs a declared reference, target key, or reasoned boundary such as an
@@ -87,10 +119,35 @@ ordinary-writer guarantee. Installation runs in the single writer transaction an
 backfills the ledger, so measure its cost on a disposable representative snapshot before
 rolling out a large catalog.
 
-This implementation installs staging triggers per declared table and loads the
-catalog when flushing pending rows. It is opt-in, not an automatic replacement
-for every application's native FKs or JSON references. Prefer native constraints
-for simple relationships and verify the cost of large declarations. A future
-implementation consuming existing change capture is a design direction, not a
-capability this page promises. Keep any remaining application enforcement gaps
+Captured tables share one trigger on the change feed. It queues an event ID
+only when declared key, lifecycle or selection inputs change. The pending event
+has a native FK to the feed row and a deferred guard FK; row images remain owned
+by the feed instead of being copied into a second queue. Statement and savepoint
+rollback remove the capture and validation work together. The runtime owns the
+compiled input-column projection on the existing reference-table metadata and
+rebuilds it from the catalog. Bootstrap receipts include the schema cookie and
+catalog digest, so DDL and redeclaration invalidate the installed plan.
+
+A declared table without change capture retains three row-image staging
+triggers. Their images contain only declared inputs where dependencies are
+known. An unconstrained wildcard retains the full row. A small edit must not
+rebuild unrelated reference data.
+
+Compiled policy is grouped by source table and includes its input-column
+projection. Equal declarations share one immutable program within the pool
+registry; each open database holds its current program alive. Compilation is
+single-flight and retryable after failure or cancellation. Weak cache entries
+retain no program after its last database closes. Each flush checks that
+database's stored declaration digest; a changed or rolled-back declaration
+cannot reuse stale policy. Application rows and target, edge and configuration
+state remain in the tenant's transaction. Target-only tables do not enter the
+outgoing-reference work queue. Installation scans target identities and
+then source edges in bounded keyset batches. Only target namespaces used by the
+policy are stored; live-state tokens are stored only when a rule needs them.
+Configuration lookups copy only referenced projections. Commit flushes also process
+bounded batches, while the whole application transaction remains atomic.
+
+It is opt-in, not an automatic replacement for every application's native FKs or
+JSON references. Prefer native constraints for simple relationships and verify
+the cost of large declarations. Keep any remaining application enforcement gaps
 explicit; do not treat a clean offline report as write-time protection.

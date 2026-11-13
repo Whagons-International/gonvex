@@ -1,4 +1,4 @@
-import{sqliteSchemaBootstrap}from'@gonvex/local-runtime/schema';
+import{sqliteSchemaBootstrap,sqliteReferenceInspectionBootstrap}from'@gonvex/local-runtime/schema';
 import type { LocalSchema } from "@gonvex/local-runtime/schema";
 
 // The framework's tenant identity table exists before application migrations.
@@ -34,6 +34,11 @@ export async function compileLocalSchema(migrations: readonly { name: string; sq
     db.exec("PRAGMA foreign_keys = ON");
     db.exec(identitySchema);
     db.exec(sqliteSchemaBootstrap);
+    // Authoring inspection keeps migration requests, but does not install the
+    // Rust ledger or pretend that a partial Local Replica can enforce them.
+    // Authoritative provisioning validates and consumes these requests inside
+    // the migration transaction; local optimistic writes can still be rejected.
+    db.exec(sqliteReferenceInspectionBootstrap);
     for (const migration of migrations) {
       const rebuild=migration.sql.split(/\r?\n/).some(line=>line.trim()==='-- gonvex:foreign-key-rebuild');
       try {

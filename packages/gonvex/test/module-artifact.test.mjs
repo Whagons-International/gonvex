@@ -645,7 +645,7 @@ export const run = action({
 });
 `);
   const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
-  assert.equal(artifact.generation, 8);
+  assert.equal(artifact.generation, 9);
   assert.equal(artifact.functions.searchTasks.internal, true);
   assert.equal(artifact.functions.run.actionProfile, "agent");
   assert.deepEqual(artifact.functions.run.actionCapabilities.tools.searchTasks, { kind: "query", function: "searchTasks" });
@@ -830,4 +830,29 @@ test("codegen F5 retains child-principal parent overrides and rejects nested inh
     const nestedAny = { ...nested, operator: "inheritsAny", via: { table: "links", childColumn: "a", parentColumn: "b" } };
     await assert.rejects(build(t, { ...child, where: { ...child.where, predicate: nestedAny } }), /cannot inherit again/);
   }
+});
+
+test("migration files use compact signed payloads without changing their SQL bytes", async (t) => {
+  const { inflateRawSync } = await import('node:zlib');
+  const { encodeMigrationFile } = await import('../dist/module-artifact.js');
+  const project = await moduleProject(t, 'const schema = { object: (fields) => ({ kind: "object", fields }) }; const action = (x) => x; export const read = action({ args: schema.object({}), result: schema.object({}), run: async () => ({}) });');
+  await mkdir(join(project.root, 'migrations'));
+  const path = join(project.root, 'migrations/0001_fixture.sql');
+  const sql = Buffer.from('-- gonvex:scope tenant\r\nCREATE TABLE items(_id TEXT PRIMARY KEY);\r\n' + '-- café ☀\r\n'.repeat(2000));
+  await writeFile(path, sql);
+  const artifact = await buildModuleArtifact({root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [path]});
+  const encoded = artifact.files['migrations/0001_fixture.sql'];
+  const [codec, length, payload] = encoded.split(':');
+  assert.equal(codec, 'deflate-raw-v1');
+  assert.equal(Number(length), sql.length);
+  assert.deepEqual(inflateRawSync(Buffer.from(payload, 'base64')), sql);
+  assert.ok(encoded.length < sql.toString('base64').length);
+  assert.equal(encodeMigrationFile(sql), encoded, 'the same source has deterministic bytes');
+  const artifactFile = join(project.root, 'compressed-artifact.json');
+  await writeFile(artifactFile, JSON.stringify(artifact));
+  const repositoryRoot = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
+  assert.equal(execFileSync('cargo', ['run', '--quiet', '--manifest-path', join(repositoryRoot, 'rust/Cargo.toml'), '-p', 'gonvex-runtime', '--', 'verify-module-artifact', '--file', artifactFile], {cwd: repositoryRoot, encoding: 'utf8'}).trim(), artifact.hash);
+  const tiny = Buffer.from('SELECT 1;');
+  assert.equal(encodeMigrationFile(tiny), tiny.toString('base64'), 'keep plain encoding when it is smaller');
+  assert.notEqual(artifact.hash, (await buildModuleArtifact({root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: []})).hash);
 });

@@ -2,18 +2,21 @@
 //! with PostgreSQL's semantics (array auto-unwrapping, existential and
 //! three-valued comparisons, `jsonb_path_match` for predicates).
 //!
-//! Supported: `$`, `@`, `$name` variables, `.key`, `."key"`, `.*`, `[*]`,
+//! Supported: `$`, `@`, `$name` variables, `.key`, `."key"`, `.*`, `.**`, `[*]`,
 //! `[n]`, `[n to m]`, `? (filter)`, `.type()`, `.size()`, `.keyvalue()`,
 //! `.string()`, literals, `== != <> < <= > >=`, `&&`, `||`, `!`,
 //! `exists(…)`, `starts with` and an optional `lax`/`strict` prefix.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct JsonPath {
     expr: Expr,
+    lax: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +42,7 @@ enum Primary {
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
     Member(String),
+    Descendants,
     AnyMember,
     AnyElement,
     Elements(Vec<(i64, Option<i64>)>),
@@ -80,11 +84,71 @@ impl Truth {
 pub(crate) type Vars<'a> = Option<&'a Map<String, Value>>;
 
 impl JsonPath {
+    /// Exact object-member projection; no filters, array traversal or inference.
+    pub(crate) fn member_path(&self) -> Option<Vec<String>> {
+        match &self.expr {
+            Expr::Path(Primary::Root, steps) if !steps.is_empty() => steps
+                .iter()
+                .map(|step| match step {
+                    Step::Member(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_root(&self) -> bool {
+        matches!(&self.expr, Expr::Path(Primary::Root, steps) if steps.is_empty())
+    }
+
+    /// Document fields this expression may read. An unconstrained root or
+    /// wildcard needs the full row; caller must not guess a smaller projection.
+    pub(crate) fn document_members(&self, root_is_document: bool) -> Option<BTreeSet<String>> {
+        fn visit(expr: &Expr, root: bool, names: &mut BTreeSet<String>) -> Option<()> {
+            match expr {
+                Expr::Path(primary, steps) => {
+                    let document = matches!(primary, Primary::Root) && root
+                        || matches!(primary, Primary::Variable(name) if name == "document");
+                    if document {
+                        match steps.first() {
+                            Some(Step::Member(name)) => {
+                                names.insert(name.clone());
+                            }
+                            _ => return None,
+                        }
+                    }
+                    if let Primary::Nested(inner) = primary {
+                        visit(inner, root, names)?;
+                    }
+                    for step in steps {
+                        if let Step::Filter(inner) = step {
+                            visit(inner, root, names)?;
+                        }
+                    }
+                }
+                Expr::Compare(left, _, right)
+                | Expr::StartsWith(left, right)
+                | Expr::And(left, right)
+                | Expr::Or(left, right) => {
+                    visit(left, root, names)?;
+                    visit(right, root, names)?;
+                }
+                Expr::Not(inner) | Expr::Exists(inner) => visit(inner, root, names)?,
+            }
+            Some(())
+        }
+        let mut names = BTreeSet::new();
+        visit(&self.expr, root_is_document, &mut names)?;
+        Some(names)
+    }
+
     pub(crate) fn parse(source: &str) -> Result<Self, String> {
         let mut parser = Parser {
             tokens: tokenize(source)?,
             index: 0,
         };
+        let lax = !matches!(parser.peek(), Some(Token::Word(word)) if word == "strict");
         if matches!(parser.peek(), Some(Token::Word(word)) if word == "lax" || word == "strict") {
             parser.index += 1;
         }
@@ -92,7 +156,7 @@ impl JsonPath {
         if parser.index != parser.tokens.len() {
             return Err(format!("unexpected input in JSON path {source:?}"));
         }
-        Ok(Self { expr })
+        Ok(Self { expr, lax })
     }
 
     /// The first member accessor applied to `$`, if the path starts `$.key`.
@@ -112,9 +176,15 @@ impl JsonPath {
         let context = Context {
             root: document,
             vars,
+            lax: self.lax,
         };
         match &self.expr {
-            Expr::Path(..) => context.items(&self.expr, None).unwrap_or_default(),
+            Expr::Path(..) => context
+                .items(&self.expr, None)
+                .unwrap_or_default()
+                .into_iter()
+                .map(Cow::into_owned)
+                .collect(),
             predicate => match context.truth(predicate, None) {
                 Truth::True => vec![Value::Bool(true)],
                 Truth::False => vec![Value::Bool(false)],
@@ -133,10 +203,11 @@ impl JsonPath {
         let context = Context {
             root: document,
             vars,
+            lax: self.lax,
         };
         match &self.expr {
             Expr::Path(..) => match context.items(&self.expr, None).ok()?.as_slice() {
-                [Value::Bool(value)] => Some(*value),
+                [value] => value.as_bool(),
                 _ => None,
             },
             predicate => match context.truth(predicate, None) {
@@ -151,19 +222,33 @@ impl JsonPath {
 struct Context<'a> {
     root: &'a Value,
     vars: Vars<'a>,
+    lax: bool,
 }
 
 impl Context<'_> {
-    fn items(&self, expr: &Expr, current: Option<&Value>) -> Result<Vec<Value>, ()> {
+    fn unwrap<'a>(&self, items: Vec<Cow<'a, Value>>) -> Vec<Cow<'a, Value>> {
+        if self.lax {
+            unwrap(items)
+        } else {
+            items
+        }
+    }
+    fn items<'a>(
+        &'a self,
+        expr: &'a Expr,
+        current: Option<&'a Value>,
+    ) -> Result<Vec<Cow<'a, Value>>, ()> {
         match expr {
             Expr::Path(primary, steps) => {
                 let mut items = match primary {
-                    Primary::Root => vec![self.root.clone()],
-                    Primary::Current => vec![current.ok_or(())?.clone()],
+                    Primary::Root => vec![Cow::Borrowed(self.root)],
+                    Primary::Current => vec![Cow::Borrowed(current.ok_or(())?)],
                     Primary::Variable(name) => {
-                        vec![self.vars.and_then(|vars| vars.get(name)).ok_or(())?.clone()]
+                        vec![Cow::Borrowed(
+                            self.vars.and_then(|vars| vars.get(name)).ok_or(())?,
+                        )]
                     }
-                    Primary::Literal(value) => vec![value.clone()],
+                    Primary::Literal(value) => vec![Cow::Borrowed(value)],
                     Primary::Nested(inner) => self.items(inner, current)?,
                 };
                 for step in steps {
@@ -172,46 +257,96 @@ impl Context<'_> {
                 Ok(items)
             }
             predicate => Ok(match self.truth(predicate, current) {
-                Truth::True => vec![Value::Bool(true)],
-                Truth::False => vec![Value::Bool(false)],
-                Truth::Unknown => vec![Value::Null],
+                Truth::True => vec![Cow::Owned(Value::Bool(true))],
+                Truth::False => vec![Cow::Owned(Value::Bool(false))],
+                Truth::Unknown => vec![Cow::Owned(Value::Null)],
             }),
         }
     }
 
-    fn step(&self, step: &Step, items: Vec<Value>) -> Result<Vec<Value>, ()> {
+    fn step<'a>(
+        &'a self,
+        step: &'a Step,
+        items: Vec<Cow<'a, Value>>,
+    ) -> Result<Vec<Cow<'a, Value>>, ()> {
         let mut output = Vec::new();
         match step {
             Step::Member(name) => {
-                for item in unwrap(items) {
-                    if let Value::Object(object) = item {
-                        if let Some(value) = object.get(name) {
-                            output.push(value.clone());
+                for item in self.unwrap(items) {
+                    match item {
+                        Cow::Borrowed(Value::Object(object)) => {
+                            output.extend(object.get(name).map(Cow::Borrowed))
+                        }
+                        Cow::Owned(Value::Object(mut object)) => {
+                            output.extend(object.remove(name).map(Cow::Owned))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Step::Descendants => {
+                for item in items {
+                    // Borrow the tree and visit each node once. Cloning every
+                    // ancestor subtree would turn a deep form into quadratic work.
+                    match item {
+                        Cow::Borrowed(value) => {
+                            let mut pending = vec![value];
+                            while let Some(value) = pending.pop() {
+                                output.push(Cow::Borrowed(value));
+                                match value {
+                                    Value::Object(object) => pending.extend(object.values().rev()),
+                                    Value::Array(array) => pending.extend(array.iter().rev()),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Cow::Owned(value) => {
+                            let mut pending = vec![&value];
+                            while let Some(value) = pending.pop() {
+                                output.push(Cow::Owned(value.clone()));
+                                match value {
+                                    Value::Object(object) => pending.extend(object.values().rev()),
+                                    Value::Array(array) => pending.extend(array.iter().rev()),
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                 }
             }
             Step::AnyMember => {
-                for item in unwrap(items) {
-                    if let Value::Object(object) = item {
-                        output.extend(object.values().cloned());
+                for item in self.unwrap(items) {
+                    match item {
+                        Cow::Borrowed(Value::Object(object)) => {
+                            output.extend(object.values().map(Cow::Borrowed))
+                        }
+                        Cow::Owned(Value::Object(object)) => {
+                            output.extend(object.into_values().map(Cow::Owned))
+                        }
+                        _ => {}
                     }
                 }
             }
             Step::AnyElement => {
                 for item in items {
                     match item {
-                        Value::Array(elements) => output.extend(elements),
-                        other => output.push(other),
+                        Cow::Borrowed(Value::Array(elements)) => {
+                            output.extend(elements.iter().map(Cow::Borrowed))
+                        }
+                        Cow::Owned(Value::Array(elements)) => {
+                            output.extend(elements.into_iter().map(Cow::Owned))
+                        }
+                        other if self.lax => output.push(other),
+                        _ => {}
                     }
                 }
             }
             Step::Elements(ranges) => {
                 for item in items {
-                    let elements = match item {
-                        Value::Array(elements) => elements,
-                        other => vec![other],
-                    };
+                    if !self.lax && !item.is_array() {
+                        continue;
+                    }
+                    let elements = unwrap(vec![item]);
                     let length = elements.len() as i64;
                     for (start, end) in ranges {
                         let end = end.unwrap_or(*start);
@@ -222,7 +357,7 @@ impl Context<'_> {
                 }
             }
             Step::Filter(predicate) => {
-                for item in unwrap(items) {
+                for item in self.unwrap(items) {
                     if self.truth(predicate, Some(&item)) == Truth::True {
                         output.push(item);
                     }
@@ -230,24 +365,26 @@ impl Context<'_> {
             }
             Step::Type => {
                 for item in items {
-                    output.push(Value::String(type_name(&item).to_owned()));
+                    output.push(Cow::Owned(Value::String(type_name(&item).to_owned())));
                 }
             }
             Step::Size => {
                 for item in items {
-                    let size = match &item {
+                    let size = match item.as_ref() {
                         Value::Array(elements) => elements.len(),
                         _ => 1,
                     };
-                    output.push(Value::from(size));
+                    output.push(Cow::Owned(Value::from(size)));
                 }
             }
             Step::KeyValue => {
-                for item in unwrap(items) {
-                    match item {
+                for item in self.unwrap(items) {
+                    match item.into_owned() {
                         Value::Object(object) => {
                             for (key, value) in object {
-                                output.push(serde_json::json!({"key": key, "value": value}));
+                                output.push(Cow::Owned(
+                                    serde_json::json!({"key": key, "value": value}),
+                                ));
                             }
                         }
                         _ => return Err(()),
@@ -255,13 +392,13 @@ impl Context<'_> {
                 }
             }
             Step::String => {
-                for item in unwrap(items) {
-                    output.push(match item {
+                for item in self.unwrap(items) {
+                    output.push(Cow::Owned(match item.into_owned() {
                         Value::String(text) => Value::String(text),
                         Value::Number(number) => Value::String(number.to_string()),
                         Value::Bool(value) => Value::String(value.to_string()),
                         _ => return Err(()),
-                    });
+                    }));
                 }
             }
         }
@@ -300,7 +437,7 @@ impl Context<'_> {
                 else {
                     return Truth::Unknown;
                 };
-                let (left, right) = (unwrap(left), unwrap(right));
+                let (left, right) = (self.unwrap(left), self.unwrap(right));
                 let mut unknown = false;
                 for left in &left {
                     for right in &right {
@@ -322,15 +459,16 @@ impl Context<'_> {
                 else {
                     return Truth::Unknown;
                 };
-                let [Value::String(prefix)] = right.as_slice() else {
+                let [prefix] = right.as_slice() else {
+                    return Truth::Unknown;
+                };
+                let Some(prefix) = prefix.as_str() else {
                     return Truth::Unknown;
                 };
                 let mut unknown = false;
-                for item in unwrap(left) {
-                    match item {
-                        Value::String(text) if text.starts_with(prefix.as_str()) => {
-                            return Truth::True
-                        }
+                for item in self.unwrap(left) {
+                    match item.as_ref() {
+                        Value::String(text) if text.starts_with(prefix) => return Truth::True,
                         Value::String(_) => {}
                         _ => unknown = true,
                     }
@@ -343,7 +481,7 @@ impl Context<'_> {
             }
             Expr::Path(..) => match self.items(expr, current) {
                 Ok(items) => match items.as_slice() {
-                    [Value::Bool(value)] => Truth::from_bool(*value),
+                    [value] => value.as_bool().map_or(Truth::Unknown, Truth::from_bool),
                     _ => Truth::Unknown,
                 },
                 Err(()) => Truth::Unknown,
@@ -352,11 +490,16 @@ impl Context<'_> {
     }
 }
 
-fn unwrap(items: Vec<Value>) -> Vec<Value> {
+fn unwrap(items: Vec<Cow<'_, Value>>) -> Vec<Cow<'_, Value>> {
     let mut output = Vec::with_capacity(items.len());
     for item in items {
         match item {
-            Value::Array(elements) => output.extend(elements),
+            Cow::Borrowed(Value::Array(elements)) => {
+                output.extend(elements.iter().map(Cow::Borrowed))
+            }
+            Cow::Owned(Value::Array(elements)) => {
+                output.extend(elements.into_iter().map(Cow::Owned))
+            }
             other => output.push(other),
         }
     }
@@ -710,7 +853,14 @@ impl Parser {
                 Some(Token::Dot) => {
                     self.index += 1;
                     match self.next() {
-                        Some(Token::Star) => steps.push(Step::AnyMember),
+                        Some(Token::Star) => {
+                            if self.peek() == Some(&Token::Star) {
+                                self.index += 1;
+                                steps.push(Step::Descendants);
+                            } else {
+                                steps.push(Step::AnyMember);
+                            }
+                        }
                         Some(Token::Str(key)) => steps.push(Step::Member(key)),
                         Some(Token::Word(word)) => {
                             if self.peek() == Some(&Token::OpenParen) {
@@ -813,6 +963,12 @@ mod tests {
             [json!("one")]
         );
         assert_eq!(query("$[0 to 1]", json!([1, 2, 3])), [json!(1), json!(2)]);
+        assert!(query("strict $.items.id", json!({"items":[{"id":1}]})).is_empty());
+        assert_eq!(
+            query("strict $.items[*].id", json!({"items":[{"id":1}]})),
+            [json!(1)]
+        );
+        assert!(query("strict $[*]", json!("scalar")).is_empty());
     }
 
     #[test]
@@ -838,6 +994,31 @@ mod tests {
                 .query_first(&configuration, vars.as_object()),
             Some(json!("teams"))
         );
+    }
+
+    #[test]
+    fn recursive_fields_and_object_containers_keep_typed_values() {
+        let document = json!({"fields":[
+            {"properties":{"optionListId":"top"},"children":[{"properties":{"optionListId":"nested"}}]},
+            {"properties":{"optionListId":null}}, {"properties":{"optionListId":27}}
+        ],"irrelevant":{"optionListId":"outside"}});
+        let selected = query(
+            "strict $.fields.** ? (@.type() == \"object\").properties.optionListId",
+            document,
+        );
+        assert_eq!(
+            selected,
+            [json!("top"), json!("nested"), Value::Null, json!(27)]
+        );
+        let document = json!({"output":{"group":{"evidence_segment_ids":["a","b"]},"more":[{"evidence_segment_ids":["c"]}]}});
+        let path = JsonPath::parse("strict $.output.** ? (@.type() == \"object\")").unwrap();
+        let ids = JsonPath::parse("$.evidence_segment_ids[*]").unwrap();
+        let selected: Vec<_> = path
+            .query(&document, None)
+            .iter()
+            .flat_map(|container| ids.query(container, None))
+            .collect();
+        assert_eq!(selected, [json!("a"), json!("b"), json!("c")]);
     }
 
     #[test]

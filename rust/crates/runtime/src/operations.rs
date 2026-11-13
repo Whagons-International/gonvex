@@ -1658,6 +1658,8 @@ fn memory_json(runtime: &Runtime) -> Value {
             "builds": cache.builds, "rollForwards": cache.roll_forwards, "fallbacks": cache.fallbacks,
             "evictions": cache.evictions, "keysSeen": runtime.snapshot_cache_keys_seen(),
             "sparseDrops": sparse.0, "sparseSkips": sparse.1, "keyedInlineBuilds": cache.keyed_inline_builds,
+            "coldOpenLimit": cache.cold_open_limit, "coldOpenActive": cache.cold_open_active,
+            "coldOpenPeak": cache.cold_open_peak, "coldOpenRefused": cache.cold_open_refused,
             "byPath": by_path, "top": top},
         "replicaOpens": crate::open_reasons::json(),
         "principalCache": runtime.principal_cache_stats(),

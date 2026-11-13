@@ -125,3 +125,43 @@ import { controlPlane, tenant } from "./gonvex/_generated/schema";
 The runtime rejects schema changes that would silently lose existing data.
 Plan destructive changes as explicit migration work with backups and a tested
 rollback or restore procedure.
+
+## Migration files in module artifacts
+
+Artifact generation 9 stores a migration as plain base64 or, when smaller,
+`deflate-raw-v1:<decoded-byte-length>:<base64-raw-DEFLATE>`. Other source files
+retain their existing encoding. The artifact signature covers the encoded value.
+The runtime still calculates migration checksums from the exact decoded SQL
+bytes; recorded SQL, UTF-8, CRLF and migration directives are preserved.
+
+The runtime accepts both formats. It requires one complete compressed stream,
+no trailing data, the exact declared length and valid UTF-8. Total decoded
+migration bytes share the existing 64 MiB artifact request budget, preventing
+compressed inputs from allowing unbounded expansion.
+
+Deploy the decoder-capable runtime before using the new CLI's compressed
+artifacts. Older runtimes reject such files before applying migrations.
+This is a transport/storage encoding change, not a new migration lineage or
+application record contract.
+
+The control-plane migration archive also stores this envelope when it is
+smaller than SQL text. It keeps one body per decoded checksum and loads only
+pending migrations. Existing plain archives remain readable and are not
+rewritten on boot. Both formats use the same bounded decoder, followed by
+checksum verification before execution. An older runtime refuses a pending
+encoded body at its checksum check; keep the decoder-capable runtime deployed
+when rolling back an application artifact.
+
+After startup provisioning, the runtime releases bootstrap SQLx statements and
+discardable SQLite pager pages. Open connections, parsed schemas, direct
+application statements, compiled reference policy and configured cache capacities
+remain in place. Later queries refill data pages as needed; measure first-use
+latency together with startup memory when changing this boundary.
+
+First tenant authentication streams the existing replica epoch JSON from
+borrowed module metadata into its digest. It preserves the previous hash bytes
+without cloning the full function manifest or retaining another encoded copy.
+The initial feed-clock read uses the shared read acquisition path, allowing a
+returning warm reader to be reused before another schema is parsed. Include
+first authentication in measurements so startup cleanup does not move its cost
+into the first user request.

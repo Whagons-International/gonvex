@@ -29,3 +29,15 @@ test('PostgreSQL-only migration syntax fails with the migration name', async () 
     /Local schema compilation failed in 0002_pg\.sql/,
   );
 });
+
+test('authoring retains reference requests without claiming partial-replica enforcement', async () => {
+  const declaration = {version:2,existing:'reject',tables:[{name:'notes',key:'_id',live:'true'}],references:[]};
+  let observed;
+  const schema=await compileLocalSchema([{name:'0001_refs.sql',sql:`CREATE TABLE notes(_id TEXT PRIMARY KEY,body TEXT);
+    INSERT INTO _gonvex_reference_requests(declaration) VALUES('${JSON.stringify(declaration)}');`}], db=>{
+    observed=JSON.parse(db.prepare('SELECT declaration FROM _gonvex_reference_requests').get().declaration);
+    assert.equal(db.prepare("SELECT count(*) n FROM sqlite_schema WHERE name='_gonvex_reference_edges'").get().n,0);
+  });
+  assert.deepEqual(observed,declaration);
+  assert.deepEqual(Object.keys(schema).sort(),['members','notes']);
+});
