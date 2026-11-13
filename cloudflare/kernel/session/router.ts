@@ -1,3 +1,4 @@
+import { ASSIGNMENT_HEADER, automaticPlacement, withDeadline, type GatewayAssignment } from "../gateway/placement";
 /**
  * `GET /ws` in the router Worker (CONTRACT.md A.1.1). The Worker cannot know
  * the tenant (it arrives in the first `auth` frame, 0004), so it only checks
@@ -28,23 +29,41 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   const connectionId = crypto.randomUUID();
   const publicTransport = url.searchParams.get("public") === "1";
   const address = clientAddress(request.headers);
-  const gatewayName = gatewayFor(env, connectionId);
-  const refused = await admitUpgrade(env, { address, connectionId, gateway: gatewayName, publicTransport });
-  if (refused) return refused;
-  const slots = env.PUBLIC_LIMITER ? (publicTransport ? "pending,public" : "pending") : "";
-  const headers = new Headers(request.headers);
-  headers.set(UPGRADE_HEADERS.connectionId, connectionId);
-  headers.set(UPGRADE_HEADERS.publicTransport, publicTransport ? "1" : "0");
-  headers.set(UPGRADE_HEADERS.address, address);
-  headers.set(UPGRADE_HEADERS.slots, slots);
-  const gateway = env.GATEWAY.getByName(gatewayName);
+  const placement = automaticPlacement(env);
+  let assignment: GatewayAssignment | undefined;
+  let slots = "";
   let response: Response | undefined;
   try {
-    response = await gateway.fetch(new Request(request.url, { method: "GET", headers }));
+    if (placement) {
+      try { assignment = await withDeadline(placement.acquire(connectionId), 5_000); }
+      catch { return new Response("gateway capacity unavailable", { status: 503, headers: { "retry-after": "1" } }); }
+    }
+    const gatewayName = assignment?.gateway ?? gatewayFor(env, connectionId);
+    slots = env.PUBLIC_LIMITER ? (publicTransport ? "pending,public" : "pending") : "";
+    // The deadline also travels to the limiter: Promise.race cannot cancel a slow audit/RPC.
+    const admissionMs = 2_000;
+    const refused = await withDeadline(admitUpgrade(env, { address, connectionId, gateway: gatewayName, publicTransport,
+      expiresAt: Date.now() + admissionMs }), admissionMs);
+    if (refused) return refused;
+    const headers = new Headers(request.headers);
+    headers.delete(ASSIGNMENT_HEADER);
+    if (assignment) headers.set(ASSIGNMENT_HEADER, JSON.stringify(assignment));
+    headers.set(UPGRADE_HEADERS.connectionId, connectionId);
+    headers.set(UPGRADE_HEADERS.publicTransport, publicTransport ? "1" : "0");
+    headers.set(UPGRADE_HEADERS.address, address);
+    headers.set(UPGRADE_HEADERS.slots, slots);
+    response = await withDeadline(env.GATEWAY.getByName(gatewayName).fetch(new Request(request.url, { method: "GET", headers })));
     return response;
+  } catch {
+    return new Response("gateway admission unavailable", { status: 503, headers: { "retry-after": "1" } });
   } finally {
-    // The socket never reached its gateway: nothing will release the reservation, so release it here.
-    if (slots && response?.status !== 101) await publicGuard(env).release(address, connectionId, slots.split(",") as Array<"pending" | "public">);
+    if (response?.status !== 101) {
+      // Release independently: controller failure must not skip K16 cleanup (or mask the refusal).
+      await Promise.allSettled([
+        ...(slots ? [withDeadline(publicGuard(env).release(address, connectionId, slots.split(",") as Array<"pending" | "public">))] : []),
+        ...(assignment && placement ? [withDeadline(placement.release(assignment))] : []),
+      ]);
+    }
   }
 }
 

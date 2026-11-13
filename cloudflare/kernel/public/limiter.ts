@@ -31,6 +31,7 @@ import { allowCalls, type CallWindow, newWindow } from "./window";
 
 export const PENDING_LIMIT_ERROR = "pending connection limit exceeded";
 export const PUBLIC_LIMIT_ERROR = "public connection limit exceeded";
+export const ADMISSION_EXPIRED_ERROR = "connection admission expired";
 
 /** A slot this young is never audited: its upgrade may not have reached the gateway yet. */
 export const AUDIT_GRACE_MS = 10_000;
@@ -49,8 +50,10 @@ export interface AdmitRequest {
   publicTransport: boolean;
   pendingLimit: number;
   publicLimit: number;
+  /** Router deadline: a delayed audit/RPC must not install slots for an abandoned upgrade. */
+  expiresAt?: number;
 }
-export type AdmitResult = { ok: true } | { ok: false; error: typeof PENDING_LIMIT_ERROR | typeof PUBLIC_LIMIT_ERROR };
+export type AdmitResult = { ok: true } | { ok: false; error: typeof PENDING_LIMIT_ERROR | typeof PUBLIC_LIMIT_ERROR | typeof ADMISSION_EXPIRED_ERROR };
 
 export interface ReleaseRequest { v: 1; connectionId: string; kinds: SlotKind[] }
 export interface AllowRequest { v: 1; cost: number; limit: number }
@@ -123,8 +126,12 @@ export class AddressBudget {
    * a refused public slot leaves no pending slot behind.
    */
   async admit(request: AdmitRequest): Promise<AdmitResult> {
+    const expired = () => request.expiresAt !== undefined && (!Number.isFinite(request.expiresAt) || this.now() >= request.expiresAt);
+    if (expired()) return { ok: false, error: ADMISSION_EXPIRED_ERROR };
     if (!await this.room("pending", request.pendingLimit)) return { ok: false, error: PENDING_LIMIT_ERROR };
+    if (expired()) return { ok: false, error: ADMISSION_EXPIRED_ERROR };
     if (request.publicTransport && !await this.room("public", request.publicLimit)) return { ok: false, error: PUBLIC_LIMIT_ERROR };
+    if (expired()) return { ok: false, error: ADMISSION_EXPIRED_ERROR };
     // Decided again after the awaits above, with no await in between: two admits never share the last slot.
     if (!this.fits("pending", request.pendingLimit) || (request.publicTransport && !this.fits("public", request.publicLimit))) {
       return this.admit(request);

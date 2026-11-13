@@ -1,0 +1,187 @@
+{
+  "package": "X01",
+  "acceptanceComplete": false,
+  "baseSha": "c97b35a779694d67795a971d8e50740efd8428f6",
+  "createdAt": "2026-11-12T11:01:55.191154+00:00",
+  "branch": "cf/X01-autoscaling",
+  "checkout": "/home/gabriel/.t3/worktrees/gonvex/t3-298eec64-3e15b422e94aa466",
+  "runtime": {
+    "wrangler": "4.155.0",
+    "vitestPlugin": "1.4.10",
+    "compatibilityDate": "2026-10-23",
+    "harness": "independent K05 stand-ins, not K22 assembled serving runtime"
+  },
+  "sourceSha256": {
+    "cloudflare/kernel/delivery/outlet.ts": "2793bb1797235a9174c7e4594904da11d7885ac57f7cbebfa695b7350e7e7450",
+    "cloudflare/kernel/delivery/protocol.ts": "4df935b540c325406de11bc219c143f800a072c345708847380ebec842d2e42f",
+    "cloudflare/kernel/gateway/controller.ts": "91d29abaea38ace0a6985557fbd8eefe55b386a8c3825933ab522dc9f74e786c",
+    "cloudflare/kernel/gateway/metrics.ts": "a9581873c753533410d77c31212d057d237684cbbc9e50a5644db555e7ed4295",
+    "cloudflare/kernel/gateway/placement.ts": "9850a78c9e9653fc2f3d8eaf461e879682d0a860e4d26a304fb4d65d15d69016",
+    "cloudflare/kernel/gateway/test/controller.spec.ts": "21889b2adc28117e99b095165c6d834f52abafcf16648cc5098366094117c226",
+    "cloudflare/kernel/gateway/test/metrics.spec.ts": "a35b18b018d557fa2dff05ffd5df11b2270ffe51f5fcafc78ba9aa8743b618dc",
+    "cloudflare/kernel/gateway/test/outlet.spec.ts": "f83099ac7b971f2eba03f4500d30d0d562305be11fc05d7160a43406bba7cffb",
+    "cloudflare/kernel/gateway/test/worker.ts": "323f3a519021b3ed0cc5c58f70dc07a2ce30253d3f56b99cb2f59a3648586113",
+    "cloudflare/kernel/gateway/test/wrangler.jsonc": "d8b8adde684523ab50e60fea234748be7fb894111fa5b9e440c83d3766d03a61",
+    "cloudflare/kernel/gateway/vitest.config.mjs": "4d75bc217973f03dbe284c5aa83db6476b397041f8438f309f14543bd5605b82",
+    "cloudflare/kernel/session/host.ts": "ebb568d9df2ac6d6b8b22359ec1e36f0c0e12677c071ff036963cdbc0c196746",
+    "cloudflare/kernel/session/placement/gateway.ts": "e9981df3c12b73d0b8ba45b774607c981dc242101caf13b00db5e31d95be02d5",
+    "cloudflare/kernel/session/router.ts": "fb71e6e82f7bf62b19987c2dcdf303a590aa642f323a3119be2609ad15d558c1",
+    "cloudflare/package.json": "7a6d2c43548f7522f6858cc5338d3e1b1bef1ea48af46cee10057e107765e126",
+    "cloudflare/kernel/public/guard.ts": "e1ddb5cb3cac4e6f617c545ff27fb49d315c23e261cd9241fc1f1578201b06e0",
+    "cloudflare/kernel/public/limiter.ts": "8a546344982ba586b6862d0356354498c77932b9480536022ff955a5196c514e",
+    "cloudflare/kernel/public/test/units.spec.ts": "6539c93b44dceeacc999a5475e9e9afcb4b00d323a568b3a142cf1f84ec81647"
+  },
+  "checks": {
+    "typecheck": "0",
+    "root": "0",
+    "gateway": "0",
+    "public": "0",
+    "public-reducer": "0",
+    "conformance": "0",
+    "bundle": "0",
+    "harness-bundle": "0",
+    "cycles-head": "0",
+    "cycles-base": "0",
+    "generators": "PASS (docs/schema/root-types/control-types; phases.txt)"
+  },
+  "testCounts": {
+    "rootPassed": 390,
+    "gatewayPassed": 22,
+    "publicPassed": 32,
+    "public-reducerPassed": 2,
+    "conformanceUnitPassed": 29
+  },
+  "parallelRootCaveat": "Original 60be3adc evidence retained below, including two failed default-parallel migration-resume timeouts. This follow-up root run uses --maxWorkers 1, with unchanged assertions/timeouts.",
+  "runtimeCycles": {
+    "base": [
+      [
+        "../../packages/local-runtime/src/portable.ts",
+        "../../packages/local-runtime/src/read-view.ts"
+      ]
+    ],
+    "head": [
+      [
+        "../../packages/local-runtime/src/portable.ts",
+        "../../packages/local-runtime/src/read-view.ts"
+      ]
+    ],
+    "new": 0
+  },
+  "bundles": {
+    "serving-legacy-root": {
+      "bytes": 217638,
+      "gzipBytes": 54549,
+      "sha256": "decb7a64d357f811123cabd0458826f7a286b4d37309b133121f2d3fa343ef30"
+    },
+    "independent-gateway-harness": {
+      "bytes": 229086,
+      "gzipBytes": 57154,
+      "sha256": "46f57b6f320d09181d7c5ae543a7b502d6d85c06d09bbb0ccaace18689573611"
+    }
+  },
+  "rawArtifactRoot": "/mnt/data/work/gonvex-x01/lead-review-fixes",
+  "unmet": [
+    "K22 serving binding/migration and Session/engine integration",
+    "real assembled SDK/Whagons local+remote conformance and recovery/drain semantics",
+    "V03 1000-user and26-tenant campaigns during actual scaling",
+    "V04 SQL/KV rows, shared-isolate memory, receiver delay, throughput, cost/account headroom",
+    "X02 1000-client cold snapshot writer p95<150ms evaluation",
+    "independent review",
+    "K22 errors.spin quarantine/platform blocker remains separate"
+  ],
+  "operations": {
+    "remoteDeployment": false,
+    "stagingOrProductionTouched": false,
+    "accountChanges": false
+  },
+  "originalImplementationEvidence": {
+    "head": "60be3adc23a1032ef080dc5075e4a9f0e9f55452",
+    "checks": {
+      "full-result.json": {
+        "docs": 0,
+        "schema": 0,
+        "types": 0,
+        "controlTypes": 0,
+        "typecheck": 0,
+        "tests": 0,
+        "bundle": 0,
+        "conformance": 0
+      },
+      "last-result.json": {
+        "typecheck": 0,
+        "rootTestsSequential": 0,
+        "gatewayTests": 0,
+        "bundle": 0,
+        "harnessBundle": 0
+      },
+      "last-nonroot-result.json": {
+        "nonrootTests": 0
+      },
+      "publish-result.json": {
+        "docs": 0,
+        "schema": 0,
+        "types": 0,
+        "controlTypes": 0,
+        "typecheck": 0,
+        "gatewayTests": 0,
+        "cycles": 0
+      }
+    },
+    "testCounts": {
+      "rootPassedSingleWorker": 390,
+      "nonRootExistingPassed": 378,
+      "gatewayPassed": 18,
+      "combinedCurrentCoveragePassed": 786,
+      "existingSkipped": 15,
+      "deployScriptNodePassed": 3,
+      "conformanceUnitPassed": 29
+    },
+    "runtimeCycles": {
+      "base": [
+        [
+          "../../packages/local-runtime/src/portable.ts",
+          "../../packages/local-runtime/src/read-view.ts"
+        ]
+      ],
+      "head": [
+        [
+          "../../packages/local-runtime/src/portable.ts",
+          "../../packages/local-runtime/src/read-view.ts"
+        ]
+      ],
+      "new": 0
+    },
+    "bundles": {
+      "serving-legacy-root": {
+        "bytes": 216833,
+        "gzipBytes": 54609,
+        "sha256": "a709eaa209f77700ceeb461731291c272007636a6f9a7ab57184063330f5e238"
+      },
+      "independent-gateway-harness": {
+        "bytes": 228281,
+        "gzipBytes": 57216,
+        "sha256": "b956ee72b666c0ec9823e1242c25e66bd5d6b607aca0349471a3c9bb4fbdccb2"
+      }
+    },
+    "arch3FullCheckProcess": {
+      "memoryPeakBytes": 2229297152,
+      "wallSeconds": 165.331,
+      "containedOOMKills": 0,
+      "isServingIsolateMemory": false
+    },
+    "parallelRootCaveat": "Two affected default-parallel reruns timed out unchanged migration resume test at 5000ms; earlier full package passed; current root passes --maxWorkers 1 with unchanged assertions/timeouts."
+  },
+  "leadReviewFixes": {
+    "review": "https://github.com/Whagons-International/gonvex/pull/397#pullrequestreview-5873038588",
+    "originalVerdict": "request changes",
+    "fixes": [
+      "Include membership arrays and instance/recovery text in byte credits before admission.",
+      "Settle empty discarded queues and release safe host metadata while preserving recovery-required fences.",
+      "Pass the actual router admission expiry through K16 and check before/after audit awaits and before slot installation."
+    ],
+    "firstTypecheckAttempt": "FAILED test-only dynamic-import class used as type; corrected typeof budget method types, full typecheck then passed. Failed receipt typecheck-r1.log retained.",
+    "deploymentProof": false,
+    "fullPackageRerun": false,
+    "scope": "Affected source suites only; other original suites are historical evidence, not current-head reverified coverage."
+  }
+}
