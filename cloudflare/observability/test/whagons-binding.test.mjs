@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, stat, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { auditTaskBinding, proposedTaskBinding, whagonsTaskPreparation } from '../bindings/whagons-task.mjs';
@@ -111,3 +111,51 @@ test('CLI is offline, nonzero for blocked declarations, private errors and overs
     assert.equal(run.status,2);blocked(JSON.parse(run.stdout));assert.equal(run.stderr,'');
   } finally {await rm(dir,{recursive:true,force:true});}
 });
+
+async function inputFixture(run) {
+  const hosted=process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_TEMP ? path.join(process.env.RUNNER_TEMP,'m05-foundation') : null;
+  const root=process.env.M05_TEST_ROOT ?? hosted;
+  assert.ok(root && (root.startsWith('/mnt/data/work/gonvex-m05-foundation/') || root===hosted));
+  await mkdir(root,{recursive:true});const dir=await mkdtemp(path.join(root,'input-bound-'));
+  try { await run(dir); } finally { await rm(dir,{recursive:true,force:true}); }
+}
+const inputFailure = run => {
+  assert.equal(run.error,undefined);assert.equal(run.signal,null);assert.equal(run.status,1);
+  assert.equal(run.stdout,'');assert.equal(run.stderr,'monitor-input-integrity\n');
+};
+test('binding CLI enforces its actual UTF-8 byte boundary',()=>inputFixture(async dir=>{
+  const file=path.join(dir,'input.json'),prefix='{"note":"🧪"}';
+  const body=prefix+' '.repeat(64*1024-Buffer.byteLength(prefix));
+  await writeFile(file,body);
+  let run=spawnSync(process.execPath,[cli,'binding-audit',file],{encoding:'utf8',timeout:5000});
+  assert.equal(run.error,undefined);assert.equal(run.status,2);blocked(JSON.parse(run.stdout));
+  await writeFile(file,body+' ');
+  inputFailure(spawnSync(process.execPath,[cli,'binding-audit',file],{encoding:'utf8',timeout:5000}));
+}));
+test('binding and replay CLI cap a real file that grows after metadata observation',()=>inputFixture(async dir=>{
+  const replay=await readFile(new URL('../fixtures/replay.json',import.meta.url),'utf8');
+  for(const [command,limit,prefix] of [['binding-audit',64*1024,'{}'],['replay',8*1024*1024,replay]]) {
+    const file=path.join(dir,`${command}.json`),preload=path.join(dir,`${command}-grow.mjs`);
+    await writeFile(file,'');
+    // Inject only the metadata observation cutpoint. The child still reads a
+    // real opened regular file whose valid JSON bytes now exceed its old stat.
+    await writeFile(preload,`import fs from 'node:fs/promises';
+import {syncBuiltinESMExports} from 'node:module';
+const target=${JSON.stringify(file)},prefix=${JSON.stringify(prefix)},limit=${limit};
+const originalOpen=fs.open.bind(fs),originalStat=fs.stat.bind(fs);let grown=false;
+const grow=async()=>{if(!grown){grown=true;await fs.writeFile(target,prefix+' '.repeat(limit+1-Buffer.byteLength(prefix)));}};
+fs.stat=async(name,...args)=>{const info=await originalStat(name,...args);if(name===target)await grow();return info;};
+fs.open=async(name,...args)=>{const handle=await originalOpen(name,...args);if(name===target){const original=handle.stat.bind(handle);handle.stat=async(...args)=>{const info=await original(...args);await grow();return info;};}return handle;};
+syncBuiltinESMExports();\n`);
+    inputFailure(spawnSync(process.execPath,['--import',preload,cli,command,file],{encoding:'utf8',timeout:5000}));
+    assert.equal((await stat(file)).size,limit+1);
+  }
+}));
+test('binding and replay CLI reject an idle owned FIFO without waiting for a writer',
+  {skip:process.platform==='win32'},()=>inputFixture(async dir=>{
+    const fifo=path.join(dir,'idle.fifo');
+    const made=spawnSync('mkfifo',[fifo],{encoding:'utf8',timeout:5000});
+    assert.equal(made.error,undefined);assert.equal(made.status,0);
+    for(const command of ['binding-audit','replay'])
+      inputFailure(spawnSync(process.execPath,[cli,command,fifo],{encoding:'utf8',timeout:5000}));
+  }));
