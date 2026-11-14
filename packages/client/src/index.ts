@@ -2233,9 +2233,10 @@ export class GonvexClient {
       this.scheduleReconnect();
       // Disconnect bookkeeping and sent-call rejection must finish before an
       // application observer can throw or replace this connection.
+      const notifyPresenceDisconnected = this.presenceFeed.prepareDisconnect();
       this.publishTenantAdmission(undefined);
       if (!ownsClose()) return;
-      this.presenceFeed.disconnected();
+      notifyPresenceDisconnected?.();
       if (!ownsClose()) return;
       this.flushTelemetry();
       if (!ownsClose()) return;

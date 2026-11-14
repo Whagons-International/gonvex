@@ -255,3 +255,54 @@ it('presence disconnect: admission observer replacement keeps its newly accepted
  try{s.close();await vi.waitFor(()=>expect(c.tenantAdmission()?.memberId).toBe('replacement-member'));expect(handled).toBe(true);expect(replacement?.readyState).toBe(Socket.OPEN);expect(c.connectionState().isWebSocketConnected).toBe(true);}
  finally{stop();}
 });
+
+for (const deferred of [false, true]) it(`presence state invalidation precedes admission reconnect (${deferred ? 'deferred' : 'synchronous'} close)`, async () => {
+ const {c,s}=await setup({presence:true});let armed=false,handled=false;let replacement:Socket|undefined;let readyAtAdmission: boolean|undefined;
+ const stopPresence=c.subscribePresence(()=>{});
+ const subscription=s.sent.find(x=>x.type==='presence.subscribe');expect(subscription).toBeDefined();
+ s.receive({type:'presence.snapshot',id:subscription.id,members:[{memberId:'old-member',state:'active',since:1}]});
+ expect(c.presenceSnapshot().ready).toBe(true);
+ const stopAdmission=c.onTenantAdmissionChange(()=>{
+  if(!armed||handled||c.tenantAdmission())return;
+  handled=true;readyAtAdmission=c.presenceSnapshot().ready;c.connect();replacement=Socket.instances.at(-1)!;replacement.open();
+  replacement.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1,presence:1},replica:directive});
+ });
+ armed=true;
+ try {
+  s.readyState=Socket.CLOSED;
+  if(deferred)queueMicrotask(()=>s.emit('close'));else s.emit('close');
+  await tick();
+  expect(handled).toBe(true);expect(readyAtAdmission).toBe(false);
+  expect(c.tenantAdmission()).toBeUndefined();expect(c.presenceSnapshot().supported).toBe(true);expect(c.presenceSnapshot().ready).toBe(false);
+  expect([...c.presenceSnapshot().members.keys()]).toEqual(['old-member']);
+  expect(replacement?.readyState).toBe(Socket.OPEN);expect(writes(replacement!)).toHaveLength(0);
+ } finally { armed=false;stopAdmission();stopPresence(); }
+});
+
+it('presence state invalidation never overwrites an admission-observer replacement snapshot', async () => {
+ const {c,s}=await setup({presence:true});let armed=false,handled=false;
+ const stopPresence=c.subscribePresence(()=>{});const subscription=s.sent.find(x=>x.type==='presence.subscribe');
+ s.receive({type:'presence.snapshot',id:subscription.id,members:[{memberId:'old-member',state:'active',since:1}]});
+ const stopAdmission=c.onTenantAdmissionChange(()=>{
+  if(!armed||handled||c.tenantAdmission())return;
+  handled=true;c.connect();const next=Socket.instances.at(-1)!;next.open();
+  next.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1,presence:1},replica:directive});
+  const auth=next.sent.find(x=>x.type==='auth');
+  next.receive({type:'auth.result',id:auth.id,result:{replica:directive,artifactHash:'artifact-one',localIdentity:{...identity,member:{id:'new-member'}}}});
+  const subscribe=next.sent.find(x=>x.type==='presence.subscribe');expect(subscribe).toBeDefined();
+  next.receive({type:'presence.snapshot',id:subscribe.id,members:[{memberId:'new-member',state:'active',since:2}]});
+ });
+ armed=true;
+ try {
+  s.close();await tick();expect(handled).toBe(true);expect(c.tenantAdmission()?.memberId).toBe('new-member');
+  expect(c.presenceSnapshot().ready).toBe(true);expect([...c.presenceSnapshot().members.keys()]).toEqual(['new-member']);
+ } finally { armed=false;stopAdmission();stopPresence(); }
+});
+
+it('presence state invalidation still notifies a surviving same-owner presence observer once', async () => {
+ const {c,s}=await setup({presence:true});let count=0;
+ const stopPresence=c.subscribePresence(()=>{if(!c.presenceSnapshot().ready)count++;});const subscription=s.sent.find(x=>x.type==='presence.subscribe');
+ s.receive({type:'presence.snapshot',id:subscription.id,members:[{memberId:'old-member',state:'active',since:1}]});count=0;
+ try {s.close();expect(c.presenceSnapshot().ready).toBe(false);expect(count).toBe(1);}
+ finally {stopPresence();}
+});
