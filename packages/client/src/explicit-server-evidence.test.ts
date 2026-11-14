@@ -23,13 +23,13 @@ const writes=(s:Socket)=>s.sent.filter(x=>x.type==='reducer.call');
 const reads=(s:Socket)=>s.sent.filter(x=>x.type==='query.call'&&x.path==='__gonvex.reducerReceipt');
 const result=(id:string)=>({type:'reducer.result',id,path:localRef.path,result:{renamed:true},originCommandId:id,committedRevision:4});
 const transaction=(id:string,revision=4)=>({type:'replica.transaction',originCommandId:id,cursor:{epoch:'db',revision},provenance:{rootCommandId:id,channel:'ui',rootChannel:'ui',actorAccountId:'a',actorMemberId:'m'},changes:[{entity:'board',id:'row',operation:'update',newValue:{id:'row',title:'synthetic'}}]});
-async function setup(config:{hash?:any;bindingHash?:string;binding?:boolean;storage?:MemoryLocalReplicaStorage;admissionObserver?:(c:GonvexClient)=>void;localObserver?:(c:GonvexClient)=>void}={}){
+async function setup(config:{presence?:boolean;hash?:any;bindingHash?:string;binding?:boolean;storage?:MemoryLocalReplicaStorage;admissionObserver?:(c:GonvexClient)=>void;localObserver?:(c:GonvexClient)=>void}={}){
  const {bindingHash='artifact-one',binding=true,storage=new MemoryLocalReplicaStorage()}=config;const hash=Object.hasOwn(config,'hash')?config.hash:'artifact-one';
  vi.stubGlobal('WebSocket',Socket);const local={execute:0,replay:0};
  const runtime={mode:'portable' as const,artifactHash:bindingHash,tables:[],create:()=>({ready:Promise.resolve(),execute:async()=>{local.execute++;throw Error('PRIVATE local execution');},replay:async()=>{local.replay++;throw Error('PRIVATE local replay');},close:()=>{}})};
  const c=new GonvexClient('ws://controlled.invalid/ws',{project:'p',tenant:'t',token:'one',identity:{iss:'fixture',sub:'a'},errorReporting:false,localDependencyResidency:'off',clientContract:{version:3,offlineMaxAgeMs:null},localReplica:{storage},...(binding?{localRuntime:runtime}:{})});clients.push(c);
  if(config.admissionObserver)c.onTenantAdmissionChange(()=>config.admissionObserver!(c));if(config.localObserver)c.onLocalSessionChange(()=>config.localObserver!(c));
- const w=c.watchReplica(collection,{}),s=Socket.instances.at(-1)!;s.open();s.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1},replica:directive});
+ const w=c.watchReplica(collection,{}),s=Socket.instances.at(-1)!;s.open();s.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1,...(config.presence?{presence:1}:{})},replica:directive});
  const auth=s.sent.find(x=>x.type==='auth');s.receive({type:'auth.result',id:auth.id,result:{replica:directive,localIdentity:identity,...(hash===undefined?{}:{artifactHash:hash})}});
  await vi.waitFor(()=>expect(s.sent.some(x=>x.type==='replica.open')).toBe(true));
  const open=s.sent.filter(x=>x.type==='replica.open').at(-1),hashes=await replicaRowsHashes([],'id'),digest=await replicaHashesDigest(hashes);
@@ -38,6 +38,80 @@ async function setup(config:{hash?:any;bindingHash?:string;binding?:boolean;stor
 }
 const begin=(c:GonvexClient,ref=localRef,args:any={id:'row',title:'synthetic'},opts:any=options)=>c.reducerWithTransactionEvidence(ref,args,opts).then(value=>({value,error:undefined as any}),error=>({value:undefined,error}));
 async function finish(s:Socket,id:string){s.receive(result(id));s.receive(transaction(id));s.receive({type:'replica.watermark',revision:4});await vi.waitFor(()=>expect(reads(s)).toHaveLength(1));const q=reads(s)[0];s.receive({type:'query.result',id:q.id,path:q.path,result:{found:true,cursor:{epoch:'db',revision:5}}});}
+
+function initialNotification(w: Awaited<ReturnType<typeof setup>>['w'], handler: () => void) {
+ const callbacks: Array<() => void> = [];
+ const queue = vi.spyOn(globalThis, 'queueMicrotask').mockImplementation(callback => callbacks.push(callback));
+ let stop: () => void;
+ try { stop = w.onUpdate(handler); } finally { queue.mockRestore(); }
+ expect(callbacks).toHaveLength(1);
+ return { run: callbacks[0], stop: stop! };
+}
+
+it('queued initial replica observer failure fences a sent write without an uncaught exception or receipt', async () => {
+ const {c,s,w} = await setup();
+ const notification = initialNotification(w, () => { throw Error('PRIVATE initial observer'); });
+ const pending = begin(c), id = writes(s)[0].id;
+ try {
+ expect(() => notification.run()).not.toThrow();
+ const outcome = await pending;
+ expect(outcome.error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});
+ expect(JSON.stringify(outcome)).not.toContain('PRIVATE');
+ expect(c.connectionState().isWebSocketConnected).toBe(false);
+ expect(s.readyState).toBe(Socket.CLOSED);
+ s.receive(result(id));s.receive(transaction(id));s.receive({type:'replica.watermark',revision:4});
+ await tick();
+ expect(writes(s)).toHaveLength(1);expect(reads(s)).toHaveLength(0);
+ expect((await begin(c)).error).toMatchObject({possibleWriteApplied:false});
+ expect(writes(s)).toHaveLength(1);
+ } finally { notification.stop(); }
+});
+
+it('queued initial replica observer failure cannot close a connection replaced by that observer', async () => {
+ const {c,s,w} = await setup();let acted = false;
+ const notification = initialNotification(w, () => {
+  if (acted) return;
+  acted = true;s.close();c.connect();Socket.instances.at(-1)!.open();
+  throw Error('PRIVATE old observer');
+ });
+ expect(() => notification.run()).not.toThrow();
+ const replacement = Socket.instances.at(-1)!;
+ expect(replacement).not.toBe(s);
+ expect(replacement.readyState).toBe(Socket.OPEN);
+ expect(c.connectionState().isWebSocketConnected).toBe(true);
+ expect(writes(replacement)).toHaveLength(0);expect(reads(replacement)).toHaveLength(0);
+ notification.stop();
+});
+
+it('two failing initial replica observers cannot escape through synchronous close recovery', async () => {
+ const {c,s,w} = await setup();
+ const first = initialNotification(w, () => { throw Error('PRIVATE first observer'); });
+ const second = initialNotification(w, () => { throw Error('PRIVATE second observer'); });
+ const pending = begin(c);
+ try {
+  expect(() => first.run()).not.toThrow();expect(() => second.run()).not.toThrow();
+  expect((await pending).error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});
+  expect(c.connectionState().isWebSocketConnected).toBe(false);
+  expect(writes(s)).toHaveLength(1);expect(reads(s)).toHaveLength(0);
+ } finally { first.stop();second.stop(); }
+});
+
+it('unsubscribing before the queued initial notification prevents the observer from running', async () => {
+ const {c,w} = await setup();const handler = vi.fn();
+ const notification = initialNotification(w, handler);notification.stop();notification.run();
+ expect(handler).not.toHaveBeenCalled();expect(c.connectionState().isWebSocketConnected).toBe(true);
+});
+
+it('a synchronous replica observer failure still refuses actual transaction confirmation', async () => {
+ const {c,s,w} = await setup();let fail = false;
+ const stop = w.onUpdate(() => { if (fail) throw Error('PRIVATE transaction observer'); });
+ await tick();const pending = begin(c), id = writes(s)[0].id;fail = true;
+ s.receive(result(id));s.receive(transaction(id));s.receive({type:'replica.watermark',revision:4});
+ try {
+ expect((await pending).error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});
+ expect(writes(s)).toHaveLength(1);expect(reads(s)).toHaveLength(0);
+ } finally { fail = false;stop(); }
+});
 for(const order of ['result-first','transaction-first'])it(`explicit ${order}: one keyed direct command, fresh entropy, exact auth hash, no command contract`,async()=>{
  const {c,s,local}=await setup();const before={...local};const p=begin(c);const call=writes(s)[0];expect(call).toBeDefined();
  expect(call.idempotencyKey).toBe(call.id);expect(call.receiptPath).toBe(localRef.path);expect(call.artifactHash).toBe('artifact-one');expect(call.intentEntropy).toMatch(/^[0-9a-f]{64}$/);expect(Object.hasOwn(call,'clientContract')).toBe(false);expect(s.sent.find(x=>x.type==='auth').clientContract).toBe(3);
@@ -135,4 +209,100 @@ it('auth change during receipt serialization refuses before the second send',asy
  const spy=vi.spyOn(JSON,'stringify').mockImplementation(((value:any,...args:any[])=>{const payload=Reflect.apply(original,JSON,[value,...args]);if(value?.type==='query.call'&&value.path==='__gonvex.reducerReceipt'){serialized++;c.setAuth({token:'receipt-serialization-replacement'});}return payload;}) as typeof JSON.stringify);
  try {s.receive(result(id));s.receive(transaction(id));s.receive({type:'replica.watermark',revision:4});expect((await p).error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});expect(serialized).toBe(1);expect(reads(s)).toHaveLength(0);expect(writes(s)).toHaveLength(1);}
  finally {spy.mockRestore();}
+});
+
+it('synchronous close recovery rejects ordinary sent reducers before observer notifications',async()=>{
+ const {c,s,w}=await setup();const ordinaryRef:FunctionReference={kind:'reducer',path:'board.ordinary'};
+ let observed:any;const p=c.reducer(ordinaryRef,{},{timeoutMs:1000}).then(v=>observed={value:v},e=>observed={error:e});
+ const a=initialNotification(w,()=>{throw Error('initial');}),b=initialNotification(w,()=>{throw Error('recovery');});
+ try{
+  expect(()=>a.run()).not.toThrow();await tick();expect(s.readyState).toBe(Socket.CLOSED);
+  expect(observed?.error?.code).toBe('disconnected');
+ }finally{a.stop();b.stop();c.close();await p;}
+});
+
+for (const throwing of [false, true]) it(`presence disconnect: clears admission before ${throwing ? 'throwing' : 'reconnecting'} presence observers`, async () => {
+ const {c,s,w} = await setup({presence:true});let armed=false,handled=false;let observed:unknown='not called';let replacement:Socket|undefined;
+ const pending=c.reducer({kind:'reducer',path:'board.ordinary'},{},{timeoutMs:1000}).catch(error=>error);
+ const stop=c.subscribePresence(()=>{
+  if(!armed||handled||c.presenceSnapshot().ready)return;
+  handled=true;observed=c.tenantAdmission();
+  if(throwing)throw Error('PRIVATE presence observer');
+  c.connect();replacement=Socket.instances.at(-1)!;replacement.open();
+ });
+ const subscribe=s.sent.find(x=>x.type==='presence.subscribe');expect(subscribe).toBeDefined();
+ s.receive({type:'presence.snapshot',id:subscribe.id,members:[]});expect(c.presenceSnapshot().ready).toBe(true);
+ expect(c.tenantAdmission()?.memberId).toBe('m');armed=true;
+ const notification=throwing?initialNotification(w,()=>{throw Error('PRIVATE initial observer');}):undefined;
+ try{
+  if(notification)expect(()=>notification.run()).not.toThrow();else s.close();
+  expect(handled).toBe(true);expect(observed).toBeUndefined();expect(c.tenantAdmission()).toBeUndefined();
+  expect((await pending).code).toBe('disconnected');
+  if(replacement){expect(replacement).not.toBe(s);expect(replacement.readyState).toBe(Socket.OPEN);expect(c.connectionState().isWebSocketConnected).toBe(true);expect(writes(replacement)).toHaveLength(0);}
+ }finally{notification?.stop();stop();}
+});
+
+it('presence disconnect: admission observer replacement keeps its newly accepted identity', async () => {
+ const {c,s}=await setup({presence:true});let armed=false,handled=false;let replacement:Socket|undefined;
+ const stop=c.onTenantAdmissionChange(()=>{
+  if(!armed||handled||c.tenantAdmission())return;
+  handled=true;c.connect();replacement=Socket.instances.at(-1)!;replacement.open();
+  replacement.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1,presence:1},replica:directive});
+  const auth=replacement.sent.find(x=>x.type==='auth');
+  replacement.receive({type:'auth.result',id:auth.id,result:{replica:directive,artifactHash:'artifact-one',localIdentity:{...identity,member:{id:'replacement-member'}}}});
+ });
+ armed=true;
+ try{s.close();await vi.waitFor(()=>expect(c.tenantAdmission()?.memberId).toBe('replacement-member'));expect(handled).toBe(true);expect(replacement?.readyState).toBe(Socket.OPEN);expect(c.connectionState().isWebSocketConnected).toBe(true);}
+ finally{stop();}
+});
+
+for (const deferred of [false, true]) it(`presence state invalidation precedes admission reconnect (${deferred ? 'deferred' : 'synchronous'} close)`, async () => {
+ const {c,s}=await setup({presence:true});let armed=false,handled=false;let replacement:Socket|undefined;let readyAtAdmission: boolean|undefined;
+ const stopPresence=c.subscribePresence(()=>{});
+ const subscription=s.sent.find(x=>x.type==='presence.subscribe');expect(subscription).toBeDefined();
+ s.receive({type:'presence.snapshot',id:subscription.id,members:[{memberId:'old-member',state:'active',since:1}]});
+ expect(c.presenceSnapshot().ready).toBe(true);
+ const stopAdmission=c.onTenantAdmissionChange(()=>{
+  if(!armed||handled||c.tenantAdmission())return;
+  handled=true;readyAtAdmission=c.presenceSnapshot().ready;c.connect();replacement=Socket.instances.at(-1)!;replacement.open();
+  replacement.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1,presence:1},replica:directive});
+ });
+ armed=true;
+ try {
+  s.readyState=Socket.CLOSED;
+  if(deferred)queueMicrotask(()=>s.emit('close'));else s.emit('close');
+  await tick();
+  expect(handled).toBe(true);expect(readyAtAdmission).toBe(false);
+  expect(c.tenantAdmission()).toBeUndefined();expect(c.presenceSnapshot().supported).toBe(true);expect(c.presenceSnapshot().ready).toBe(false);
+  expect([...c.presenceSnapshot().members.keys()]).toEqual(['old-member']);
+  expect(replacement?.readyState).toBe(Socket.OPEN);expect(writes(replacement!)).toHaveLength(0);
+ } finally { armed=false;stopAdmission();stopPresence(); }
+});
+
+it('presence state invalidation never overwrites an admission-observer replacement snapshot', async () => {
+ const {c,s}=await setup({presence:true});let armed=false,handled=false;
+ const stopPresence=c.subscribePresence(()=>{});const subscription=s.sent.find(x=>x.type==='presence.subscribe');
+ s.receive({type:'presence.snapshot',id:subscription.id,members:[{memberId:'old-member',state:'active',since:1}]});
+ const stopAdmission=c.onTenantAdmissionChange(()=>{
+  if(!armed||handled||c.tenantAdmission())return;
+  handled=true;c.connect();const next=Socket.instances.at(-1)!;next.open();
+  next.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1,presence:1},replica:directive});
+  const auth=next.sent.find(x=>x.type==='auth');
+  next.receive({type:'auth.result',id:auth.id,result:{replica:directive,artifactHash:'artifact-one',localIdentity:{...identity,member:{id:'new-member'}}}});
+  const subscribe=next.sent.find(x=>x.type==='presence.subscribe');expect(subscribe).toBeDefined();
+  next.receive({type:'presence.snapshot',id:subscribe.id,members:[{memberId:'new-member',state:'active',since:2}]});
+ });
+ armed=true;
+ try {
+  s.close();await tick();expect(handled).toBe(true);expect(c.tenantAdmission()?.memberId).toBe('new-member');
+  expect(c.presenceSnapshot().ready).toBe(true);expect([...c.presenceSnapshot().members.keys()]).toEqual(['new-member']);
+ } finally { armed=false;stopAdmission();stopPresence(); }
+});
+
+it('presence state invalidation still notifies a surviving same-owner presence observer once', async () => {
+ const {c,s}=await setup({presence:true});let count=0;
+ const stopPresence=c.subscribePresence(()=>{if(!c.presenceSnapshot().ready)count++;});const subscription=s.sent.find(x=>x.type==='presence.subscribe');
+ s.receive({type:'presence.snapshot',id:subscription.id,members:[{memberId:'old-member',state:'active',since:1}]});count=0;
+ try {s.close();expect(c.presenceSnapshot().ready).toBe(false);expect(count).toBe(1);}
+ finally {stopPresence();}
 });

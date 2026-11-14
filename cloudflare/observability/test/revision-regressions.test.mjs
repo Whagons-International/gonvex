@@ -25,11 +25,19 @@ for (const [name,adapter] of [
   ['sync-body',()=>block(40)],
   ['async-microtask',async()=>{await Promise.resolve();block(40);}],
   ['async-turn-boundary',async()=>{await nextTurn();block(40);}],
-]) test(`F1: ${name} cannot PASS a 10ms deadline after 40ms work`,async()=>{
+]) test(`F1: ${name} cannot PASS a 10ms deadline after 40ms work`,async t=>{
+  // Hold only the deadline timer for this case so the real next-turn body
+  // must settle. Otherwise a loaded executor may correctly time out before
+  // that body starts, which does not prove a 40ms settlement observation.
+  if (name==='async-turn-boundary') t.mock.timers.enable({apis:['setTimeout']});
   const g=guard(),r=await runCheck(ctx(),'sqlite-read',adapter,g);
   assert.equal(r.status,'fail');assert.equal(r.code,'deadline');assert.equal(r.attempt,0);
   assert.ok(r.durationMs>=40);assert.equal(r.deadlineExceeded,true);
-  // A loaded executor can let the timer win before the asynchronous body starts.
+  if (name==='async-turn-boundary') {
+    assert.equal(r.settlement,'fulfilled');assert.ok(r.settledElapsedMs>=40);
+    assert.equal(r.observedStatus,'pass');
+  }
+  // Separate real-timer tests below retain unsettled deadline observations.
   assert.ok(['fulfilled','unsettled'].includes(r.settlement));
   assert.equal(g.state.paused,true);validateRaw(r);
   evidence.results[name]=r;

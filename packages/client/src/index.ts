@@ -2205,13 +2205,10 @@ export class GonvexClient {
       if(this.socket===socket)this.transactionEvidence?.fail();
       rowPatches.clear();
       if (this.socket !== socket || this.manuallyClosed) return;
-      this.presenceFeed.disconnected();
-      this.flushTelemetry();
-      this.publishTenantAdmission(undefined);
+      const scope = this.replicaScope;
+      const ownsClose = () => this.socket === socket && this.socketGeneration === generation
+        && this.replicaScope === scope && !this.manuallyClosed;
       this.isWebSocketConnected = false;
-      this.replica.setFreshness("offline");
-      if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
-      this.markReplicaSubscriptionsOutOfDate();
       this.authInFlight = false;
       this.authResendRequired = false;
       this.latestAuthFrameId = undefined;
@@ -2234,6 +2231,21 @@ export class GonvexClient {
         { code: "disconnected", path: call.path, operation: call.kind },
       ), (call) => call.scope !== "control");
       this.scheduleReconnect();
+      // Disconnect bookkeeping and sent-call rejection must finish before an
+      // application observer can throw or replace this connection.
+      const notifyPresenceDisconnected = this.presenceFeed.prepareDisconnect();
+      this.publishTenantAdmission(undefined);
+      if (!ownsClose()) return;
+      notifyPresenceDisconnected?.();
+      if (!ownsClose()) return;
+      this.flushTelemetry();
+      if (!ownsClose()) return;
+      this.replica.setFreshness("offline");
+      if (!ownsClose()) return;
+      if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
+      if (!ownsClose()) return;
+      this.markReplicaSubscriptionsOutOfDate();
+      if (!ownsClose()) return;
       this.notifyConnectionState();
     });
     // Delivery v2 batches re-enter with already parsed frames (`parsed`).
@@ -3300,6 +3312,20 @@ export class GonvexClient {
     const notify = () => {
       for (const handler of updateHandlers) handler();
     };
+    const notifyInitial = (handler: WatchUpdateHandler, unsubscribe: () => void) => {
+      if (!updateHandlers.has(handler)) return;
+      const scope = this.replicaScope;
+      const generation = this.socketGeneration;
+      const socket = this.socket;
+      try { handler(); }
+      catch {
+        unsubscribe();
+        // This notification runs outside the frame queue. Preserve its failure
+        // boundary without letting an old observer close a replacement stream.
+        try { this.handleReplicaFrameFailure(scope, generation, socket); }
+        catch { /* Failure fencing precedes recovery notifications to other observers. */ }
+      }
+    };
     // Keep the ReplicaSubscription as transport/reconciliation state only. The
     // value returned by this watch always comes from normalized LocalReplica.
     let stop: (() => void) | undefined;
@@ -3387,10 +3413,7 @@ export class GonvexClient {
           releaseTimer = undefined;
         }
         updateHandlers.add(handler);
-        queueMicrotask(() => {
-          if (updateHandlers.has(handler)) handler();
-        });
-        return () => {
+        const unsubscribe = () => {
           updateHandlers.delete(handler);
           if (updateHandlers.size > 0 || releaseTimer) return;
           releaseTimer = setTimeout(() => {
@@ -3399,6 +3422,10 @@ export class GonvexClient {
             stop?.();
           }, 0);
         };
+        queueMicrotask(() => {
+          notifyInitial(handler, unsubscribe);
+        });
+        return unsubscribe;
       },
     };
   }
