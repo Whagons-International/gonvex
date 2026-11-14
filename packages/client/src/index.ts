@@ -2205,13 +2205,10 @@ export class GonvexClient {
       if(this.socket===socket)this.transactionEvidence?.fail();
       rowPatches.clear();
       if (this.socket !== socket || this.manuallyClosed) return;
-      this.presenceFeed.disconnected();
-      this.flushTelemetry();
-      this.publishTenantAdmission(undefined);
+      const scope = this.replicaScope;
+      const ownsClose = () => this.socket === socket && this.socketGeneration === generation
+        && this.replicaScope === scope && !this.manuallyClosed;
       this.isWebSocketConnected = false;
-      this.replica.setFreshness("offline");
-      if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
-      this.markReplicaSubscriptionsOutOfDate();
       this.authInFlight = false;
       this.authResendRequired = false;
       this.latestAuthFrameId = undefined;
@@ -2234,6 +2231,19 @@ export class GonvexClient {
         { code: "disconnected", path: call.path, operation: call.kind },
       ), (call) => call.scope !== "control");
       this.scheduleReconnect();
+      // Disconnect bookkeeping and sent-call rejection must finish before an
+      // application observer can throw or replace this connection.
+      this.presenceFeed.disconnected();
+      if (!ownsClose()) return;
+      this.flushTelemetry();
+      this.publishTenantAdmission(undefined);
+      if (!ownsClose()) return;
+      this.replica.setFreshness("offline");
+      if (!ownsClose()) return;
+      if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
+      if (!ownsClose()) return;
+      this.markReplicaSubscriptionsOutOfDate();
+      if (!ownsClose()) return;
       this.notifyConnectionState();
     });
     // Delivery v2 batches re-enter with already parsed frames (`parsed`).

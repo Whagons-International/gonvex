@@ -210,3 +210,13 @@ it('auth change during receipt serialization refuses before the second send',asy
  try {s.receive(result(id));s.receive(transaction(id));s.receive({type:'replica.watermark',revision:4});expect((await p).error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});expect(serialized).toBe(1);expect(reads(s)).toHaveLength(0);expect(writes(s)).toHaveLength(1);}
  finally {spy.mockRestore();}
 });
+
+it('synchronous close recovery rejects ordinary sent reducers before observer notifications',async()=>{
+ const {c,s,w}=await setup();const ordinaryRef:FunctionReference={kind:'reducer',path:'board.ordinary'};
+ let observed:any;const p=c.reducer(ordinaryRef,{},{timeoutMs:1000}).then(v=>observed={value:v},e=>observed={error:e});
+ const a=initialNotification(w,()=>{throw Error('initial');}),b=initialNotification(w,()=>{throw Error('recovery');});
+ try{
+  expect(()=>a.run()).not.toThrow();await tick();expect(s.readyState).toBe(Socket.CLOSED);
+  expect(observed?.error?.code).toBe('disconnected');
+ }finally{a.stop();b.stop();c.close();await p;}
+});
