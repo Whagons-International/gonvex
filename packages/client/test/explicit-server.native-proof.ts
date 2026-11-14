@@ -77,6 +77,13 @@ it('generated local refs execute once through the explicit native SDK evidence p
   expect(client.activeArtifactHash()).toBe(manifests.v2.module.hash);await new Promise<void>(resolve=>setTimeout(resolve,0));
   await expect(client.reducerWithTransactionEvidence(api.board.rename,{id:'target',title:'must-not-send'},opts)).rejects.toMatchObject({possibleWriteApplied:false});
   expect(sock.sent.filter(x=>x.type==='reducer.call')).toHaveLength(count);
+  await vi.waitFor(()=>{expect(client!.localSessionState()).toBe('authenticated');expect(w.localReplicaState()?.isUpToDate).toBe(true);},{timeout:10000});
+  const installedV1=localRuntime.artifactHash;
+  try {
+    localRuntime.artifactHash=manifests.v2.module.hash;
+    await expect(client.reducerWithTransactionEvidence(api.board.rename,{id:'target',title:'must-not-relabel-installed-binding'},opts)).rejects.toMatchObject({possibleWriteApplied:false});
+    expect(sock.sent.filter(x=>x.type==='reducer.call')).toHaveLength(count);
+  } finally { localRuntime.artifactHash=installedV1; }
   const rows=(await stub('GET',`tables/board?project=${projectId}&tenant=${tenant}`)).rows;
   expect(rows.find((x:any)=>x.id==='target')).toMatchObject({title:'actually-applied-unknown',archived:1});
   console.log('M05_EXPLICIT_NATIVE '+JSON.stringify({domain:'controlled-generated-module-native-sdk-NOT-Whagons',generatedArtifact:manifest.module.hash,confirmedCommands:3,initialTransaction:created.confirmation.cursor,laterReceiptFence:sock.receiptFences[0],nativeLastCall:counters,distinctKeys:3,receiptReads:3,ordinaryAuthContract:3,commandContractOmitted:true,localExecutionMetadataPreserved:true,fallbacks,noopUnknown:true,sameContractReloadUnknown:true,actualUnknownWriteRetained:true,oldBindingMismatchAfterFreshAuthRefused:true}));

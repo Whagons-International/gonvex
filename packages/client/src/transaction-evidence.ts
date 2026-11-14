@@ -47,7 +47,7 @@ export class TransactionEvidenceCall {
   private owns() {
     if(this.finished)return false;
     if(performance.now()-this.start>=this.timeoutMs){this.fail('deadline');return false;}
-    if(!this.current()){this.fail();return false;}return true;
+    if(!this.current()){this.fail();return false;}return !this.finished;
   }
   observe(message:ServerMessage) {
     if(!this.owns())return;

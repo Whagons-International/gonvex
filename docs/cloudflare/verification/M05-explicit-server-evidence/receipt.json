@@ -2503,5 +2503,90 @@
     "Chromium/browser/Container/CPU/K22 campaign",
     "drills/continuous uptime/14d30d"
   ],
-  "independentReview": "NEW lead-owned review required"
+  "independentReview": "NEW lead-owned review required",
+  "historicalReceiptSource": "35f7b53e1b9d1c8f10df083e9a0c9afa6e607087",
+  "reviewCorrection": {
+    "parent": "35f7b53e1b9d1c8f10df083e9a0c9afa6e607087",
+    "base": "1b934f15a2bd11db8753fd39dedf895a31952bb3",
+    "sourceDomain": "same tested runtime source bytes, exact hashes below; evidence/docs may differ",
+    "findings": [
+      "R1 final getter invalidation/send classification",
+      "R2 installed generated binding mutation",
+      "R3 storage-supplied identity alias"
+    ],
+    "productionScope": [
+      "packages/client/src/index.ts",
+      "packages/client/src/transaction-evidence.ts:owns post-callback finished check"
+    ],
+    "runtimeAndRegressionSources": [
+      {
+        "path": "packages/client/src/index.ts",
+        "bytes": 324769,
+        "sha256": "f1f49d93c01571d824f2d77de5a7a8e7b25a4189dfc428846905248ba684ad6b"
+      },
+      {
+        "path": "packages/client/src/transaction-evidence.ts",
+        "bytes": 6326,
+        "sha256": "2efa35a28154d47de84503aaf4185f6a508eab1f2f622eba04f9f555e77ab8da"
+      },
+      {
+        "path": "packages/client/src/explicit-server-review-regressions.test.ts",
+        "bytes": 7086,
+        "sha256": "4ed412774f68ae5515e77a6fdcaeb10fc5b325f2aacafd8c4c525fb295f1ce30"
+      },
+      {
+        "path": "packages/client/src/transaction-evidence-reentrancy.test.ts",
+        "bytes": 634,
+        "sha256": "f662ac6c81e1780e1614ed5cceb72000936a30910bce4cebdfb2a8c47ebe0d4f"
+      },
+      {
+        "path": "packages/client/test/explicit-server.native-proof.ts",
+        "bytes": 9947,
+        "sha256": "beefe9679922f197d522725cb87e33a6ac1f581b2595bf84cf23d2c04f1c34bf"
+      }
+    ],
+    "verification": {
+      "baselineFourIntendedFailures": true,
+      "fullSDK": 1252,
+      "originalSDK": 1178,
+      "original35fAdditions": 70,
+      "newRegressionTests": 4,
+      "nativeOriginalAndFrozenMutation": 10,
+      "appendedNativeCase": {
+        "passed": 1,
+        "notSelected": 9
+      },
+      "OPFS": 19,
+      "policy": 199,
+      "monitoring": 156,
+      "conformance": 29,
+      "watermark": "12 + three controls reaching four intended failures each",
+      "ControlWatch": "38 + twenty intended failures over twelve controls",
+      "CFTypeContexts": {
+        "passedPairs": 9,
+        "sameInheritedDiagnosticPairs": 1,
+        "rootDiagnostics": "same three path.spec diagnostics on base/head under built SDK resolution; no assertion removed"
+      },
+      "cycles": {
+        "packages/client/src": {
+          "integration-base": 0,
+          "candidate": 0
+        },
+        "cloudflare": {
+          "integration-base": 1,
+          "candidate": 1
+        }
+      },
+      "generators": "SQLite options/dashboard/template/catalog/types/Wrangler/docs metadata + Next types all completed, no tracked generated drift"
+    },
+    "localEvidenceRoot": "/mnt/data/work/gonvex-cloudflare-lead/m05-pr427/repair-adverses-35f",
+    "retainedFailures": [
+      "monitoring wrong own scratch prefix",
+      "own unmatched appended-native test selector (zero tests, not PASS)",
+      "own relative-path diagnostic comparison mismatch"
+    ],
+    "newIndependentRecheck": "REQUIRED, not completed",
+    "fullM05": "UNMET",
+    "monitoring": "DISABLED"
+  }
 }

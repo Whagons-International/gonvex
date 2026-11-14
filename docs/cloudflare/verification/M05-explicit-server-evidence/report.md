@@ -1,5 +1,7 @@
 # M05 explicit server transaction evidence candidate
 
+> Historical implementation and verification at source35f7b53e follow below. The new independent review found three P2 ownership defects on that source. Current correction and verification are in [review-corrections.md](review-corrections.md); the original1248/native9 evidence is retained and is not source clearance for the corrected head.
+
 The public SDK now accepts `execution:'server'` on `reducerWithTransactionEvidence`. A generated `localExecution:1` ref requires this explicit opt-in, a genuine installed binding hash matching the latest accepted tenant auth artifact, and the unchanged transaction/application/watermark/receipt proof. The method preserves the ref and offline metadata, never enters LocalRuntime/outbox/generic send/reconnect helpers, and never retries an ambiguous write. This is an isolated candidate, not monitoring activation or Whagons application proof.
 
 Source began at b9c4b2483a5629421caf8a29c2ee867f0d8f21d5. At a settled collection boundary it ordinarily fast-forwarded to integration 1b934f15a2bd11db8753fd39dedf895a31952bb3, which adds only reviewed PR425 observability files. SDK/protocol/kernel/Rust source is byte-identical between those bases. Frozen b9 results retain their labels; the final complete SDK invocation and final proof collections use current candidate SDK bytes with the adopted integration context.

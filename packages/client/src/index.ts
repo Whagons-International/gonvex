@@ -1,6 +1,14 @@
 import { isReplicaRevision } from "./revision-policy.js";
 import { TransactionEvidenceCall, TransactionEvidenceError, evidenceIdentity, type TransactionEvidenceResult } from './transaction-evidence.js';
 export { TransactionEvidenceError, type TransactionEvidenceResult } from './transaction-evidence.js';
+/** Evidence metadata must be an own value, never an accessor executed as proof. */
+function evidenceDataProperty(object:unknown, key:string):unknown {
+  try {
+    if (object===null || (typeof object!=='object' && typeof object!=='function')) return undefined;
+    const descriptor=Object.getOwnPropertyDescriptor(object,key);
+    return descriptor && Object.hasOwn(descriptor,'value') ? descriptor.value : undefined;
+  } catch { return undefined; }
+}
 import { REDUCER_RECEIPT_QUERY, expandReplicaBatch } from "@gonvex/protocol";
 import { ownsCurrentScope } from "./ownership-policy.js";
 import { RowPatchDecoder } from "./row-patch.js";
@@ -631,6 +639,10 @@ export class GonvexClient {
   private deferredReplicaOpens: { ref: FunctionReference; args: JsonValue; onMessage: ReplicaSubscriptionHandler; metadataOnly: boolean; cancelled: boolean; release?: () => void }[] = [];
   private unrestrictedVisibilityLoad?: Promise<Readonly<Record<string, unknown>> | undefined>;
   private readonly localBinding?: GonvexClientOptions["localRuntime"];
+  private readonly installedServerEvidenceBinding: {
+    readonly binding:NonNullable<GonvexClientOptions['localRuntime']>;
+    readonly hash:string;
+  } | undefined;
   private readonly localExecutor?: LocalExecutor;
   private readonly localStorage?: LocalReplicaStorage;
   private localIdentity?: LocalExecution["identity"];
@@ -821,6 +833,9 @@ export class GonvexClient {
     this.clientContract = options.clientContract ?? options.localRuntime?.clientContract;
     this.updateRequiredHandler = options.onUpdateRequired;
     this.localBinding = options.localRuntime;
+    const installedHash=evidenceDataProperty(this.localBinding,'artifactHash');
+    this.installedServerEvidenceBinding=this.localBinding && evidenceIdentity(installedHash)
+      ? {binding:this.localBinding,hash:installedHash} : undefined;
     for (const table of this.localBinding?.tables ?? []) {
       const references = (this.localBinding?.collections ?? []).filter(ref => ref.replica?.table === table
         && !Object.keys(ref.replica.equalFilters ?? {}).length && !(ref.replica.excludeWhenSet?.length));
@@ -4864,8 +4879,16 @@ export class GonvexClient {
       scope=this.replicaScope, activation=this.replicaReady, definition=this.replicaDefinitionEpoch,
       identity=this.localIdentity, project=this.auth.project, tenant=this.auth.tenant;
     if (!socket || !auth || this.publicTenant || this.controlOnly) return;
+    const identityAuth=evidenceDataProperty(identity,'auth'), account=evidenceDataProperty(identityAuth,'account'),
+      member=evidenceDataProperty(identity,'member'), tenantIdentity=evidenceDataProperty(identity,'tenant');
+    const identityCurrent=()=>evidenceDataProperty(identity,'auth')===identityAuth
+      && evidenceDataProperty(identityAuth,'account')===account
+      && evidenceDataProperty(identity,'member')===member && evidenceDataProperty(identity,'tenant')===tenantIdentity
+      && evidenceDataProperty(account,'id')===admission.accountId
+      && evidenceDataProperty(member,'id')===admission.memberId
+      && evidenceDataProperty(tenantIdentity,'id')===admission.tenantId;
     const record:NonNullable<typeof this.acceptedTenantArtifact>={hash,admission,epoch:this.replica.cursor()?.epoch,
-      current:()=>this.acceptedTenantArtifact===record && this.serverEvidenceAuthAttempt===attempt
+      current:()=>identityCurrent() && this.acceptedTenantArtifact===record && this.serverEvidenceAuthAttempt===attempt
         && !this.manuallyClosed && !this.updateRequired && this.socket===socket && socket.readyState===WebSocket.OPEN
         && this.isWebSocketConnected && this.socketGeneration===generation && this.authenticatedSocketGeneration===generation
         && !this.authInFlight && this.activeAuthFrameId===auth && this.latestAuthFrameId===undefined && !this.authResendRequired
@@ -4892,6 +4915,7 @@ export class GonvexClient {
     const timeoutMs=options?.timeoutMs,path=ref.path,explicitServer=options?.execution==='server';
     const admission=this.tenantAdmissionValue,socket=this.socket,cursor=this.replica.cursor();
     const artifact=explicitServer?this.acceptedTenantArtifact:undefined;
+    const installedBinding=explicitServer?this.installedServerEvidenceBinding:undefined;
     if (options?.execution!==undefined && !explicitServer) return refuse();
     if (explicitServer && Reflect.ownKeys(options).some(k=>typeof k!=='string' || !['offline','optimistic','timeoutMs','execution'].includes(k))) return refuse();
     if(this.transactionEvidence || !admission || !socket || !cursor || this.publicTenant || this.controlOnly
@@ -4904,17 +4928,18 @@ export class GonvexClient {
       || ![admission.accountId,admission.memberId,admission.project,admission.tenantId,cursor.epoch].every(evidenceIdentity)
       || !isReplicaRevision(cursor.revision)) return refuse();
     if (explicitServer && (!artifact || !artifact.current() || artifact.admission!==admission || artifact.epoch!==cursor.epoch
-      || (ref.localExecution===1 && (!evidenceIdentity(this.localBinding?.artifactHash) || this.localBinding.artifactHash!==artifact.hash))
+      || (ref.localExecution===1 && (!installedBinding || this.localBinding!==installedBinding.binding
+        || installedBinding.hash!==artifact.hash || evidenceDataProperty(this.localBinding,'artifactHash')!==installedBinding.hash))
       || 'intentEntropy' in ref || ('artifactHash' in ref && ref.artifactHash!==artifact.hash))) return refuse();
     const localExecution=explicitServer?ref.localExecution:undefined, binding=explicitServer?this.localBinding:undefined,
-      bindingHash=explicitServer?binding?.artifactHash:undefined;
+      bindingHash=explicitServer?installedBinding?.hash:undefined;
     const explicitRefCurrent=()=>{
-      try { return this.acceptedTenantArtifact===artifact && artifact?.current()===true && artifact.epoch===cursor.epoch
-        && ref.path===path && ref.kind==='reducer' && ref.localExecution===localExecution && ref.optimistic===undefined
+      try { return artifact!==undefined && ref.path===path && ref.kind==='reducer' && ref.localExecution===localExecution && ref.optimistic===undefined
         && (ref.scope===undefined || ref.scope==='tenant') && ref.authorization!=='public'
         && !('intentEntropy' in ref) && (!('artifactHash' in ref) || ref.artifactHash===artifact.hash)
         && (ref.receiptPath===undefined || ref.receiptPath===path)
-        && (localExecution!==1 || (this.localBinding===binding && binding?.artifactHash===bindingHash && bindingHash===artifact.hash)); }
+        && (localExecution!==1 || (this.localBinding===binding && evidenceDataProperty(binding,'artifactHash')===bindingHash && bindingHash===artifact!.hash))
+        && this.acceptedTenantArtifact===artifact && artifact?.current()===true && artifact.epoch===cursor.epoch; }
       catch { return false; }
     };
     const scope=this.replicaScope,generation=this.socketGeneration,auth=this.activeAuthFrameId,
