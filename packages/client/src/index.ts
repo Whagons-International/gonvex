@@ -3300,6 +3300,20 @@ export class GonvexClient {
     const notify = () => {
       for (const handler of updateHandlers) handler();
     };
+    const notifyInitial = (handler: WatchUpdateHandler, unsubscribe: () => void) => {
+      if (!updateHandlers.has(handler)) return;
+      const scope = this.replicaScope;
+      const generation = this.socketGeneration;
+      const socket = this.socket;
+      try { handler(); }
+      catch {
+        unsubscribe();
+        // This notification runs outside the frame queue. Preserve its failure
+        // boundary without letting an old observer close a replacement stream.
+        try { this.handleReplicaFrameFailure(scope, generation, socket); }
+        catch { /* Failure fencing precedes recovery notifications to other observers. */ }
+      }
+    };
     // Keep the ReplicaSubscription as transport/reconciliation state only. The
     // value returned by this watch always comes from normalized LocalReplica.
     let stop: (() => void) | undefined;
@@ -3387,10 +3401,7 @@ export class GonvexClient {
           releaseTimer = undefined;
         }
         updateHandlers.add(handler);
-        queueMicrotask(() => {
-          if (updateHandlers.has(handler)) handler();
-        });
-        return () => {
+        const unsubscribe = () => {
           updateHandlers.delete(handler);
           if (updateHandlers.size > 0 || releaseTimer) return;
           releaseTimer = setTimeout(() => {
@@ -3399,6 +3410,10 @@ export class GonvexClient {
             stop?.();
           }, 0);
         };
+        queueMicrotask(() => {
+          notifyInitial(handler, unsubscribe);
+        });
+        return unsubscribe;
       },
     };
   }

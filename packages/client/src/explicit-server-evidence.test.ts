@@ -38,6 +38,80 @@ async function setup(config:{hash?:any;bindingHash?:string;binding?:boolean;stor
 }
 const begin=(c:GonvexClient,ref=localRef,args:any={id:'row',title:'synthetic'},opts:any=options)=>c.reducerWithTransactionEvidence(ref,args,opts).then(value=>({value,error:undefined as any}),error=>({value:undefined,error}));
 async function finish(s:Socket,id:string){s.receive(result(id));s.receive(transaction(id));s.receive({type:'replica.watermark',revision:4});await vi.waitFor(()=>expect(reads(s)).toHaveLength(1));const q=reads(s)[0];s.receive({type:'query.result',id:q.id,path:q.path,result:{found:true,cursor:{epoch:'db',revision:5}}});}
+
+function initialNotification(w: Awaited<ReturnType<typeof setup>>['w'], handler: () => void) {
+ const callbacks: Array<() => void> = [];
+ const queue = vi.spyOn(globalThis, 'queueMicrotask').mockImplementation(callback => callbacks.push(callback));
+ let stop: () => void;
+ try { stop = w.onUpdate(handler); } finally { queue.mockRestore(); }
+ expect(callbacks).toHaveLength(1);
+ return { run: callbacks[0], stop: stop! };
+}
+
+it('queued initial replica observer failure fences a sent write without an uncaught exception or receipt', async () => {
+ const {c,s,w} = await setup();
+ const notification = initialNotification(w, () => { throw Error('PRIVATE initial observer'); });
+ const pending = begin(c), id = writes(s)[0].id;
+ try {
+ expect(() => notification.run()).not.toThrow();
+ const outcome = await pending;
+ expect(outcome.error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});
+ expect(JSON.stringify(outcome)).not.toContain('PRIVATE');
+ expect(c.connectionState().isWebSocketConnected).toBe(false);
+ expect(s.readyState).toBe(Socket.CLOSED);
+ s.receive(result(id));s.receive(transaction(id));s.receive({type:'replica.watermark',revision:4});
+ await tick();
+ expect(writes(s)).toHaveLength(1);expect(reads(s)).toHaveLength(0);
+ expect((await begin(c)).error).toMatchObject({possibleWriteApplied:false});
+ expect(writes(s)).toHaveLength(1);
+ } finally { notification.stop(); }
+});
+
+it('queued initial replica observer failure cannot close a connection replaced by that observer', async () => {
+ const {c,s,w} = await setup();let acted = false;
+ const notification = initialNotification(w, () => {
+  if (acted) return;
+  acted = true;s.close();c.connect();Socket.instances.at(-1)!.open();
+  throw Error('PRIVATE old observer');
+ });
+ expect(() => notification.run()).not.toThrow();
+ const replacement = Socket.instances.at(-1)!;
+ expect(replacement).not.toBe(s);
+ expect(replacement.readyState).toBe(Socket.OPEN);
+ expect(c.connectionState().isWebSocketConnected).toBe(true);
+ expect(writes(replacement)).toHaveLength(0);expect(reads(replacement)).toHaveLength(0);
+ notification.stop();
+});
+
+it('two failing initial replica observers cannot escape through synchronous close recovery', async () => {
+ const {c,s,w} = await setup();
+ const first = initialNotification(w, () => { throw Error('PRIVATE first observer'); });
+ const second = initialNotification(w, () => { throw Error('PRIVATE second observer'); });
+ const pending = begin(c);
+ try {
+  expect(() => first.run()).not.toThrow();expect(() => second.run()).not.toThrow();
+  expect((await pending).error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});
+  expect(c.connectionState().isWebSocketConnected).toBe(false);
+  expect(writes(s)).toHaveLength(1);expect(reads(s)).toHaveLength(0);
+ } finally { first.stop();second.stop(); }
+});
+
+it('unsubscribing before the queued initial notification prevents the observer from running', async () => {
+ const {c,w} = await setup();const handler = vi.fn();
+ const notification = initialNotification(w, handler);notification.stop();notification.run();
+ expect(handler).not.toHaveBeenCalled();expect(c.connectionState().isWebSocketConnected).toBe(true);
+});
+
+it('a synchronous replica observer failure still refuses actual transaction confirmation', async () => {
+ const {c,s,w} = await setup();let fail = false;
+ const stop = w.onUpdate(() => { if (fail) throw Error('PRIVATE transaction observer'); });
+ await tick();const pending = begin(c), id = writes(s)[0].id;fail = true;
+ s.receive(result(id));s.receive(transaction(id));s.receive({type:'replica.watermark',revision:4});
+ try {
+ expect((await pending).error).toMatchObject({outcome:'unknown',possibleWriteApplied:true});
+ expect(writes(s)).toHaveLength(1);expect(reads(s)).toHaveLength(0);
+ } finally { fail = false;stop(); }
+});
 for(const order of ['result-first','transaction-first'])it(`explicit ${order}: one keyed direct command, fresh entropy, exact auth hash, no command contract`,async()=>{
  const {c,s,local}=await setup();const before={...local};const p=begin(c);const call=writes(s)[0];expect(call).toBeDefined();
  expect(call.idempotencyKey).toBe(call.id);expect(call.receiptPath).toBe(localRef.path);expect(call.artifactHash).toBe('artifact-one');expect(call.intentEntropy).toMatch(/^[0-9a-f]{64}$/);expect(Object.hasOwn(call,'clientContract')).toBe(false);expect(s.sent.find(x=>x.type==='auth').clientContract).toBe(3);
