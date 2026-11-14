@@ -9,7 +9,7 @@
  */
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { SocketHost } from "../host";
 import { handleWebSocketUpgrade, validExtensionsField } from "../router";
 
@@ -25,12 +25,15 @@ async function stub(method: string, route: string, body?: unknown): Promise<any>
   return r.json();
 }
 
+const ownedClients: Client[] = [];
+
 class Client {
   readonly frames: Frame[] = [];
   readonly raw: string[] = [];
   private waiters: Array<() => void> = [];
   close?: { code: number; reason: string };
   constructor(readonly ws: WebSocket) {
+    ownedClients.push(this);
     ws.accept();
     ws.addEventListener("message", (e) => { const t = String(e.data); this.raw.push(t); this.frames.push(JSON.parse(t)); this.wake(); });
     ws.addEventListener("close", (e) => { this.close = { code: e.code, reason: e.reason }; this.wake(); });
@@ -61,6 +64,14 @@ class Client {
     return this.next(f => f.id === frame.id || f.type === "client.updateRequired", `${frame.id} reply`);
   }
 }
+
+// Close test-owned sockets while their gateway and RPC environment still exist.
+// Await the existing close observer; do not leave cleanup to worker teardown.
+afterEach(async () => {
+  const clients = ownedClients.splice(0);
+  for (const client of clients) if (!client.close) client.ws.close(1000);
+  await Promise.all(clients.map(client => client.closed()));
+});
 
 let seq = 0;
 /** A project with a module, tenants and Members, and a logged-in session per Member. */

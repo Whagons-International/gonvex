@@ -23,13 +23,13 @@ const writes=(s:Socket)=>s.sent.filter(x=>x.type==='reducer.call');
 const reads=(s:Socket)=>s.sent.filter(x=>x.type==='query.call'&&x.path==='__gonvex.reducerReceipt');
 const result=(id:string)=>({type:'reducer.result',id,path:localRef.path,result:{renamed:true},originCommandId:id,committedRevision:4});
 const transaction=(id:string,revision=4)=>({type:'replica.transaction',originCommandId:id,cursor:{epoch:'db',revision},provenance:{rootCommandId:id,channel:'ui',rootChannel:'ui',actorAccountId:'a',actorMemberId:'m'},changes:[{entity:'board',id:'row',operation:'update',newValue:{id:'row',title:'synthetic'}}]});
-async function setup(config:{hash?:any;bindingHash?:string;binding?:boolean;storage?:MemoryLocalReplicaStorage;admissionObserver?:(c:GonvexClient)=>void;localObserver?:(c:GonvexClient)=>void}={}){
+async function setup(config:{presence?:boolean;hash?:any;bindingHash?:string;binding?:boolean;storage?:MemoryLocalReplicaStorage;admissionObserver?:(c:GonvexClient)=>void;localObserver?:(c:GonvexClient)=>void}={}){
  const {bindingHash='artifact-one',binding=true,storage=new MemoryLocalReplicaStorage()}=config;const hash=Object.hasOwn(config,'hash')?config.hash:'artifact-one';
  vi.stubGlobal('WebSocket',Socket);const local={execute:0,replay:0};
  const runtime={mode:'portable' as const,artifactHash:bindingHash,tables:[],create:()=>({ready:Promise.resolve(),execute:async()=>{local.execute++;throw Error('PRIVATE local execution');},replay:async()=>{local.replay++;throw Error('PRIVATE local replay');},close:()=>{}})};
  const c=new GonvexClient('ws://controlled.invalid/ws',{project:'p',tenant:'t',token:'one',identity:{iss:'fixture',sub:'a'},errorReporting:false,localDependencyResidency:'off',clientContract:{version:3,offlineMaxAgeMs:null},localReplica:{storage},...(binding?{localRuntime:runtime}:{})});clients.push(c);
  if(config.admissionObserver)c.onTenantAdmissionChange(()=>config.admissionObserver!(c));if(config.localObserver)c.onLocalSessionChange(()=>config.localObserver!(c));
- const w=c.watchReplica(collection,{}),s=Socket.instances.at(-1)!;s.open();s.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1},replica:directive});
+ const w=c.watchReplica(collection,{}),s=Socket.instances.at(-1)!;s.open();s.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1,...(config.presence?{presence:1}:{})},replica:directive});
  const auth=s.sent.find(x=>x.type==='auth');s.receive({type:'auth.result',id:auth.id,result:{replica:directive,localIdentity:identity,...(hash===undefined?{}:{artifactHash:hash})}});
  await vi.waitFor(()=>expect(s.sent.some(x=>x.type==='replica.open')).toBe(true));
  const open=s.sent.filter(x=>x.type==='replica.open').at(-1),hashes=await replicaRowsHashes([],'id'),digest=await replicaHashesDigest(hashes);
@@ -219,4 +219,39 @@ it('synchronous close recovery rejects ordinary sent reducers before observer no
   expect(()=>a.run()).not.toThrow();await tick();expect(s.readyState).toBe(Socket.CLOSED);
   expect(observed?.error?.code).toBe('disconnected');
  }finally{a.stop();b.stop();c.close();await p;}
+});
+
+for (const throwing of [false, true]) it(`presence disconnect: clears admission before ${throwing ? 'throwing' : 'reconnecting'} presence observers`, async () => {
+ const {c,s,w} = await setup({presence:true});let armed=false,handled=false;let observed:unknown='not called';let replacement:Socket|undefined;
+ const pending=c.reducer({kind:'reducer',path:'board.ordinary'},{},{timeoutMs:1000}).catch(error=>error);
+ const stop=c.subscribePresence(()=>{
+  if(!armed||handled||c.presenceSnapshot().ready)return;
+  handled=true;observed=c.tenantAdmission();
+  if(throwing)throw Error('PRIVATE presence observer');
+  c.connect();replacement=Socket.instances.at(-1)!;replacement.open();
+ });
+ const subscribe=s.sent.find(x=>x.type==='presence.subscribe');expect(subscribe).toBeDefined();
+ s.receive({type:'presence.snapshot',id:subscribe.id,members:[]});expect(c.presenceSnapshot().ready).toBe(true);
+ expect(c.tenantAdmission()?.memberId).toBe('m');armed=true;
+ const notification=throwing?initialNotification(w,()=>{throw Error('PRIVATE initial observer');}):undefined;
+ try{
+  if(notification)expect(()=>notification.run()).not.toThrow();else s.close();
+  expect(handled).toBe(true);expect(observed).toBeUndefined();expect(c.tenantAdmission()).toBeUndefined();
+  expect((await pending).code).toBe('disconnected');
+  if(replacement){expect(replacement).not.toBe(s);expect(replacement.readyState).toBe(Socket.OPEN);expect(c.connectionState().isWebSocketConnected).toBe(true);expect(writes(replacement)).toHaveLength(0);}
+ }finally{notification?.stop();stop();}
+});
+
+it('presence disconnect: admission observer replacement keeps its newly accepted identity', async () => {
+ const {c,s}=await setup({presence:true});let armed=false,handled=false;let replacement:Socket|undefined;
+ const stop=c.onTenantAdmissionChange(()=>{
+  if(!armed||handled||c.tenantAdmission())return;
+  handled=true;c.connect();replacement=Socket.instances.at(-1)!;replacement.open();
+  replacement.receive({type:'session.ready',capabilities:{replicaWatermark:1,reducerReceiptLookup:1,presence:1},replica:directive});
+  const auth=replacement.sent.find(x=>x.type==='auth');
+  replacement.receive({type:'auth.result',id:auth.id,result:{replica:directive,artifactHash:'artifact-one',localIdentity:{...identity,member:{id:'replacement-member'}}}});
+ });
+ armed=true;
+ try{s.close();await vi.waitFor(()=>expect(c.tenantAdmission()?.memberId).toBe('replacement-member'));expect(handled).toBe(true);expect(replacement?.readyState).toBe(Socket.OPEN);expect(c.connectionState().isWebSocketConnected).toBe(true);}
+ finally{stop();}
 });
