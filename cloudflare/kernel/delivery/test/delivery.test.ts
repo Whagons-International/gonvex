@@ -629,6 +629,27 @@ describe("BUG-2 a subscribed tenant stays in memory between a session's events",
     }, MODULE, false, () => keep?.touch());
   });
 
+  it("arms the keep-alive for a socket whose only subscription is a live query, once the query is installed", async () => {
+    const { clock, advance } = manualClock();
+    let keep: SubscriberKeepAlive | undefined;
+    await withEngine(async ({ engine, live, commit }) => {
+      keep = new SubscriberKeepAlive(() => engine.holdsSubscriptions(), KEEPALIVE_GRACE_MS, clock);
+      await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);
+      expect(keep.holding).toBe(false); // nothing subscribed yet: the tenant may hibernate
+      const view = { ...socket("live-only"), queryId: "live" } as SocketView;
+      const frame = { type: "query.subscribe" as const, id: "live", path: "items.live", args: {} };
+      await engine.querySubscribe(view, (db) => live.subscribeSnapshot(db, view.connectionId, view.tenant, frame));
+      expect(live.subscriptionIds("live-only")).toEqual(["live"]);
+      expect(engine.holdsSubscriptions()).toBe(true);
+      expect(keep.holding).toBe(true); // armed by the subscribe itself, not by a later event
+      advance(PLATFORM_HIBERNATION_IDLE_MS + 5_000);
+      expect(keep.holding).toBe(true);
+      engine.queryUnsubscribe(view, "live");
+      expect(engine.holdsSubscriptions()).toBe(false);
+      expect(keep.holding).toBe(false);
+    }, MODULE, true, () => keep?.touch());
+  });
+
   it("lets a subscribed tenant hibernate after the grace with no event, and extends the grace on every event", () => {
     const { clock, advance } = manualClock();
     let subscribed = true;

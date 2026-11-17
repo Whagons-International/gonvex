@@ -297,7 +297,12 @@ export class ReplicaDeliveryEngine {
 
   /** Initial LQ snapshots and their enqueue share the reducer/commit serialization turn. */
   querySubscribe(socket: SocketView, snapshot: (db: StorageSession) => string, recovery = false): Promise<string[]> {
-    return this.options.serial(async () => {
+    // BUG-2: the snapshot installs the live query; arm/extend the keep-alive only after it is held.
+    return this.options.serial(async () => { try { return await this.subscribeQuery(socket, snapshot, recovery); } finally { this.options.activity?.(); } });
+  }
+
+  private subscribeQuery(socket: SocketView, snapshot: (db: StorageSession) => string, recovery: boolean): Promise<string[]> {
+    return (async () => {
       if (socket.tenant && !this.observe(socket, false)) throw new Error("stale tenant subscription scope");
       const connection = this.connections.get(socket.connectionId);
       for (const initial of socket.initialRequests ?? []) if (connection && initial.epoch === connection.epoch) connection.initials.set(initial.generation, initial);
@@ -313,7 +318,7 @@ export class ReplicaDeliveryEngine {
       if (recovery) return replies;
       this.queryReply(socket, replies);
       return [];
-    });
+    })();
   }
 
   queryUnsubscribe(socket: SocketView, id: string): boolean {
@@ -370,6 +375,7 @@ export class ReplicaDeliveryEngine {
 
   /** BUG-2: true while any socket has a subscription, a pending open or a live query here (state only memory holds). */
   holdsSubscriptions(): boolean {
+    if (this.deferredQueries.size) return true;
     for (const connection of this.connections.values()) {
       if (connection.subscriptions.size || connection.pending.length || connection.initials.size) return true;
       if (this.options.live?.subscriptionIds(connection.id).length) return true;
@@ -538,6 +544,7 @@ export class ReplicaDeliveryEngine {
     if (subscription) {
       // The connection may have closed or reopened the id while this open ran.
       connection.subscriptions.set(subscription.id, subscription);
+      this.options.activity?.();
       connection.tokens.delete(subscription.id);
       opened[subscription.id] = subscription.path;
     }
@@ -907,6 +914,7 @@ export class ReplicaDeliveryEngine {
           const replies = await this.options.read((db) => [query.snapshot(db)]);
           this.queryReply(query.socket, replies);
         }
+        this.options.activity?.();
       }
       return { ...result, receipt };
     });
