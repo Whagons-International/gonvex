@@ -1,5 +1,5 @@
 import { env, SELF, evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { fixtureControl } from "../fixture-control";
 import { capacityPage, type CapacityEnv } from "../capacity";
 import { CAPACITY_PATH, CAPACITY_LIMITS, type CapacityPage } from "../capacity-contract";
@@ -94,6 +94,33 @@ describe("K22 bounded capacity HTTP facade, local data refusals", () => {
       if (fault === "timeout") { expect(p.controller.status).toBe("NOT_SELECTED"); expect(p.provenance.controllerStatusCalls).toBe(0); }
     } finally { resolve(null); }
   });
+  it("refuses malformed catalog Worker metadata before traversing it or selecting a controller", async () => {
+    const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
+    let deep: unknown = { private: "DO_NOT_DISCLOSE" };
+    for (let i = 0; i < 2000; i++) deep = { nested: deep };
+    for (const worker of [cyclic, deep, "DO_NOT_DISCLOSE", {},
+      { id: "local-worker", tag: "", timestamp: "0", unknown: cyclic },
+      { id: "local-worker", tag: "", timestamp: "x".repeat(65) }]) {
+      const d = data();
+      const bindings = { ...d.bindings, RUNTIME_CATALOG: { identity: async () => { d.calls.push("identity"); return { ...catalog, worker }; } } } as unknown as CapacityEnv;
+      const p = await page(await capacityPage(request("cell=0&fresh=1"), bindings));
+      expect(p.identity.catalog).toEqual({ status: "MALFORMED" }); expect(p.identity.runtimeWorker).toBeNull();
+      expect(p.controller).toEqual({ status: "NOT_SELECTED" }); expect(p.pageStatus).toBe("PARTIAL");
+      expect(d.calls).toEqual(["identity"]); expect(JSON.stringify(p)).not.toContain("DO_NOT_DISCLOSE");
+    }
+  });
+  it.each([0, 1, 900, 1000, 1001])("preserves an apparent future age of %ims as clock skew in cached and fresh samples", async offset => {
+    const now = 1_700_000_000_000, clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const input = state(); input.slots[0]!.sample.at = now + offset;
+      const d = data(input, () => ({ capacity: async () => measured(1, now + offset), drainStatus: async () => ({ closed: 0, remaining: 0, blocked: {} }) }));
+      const p = await page(await capacityPage(request("cell=0&fresh=1"), d.bindings));
+      const expected = { state: offset ? "CLOCK_SKEW" : "FRESH", ageMs: offset ? null : 0, sample: { at: now + offset } };
+      expect(p.slots[0]!.cached).toMatchObject(expected);
+      expect(p.slots[0]!.fresh.capacity).toMatchObject({ status: "OK", value: expected });
+      expect(p.pageStatus).toBe(offset ? "PARTIAL" : "COMPLETE");
+    } finally { clock.mockRestore(); }
+  });
   it("bounds the largest source cardinality, event page and UTF8 response", async () => {
     const input = state(64), now = Date.now();
     for (const s of input.slots) {
@@ -184,6 +211,27 @@ describe("K22 bounded capacity HTTP facade, local data refusals", () => {
 });
 
 describe("K22 real composed local Controller/AssemblyGateway HTTP observations", () => {
+  it("keeps a sub-second future cached timestamp as clock skew across Controller RPC and authenticated HTTP", async () => {
+    const bindings = env as typeof env & { CAPACITY_CONTROLLER: DurableObjectNamespace<GatewayControllerObject> };
+    const controller = bindings.CAPACITY_CONTROLLER.getByName("gateway-cell-31");
+    const previous = await runInDurableObject(controller, async (_object, ctx) => ({ state: await ctx.storage.get("placement"), alarm: await ctx.storage.getAlarm() }));
+    try {
+      await runInDurableObject(controller, async (_object, ctx) => {
+        await ctx.storage.put("placement", { v: 1, epoch: 1, leases: [], events: [], slots: [{
+          name: "auto-gw-31-0", epoch: 1, mode: "active", changedAt: 1, quietSince: null, pressuredSince: null, replacement: null,
+          sample: { v: 1, epoch: 1, at: Date.now() + 900, sockets: 1, framesPerSecond: 0, bytesPerSecond: 0, deliveryMs: 0, queueAgeMs: 0, rpcMs: 0 },
+        }] });
+      });
+      const p = await page(await SELF.fetch(request("cell=31")));
+      expect(p.controller.status).toBe("OK");
+      expect(p.slots[0]!.cached).toMatchObject({ state: "CLOCK_SKEW", ageMs: null });
+    } finally {
+      await runInDurableObject(controller, async (_object, ctx) => {
+        if (previous.state === undefined) await ctx.storage.delete("placement"); else await ctx.storage.put("placement", previous.state);
+        if (previous.alarm === null) await ctx.storage.deleteAlarm(); else await ctx.storage.setAlarm(previous.alarm);
+      });
+    }
+  });
   it("serves the authenticated route and keeps cached reads read-only across controller restart", async () => {
     const bindings = env as typeof env & { CAPACITY_CONTROLLER: DurableObjectNamespace<GatewayControllerObject>; CAPACITY_GATEWAY: DurableObjectNamespace<AssemblyGateway> };
     const controller = bindings.CAPACITY_CONTROLLER.getByName("gateway-cell-30");

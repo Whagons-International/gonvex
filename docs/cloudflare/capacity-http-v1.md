@@ -45,7 +45,8 @@ Cached mode calls the existing private `RuntimeCatalog.identity()` once and
 actual slot modes, original sample.at/window identity, pressure evidence and
 event facts. It does not restamp sample ages or prune expired leases. Null
 samples remain UNKNOWN. Staleness is computed against the HTTP service's wall
-clock: sample age over30s is STALE; apparent future time over1s is CLOCK_SKEW.
+clock: sample age over30s is STALE; any apparent future time is CLOCK_SKEW,
+with unknown age rather than a clamped zero.
 Completed windows older than2×existing5s SAMPLE_MS are STALE. Service clocks
 are explicitly **not synchronized**; these labels are apparent recency, not a
 measured cross-isolate clock bound. Missing windows are UNKNOWN.
@@ -74,7 +75,8 @@ thresholds, maturity, cooldown, capacity ceilings or drain eligibility.
 
 Budgets are source constants: runtime catalog750ms, controller1500ms, each
 holder RPC750ms, overall request6000ms, at most2RPCs in flight, at most
-1catalog+1controller+8holder calls. Catalog timeout/abort stops the request
+1catalog+1controller+8holder calls. Catalog timeout/abort or malformed/oversized
+identity stops the request
 before controller/holder calls; no uncancellable catalog RPC is left alongside
 further fanout. A holder
 timeout/abort stops scheduling further calls, including drainStatus, so an
@@ -97,7 +99,9 @@ sorted `[project,hash]` pairs are returned; project IDs and manifests are not.
 This existing port exports no generations: generation is explicitly
 UNAVAILABLE_IDENTITY_PORT_HAS_HASHES_ONLY, never inferred from a catalog label.
 The stable Worker imports no generated application code. Catalog identity is
-bounded to2048entries with bounded scalar fields and512KiB. Config facts/digest
+bounded to2048entries with bounded scalar fields and512KiB. Null Worker metadata
+is unavailable; nonnull metadata must pass its complete scalar schema before
+the validated catalog projection is sized. Config facts/digest
 cover only controller/runtime-catalog binding presence and static shard fallback; they are **not** a provider
 settings/binding-namespace audit. No `assembled:true` or `autoscaling:true`
 assertion substitutes for measurements. The existing version port is HTTP

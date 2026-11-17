@@ -47,9 +47,9 @@ function sample(v: unknown): CapacitySample | undefined {
   return checkedCapacitySample(v as unknown as CapacitySample, v.at);
 }
 function observation(s: CapacitySample | null, now: number): CapacityObservation {
-  const state = !s ? "UNKNOWN" : s.at > now + 1000 ? "CLOCK_SKEW" : now - s.at > LIMITS.cachedStaleMs ? "STALE" : "FRESH";
+  const state = !s ? "UNKNOWN" : s.at > now ? "CLOCK_SKEW" : now - s.at > LIMITS.cachedStaleMs ? "STALE" : "FRESH";
   const windowState = s?.windowEnd === undefined ? "UNKNOWN" : s.windowEnd > now ? "CLOCK_SKEW" : now - s.windowEnd > 2 * SAMPLE_MS ? "STALE" : "FRESH";
-  return { sample: s, state, ageMs: !s || state === "CLOCK_SKEW" ? null : Math.max(0, now - s.at), windowState };
+  return { sample: s, state, ageMs: !s || state === "CLOCK_SKEW" ? null : now - s.at, windowState };
 }
 function holderName(name: unknown, cell: number): name is string {
   if (typeof name !== "string") return false;
@@ -125,15 +125,19 @@ async function identity(env: CapacityEnv, source: CapacityRead<unknown>): Promis
     const input = source.value, tuples: [string, string][] = [];
     if (object(input, ["version", "worker", "releases"]) && label(input.version) && input.releases !== null && typeof input.releases === "object" && !Array.isArray(input.releases)
       && Object.keys(input.releases).length <= 2048) {
-      let valid = true;
+      const worker = workerVersion(input.worker);
+      // Null means metadata is unavailable. A malformed non-null reply must
+      // refuse before sizing: JSON serialization would otherwise walk raw data.
+      let valid = input.worker === null || worker !== null;
       for (const [key, hash] of Object.entries(input.releases)) {
         if (!label(key) || !label(hash)) { valid = false; break; }
         tuples.push([key, hash]);
       }
       if (valid) {
         tuples.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-        runtimeWorker = workerVersion(input.worker);
-        catalog = bytes(input) > LIMITS.catalogReplyBytes ? { status: "OVERSIZED" } : { status: "OK", value: {
+        runtimeWorker = worker;
+        const projected = { version: input.version, worker, releases: Object.fromEntries(tuples) };
+        catalog = bytes(projected) > LIMITS.catalogReplyBytes ? { status: "OVERSIZED" } : { status: "OK", value: {
           originService: "runtime-catalog", sourceInterface: "RuntimeCatalog.identity", version: input.version,
           projects: tuples.length, releasesSha256: await digest(tuples), generation: "UNAVAILABLE_IDENTITY_PORT_HAS_HASHES_ONLY" } };
       }
@@ -172,7 +176,10 @@ export async function capacityPage(request: Request, env: CapacityEnv): Promise<
       drainResult: "LAST_TRACKED_RESULT_NO_RESULT_TIMESTAMP", cancellation: "STOPS_FURTHER_CALLS_INFLIGHT_RPC_NOT_CANCELLED",
       runId: "CORRELATION_ONLY_NOT_COST_ATTRIBUTION", history: "LAST_64_EVENTS_NO_COMPLETE_TIMELINE_OR_LOSS_COUNTER",
       windowHistory: "LATEST_COMPLETED_BUCKET_ONLY_GAPS_REQUIRE_CLIENT_COMPARISON", sockets: "CURRENT_GAUGE_AND_BUCKET_SAMPLED_MIN_NOT_CONTINUOUS_OCCUPANCY" } };
-  if (catalogRead.status === "TIMEOUT" || catalogRead.status === "ABORTED") { result.controller = { status: "NOT_SELECTED" }; return json(result); }
+  if (catalogRead.status === "TIMEOUT" || catalogRead.status === "ABORTED"
+    || result.identity.catalog.status === "MALFORMED" || result.identity.catalog.status === "OVERSIZED") {
+    result.controller = { status: "NOT_SELECTED" }; return json(result);
+  }
   if (!env.GATEWAY_CONTROLLER) return json(result);
   const read = await bounded(() => {
     result.provenance.controllerStatusCalls++;
