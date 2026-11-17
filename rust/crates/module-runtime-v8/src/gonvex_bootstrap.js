@@ -448,14 +448,17 @@
   const hostCall = async (payload) => {
     // The op answers with a JSON envelope so a denial, a host failure and a
     // successful response are one shape the host fully controls.
-    const outcome = JSON.parse(await ops.op_gonvex_host_call(JSON.stringify(payload)));
-    if (outcome.status !== "ok") throw new GonvexHostError(outcome.message, outcome.status);
-    if (outcome.value === "") return undefined;
+    // A successful value is embedded as JSON (absent means undefined), so the
+    // response is parsed once.
+    const raw = await ops.op_gonvex_host_call(JSON.stringify(payload));
+    let outcome;
     try {
-      return JSON.parse(outcome.value);
+      outcome = JSON.parse(raw);
     } catch {
       throw new GonvexHostError(`host operation ${payload.kind} returned a response that is not JSON`, "failed");
     }
+    if (outcome.status !== "ok") throw new GonvexHostError(outcome.message, outcome.status);
+    return outcome.value;
   };
 
   const text = (name, value) => {
@@ -568,6 +571,18 @@
       });
     }
     if (granted.dbWrite) {
+      const records = new Map();
+      let hasRecords;
+      db.recordColumns = (table) => {
+        text("table",table);
+        if (!records.has(table)) records.set(table,(async () => {
+          hasRecords ??= db.query("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='_gonvex_record_views' AND type='table') AS present");
+          if (!(await hasRecords)[0]?.present) return undefined;
+          const [record] = await db.query("SELECT schema FROM _gonvex_record_views WHERE name=$1",[table]);
+          return record ? JSON.parse(record.schema).columns : undefined;
+        })());
+        return records.get(table);
+      };
       db.insert = (table, row, allocation) => hostCall({
         kind: "dbInsert",
         table: text("table", table),
@@ -592,6 +607,17 @@
       });
     }
     if (granted.dbRead || granted.dbWrite) context.db = Object.freeze(db);
+    if (granted.dbRead) {
+      // Committed permission bits of the invoking member (one per permission
+      // and scope), answered in memory by the host. "" is the tenant-wide scope.
+      context.permissions = Object.freeze({
+        has: (permission, scope) => hostCall({
+          kind: "permissionsHas",
+          permission: text("permission", permission),
+          scope: scope === undefined || scope === null ? "" : String(scope),
+        }),
+      });
+    }
 
     if (granted.actionOutbox) {
       context.actions = Object.freeze({

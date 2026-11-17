@@ -1,9 +1,9 @@
 import { isReplicaRevision } from "./revision-policy.js";
-import { REDUCER_RECEIPT_QUERY } from "@gonvex/protocol";
+import { REDUCER_RECEIPT_QUERY, expandReplicaBatch } from "@gonvex/protocol";
 import { ownsCurrentScope } from "./ownership-policy.js";
 import { RowPatchDecoder } from "./row-patch.js";
-import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
-import type { DataRead } from "@gonvex/module-sdk";
+import { readIsCovered, primaryReadKeys, type ReadCoverage } from "@gonvex/local-runtime/read-view";
+import type { DataRead, DataPredicate } from "@gonvex/module-sdk";
 import type {
   BrowserTelemetryInfo,
   ClientMessage,
@@ -23,6 +23,7 @@ import { applyReplicaHashDelta, replicaAggregateDigest, replicaHashesDigest, rep
 import type { LocalExecution, LocalSnapshot, LocalTransactionResult } from "@gonvex/local-runtime";
 import type { LocalExecutor, LocalRuntimeBinding } from "@gonvex/local-runtime/worker-client";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
+import { PresenceFeed, type PresenceFeedSnapshot } from "./presence.js";
 export { GonvexErrorReporter } from "./error-reporter.js";
 export type { ErrorReporterOptions, ErrorEventPayload, ErrorContext, ErrorAccount } from "./error-reporter.js";
 import {
@@ -66,6 +67,7 @@ import {
 } from "./local-replica.js";
 import { runOfflineLiveQuery, liveQueryDependencies, liveQueryEquality, liveScopeCoverage, type LiveQueryPlan, type OfflineLiveQueryResult } from "./query-expression.js";
 export * from "./error-reporter.js";
+export { PresenceFeed, type PresenceFeedSnapshot } from "./presence.js";
 export * from "./optimistic.js";
 export * from "./outbox.js";
 export { OutboxRecoveryError } from "./outbox-recovery.js";
@@ -74,6 +76,7 @@ export * from "./client-upgrades.js";
 export * from "./browser-upgrades.js";
 export * from "./signals.js";
 export * from "./paged-read-view.js";
+export * from "./column-page.js";
 export {mergeReplicaRecord,type ReplicaRecordVersion,type VersionedReplicaRecord} from './replica-record.js';
 export * from "./external-auth.js";
 // Keep the mutable LocalReplica implementation private to GonvexClient. The
@@ -100,6 +103,7 @@ export {
   type ReplicaCollectionState,
   type ReplicaCollectionSubscriptionState,
   type ReplicaCollectionPlan,
+  type ReplicaColumnPage,
 } from "./local-replica.js";
 export * from "./query-expression.js";
 export * from "./indexeddb-replica.js";
@@ -145,6 +149,7 @@ function createLocalReplicaView(replica: LocalReplica): LocalReplicaView {
     windowRows: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.windowRows<T>(signature),
     entity: <T extends ReplicaRow = ReplicaRow>(entity: string, id: string) => replica.entity<T>(entity, id),
     entityBatch: <T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]) => replica.entityBatch<T>(entity, ids),
+    entityColumns: (entity, ids, projection, limits) => replica.entityColumns(entity, ids, projection, limits),
     entityRows: <T extends ReplicaRow = ReplicaRow>(entity: string) => replica.entityRows<T>(entity),
     entityCompleteness: (entity) => replica.entityCompleteness(entity),
     liveQuery: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.liveQuery<T>(signature),
@@ -551,6 +556,8 @@ export type GonvexClientOptions = GonvexClientAuth & {
     collections?: readonly FunctionReference[];
     /** Per locally executing Reducer, the tables its body reads locally (from codegen). */
     localDependencies?: Readonly<Record<string, readonly string[]>>;
+    /** Generated conditions under which delivered rows can prove absence. */
+    unrestrictedVisibility?: Readonly<Record<string, unknown>> | (() => Promise<Readonly<Record<string, unknown>>>);
   };
   /**
    * Keep the generated local collections that locally executing Reducers
@@ -565,6 +572,8 @@ export type GonvexClientOptions = GonvexClientAuth & {
    * to disable residency.
    */
   localDependencyResidency?: LocalDependencyResidency;
+  /** Hold selected collection opens until the application releases its first-screen gate. */
+  deferReplicaOpen?: (path: string) => boolean;
   /** Observe local-execution fallbacks; see {@link GonvexClient.onLocalExecutionFallback}. */
   onLocalExecutionFallback?: (event: LocalExecutionFallbackEvent) => void;
   /**
@@ -616,6 +625,9 @@ const maxReplicaBatchOpens = 256;
 
 export class GonvexClient {
   private readonly localTableBindings = new Map<string, { signatures: string[]; columns: string[] }>();
+  private replicaOpenDeferral?: (path: string) => boolean;
+  private deferredReplicaOpens: { ref: FunctionReference; args: JsonValue; onMessage: ReplicaSubscriptionHandler; metadataOnly: boolean; cancelled: boolean; release?: () => void }[] = [];
+  private unrestrictedVisibilityLoad?: Promise<Readonly<Record<string, unknown>> | undefined>;
   private readonly localBinding?: GonvexClientOptions["localRuntime"];
   private readonly localExecutor?: LocalExecutor;
   private readonly localStorage?: LocalReplicaStorage;
@@ -651,6 +663,11 @@ export class GonvexClient {
   private replicaOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
+  private readonly presenceFeed = new PresenceFeed({
+    supported: () => this.serverCapabilities.presence === 1,
+    canSend: () => !!this.activeAuthFrameId && this.socket?.readyState === WebSocket.OPEN,
+    send: (message) => this.sendNow(message),
+  });
   private readonly replicaSnapshotPagesEnabled: boolean;
   private replicaFieldPatchesEnabled: boolean;
   private activeArtifactHashValue = "";
@@ -716,6 +733,13 @@ export class GonvexClient {
   private hasAuthoritativeReplicaScope = false;
   private replicaDefinitionEpoch?: string;
   private replicaReady: Promise<void> = Promise.resolve();
+  // The initial promise has no durable activation to await. Construction
+  // replaces it via setReplicaReady before authoritative scopes are possible.
+  private hydratedReplicaReady: Promise<void> | undefined = this.replicaReady;
+  private readonly replicaOpenHydrations = new Map<ReplicaSubscription, {
+    current: () => boolean; task: Promise<void>;
+  }>();
+  private readonly replicaOpenOwners = new WeakMap<ReplicaSubscription, () => boolean>();
   private localSessionRestore: Promise<void> = Promise.resolve();
   private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
   private readonly localSessionHandlers = new Set<() => void>();
@@ -794,6 +818,7 @@ export class GonvexClient {
     }
     this.localExecutor = options.localRuntime ? deferredLocalExecutor(() => options.localRuntime!.create()) : undefined;
     this.residentDependencyTables = residentLocalDependencyTables(options.localRuntime, options.localDependencyResidency);
+    this.replicaOpenDeferral = options.deferReplicaOpen;
     if (options.onLocalExecutionFallback) this.localFallbackHandlers.add(options.onLocalExecutionFallback);
     this.localStorage = options.localReplica?.storage;
     this.auth = authFromOptions(options);
@@ -878,6 +903,10 @@ export class GonvexClient {
         tenant: options.tenant,
         ...options.errorReporting,
         transport: (type, payload) => this.sendNativeError(type, payload),
+        client: {
+          reportError: (type, payload) => this.sendNativeError(type, payload),
+          presenceSupported: () => this.presenceSupported(),
+        },
       });
     }
     this.localSessionRestore = this.restoreLocalSession(initialScope, this.outboxScopeGeneration);
@@ -1231,67 +1260,168 @@ export class GonvexClient {
   }
 
   private async executeLocal(path: string, args: JsonValue, snapshot: LocalSnapshot | undefined, execution: LocalExecution, pending: boolean | readonly import('@gonvex/local-runtime').LocalPatch[] = true, residentOnly = false): Promise<LocalTransactionResult> {
-    const scope = this.outboxScope;
-    const generation = this.outboxScopeGeneration;
-    const replicaScope = this.replicaScope;
-    const assertCurrent = () => {
-      if (!ownsCurrentScope(scope, this.outboxScope, generation, this.outboxScopeGeneration, this.manuallyClosed)
-        || replicaScope !== this.replicaScope)
-        throw new GonvexClientError("Session changed during local execution", { code: "superseded" });
-    };
-    assertCurrent();
-    const executor = this.localExecutor!;
-    if (this.localBinding?.mode === 'portable') {
-      try {
-        const run = (source: import('@gonvex/local-runtime/portable').ReducerReadView) => {
-          assertCurrent();
-          return executor.executeRead!(path,args,source,execution);
+        const scope = this.outboxScope;
+        const generation = this.outboxScopeGeneration;
+        const replicaScope = this.replicaScope;
+        const assertCurrent = () => {
+            if (!ownsCurrentScope(scope, this.outboxScope, generation, this.outboxScopeGeneration, this.manuallyClosed)
+                || replicaScope !== this.replicaScope)
+                throw new GonvexClientError("Session changed during local execution", { code: "superseded" });
         };
-        let transaction: LocalTransactionResult;
-        try {
-          transaction = await this.replica.withReadView(() => this.localReadCoverage(), pending, run, true);
-        } catch (error) {
-          assertCurrent();
-          if (residentOnly || !(error instanceof Error) || error.name !== 'IncompleteReplicaError' || this.isUncoveredLocalRead(error)) throw error;
-          transaction = await this.replica.withReadView(() => this.localReadCoverage(), pending, run);
+        assertCurrent();
+        const executor = this.localExecutor!;
+        if (this.localBinding?.mode === 'portable') {
+            try {
+                const run = (source: import('@gonvex/local-runtime/portable').ReducerReadView) => {
+                    assertCurrent();
+                    return executor.executeRead!(path, args, source, execution);
+                };
+                const attempt = async (coverage: () => ReadCoverage) => {
+                    try {
+                        return await this.replica.withReadView(coverage, pending, run, true);
+                    }
+                    catch (error) {
+                        assertCurrent();
+                        if (residentOnly || !(error instanceof Error) || error.name !== 'IncompleteReplicaError' || this.isUncoveredLocalRead(error))
+                            throw error;
+                        return await this.replica.withReadView(coverage, pending, run);
+                    }
+                };
+                let transaction;
+                try {
+                    transaction = await attempt(() => this.localReadCoverage());
+                }
+                catch (error) {
+                    assertCurrent();
+                    // Rows this member cannot see can still support a prediction, which
+                    // authoritative replay corrects. They cannot reject the intent: rerun
+                    // with only coverage that proves absence. A missing row then leaves the
+                    // intent for the server; a rejection from rows held here stands.
+                    // The rerun keeps this intent's captured identity, execution and executor.
+                    if (!(error instanceof Error) || error.name === 'IncompleteReplicaError')
+                        throw error;
+                    const conditions = await this.loadUnrestrictedVisibility();
+                    assertCurrent();
+                    const authoritative = () => this.authoritativeReadCoverage(conditions, execution.identity);
+                    if (!authoritative())
+                        throw error;
+                    transaction = await attempt(() => authoritative() ?? this.localReadCoverage());
+                }
+                // The read view already proved every read from the available replica
+                // windows or cached primary keys. Do not promote those bounded reads
+                // to whole-table subscriptions after a successful user edit. Missing
+                // coverage still opens its generated collection in the error path.
+                assertCurrent();
+                return transaction;
+            }
+            catch (error) {
+                assertCurrent();
+                // A speculative memory-only read may simply need IndexedDB. Its
+                // coordinated retry checks disk before deciding to request more data.
+                if (!residentOnly)
+                    this.hydrateMissingLocalTable(error);
+                throw error;
+            }
         }
-        // The read view already proved every read from the available replica
-        // windows or cached primary keys. Do not promote those bounded reads
-        // to whole-table subscriptions after a successful user edit. Missing
-        // coverage still opens its generated collection in the error path.
+        if (!snapshot)
+            throw new Error('Legacy local executor requires a snapshot');
+        const known = this.localExecutionTables.get(path);
+        const input = known ? { ...snapshot, tables: Object.fromEntries(Object.entries(snapshot.tables).filter(([table]) => known.has(table))) } : snapshot;
+        let transaction;
+        try {
+            try {
+                transaction = await executor.execute(path, args, input, execution);
+            }
+            catch (error) {
+                assertCurrent();
+                this.hydrateMissingLocalTable(error);
+                assertCurrent();
+                if (!known || !(error instanceof Error) || error.name !== "IncompleteReplicaError")
+                    throw error;
+                // A different argument, tenant or workflow can read different tables.
+                // Retry against the SAME captured snapshot, never newer mixed-version rows.
+                try {
+                    transaction = await executor.execute(path, args, snapshot, execution);
+                }
+                catch (retryError) {
+                    assertCurrent();
+                    this.hydrateMissingLocalTable(retryError);
+                    throw retryError;
+                }
+            }
+        }
+        catch (error) {
+            assertCurrent();
+            // See the portable path: only coverage that proves absence may reject.
+            // Rerun against the SAME captured snapshot, execution and executor.
+            if (!(error instanceof Error) || error.name === "IncompleteReplicaError")
+                throw error;
+            const authoritative = this.authoritativeSnapshot(snapshot, await this.loadUnrestrictedVisibility(), execution.identity);
+            assertCurrent();
+            if (!authoritative)
+                throw error;
+            try {
+                transaction = await executor.execute(path, args, authoritative, execution);
+            }
+            catch (retryError) {
+                assertCurrent();
+                this.hydrateMissingLocalTable(retryError);
+                throw retryError;
+            }
+        }
         assertCurrent();
+        this.ensureLocalCollections(transaction.readTables);
+        assertCurrent();
+        this.localExecutionTables.set(path, new Set([
+            ...(known ?? []), ...transaction.readTables, ...transaction.patches.map(patch => patch.entity),
+        ]));
         return transaction;
-      } catch (error) {
-        assertCurrent();
-        // A speculative memory-only read may simply need IndexedDB. Its
-        // coordinated retry checks disk before deciding to request more data.
-        if (!residentOnly) this.hydrateMissingLocalTable(error);
-        throw error;
-      }
     }
-    if (!snapshot) throw new Error('Legacy local executor requires a snapshot');
-    const known = this.localExecutionTables.get(path);
-    const input = known ? { ...snapshot, tables: Object.fromEntries(Object.entries(snapshot.tables).filter(([table]) => known.has(table))) } : snapshot;
-    let transaction: LocalTransactionResult;
-    try { transaction = await executor.execute(path, args, input, execution); }
-    catch (error) {
-      assertCurrent();
-      this.hydrateMissingLocalTable(error);
-      assertCurrent();
-      if (!known || !(error instanceof Error) || error.name !== "IncompleteReplicaError") throw error;
-      // A different argument, tenant or workflow can read different tables.
-      // Retry against the SAME captured snapshot, never newer mixed-version rows.
-      try { transaction = await executor.execute(path, args, snapshot, execution); }
-      catch (retryError) { assertCurrent(); this.hydrateMissingLocalTable(retryError); throw retryError; }
+
+  private authoritativeReadCoverage(conditions: Readonly<Record<string, unknown>> | undefined, identity: LocalExecution["identity"]): ReadCoverage | undefined {
+        let narrowed = false;
+        const coverage = Object.fromEntries(Object.entries(this.localReadCoverage()).map(([table, known]) => {
+            if (!known.complete && !known.completeWhere?.length)
+                return [table, known];
+            const visible = visibleRowSlices(conditions?.[table], identity);
+            if (visible.some(slice => slice.length === 0))
+                return [table, known];
+            narrowed = true;
+            const held = known.complete ? [[]] : (known.completeWhere ?? []).map(where => [where]);
+            const completeWhere = held.flatMap(base => visible.map(slice => [...base, ...slice]))
+                .map(terms => terms.length === 1 ? terms[0] : { and: terms });
+            return [table, { ...known, complete: false, completeWhere: completeWhere.length ? completeWhere : undefined }];
+        }));
+        return narrowed ? coverage : undefined;
     }
-    assertCurrent();
-    this.ensureLocalCollections(transaction.readTables);
-    assertCurrent();
-    this.localExecutionTables.set(path, new Set([
-      ...(known ?? []), ...transaction.readTables, ...transaction.patches.map(patch => patch.entity),
-    ]));
-    return transaction;
-  }
+  private authoritativeSnapshot(snapshot: LocalSnapshot, conditions: Readonly<Record<string, unknown>> | undefined, identity: LocalExecution["identity"]): LocalSnapshot | undefined {
+        const member = identity?.member;
+        let narrowed = false;
+        const tables: LocalSnapshot["tables"] = {};
+        for (const [table, value] of Object.entries(snapshot.tables)) {
+            if (!value.complete || visibilityAdmitsEveryRow(conditions?.[table], member) === true) {
+                tables[table] = value;
+                continue;
+            }
+            narrowed = true;
+            tables[table] = { complete: false, columns: value.columns, get rows() { return value.rows; } };
+        }
+        return narrowed ? { ...snapshot, tables } : undefined;
+    }
+  private loadUnrestrictedVisibility(): Promise<Readonly<Record<string, unknown>> | undefined> {
+        const source = this.localBinding?.unrestrictedVisibility;
+        if (typeof source !== "function")
+            return Promise.resolve(source);
+        return this.unrestrictedVisibilityLoad ??= Promise.resolve().then(source).then(conditions => conditions && typeof conditions === "object" ? conditions : undefined, () => { this.unrestrictedVisibilityLoad = undefined; return undefined; });
+    }
+  releaseDeferredReplicaOpens(): void {
+        this.replicaOpenDeferral = undefined;
+        const pending = this.deferredReplicaOpens.splice(0);
+        for (const open of pending) {
+            if (!open.cancelled)
+                open.release = this.subscribeReplicaTransport(open.ref, open.args, open.onMessage, open.metadataOnly);
+        }
+    }
 
   private inLocalLane<T>(run: () => Promise<T>): Promise<T> {
     const job = this.localLane.then(run);
@@ -1821,7 +1951,7 @@ export class GonvexClient {
       this.authFetchGeneration = Symbol();
       return;
     }
-    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
+    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.", "superseded");
     this.applyAuth(auth);
     // The caller owns auth now: a token fetch still in flight from the
     // previous installation must not clobber this one when it resolves.
@@ -1885,7 +2015,7 @@ export class GonvexClient {
    * provider rather than calling this method directly.
    */
   authenticate(auth: GonvexClientAuth): Promise<void> {
-    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
+    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.", "superseded");
     this.applyAuth(auth);
     this.authFetchGeneration = Symbol();
     const promise = new Promise<void>((resolve, reject) => {
@@ -2016,6 +2146,8 @@ export class GonvexClient {
     }
     const socket = new WebSocket(transportUrl);
     const rowPatches = new RowPatchDecoder();
+    // Delivery v2 stream token -> subscription ids, scoped to this socket.
+    const replicaStreams = new Map<string, string[]>();
     this.socket = socket;
     this.serverCapabilities = {};
     socket.addEventListener("open", () => {
@@ -2038,6 +2170,7 @@ export class GonvexClient {
     socket.addEventListener("close", () => {
       rowPatches.clear();
       if (this.socket !== socket || this.manuallyClosed) return;
+      this.presenceFeed.disconnected();
       this.flushTelemetry();
       this.publishTenantAdmission(undefined);
       this.isWebSocketConnected = false;
@@ -2068,11 +2201,21 @@ export class GonvexClient {
       this.scheduleReconnect();
       this.notifyConnectionState();
     });
-    socket.addEventListener("message", (event) => {
+    // Delivery v2 batches re-enter with already parsed frames (`parsed`).
+    const onMessage = (event: { data?: unknown; parsed?: ServerMessage }) => {
       if (this.socket !== socket) return;
       let message: ServerMessage;
       try {
-        const frame = JSON.parse(String(event.data));
+        const frame = event.parsed ?? JSON.parse(String(event.data));
+        if (frame?.type === "replica.batch") {
+          // One message per tick of shared, stream-addressed items: dispatch
+          // the frames it stands for, in order (see docs/performance/delivery.md).
+          for (const parsed of expandReplicaBatch(frame, replicaStreams)) {
+            if (this.socket !== socket) return;
+            onMessage({ parsed });
+          }
+          return;
+        }
         if (frame?.type === "replica.rowPatch") {
           try {
             if (!this.replicaFieldPatchesEnabled || this.serverCapabilities.replicaFieldPatches !== 1) throw new Error("unnegotiated-replica-row-patch");
@@ -2096,7 +2239,10 @@ export class GonvexClient {
         return;
       }
       if (message.type === "session.ready") {
+        const presenceChanged = (message.capabilities?.presence === 1) !== (this.serverCapabilities.presence === 1);
         this.serverCapabilities = message.capabilities ?? {};
+        // Capability-dependent UI (presence v2) re-reads on connection state.
+        if (presenceChanged) this.notifyConnectionState();
         if (this.controlOnly) {
           this.flushPendingMessages();
           return;
@@ -2216,6 +2362,8 @@ export class GonvexClient {
         if (message.type === "auth.result") this.activeAuthFrameId = message.id;
         else this.activeAuthFrameId = undefined;
         if (message.type === "auth.result") this.flushPendingNativeErrors();
+        if (message.type === "auth.result") this.presenceFeed.authenticated();
+        else this.presenceFeed.disconnected();
         if (this.authWatchdogTimer) {
           clearTimeout(this.authWatchdogTimer);
           this.authWatchdogTimer = undefined;
@@ -2393,6 +2541,7 @@ export class GonvexClient {
         }
         return;
       }
+      if (this.presenceFeed.handle(message)) return;
       if (message.type === "support.command") {
         const result = message.result && typeof message.result === "object" && !Array.isArray(message.result)
           ? message.result as Record<string, JsonValue>
@@ -2426,94 +2575,107 @@ export class GonvexClient {
 			}
       const id = "id" in message ? message.id : "system";
       this.handlers.get(id)?.(message);
-    });
+    };
+    socket.addEventListener("message", onMessage);
   }
 
   close() {
-    this.receiptReconciliationGeneration = Symbol();
-    this.receiptReconciliations.clear();
-    this.openingReplicaWatermark = undefined;
-    this.publishTenantAdmission(undefined);
-    this.snapshotDeferredFrames = [];
-    this.snapshotDeferredBytes = 0;
-    this.snapshotPageSubscriptions.clear();
-    for (const subscription of this.replicaSubscriptions.values()) {
-      this.discardSnapshotPages(subscription);
-      subscription.verificationGeneration = Symbol();
+        this.receiptReconciliationGeneration = Symbol();
+        this.receiptReconciliations.clear();
+        this.openingReplicaWatermark = undefined;
+        this.publishTenantAdmission(undefined);
+        this.snapshotDeferredFrames = [];
+        this.snapshotDeferredBytes = 0;
+        this.snapshotPageSubscriptions.clear();
+        for (const subscription of this.replicaSubscriptions.values()) {
+            this.discardSnapshotPages(subscription);
+            subscription.verificationGeneration = Symbol();
+        }
+        this.flushTelemetry();
+        this.unsubscribeTelemetryLifecycle?.();
+        this.manuallyClosed = true;
+        this.authInFlight = false;
+        this.authResendRequired = false;
+        this.latestAuthFrameId = undefined;
+        this.activeAuthFrameId = undefined;
+        if (this.authWatchdogTimer) {
+            clearTimeout(this.authWatchdogTimer);
+            this.authWatchdogTimer = undefined;
+        }
+        this.outboxScopeGeneration = Symbol();
+        this.setLocalSessionState("unavailable");
+        this.unsubscribeLocal?.();
+        for (const close of this.localCollectionClosers.splice(0))
+            close();
+        this.localCollectionKeys.clear();
+        this.localExecutor?.close();
+        this.cancelManagedAuthAttempt("Gonvex client was closed during authentication.", "closed");
+        if (isEphemeralOutboxScope(this.outboxScope)) {
+            void this.reducerOutbox.clear(this.outboxScope);
+        }
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = undefined;
+        }
+        for (const query of this.oneShotQueries.values()) {
+            if (query.timeoutTimer)
+                clearTimeout(query.timeoutTimer);
+            query.reject(new GonvexClientError("Gonvex client was closed", { code: "closed", path: query.path, operation: "query" }));
+        }
+        this.oneShotQueries.clear();
+        this.rejectPendingCalls((call) => new GonvexClientError(`Gonvex client was closed while waiting for ${call.kind} ${call.path}`, { code: "closed", path: call.path, operation: call.kind }));
+        for (const subscription of this.replicaSubscriptions.values()) {
+            this.clearReplicaRetry(subscription);
+            if (subscription.unsubscribeTimer)
+                clearTimeout(subscription.unsubscribeTimer);
+        }
+        if (this.replicaOpenFlushTimer) {
+            clearTimeout(this.replicaOpenFlushTimer);
+            this.replicaOpenFlushTimer = undefined;
+        }
+        this.pendingReplicaOpens.clear();
+         this.replicaOpenHydrations.clear();
+        if (this.querySubscribeFlushTimer) {
+            clearTimeout(this.querySubscribeFlushTimer);
+            this.querySubscribeFlushTimer = undefined;
+        }
+        this.pendingQuerySubscribes.clear();
+        if (this.outboxDrainTimer) {
+            clearTimeout(this.outboxDrainTimer);
+            this.outboxDrainTimer = undefined;
+        }
+        this.unsubscribeOutbox();
+        this.reducerOutbox.dispose?.();
+        this.unsubscribePeerOutbox?.();
+        this.unsubscribePeerReplica?.();
+        this.unsubscribeBrowserOnline?.();
+        this.handlers.clear();
+        this.querySubscriptions.clear();
+        this.replicaSubscriptions.clear();
+        this.offlineResults.clear();
+        this.offlineResultRows = 0;
+        this.sessionScopeHandlers.clear();
+        this.authErrorHandlers.clear();
+        this.developerCredentialHandlers.clear();
+        // Invalidate any token fetch still in flight so its resolve can't touch
+        // the closed client's caches.
+        this.authFetchGeneration = Symbol();
+        this.errorReporter?.close();
+        const socket = this.socket;
+        this.socket = undefined;
+        this.isWebSocketConnected = false;
+        this.replica.setFreshness("offline");
+        this.notifyConnectionState();
+        this.connectionStateHandlers.clear();
+        this.supportCommandHandlers.clear();
+        this.replica.dispose();
+        const closedError = new Error("Gonvex client is closed");
+        for (const pending of this.pendingNativeErrors.splice(0))
+            pending.reject(closedError);
+        if (!socket)
+            return;
+        socket.close();
     }
-    this.flushTelemetry();
-    this.unsubscribeTelemetryLifecycle?.();
-    this.manuallyClosed = true;
-    this.outboxScopeGeneration = Symbol();
-    this.setLocalSessionState("unavailable");
-    this.unsubscribeLocal?.();
-    for (const close of this.localCollectionClosers.splice(0)) close();
-    this.localCollectionKeys.clear();
-    this.localExecutor?.close();
-    this.cancelManagedAuthAttempt("Gonvex client was closed during authentication.");
-    if (isEphemeralOutboxScope(this.outboxScope)) {
-      void this.reducerOutbox.clear(this.outboxScope);
-    }
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = undefined;
-    }
-    for (const query of this.oneShotQueries.values()) {
-      if (query.timeoutTimer) clearTimeout(query.timeoutTimer);
-      query.reject(new GonvexClientError("Gonvex client was closed", { code: "closed", path: query.path, operation: "query" }));
-    }
-    this.oneShotQueries.clear();
-    this.rejectPendingCalls((call) => new GonvexClientError(
-      `Gonvex client was closed while waiting for ${call.kind} ${call.path}`,
-      { code: "closed", path: call.path, operation: call.kind },
-    ));
-    for (const subscription of this.replicaSubscriptions.values()) {
-      this.clearReplicaRetry(subscription);
-      if (subscription.unsubscribeTimer) clearTimeout(subscription.unsubscribeTimer);
-    }
-    if (this.replicaOpenFlushTimer) {
-      clearTimeout(this.replicaOpenFlushTimer);
-      this.replicaOpenFlushTimer = undefined;
-    }
-    this.pendingReplicaOpens.clear();
-    if (this.querySubscribeFlushTimer) {
-      clearTimeout(this.querySubscribeFlushTimer);
-      this.querySubscribeFlushTimer = undefined;
-    }
-    this.pendingQuerySubscribes.clear();
-    if (this.outboxDrainTimer) {
-      clearTimeout(this.outboxDrainTimer);
-      this.outboxDrainTimer = undefined;
-    }
-    this.unsubscribeOutbox();
-    this.reducerOutbox.dispose?.();
-    this.unsubscribePeerOutbox?.();
-    this.unsubscribePeerReplica?.();
-    this.unsubscribeBrowserOnline?.();
-    this.handlers.clear();
-    this.querySubscriptions.clear();
-    this.replicaSubscriptions.clear();
-    this.offlineResults.clear(); this.offlineResultRows = 0;
-    this.sessionScopeHandlers.clear();
-    this.authErrorHandlers.clear();
-    this.developerCredentialHandlers.clear();
-    // Invalidate any token fetch still in flight so its resolve can't touch
-    // the closed client's caches.
-    this.authFetchGeneration = Symbol();
-    this.errorReporter?.close();
-    const socket = this.socket;
-    this.socket = undefined;
-    this.isWebSocketConnected = false;
-    this.replica.setFreshness("offline");
-    this.notifyConnectionState();
-    this.connectionStateHandlers.clear();
-    this.supportCommandHandlers.clear();
-    this.replica.dispose();
-    const closedError = new Error("Gonvex client is closed");
-    for (const pending of this.pendingNativeErrors.splice(0)) pending.reject(closedError);
-    if (!socket) return;
-    socket.close();
-  }
 
   private rejectPendingCalls(
     makeError: (call: PendingCall) => GonvexClientError,
@@ -2537,6 +2699,35 @@ export class GonvexClient {
   onSessionScopeChange(handler: () => void) {
     this.sessionScopeHandlers.add(handler);
     return () => this.sessionScopeHandlers.delete(handler);
+  }
+
+  /**
+   * Presence v2 is available on this connection: the runtime advertised
+   * `capabilities.presence`. Applications then report state with
+   * `setPresence` and stop calling heartbeat Reducers.
+   */
+  presenceSupported(): boolean {
+    return this.serverCapabilities.presence === 1;
+  }
+
+  /**
+   * Reports this connection's own presence. Send on transitions only; the
+   * client re-sends the latest state after every reconnect. `offline` leaves
+   * immediately (e.g. on page hide); closing the socket leaves after grace.
+   */
+  setPresence(state: "active" | "idle" | "offline"): void {
+    this.presenceFeed.set(state);
+  }
+
+  /** Subscribes to the tenant's presence feed while at least one listener exists. */
+  subscribePresence(listener: () => void): () => void {
+    this.connect();
+    return this.presenceFeed.subscribe(listener);
+  }
+
+  /** Current presence view; stable identity until the next change. */
+  presenceSnapshot(): PresenceFeedSnapshot {
+    return this.presenceFeed.snapshot();
   }
 
   onSupportCommand(handler: (command: SupportCommand) => void) {
@@ -2964,6 +3155,11 @@ export class GonvexClient {
 
   private subscribeReplicaTransport<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: ReplicaSubscriptionHandler, metadataOnly = false) {
     if (this.controlOnly) throw new Error("Control connections cannot subscribe to Replica Collections");
+    if (this.replicaOpenDeferral?.(ref.path)) {
+      const pending = {ref, args, onMessage, metadataOnly, cancelled: false, release: undefined as (() => void) | undefined};
+      this.deferredReplicaOpens.push(pending);
+      return () => { pending.cancelled = true; pending.release?.(); };
+    }
     if (metadataOnly) this.replicaMetadataListeners.add(onMessage);
     this.connect();
     const key = querySubscriptionKey(ref, args);
@@ -3318,7 +3514,7 @@ export class GonvexClient {
     if (message.type === "replica.reset" || message.type === "replica.error" || message.type === "replica.needHashes") {
       this.discardSnapshotPages(subscription);
     }
-    const current = () => this.replica.getWindow(subscription.key);
+    const current = () => this.replica.windowProtocolState(subscription.key);
     if (message.type === "replica.snapshot") {
       if (!subscription.opening || replicaCursorIsStale(subscription, message.cursor)) return;
       const generation = subscription.verificationGeneration;
@@ -3636,7 +3832,7 @@ export class GonvexClient {
   private async acceptReplicaReady(
     subscription: ReplicaSubscription,
     message: ReplicaReadyMessage,
-    hashes: Record<string, string>,
+    hashes: Readonly<Record<string, string>>,
     hashesWereStored: boolean,
     scope = this.replicaScope,
   ) {
@@ -3648,7 +3844,7 @@ export class GonvexClient {
     subscription.isUpToDate = true;
     subscription.opening = false;
     raiseReplicaCursorFloor(subscription, message.cursor);
-    const window = this.replica.getWindow(subscription.key);
+    const window = this.replica.windowProtocolState(subscription.key);
     if (window) {
       const completeness = message.truncated === true ? "partial" : "complete";
       const mode = message.mode ?? window.mode;
@@ -3841,7 +4037,7 @@ export class GonvexClient {
   }
 
   private startReplica(subscription: ReplicaSubscription) {
-    const cached = this.replica.getWindow(subscription.key);
+    const cached = this.replica.windowProtocolState(subscription.key);
     if (cached) {
       subscription.isUpToDate = false;
       const message: ReplicaMessage = {
@@ -3857,19 +4053,51 @@ export class GonvexClient {
   }
 
   private sendReplicaOpen(subscription: ReplicaSubscription) {
+    // Auth/directive resume owns the first request for watches restored while
+    // disconnected. Do not queue an obsolete subscription for the next socket.
     // Replica rows are tenant-authorized state. A hook can mount while the
     // socket is connected but before session.ready/auth.result supplies the
     // authoritative visibility scope. Opening in that gap produces a correct
     // server rejection that is nevertheless transient and must not become a
     // fatal React snapshot error. The directive handlers resume every retained
     // subscription once the scope is active.
-    if (!this.ownsReplicaSubscription(subscription) || this.authInFlight || !this.hasAuthoritativeReplicaScope
+    if (!this.isWebSocketConnected || !this.ownsReplicaSubscription(subscription) || this.authInFlight || !this.hasAuthoritativeReplicaScope
       || subscription.listeners.size === 0 || subscription.opening) return;
+    const ready = this.replicaReady;
+    const owner = this.capturePublicationOwner();
+    const id = subscription.id, verification = subscription.verificationGeneration;
+    const authFrame = this.activeAuthFrameId, pendingAuth = this.latestAuthFrameId;
+    const current = () => owner() && this.replicaReady === ready
+      && this.activeAuthFrameId === authFrame && this.latestAuthFrameId === pendingAuth
+      && this.ownsReplicaSubscription(subscription) && subscription.id === id
+      && subscription.verificationGeneration === verification;
+    if (this.hydratedReplicaReady !== ready) {
+      const previous = this.replicaOpenHydrations.get(subscription);
+      if (previous?.current()) return;
+      const pending = { current, task: Promise.resolve() };
+      this.replicaOpenHydrations.set(subscription, pending);
+      // Only collection opens wait here. In particular, control RPCs and
+      // outbox journal admission must progress while durable rows hydrate.
+      pending.task = ready.then(() => {
+        if (this.replicaOpenHydrations.get(subscription) !== pending) return;
+        this.replicaOpenHydrations.delete(subscription);
+        if (current()) this.sendReplicaOpen(subscription);
+      }, () => {
+        if (this.replicaOpenHydrations.get(subscription) === pending) {
+          this.replicaOpenHydrations.delete(subscription);
+        }
+        // The scope activation owner reports failure; never send a cold open
+        // on behalf of a failed or superseded durable activation.
+      }).catch(error => {
+        if (current()) this.rejectReplicaDirective(error);
+      });
+      return;
+    }
     const requestScope = this.replicaScope;
     subscription.scope = requestScope;
     subscription.opening = true;
     subscription.socketGeneration = this.socketGeneration;
-    const open = this.replicaOpenRequest(subscription);
+    this.replicaOpenOwners.set(subscription, current);
     if (this.serverCapabilities.replicaBatch === 1) {
       this.pendingReplicaOpens.add(subscription);
       if (!this.replicaOpenFlushTimer) {
@@ -3877,7 +4105,7 @@ export class GonvexClient {
       }
       return;
     }
-    this.send({ type: "replica.open", ...open });
+    this.send({ type: "replica.open", ...this.replicaOpenRequest(subscription) });
   }
 
   private replicaOpenRequest(subscription: ReplicaSubscription): ReplicaOpenRequest {
@@ -3912,22 +4140,31 @@ export class GonvexClient {
     this.replicaOpenFlushTimer = undefined;
     const subscriptions = Array.from(this.pendingReplicaOpens);
     this.pendingReplicaOpens.clear();
-    if (this.authInFlight || !this.hasAuthoritativeReplicaScope) {
-      for (const subscription of subscriptions) {
-        subscription.opening = false;
-        subscription.socketGeneration = undefined;
+    const owners = new Map(subscriptions.map(subscription =>
+      [subscription, this.replicaOpenOwners.get(subscription)] as const));
+    const canFlush = (subscription: ReplicaSubscription) =>
+      this.replicaOpenOwners.get(subscription) === owners.get(subscription)
+      && owners.get(subscription)?.() === true
+      && this.isWebSocketConnected && !this.authInFlight && this.hasAuthoritativeReplicaScope
+      && this.hydratedReplicaReady === this.replicaReady
+      && subscription.scope === this.replicaScope
+      && subscription.socketGeneration === this.socketGeneration
+      && subscription.opening && subscription.listeners.size > 0;
+    const release = (subscription: ReplicaSubscription) => {
+      // A reentrant send may already have queued a replacement preparation.
+      if (this.replicaOpenOwners.get(subscription) !== owners.get(subscription)) return;
+      subscription.opening = false;
+      subscription.socketGeneration = undefined;
+    };
+    for (let offset = 0; offset < subscriptions.length; offset += maxReplicaBatchOpens) {
+      // Recheck per frame too: a transport callback can retire the owner
+      // synchronously while the previous batch is sent.
+      const opens: ReplicaOpenRequest[] = [];
+      for (const subscription of subscriptions.slice(offset, offset + maxReplicaBatchOpens)) {
+        if (canFlush(subscription)) opens.push(this.replicaOpenRequest(subscription));
+        else release(subscription);
       }
-      return;
-    }
-    const opens = subscriptions
-      .filter((subscription) => (
-        subscription.opening
-        && subscription.listeners.size > 0
-        && this.replicaSubscriptions.get(subscription.key) === subscription
-      ))
-      .map((subscription) => this.replicaOpenRequest(subscription));
-    for (let offset = 0; offset < opens.length; offset += maxReplicaBatchOpens) {
-      this.send({ type: "replica.openMany", opens: opens.slice(offset, offset + maxReplicaBatchOpens) });
+      if (opens.length) this.send({ type: "replica.openMany", opens });
     }
   }
 
@@ -3942,6 +4179,7 @@ export class GonvexClient {
       latest.unsubscribeTimer = undefined;
       this.clearReplicaRetry(latest);
       this.pendingReplicaOpens.delete(latest);
+      this.replicaOpenHydrations.delete(latest);
       latest.verificationGeneration = Symbol();
       this.replicaSubscriptions.delete(key);
       this.discardSnapshotPages(latest);
@@ -4023,8 +4261,13 @@ export class GonvexClient {
   // await replicaReady still see the rejection; the stored promise itself must
   // not surface as an unhandled rejection that kills Node processes.
   private setReplicaReady(ready: Promise<void>) {
+    if (this.replicaReady === ready) return;
     this.replicaReady = ready;
-    ready.catch(() => undefined);
+    this.hydratedReplicaReady = undefined;
+    this.replicaOpenHydrations.clear();
+    void ready.then(() => {
+      if (this.replicaReady === ready) this.hydratedReplicaReady = ready;
+    }, () => undefined);
   }
 
   // Outbox restore awaits replicaReady, so it rejects the same way.
@@ -5130,13 +5373,18 @@ export class GonvexClient {
   }
 
   private requestSubscriptionSnapshot(subscription: QuerySubscription) {
-    // Do not advertise the cache revision while recovering. Otherwise the
-    // runtime can answer with another progress frame instead of a snapshot.
-    subscription.serverSettled = false;
-    subscription.forceSnapshot = true;
-    subscription.socketGeneration = undefined;
-    this.sendSubscription(subscription);
-  }
+        // Keep one full snapshot request outstanding. Progress or patches that
+        // cannot be applied while it is pending must not start a feedback loop.
+        // A full result clears forceSnapshot; reconnect resends subscriptions.
+        if (subscription.forceSnapshot)
+            return;
+        // Do not advertise the cache revision while recovering. Otherwise the
+        // runtime can answer with another progress frame instead of a snapshot.
+        subscription.serverSettled = false;
+        subscription.forceSnapshot = true;
+        subscription.socketGeneration = undefined;
+        this.sendSubscription(subscription);
+    }
 
   private sendOneShotQuery(query: OneShotQuery) {
     if (query.socketGeneration === this.socketGeneration) return;
@@ -5458,7 +5706,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
+		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 },
     });
   }
 
@@ -5470,12 +5718,13 @@ export class GonvexClient {
     else attempt.resolve();
   }
 
-  private cancelManagedAuthAttempt(message: string) {
-    const attempt = this.managedAuthAttempt;
-    if (!attempt) return;
-    this.managedAuthAttempt = undefined;
-    attempt.reject(new GonvexClientError(message, { code: "auth" }));
-  }
+  private cancelManagedAuthAttempt(message: string, code: GonvexClientErrorCode = "auth") {
+        const attempt = this.managedAuthAttempt;
+        if (!attempt)
+            return;
+        this.managedAuthAttempt = undefined;
+        attempt.reject(new GonvexClientError(message, { code }));
+    }
 
   // Tokens from a fetcher are typically short-lived while the socket (and any
   // disconnect gap) can span hours: replaying the token that was current at
@@ -5570,7 +5819,7 @@ export class GonvexClient {
     if (this.authWatchdogTimer) clearTimeout(this.authWatchdogTimer);
     this.authWatchdogTimer = setTimeout(() => {
       this.authWatchdogTimer = undefined;
-      if (!this.authInFlight) return;
+      if (this.manuallyClosed || !this.authInFlight) return;
       if (this.socket?.readyState === WebSocket.OPEN) {
         this.sendAuth(true);
       } else {
@@ -6241,4 +6490,90 @@ function localIntentDependencies(transaction: LocalTransactionResult): IntentDep
     scans: transaction.scanTables ?? transaction.readTables,
     writes: transaction.patches.map(patch => ({ entity: patch.entity, rowId: patch.rowId })),
   };
+}
+
+type LocalVisibilityCondition = {operator?: string; column?: string; context?: string; value?: unknown; children?: readonly LocalVisibilityCondition[]};
+function permissionGranted(value: unknown): boolean | undefined {
+    if (value === undefined || value === null || value === false)
+        return false;
+    if (value === true || value === "true" || value === "1")
+        return true;
+    if (typeof value === "number")
+        return value === 0 ? false : undefined;
+    // A case variant such as "TRUE" passes SQL but not the mask.
+    if (typeof value === "string")
+        return /^[\x00-\x7f]*$/.test(value) && !["true", "1"].includes(value.toLowerCase()) ? false : undefined;
+    // An object or array: ->> yields its JSON text, and the mask reads false.
+    return false;
+}
+function visibilityAdmitsEveryRow(input: unknown, member: LocalExecution["identity"]["member"]): boolean | undefined {
+    const condition = input as LocalVisibilityCondition | undefined;
+    if (!condition || typeof condition !== "object" || !member)
+        return undefined;
+    switch (condition.operator) {
+        case "public":
+            return true;
+        case "role":
+        case "permission": {
+            // The runtime checks an active member row. Any other member state is unknown here.
+            if (member.status !== "active" || typeof condition.value !== "string")
+                return undefined;
+            if (condition.operator === "role")
+                return typeof member.role === "string" ? member.role === condition.value : undefined;
+            const permissions = member.permissions;
+            if (!permissions || typeof permissions !== "object" || Array.isArray(permissions))
+                return undefined;
+            return permissionGranted(Object.hasOwn(permissions, condition.value) ? permissions[condition.value] : undefined);
+        }
+        case "not": {
+            const value = condition.children?.length === 1 ? visibilityAdmitsEveryRow(condition.children[0], member) : undefined;
+            return value === undefined ? undefined : !value;
+        }
+        case "and":
+        case "or": {
+            if (!condition.children?.length)
+                return undefined;
+            const every = condition.operator === "and";
+            let unknown = false;
+            for (const child of condition.children) {
+                const value = visibilityAdmitsEveryRow(child, member);
+                if (value === undefined)
+                    unknown = true;
+                else if (value !== every)
+                    return value;
+            }
+            return unknown ? undefined : every;
+        }
+        default:
+            return undefined;
+    }
+}
+function visibleRowSlices(input: unknown, identity: LocalExecution["identity"], budget = 32): DataPredicate[][] {
+    const condition = input as LocalVisibilityCondition | undefined;
+    if (!condition || typeof condition !== "object" || !identity)
+        return [];
+    switch (condition.operator) {
+        case "eqContext": {
+            const value = condition.context === "member.id" ? identity.member?.id
+                : condition.context === "account.id" ? identity.auth?.account?.id
+                    : condition.context === "tenant.id" ? identity.tenant?.id : undefined;
+            return typeof condition.column === "string" && typeof value === "string" ? [[{ column: condition.column, op: "eq", value }]] : [];
+        }
+        case "or":
+            return (condition.children ?? []).flatMap(child => visibleRowSlices(child, identity, budget)).slice(0, budget);
+        case "and": {
+            if (!condition.children?.length)
+                return [];
+            let slices: DataPredicate[][] = [[]];
+            for (const child of condition.children) {
+                const next = visibleRowSlices(child, identity, budget);
+                slices = slices.flatMap(slice => next.map(more => [...slice, ...more]));
+                if (slices.length > budget)
+                    return [];
+            }
+            return slices;
+        }
+        default:
+            return visibilityAdmitsEveryRow(condition, identity.member) === true ? [[]] : [];
+    }
 }

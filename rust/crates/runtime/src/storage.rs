@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::config::StorageConfig;
 use crate::Runtime;
-use gonvex_postgres::TenantSession;
+use gonvex_store::TenantSession;
 
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const MAX_DIRECT_STORE_BYTES: usize = 128 << 20;
@@ -34,14 +34,20 @@ const FILES_TABLE_DDL: &str = r#"CREATE TABLE IF NOT EXISTS _gonvex_files (
   bucket TEXT NOT NULL,
   object_key TEXT NOT NULL,
   content_type TEXT NOT NULL DEFAULT '',
-  size_bytes BIGINT NOT NULL DEFAULT 0,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
   checksum TEXT NOT NULL DEFAULT '',
   visibility TEXT NOT NULL DEFAULT 'private',
   status TEXT NOT NULL DEFAULT 'pending',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  uploaded_at TIMESTAMPTZ,
-  deleted_at TIMESTAMPTZ
+  created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+  uploaded_at INTEGER,
+  deleted_at INTEGER
 )"#;
+
+const NOW_MS_SQL: &str = gonvex_store::NOW_MS;
+
+fn millis_to_datetime(millis: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(millis).unwrap_or_default()
+}
 
 #[derive(Clone)]
 pub struct StorageManager {
@@ -289,7 +295,7 @@ impl StorageManager {
                     .map_err(|error| error.to_string())?;
                 let row = sqlx::query(r#"INSERT INTO _gonvex_files
                     (id,tenant_id,owner_id,bucket,object_key,content_type,size_bytes,checksum,visibility,status,uploaded_at)
-                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'uploaded',now())
+                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'uploaded',CAST(unixepoch('subsec')*1000 AS INTEGER))
                     RETURNING id,tenant_id,owner_id,bucket,object_key,content_type,size_bytes,
                               checksum,visibility,status,created_at,uploaded_at"#)
                     .bind(&file_id)
@@ -395,10 +401,7 @@ impl StorageManager {
             .bind(key).fetch_optional(&mut **lookup.transaction()).await.map_err(|e| e.to_string())?;
         lookup.commit().await.map_err(|e| e.to_string())?;
         if let Some(ticket) = ticket {
-            if ticket
-                .get::<Option<DateTime<Utc>>, _>("consumed_at")
-                .is_some()
-            {
+            if ticket.get::<Option<i64>, _>("consumed_at").is_some() {
                 return Err("upload already consumed".into());
             }
             let project: String = ticket.get("project_id");
@@ -421,19 +424,51 @@ impl StorageManager {
                 }
             }
         }
+        // The unique row serializes concurrent uses of this bearer URL. The
+        // claim commits before the PUT so the Control Plane writer is never
+        // held across object storage I/O; a failed PUT releases the claim.
         let mut transaction = control
             .begin_control_transaction(false)
             .await
             .map_err(|e| e.to_string())?;
-        // The unique row serializes concurrent uses of this bearer URL across
-        // instances. Failed PUTs roll back; successful writes consume it durably.
-        let claimed = sqlx::query("INSERT INTO gonvex_storage_uploads(object_key,consumed_at) VALUES($1,now()) ON CONFLICT(object_key) DO UPDATE SET consumed_at=now() WHERE gonvex_storage_uploads.consumed_at IS NULL")
-            .bind(key).execute(&mut **transaction.transaction()).await.map_err(|e| e.to_string())?;
-        if claimed.rows_affected() == 0 {
+        let claim_sql = format!(
+            "INSERT INTO gonvex_storage_uploads(object_key,consumed_at) VALUES($1,{NOW_MS_SQL}) \
+             ON CONFLICT(object_key) DO UPDATE SET consumed_at={NOW_MS_SQL} \
+             WHERE gonvex_storage_uploads.consumed_at IS NULL RETURNING consumed_at,project_id"
+        );
+        let claimed = sqlx::query(&claim_sql)
+            .bind(key)
+            .fetch_optional(&mut **transaction.transaction())
+            .await
+            .map_err(|e| e.to_string())?;
+        let Some(claimed) = claimed else {
             return Err("upload already consumed".into());
+        };
+        let consumed_at: i64 = claimed.get("consumed_at");
+        let ticketless = claimed.get::<String, _>("project_id").is_empty();
+        transaction.commit().await.map_err(|e| e.to_string())?;
+        if let Err(error) = self.put_once(key, body, content_type).await {
+            let release = async {
+                let mut transaction = control.begin_control_transaction(false).await?;
+                let statement = if ticketless {
+                    "DELETE FROM gonvex_storage_uploads WHERE object_key=$1 AND consumed_at=$2 AND project_id=''"
+                } else {
+                    "UPDATE gonvex_storage_uploads SET consumed_at=NULL WHERE object_key=$1 AND consumed_at=$2"
+                };
+                sqlx::query(statement)
+                    .bind(key)
+                    .bind(consumed_at)
+                    .execute(&mut **transaction.transaction())
+                    .await?;
+                transaction.commit().await
+            }
+            .await;
+            if let Err(release_error) = release {
+                tracing::warn!(%release_error, "failed upload claim could not be released");
+            }
+            return Err(error);
         }
-        self.put_once(key, body, content_type).await?;
-        transaction.commit().await.map_err(|e| e.to_string())
+        Ok(())
     }
 
     async fn put_once(&self, key: &str, body: Vec<u8>, content_type: &str) -> Result<(), String> {
@@ -481,7 +516,7 @@ impl StorageManager {
                 .await
                 .map_err(|error| error.to_string())?;
             let exists: bool =
-                sqlx::query_scalar("SELECT to_regclass('public._gonvex_files') IS NOT NULL")
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_files')")
                     .fetch_one(&mut **transaction.transaction())
                     .await
                     .map_err(|error| error.to_string())?;
@@ -516,8 +551,8 @@ impl StorageManager {
                     "key":key,
                     "size":row.get::<i64,_>("size_bytes"),
                     "contentType":row.get::<String,_>("content_type"),
-                    "uploadedAt":row.get::<Option<DateTime<Utc>>,_>("uploaded_at")
-                        .unwrap_or_else(||row.get::<DateTime<Utc>,_>("created_at")),
+                    "uploadedAt":millis_to_datetime(row.get::<Option<i64>,_>("uploaded_at")
+                        .unwrap_or_else(||row.get::<i64,_>("created_at"))),
                     "url":self.proxy_url(&key,DEFAULT_DOWNLOAD_SECONDS,false),
                 }));
             }
@@ -544,7 +579,7 @@ impl StorageManager {
 
     async fn ensure_table(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         session: &TenantSession,
     ) -> Result<(), String> {
         let mut transaction = control
@@ -569,7 +604,7 @@ impl StorageManager {
 
     async fn metadata(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         session: &TenantSession,
         file_id: &str,
         finalize: bool,
@@ -594,7 +629,7 @@ impl StorageManager {
     pub(crate) async fn reducer_metadata(
         &self,
         session: &TenantSession,
-        transaction: &mut gonvex_postgres::TenantTransaction,
+        transaction: &mut gonvex_store::TenantTransaction,
         file_id: &str,
     ) -> Result<Value, String> {
         self.require_configured()?;
@@ -607,7 +642,7 @@ impl StorageManager {
     async fn metadata_in_transaction(
         &self,
         session: &TenantSession,
-        transaction: &mut gonvex_postgres::TenantTransaction,
+        transaction: &mut gonvex_store::TenantTransaction,
         file_id: &str,
         finalize: bool,
     ) -> Result<FileMetadata, String> {
@@ -626,7 +661,7 @@ impl StorageManager {
         if finalize && metadata.status == "pending" {
             if let Some((size, content_type, checksum)) = self.head(&metadata.object_key).await? {
                 let row = sqlx::query(r#"UPDATE _gonvex_files SET status='uploaded',size_bytes=$2,
-                        content_type=COALESCE(NULLIF($3,''),content_type),checksum=$4,uploaded_at=now()
+                        content_type=COALESCE(NULLIF($3,''),content_type),checksum=$4,uploaded_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                     WHERE id=$1 RETURNING id,tenant_id,owner_id,bucket,object_key,content_type,
                         size_bytes,checksum,visibility,status,created_at,uploaded_at"#)
                     .bind(file_id)
@@ -869,7 +904,7 @@ impl StorageManager {
     }
 }
 
-fn metadata_from_row(row: &sqlx::postgres::PgRow) -> FileMetadata {
+fn metadata_from_row(row: &sqlx::sqlite::SqliteRow) -> FileMetadata {
     FileMetadata {
         id: row.get("id"),
         tenant_id: row.get("tenant_id"),
@@ -881,8 +916,10 @@ fn metadata_from_row(row: &sqlx::postgres::PgRow) -> FileMetadata {
         checksum: row.get("checksum"),
         visibility: row.get("visibility"),
         status: row.get("status"),
-        created_at: row.get("created_at"),
-        uploaded_at: row.get("uploaded_at"),
+        created_at: millis_to_datetime(row.get("created_at")),
+        uploaded_at: row
+            .get::<Option<i64>, _>("uploaded_at")
+            .map(millis_to_datetime),
     }
 }
 
@@ -982,6 +1019,21 @@ fn constant_time(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    /// A fresh data directory under `GONVEX_TEST_DATA_DIR` when set (CI volume),
+    /// otherwise a system tempdir.
+    fn test_data_dir() -> tempfile::TempDir {
+        match std::env::var("GONVEX_TEST_DATA_DIR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(root) => {
+                std::fs::create_dir_all(&root).unwrap();
+                tempfile::tempdir_in(root).unwrap()
+            }
+            None => tempfile::tempdir().unwrap(),
+        }
+    }
+
     #[test]
     fn object_keys_are_tenant_namespaced_and_paths_are_encoded() {
         assert_eq!(encode_key("project/a b/file"), "project/a%20b/file");
@@ -1002,21 +1054,15 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_uploads_are_single_use_and_metadata_binds_immutable_bytes() {
-        use gonvex_postgres::{ControlPlane, TenantRoute};
-        let (Ok(base), Ok(endpoint)) = (
-            std::env::var("GONVEX_TEST_POSTGRES_URL"),
-            std::env::var("GONVEX_TEST_STORAGE_ENDPOINT"),
-        ) else {
+        use gonvex_store::{ControlPlane, TenantRoute};
+        // Object storage still needs a MinIO (or S3-compatible) endpoint; the
+        // databases are always local SQLite files.
+        let Ok(endpoint) = std::env::var("GONVEX_TEST_STORAGE_ENDPOINT") else {
             return;
         };
-        let schema = format!("immutable_upload_{}", Uuid::new_v4().simple());
-        let admin = sqlx::PgPool::connect(&base).await.unwrap();
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if base.contains('?') { '&' } else { '?' };
-        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let data = test_data_dir();
+        let control_url = gonvex_store::database_url(&data.path().join("control.db"));
+        let url = gonvex_store::database_url(&data.path().join("tenant.db"));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut config = crate::config::Config::from_env().unwrap();
@@ -1030,10 +1076,11 @@ mod tests {
             public_base_url: format!("http://{address}"),
         };
         let runtime = Runtime::new(config);
-        let control = ControlPlane::connect(&url, runtime.inner.pools.clone(), BTreeMap::new())
-            .await
-            .unwrap();
-        let fixture = sqlx::PgPool::connect(&url).await.unwrap();
+        let control =
+            ControlPlane::connect(&control_url, runtime.inner.pools.clone(), BTreeMap::new())
+                .await
+                .unwrap();
+        let fixture = control.pools().pool(&control_url).await.unwrap();
         sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('project','Project','multiTenant','active')").execute(&fixture).await.unwrap();
         sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_url,status) VALUES('route','project','tenant','Tenant',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
         let route = TenantRoute {
@@ -1152,7 +1199,7 @@ mod tests {
             b"PDF"
         );
         // Restore the successful consumption record, then delete the object.
-        sqlx::query("INSERT INTO gonvex_storage_uploads(object_key,consumed_at) VALUES($1,now())")
+        sqlx::query("INSERT INTO gonvex_storage_uploads(object_key,consumed_at) VALUES($1,CAST(unixepoch('subsec')*1000 AS INTEGER))")
             .bind(&key)
             .execute(&fixture)
             .await
@@ -1245,13 +1292,8 @@ mod tests {
             reqwest::StatusCode::OK
         );
         server.abort();
+        drop(fixture);
         runtime.shutdown().await;
-        fixture.close().await;
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
     }
 
     #[tokio::test]

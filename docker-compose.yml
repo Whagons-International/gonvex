@@ -1,21 +1,4 @@
 services:
-  postgres:
-    image: postgres:17-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: gonvex_dev
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d gonvex_dev"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
   minio:
     image: quay.io/minio/minio:latest
     restart: unless-stopped
@@ -60,16 +43,13 @@ services:
     working_dir: /var/lib/gonvex
     user: "0:0"
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       GONVEX_DB_MAX_OPEN_CONNS: ${GONVEX_DB_MAX_OPEN_CONNS:-2}
       GONVEX_DB_MAX_IDLE_CONNS: ${GONVEX_DB_MAX_IDLE_CONNS:-2}
       GONVEX_DB_IDLE_TIMEOUT_MS: ${GONVEX_DB_IDLE_TIMEOUT_MS:-60000}
       GONVEX_ADDR: 0.0.0.0:8080
-      GONVEX_CONTROL_PLANE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/gonvex_dev?sslmode=disable
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/gonvex_dev?sslmode=disable
+      # Every database (control.db and tenant files) is a SQLite file here.
+      GONVEX_DATA_DIR: /data
       GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
       S3_ENDPOINT: http://minio:9000
       S3_REGION: us-east-1
@@ -92,6 +72,7 @@ services:
       - "8080:8080"
     volumes:
       - runtime-data:/var/lib/gonvex
+      - sqlite-data:/data
     cap_drop:
       - ALL
     cap_add:
@@ -138,6 +119,6 @@ services:
       retries: 20
 
 volumes:
-  postgres-data:
   minio-data:
   runtime-data:
+  sqlite-data:

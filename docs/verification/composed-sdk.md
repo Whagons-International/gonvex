@@ -1,5 +1,10 @@
 # Authenticated SDK, receipt and replica composition
 
+> Storage moved from PostgreSQL to SQLite on 2026-11-02 (see
+> [SQLite storage](../sqlite-storage.md)). Evidence below that names PostgreSQL
+> was established on the earlier backend and must be re-run on SQLite before it
+> is relied on for the current runtime.
+
 The fixture in
 [`authenticated_sdk_receipt_replica_composition`](../../rust/crates/runtime/src/tests/receipt_guarantee_tests.rs)
 is explicitly selected by
@@ -306,35 +311,13 @@ The deterministic PostgreSQL regression establishes the scheduling defect; one
 later successful browser run alone would not establish that correspondence.
 
 
-## SDK retirement after PostgreSQL process crash
+## SDK retirement after PostgreSQL process crash (retired)
 
-[`check_sdk_postgres_crash.py`](../../verification/backend-receipts/check_sdk_postgres_crash.py)
-owns a disposable PostgreSQL container and runs the authenticated SDK composition
-against the existing native runtime. In the lost-reply schedule, the SDK drops
-the real committed reducer result, closes the old socket and retains its original
-intent in SQLite. A marker pauses recovery before opening fresh SDK handles.
-An independent PostgreSQL connection must observe exactly one committed business
-row and one completed receipt for that key before the coordinator kills the
-owned database process with SIGKILL.
-
-The container must exit with status 137. It restarts with the same data and port,
-and a second SQL witness must match the first. The runtime process and its pools
-remain alive throughout. Fresh SDK and SQLite handles then authenticate through
-those pools, discover the retained receipt, persist replica data and retire the
-original intent. Exactly one ordinary reducer call is allowed across the whole
-schedule; the recovered durable cursor must cover the committed revision.
-The remaining composition schedules and Rust SQL postconditions also complete.
-
-The coordinator records the native artifact hashes, all built JavaScript and
-TypeScript package inputs, the selected runtime source, durable PostgreSQL
-settings, process identity and both SQL witnesses. It refuses changed inputs
-during execution. The required CI workflow runs this schedule and a control
-that deliberately removes the committed business row after database recovery;
-the control must fail the named business/receipt witness assertion. That control
-tests evidence integrity and does not simulate PostgreSQL losing committed data.
-
-This establishes a committed lost-reply recovery schedule through SQLx pool
-recovery without explicit pool reset or runtime restart. The SDK object itself
-is reopened. Automatic reconnection of the same SDK object, an uncommitted
-PostgreSQL crash during its business call, native app drivers and machine
-power-loss durability remain separate obligations.
+This schedule killed a separate PostgreSQL server while the runtime and its
+connection pools stayed alive. With SQLite storage the database runs inside the
+runtime process, so there is no independent database process to kill and no
+pool to recover; `check_sdk_postgres_crash.py` and its CI step were removed. The
+corresponding boundary is now a runtime process crash, covered by
+`verification/backend-receipts/check_restart.py` (see
+[reducer receipts](reducer-receipts.md#runtime-process-crash-experiment)).
+SDK recovery across a runtime process crash remains a separate obligation.

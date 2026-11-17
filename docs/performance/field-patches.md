@@ -1,5 +1,8 @@
 # Field patches for replica updates
 
+> Historical: written while Gonvex stored data in PostgreSQL. Storage moved to
+> SQLite on 2026-11-02; see [SQLite storage](../sqlite-storage.md).
+
 The first implementation is opt-in. It reduces repeated row transmission while preserving the existing logical transaction, collection, storage and integrity contracts. It adds no production dependencies and keeps JSON/permessage-deflate.
 
 ```ts

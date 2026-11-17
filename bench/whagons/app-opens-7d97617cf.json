@@ -1,0 +1,533 @@
+{
+ "source": "Whagons web client 7d97617cf (lab pin), /workspace/all reload as load-user-0, captured 2026-11-04 from sent replica.openMany frames",
+ "opens": [
+  {
+   "path": "__local.advancedVoiceSessions",
+   "args": {}
+  },
+  {
+   "path": "__local.bugReports",
+   "args": {}
+  },
+  {
+   "path": "__local.centers",
+   "args": {}
+  },
+  {
+   "path": "__local.cleaningReportDeliveries",
+   "args": {}
+  },
+  {
+   "path": "__local.cleaningReportSchedules",
+   "args": {}
+  },
+  {
+   "path": "__local.cleaningResetRules",
+   "args": {}
+  },
+  {
+   "path": "__local.clockInEvents",
+   "args": {}
+  },
+  {
+   "path": "__local.clockInSessions",
+   "args": {}
+  },
+  {
+   "path": "__local.deepResearchAssignments",
+   "args": {}
+  },
+  {
+   "path": "__local.deepResearchSettings",
+   "args": {}
+  },
+  {
+   "path": "__local.fcmTokens",
+   "args": {}
+  },
+  {
+   "path": "__local.githubConnections",
+   "args": {}
+  },
+  {
+   "path": "__local.journeySyncConfigurations",
+   "args": {}
+  },
+  {
+   "path": "__local.learnProgress",
+   "args": {}
+  },
+  {
+   "path": "__local.marketProjects",
+   "args": {}
+  },
+  {
+   "path": "__local.memberAuthStates",
+   "args": {}
+  },
+  {
+   "path": "__local.nfcTapLogs",
+   "args": {}
+  },
+  {
+   "path": "__local.opsManagerConfigs",
+   "args": {}
+  },
+  {
+   "path": "__local.opsManagerReports",
+   "args": {}
+  },
+  {
+   "path": "__local.peopleFlowTemplates",
+   "args": {}
+  },
+  {
+   "path": "__local.peopleLinks",
+   "args": {}
+  },
+  {
+   "path": "__local.phoneContacts",
+   "args": {}
+  },
+  {
+   "path": "__local.phoneScripts",
+   "args": {}
+  },
+  {
+   "path": "__local.plugins",
+   "args": {}
+  },
+  {
+   "path": "__local.pmsConnections",
+   "args": {}
+  },
+  {
+   "path": "__local.purchasingDocumentCounters",
+   "args": {}
+  },
+  {
+   "path": "__local.relayCallPolicies",
+   "args": {}
+  },
+  {
+   "path": "__local.relayNumberAssignments",
+   "args": {}
+  },
+  {
+   "path": "__local.relayPhoneNumbers",
+   "args": {}
+  },
+  {
+   "path": "__local.reportDocuments",
+   "args": {}
+  },
+  {
+   "path": "__local.reportTemplates",
+   "args": {}
+  },
+  {
+   "path": "__local.researchCompanies",
+   "args": {}
+  },
+  {
+   "path": "__local.researchRuns",
+   "args": {}
+  },
+  {
+   "path": "__local.researchSettings",
+   "args": {}
+  },
+  {
+   "path": "__local.taskNumberCounters",
+   "args": {}
+  },
+  {
+   "path": "__local.tenantBilling",
+   "args": {}
+  },
+  {
+   "path": "__local.tenantBranding",
+   "args": {}
+  },
+  {
+   "path": "__local.webhooks",
+   "args": {}
+  },
+  {
+   "path": "__local.workspaceViewPublicShares",
+   "args": {}
+  },
+  {
+   "path": "__local.workspaceViewWorkspaces",
+   "args": {}
+  },
+  {
+   "path": "members.listMembers",
+   "args": {}
+  },
+  {
+   "path": "tasks.recentWorkspaceTasks",
+   "args": {}
+  },
+  {
+   "path": "memberAuthStates.mine",
+   "args": {}
+  },
+  {
+   "path": "billing.current",
+   "args": {}
+  },
+  {
+   "path": "tenantBranding.getPublic",
+   "args": {}
+  },
+  {
+   "path": "settingsReplicas.globalSettings",
+   "args": {}
+  },
+  {
+   "path": "properties.properties",
+   "args": {}
+  },
+  {
+   "path": "centers.centers",
+   "args": {}
+  },
+  {
+   "path": "centers.jobPositionCenters",
+   "args": {}
+  },
+  {
+   "path": "centers.preferences",
+   "args": {}
+  },
+  {
+   "path": "settings.plugins",
+   "args": {}
+  },
+  {
+   "path": "workspacePreferences.workspacePreferences",
+   "args": {}
+  },
+  {
+   "path": "chat.conversationParticipants",
+   "args": {}
+  },
+  {
+   "path": "chat.directMessages",
+   "args": {}
+  },
+  {
+   "path": "notifications.listNotifications",
+   "args": {}
+  },
+  {
+   "path": "taskResources.listSharedToMe",
+   "args": {}
+  },
+  {
+   "path": "members.listMemberTeams",
+   "args": {}
+  },
+  {
+   "path": "taskWorkspaceContexts.contexts",
+   "args": {}
+  },
+  {
+   "path": "taskResources.recentTaskAcknowledgments",
+   "args": {}
+  },
+  {
+   "path": "taskResources.recentTaskAcknowledgmentReads",
+   "args": {}
+  },
+  {
+   "path": "categories.categories",
+   "args": {}
+  },
+  {
+   "path": "workspaceGroups.workspaceGroups",
+   "args": {}
+  },
+  {
+   "path": "statuses.statuses",
+   "args": {}
+  },
+  {
+   "path": "learn.progress",
+   "args": {}
+  },
+  {
+   "path": "learn.positionFits",
+   "args": {}
+  },
+  {
+   "path": "jobPositions.jobPositions",
+   "args": {}
+  },
+  {
+   "path": "roles.list",
+   "args": {}
+  },
+  {
+   "path": "roles.listPermissions",
+   "args": {}
+  },
+  {
+   "path": "roles.rolePermissions",
+   "args": {}
+  },
+  {
+   "path": "roles.memberTeams",
+   "args": {}
+  },
+  {
+   "path": "broadcasts.listAllAcknowledgments",
+   "args": {}
+  },
+  {
+   "path": "workspaces.list",
+   "args": {}
+  },
+  {
+   "path": "teams.teams",
+   "args": {}
+  },
+  {
+   "path": "boards.list",
+   "args": {}
+  },
+  {
+   "path": "gamification.pointActionSettings",
+   "args": {}
+  },
+  {
+   "path": "gamification.userPoints",
+   "args": {}
+  },
+  {
+   "path": "gamification.pointTransactions",
+   "args": {}
+  },
+  {
+   "path": "gamification.userActionStats",
+   "args": {
+    "userId": "$member"
+   }
+  },
+  {
+   "path": "gamification.userBadges",
+   "args": {
+    "userId": "$member"
+   }
+  },
+  {
+   "path": "gamification.badges",
+   "args": {}
+  },
+  {
+   "path": "gamification.levels",
+   "args": {}
+  },
+  {
+   "path": "schedulingReplicas.scheduleBoards",
+   "args": {}
+  },
+  {
+   "path": "complianceReplicas.complianceStandards",
+   "args": {}
+  },
+  {
+   "path": "complianceReplicas.complianceRequirements",
+   "args": {}
+  },
+  {
+   "path": "complianceReplicas.complianceMappings",
+   "args": {}
+  },
+  {
+   "path": "complianceReplicas.complianceAudits",
+   "args": {}
+  },
+  {
+   "path": "assistant.listThreads",
+   "args": {}
+  },
+  {
+   "path": "workplans.workplans",
+   "args": {}
+  },
+  {
+   "path": "taskResources.taskUsers",
+   "args": {}
+  },
+  {
+   "path": "priorities.list",
+   "args": {}
+  },
+  {
+   "path": "spots.list",
+   "args": {}
+  },
+  {
+   "path": "tags.tags",
+   "args": {}
+  },
+  {
+   "path": "customFields.customFields",
+   "args": {}
+  },
+  {
+   "path": "workspaceViews.listAvailable",
+   "args": {
+    "workspaceId": "all"
+   }
+  },
+  {
+   "path": "workspaces.workspaceTeams",
+   "args": {}
+  },
+  {
+   "path": "workplans.listWorkplans",
+   "args": {}
+  },
+  {
+   "path": "templates.list",
+   "args": {}
+  },
+  {
+   "path": "statusTransitions.statusTransitions",
+   "args": {}
+  },
+  {
+   "path": "statusTransitions.statusTransitionGroups",
+   "args": {}
+  },
+  {
+   "path": "approvals.approvals",
+   "args": {}
+  },
+  {
+   "path": "approvals.approvalApprovers",
+   "args": {}
+  },
+  {
+   "path": "approvals.taskApprovalInstances",
+   "args": {}
+  },
+  {
+   "path": "workflowRuntime.workflows",
+   "args": {}
+  },
+  {
+   "path": "sla.slas",
+   "args": {}
+  },
+  {
+   "path": "customFields.categoryCustomFields",
+   "args": {}
+  },
+  {
+   "path": "assets.assetItems",
+   "args": {}
+  },
+  {
+   "path": "analytics.listTaskTagsForAnalytics",
+   "args": {}
+  },
+  {
+   "path": "analytics.listKpiCards",
+   "args": {}
+  },
+  {
+   "path": "customFields.taskValues",
+   "args": {}
+  },
+  {
+   "path": "chat.workspaceChat",
+   "args": {}
+  },
+  {
+   "path": "calls.listForUser",
+   "args": {}
+  },
+  {
+   "path": "taskResources.listTaskRelations",
+   "args": {}
+  },
+  {
+   "path": "taskFindings.routingLinks",
+   "args": {}
+  },
+  {
+   "path": "cleaningStatuses.cleaningStatuses",
+   "args": {}
+  },
+  {
+   "path": "reminderRules.reminderRules",
+   "args": {}
+  },
+  {
+   "path": "forms.list",
+   "args": {}
+  },
+  {
+   "path": "notificationSoundRules.notificationSoundRules",
+   "args": {}
+  },
+  {
+   "path": "audiences.list",
+   "args": {}
+  },
+  {
+   "path": "emailTemplates.emailTemplates",
+   "args": {}
+  },
+  {
+   "path": "taskResources.noteCountsByTenant",
+   "args": {}
+  },
+  {
+   "path": "taskFindings.countsByTenant",
+   "args": {}
+  },
+  {
+   "path": "taskFindings.linkedTasksByTenant",
+   "args": {}
+  },
+  {
+   "path": "taskFindings.routesByTenant",
+   "args": {}
+  },
+  {
+   "path": "taskFindings.list",
+   "args": {}
+  },
+  {
+   "path": "forms.listVersions",
+   "args": {}
+  },
+  {
+   "path": "forms.listTaskForms",
+   "args": {}
+  },
+  {
+   "path": "taskResources.noteSummariesByTenant",
+   "args": {}
+  },
+  {
+   "path": "taskResources.listTaskIdsWithSignatures",
+   "args": {}
+  },
+  {
+   "path": "documents.listEntityIdsWithDocuments",
+   "args": {
+    "associableType": "task"
+   }
+  },
+  {
+   "path": "taskResources.listTaskIdsWithAttachments",
+   "args": {}
+  }
+ ]
+}

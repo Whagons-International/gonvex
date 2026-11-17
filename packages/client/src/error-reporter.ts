@@ -8,6 +8,8 @@ export type ErrorReporterOptions = {
     reportError: (type: "register" | "envelope" | "heartbeat", payload: unknown) => Promise<void>;
     connectionState?: () => { isWebSocketConnected: boolean };
     subscribeToConnectionState?: (listener: (state: { isWebSocketConnected: boolean }) => void) => () => void;
+    /** Presence v2 runtimes treat the open socket as session liveness. */
+    presenceSupported?: () => boolean;
   };
   project?: string;
   tenant?: string;
@@ -165,7 +167,11 @@ export class GonvexErrorReporter {
     if (this.heartbeatTimer) return;
     this.heartbeatTimer = setTimeout(() => {
       this.heartbeatTimer = undefined;
-      void this.options.transport("heartbeat", {}).catch(() => undefined);
+      // A presence v2 runtime keeps the session live while the socket is
+      // open; the periodic heartbeat would be a no-op round trip.
+      if (!this.options.client?.presenceSupported?.()) {
+        void this.options.transport("heartbeat", {}).catch(() => undefined);
+      }
       this.scheduleHeartbeat();
     }, 30_000);
   }

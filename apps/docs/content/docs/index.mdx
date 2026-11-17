@@ -1,12 +1,12 @@
 ---
 title: Gonvex
-description: Build realtime TypeScript + Postgres applications with a normalized Local Replica.
+description: Build realtime TypeScript + SQLite applications with a normalized Local Replica.
 ---
 
 # Gonvex
 
 Gonvex is a self-hostable realtime backend for TypeScript applications. It
-combines transactional Reducers, exact Postgres change feeds, a persistent
+combines transactional Reducers, exact SQLite change feeds, a persistent
 normalized Local Replica, bounded Replica Collections, and indexed Live Queries.
 
 ```bash
@@ -33,7 +33,7 @@ my-app/
 - **Three executable kinds**: read-only Queries, atomic Reducers, and
   external-work Actions.
 - **Generated TypeScript bindings**: typed function references and React hooks.
-- **Committed change feed**: exact Postgres transactions drive realtime delivery.
+- **Committed change feed**: exact SQLite transactions drive realtime delivery.
 - **Local Replica**: one normalized authoritative/optimistic store for browser
   and mobile state.
 - **Replica Collections**: bounded authorized entity sets persisted locally.

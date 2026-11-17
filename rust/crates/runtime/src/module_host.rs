@@ -84,11 +84,30 @@ pub struct ModuleHost {
     endpoint: RwLock<Option<String>>,
     child: Mutex<Option<Child>>,
     status: RwLock<ModuleHostStatus>,
+    /// Isolates owned by this process (`config.in_process`). The same module
+    /// registry, admission and error rules as the separate host, without the
+    /// socket: see `in_process.rs`.
+    local: Option<Arc<gonvex_module_host::session::HostState>>,
+}
+
+/// Runtime-side timing of one module-host invocation (ns), handed to the
+/// handler when the invocation returns (profiler slow traces).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InvokeTimes {
+    pub connect: u64,
+    pub first_frame: u64,
+    pub js: u64,
+    pub host_calls: u64,
+    pub host_call_count: u64,
+    /// In-process only: request -> isolate leased (part of `first_frame`).
+    pub isolate_wait: u64,
 }
 
 #[async_trait]
 pub trait HostCallHandler: Send {
     async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String>;
+    /// Receives the invocation's timing when the profiler is on.
+    fn invoke_profiled(&mut self, _times: InvokeTimes) {}
     /// Only stateless, capability-checked work may opt out of serial dispatch.
     /// Database handlers retain the default so transaction calls stay ordered.
     fn concurrent(
@@ -96,6 +115,27 @@ pub trait HostCallHandler: Send {
         _call: &HostCallFrame,
     ) -> Option<BoxFuture<'static, Result<Value, String>>> {
         None
+    }
+
+    /// The response as the JSON bytes the module receives. Handlers that
+    /// produce JSON directly (module SQL) override this to skip a `Value`.
+    async fn handle_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+        let value = self.handle(call).await?;
+        serde_json::to_vec(&value)
+            .map_err(|error| format!("host response could not be re-encoded: {error}"))
+    }
+
+    /// Calls the in-process engine may answer on the isolate's own thread
+    /// (see `gonvex_module_runtime::InlineHost`). Socket transport ignores it.
+    fn inline_host(&self) -> Option<std::sync::Arc<dyn gonvex_module_runtime::InlineHost>> {
+        None
+    }
+
+    /// `(calls, ns)` answered so far on the isolate thread through
+    /// [`HostCallHandler::inline_host`] (profiler; read before and after an
+    /// in-process invocation).
+    fn inline_profile(&self) -> (u64, u64) {
+        (0, 0)
     }
 }
 
@@ -110,6 +150,8 @@ impl ModuleHost {
             }),
             endpoint: RwLock::new(config.endpoint.clone()),
             child: Mutex::new(None),
+            local: (config.enabled && config.in_process)
+                .then(|| crate::in_process::host_state(&config)),
             config,
         })
     }
@@ -117,6 +159,16 @@ impl ModuleHost {
     pub async fn start(&self) -> Result<(), ModuleHostError> {
         if !self.config.enabled {
             return Ok(());
+        }
+        if self.local.is_some() {
+            // Idempotent; production initializes the platform in `main`
+            // before Tokio starts its worker threads.
+            gonvex_module_runtime_v8::initialize_v8_platform();
+            let mut status = self.status.write().await;
+            status.ready = true;
+            status.reason = None;
+            drop(status);
+            return self.ping().await;
         }
         if self.config.binary.is_none() {
             if self.config.endpoint.is_some() {
@@ -228,6 +280,32 @@ impl ModuleHost {
         operation: RequestOp,
         mut handler: Option<&mut dyn HostCallHandler>,
     ) -> Result<ResponsePayload, ModuleHostError> {
+        let label = match &operation {
+            RequestOp::Invoke(_) if crate::cron_profile::active() => {
+                Some(gonvex_profiler::Label::Cron)
+            }
+            RequestOp::Invoke(request) => Some(gonvex_profiler::Label::classify(
+                &request.kind,
+                &request.function,
+            )),
+            _ => None,
+        };
+        let _inflight = gonvex_profiler::gauge(gonvex_profiler::GaugeId::ModuleInflight).guard();
+        let _total = label.map(|label| {
+            gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::InvokeTotal, label)
+        });
+        let mut timer = gonvex_profiler::Timer::start();
+        if let Some(state) = &self.local {
+            if !self.status.read().await.ready {
+                return Err(ModuleHostError::NotReady);
+            }
+            // Recorded with the other in-process stages (in_process.rs).
+            let connect_ns = timer.elapsed_ns();
+            return crate::in_process::request(state, operation, handler.take(), label, connect_ns)
+                .await
+                .map_err(remote_error);
+        }
+        let mut connect_ns = 0;
         let mut stream = self.connect().await?;
         // Invocation provenance carries the per-kind deadline. In particular,
         // an agent Action deliberately has none while awaiting model I/O.
@@ -241,8 +319,19 @@ impl ModuleHost {
             payload: operation,
         };
         self.write_client_frame(&mut stream, &request).await?;
+        if let Some(label) = label {
+            connect_ns = timer.lap(gonvex_profiler::Stage::InvokeConnect, label);
+        }
         let (reader, writer) = tokio::io::split(stream);
-        dispatch_frames(reader, writer, self.config.max_frame_bytes, handler.take()).await
+        dispatch_frames_profiled(
+            reader,
+            writer,
+            self.config.max_frame_bytes,
+            handler.take(),
+            label,
+            connect_ns,
+        )
+        .await
     }
 
     async fn write_client_frame(
@@ -283,6 +372,11 @@ impl ModuleHost {
     }
 
     pub async fn shutdown(&self) {
+        if let Some(state) = &self.local {
+            crate::in_process::shutdown(state, self.config.shutdown_timeout).await;
+            self.status.write().await.ready = false;
+            return;
+        }
         let mut child_slot = self.child.lock().await;
         let Some(child) = child_slot.as_mut() else {
             return;
@@ -392,12 +486,105 @@ fn host_response(id: u64, result: Result<Value, String>) -> ClientFrame {
     }
 }
 
+#[cfg(test)]
 async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: R,
+    writer: W,
+    max_frame_bytes: usize,
+    handler: Option<&mut dyn HostCallHandler>,
+) -> Result<ResponsePayload, ModuleHostError> {
+    dispatch_frames_profiled(reader, writer, max_frame_bytes, handler, None, 0).await
+}
+
+/// Splits one module-host invocation into first-frame wait (isolate wait +
+/// JS before the first host call), later JS gaps and host-call handling, as
+/// seen from the runtime side of the socket. Records on drop (any exit).
+struct InvokeProfile {
+    label: Option<gonvex_profiler::Label>,
+    connect: u64,
+    first_frame: u64,
+    mark: u64,
+    first: bool,
+    js: u64,
+    host: u64,
+    calls: u64,
+}
+
+impl InvokeProfile {
+    fn new(label: Option<gonvex_profiler::Label>, connect: u64) -> Self {
+        let label = label.filter(|_| gonvex_profiler::enabled());
+        Self {
+            label,
+            connect,
+            first_frame: 0,
+            mark: if label.is_some() {
+                gonvex_profiler::now_ns()
+            } else {
+                0
+            },
+            first: true,
+            js: 0,
+            host: 0,
+            calls: 0,
+        }
+    }
+
+    fn frame_arrived(&mut self) {
+        if let Some(label) = self.label {
+            let now = gonvex_profiler::now_ns();
+            let gap = now.saturating_sub(self.mark);
+            if self.first {
+                gonvex_profiler::record(gonvex_profiler::Stage::InvokeFirstFrame, label, gap);
+                self.first_frame = gap;
+                self.first = false;
+            } else {
+                self.js += gap;
+            }
+            self.mark = now;
+        }
+    }
+
+    fn times(&self) -> Option<InvokeTimes> {
+        self.label.map(|_| InvokeTimes {
+            connect: self.connect,
+            first_frame: self.first_frame,
+            js: self.js,
+            host_calls: self.host,
+            host_call_count: self.calls,
+            isolate_wait: 0,
+        })
+    }
+
+    fn host_call_answered(&mut self) {
+        if self.label.is_some() {
+            let now = gonvex_profiler::now_ns();
+            self.host += now.saturating_sub(self.mark);
+            self.calls += 1;
+            self.mark = now;
+        }
+    }
+}
+
+impl Drop for InvokeProfile {
+    fn drop(&mut self) {
+        if let Some(label) = self.label {
+            use gonvex_profiler::{record, Stage};
+            record(Stage::InvokeJs, label, self.js);
+            record(Stage::InvokeHostCalls, label, self.host);
+            record(Stage::HostCallCount, label, self.calls);
+        }
+    }
+}
+
+async fn dispatch_frames_profiled<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     mut reader: R,
     mut writer: W,
     max_frame_bytes: usize,
     mut handler: Option<&mut dyn HostCallHandler>,
+    label: Option<gonvex_profiler::Label>,
+    connect_ns: u64,
 ) -> Result<ResponsePayload, ModuleHostError> {
+    let mut profile = InvokeProfile::new(label, connect_ns);
     let mut pending: FuturesUnordered<BoxFuture<'static, ClientFrame>> = FuturesUnordered::new();
     loop {
         // Preserve partial reads when a network request completes. read_exact
@@ -413,11 +600,17 @@ async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
             }
         };
+        profile.frame_arrived();
         let frame: ServerFrame = serde_json::from_slice(&frame)
             .map_err(|e| ModuleHostError::InvalidReady(e.to_string()))?;
         match frame {
             ServerFrame::Ready { protocol: 2, .. } => continue,
-            ServerFrame::Response { id: 1, payload } => return Ok(payload),
+            ServerFrame::Response { id: 1, payload } => {
+                if let (Some(times), Some(handler)) = (profile.times(), handler.as_deref_mut()) {
+                    handler.invoke_profiled(times);
+                }
+                return Ok(payload);
+            }
             ServerFrame::Error { id: 1, error } => return Err(remote_error(error)),
             ServerFrame::HostCall {
                 id,
@@ -442,6 +635,7 @@ async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 let bytes = serde_json::to_vec(&host_response(id, result))
                     .map_err(|e| ModuleHostError::InvalidReady(e.to_string()))?;
                 write_frame(&mut writer, &bytes, max_frame_bytes).await?;
+                profile.host_call_answered();
             }
             _ => return Err(ModuleHostError::UnexpectedResponse),
         }

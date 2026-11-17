@@ -61,11 +61,16 @@ async fn run(args: Vec<String>) -> Result<()> {
         print_help();
         return Ok(());
     }
+    if args[0] == "export-sqlite" {
+        return gonvex_admin::export_sqlite::run(&args[1..]).await;
+    }
     if args.first().map(String::as_str) != Some("migrate")
         || args.get(1).map(String::as_str) != Some("identity-v2")
     {
         print_help();
-        return Err("expected `gonvex-admin migrate identity-v2`".into());
+        return Err(
+            "expected `gonvex-admin migrate identity-v2` or `gonvex-admin export-sqlite`".into(),
+        );
     }
     let options = parse_options(&args[2..])?;
     let control = identity::connect(&options.control_plane_url).await?;
@@ -262,6 +267,7 @@ fn print_result(
 fn print_help() {
     println!("Gonvex administration CLI");
     println!("  gonvex-admin migrate identity-v2 (--plan | --apply | --verify) [options]");
+    println!("  {}", gonvex_admin::export_sqlite::usage());
 }
 
 #[cfg(test)]

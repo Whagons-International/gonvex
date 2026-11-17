@@ -1,13 +1,13 @@
 ---
 title: Committed Change Feed
-description: Exact Postgres changes drive Replica and Live Query delivery.
+description: Exact SQLite commits drive Replica and Live Query delivery.
 ---
 
 Gonvex does not ask application code what a Reducer might write.
 
 Every application table appends committed row changes to
-`_gonvex_sync_changes`. Postgres emits `gonvex_change_feed` only as a wake-up
-signal; Gonvex reads the durable transaction revision before routing it.
+`_gonvex_sync_changes`. After commit the runtime publishes an in-process
+wake-up signal; Gonvex reads the durable transaction revision before routing it.
 
 Live Query freshness is:
 

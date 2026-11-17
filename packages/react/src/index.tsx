@@ -1,9 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore as useReactSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
-import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow, type PresenceFeedSnapshot } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
+import { type ColumnProjection, type ColumnPageLimits, type ReplicaColumnPage } from "@gonvex/client";
 
-export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult } from "@gonvex/client";
+export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type PresenceFeedSnapshot } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
 
 const GonvexContext = createContext<GonvexClient | null>(null);
@@ -334,6 +335,11 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   // state so it cannot leak through the public auth value.
   const developerTokenRef = useRef<string | null>(initialAuth.developerToken);
   const pendingDeveloperTokenRef = useRef<{ token: string } | null>(null);
+  // A tenant selection is published only after the runtime accepts it. Until
+  // then, background session installs (provider token exchange, refresh,
+  // directory updates) must authenticate the selected tenant instead of the
+  // previously active one, or they cancel the selection in flight.
+  const pendingTenantSelectionRef = useRef<PendingTenantSelection | null>(null);
   // A persisted session is only a candidate until bootstrap/external auth has
   // installed its complete project + tenant + account scope on the client.
   // Never let the token-refresh effect authenticate an account-only socket in
@@ -375,8 +381,9 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (next) {
       if (persist) safeLocalStorageSet(storageKey, JSON.stringify(next));
       if (!activeDeveloper) {
-        if (installClientAuth) installClientSession(props.client, props.projectId, next);
-        installedClientScopeRef.current = authSessionScope(props.projectId, next);
+        const installed = withPendingTenantSelection(next, pendingTenantSelectionRef.current);
+        if (installClientAuth) installClientSession(props.client, props.projectId, installed);
+        installedClientScopeRef.current = authSessionScope(props.projectId, installed);
       } else if (!activeDeveloper.clientInstalled && installClientAuth && developerTokenRef.current) {
         // A grant restored after reload waits for its account session to be
         // confirmed, then connects with the grant instead of that session.
@@ -919,18 +926,53 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (!current || !current.tenants.some((tenant) => tenant.id === tenantId)) {
       throw new Error(`Your account does not have access to tenant ${tenantId}.`);
     }
-    const next = { ...current, activeTenantId: tenantId };
-    await props.client.authenticate({
-      project: props.projectId,
-      tenant: tenantId,
-      token: current.accessToken,
-      fetchToken: fetchAccessToken,
-      identity: { sub: current.account.id, iss: props.projectId },
-    });
-    // Publish the new tenant only after the runtime accepted it and the client
-    // activated its authoritative Local Replica scope. This keeps React hooks
-    // from observing a tenant that is not usable yet.
-    installSession(next, true, false);
+    const selection: PendingTenantSelection = { accountId: current.account.id, tenantId };
+    const authInvalidationVersion = authInvalidationVersionRef.current;
+    pendingTenantSelectionRef.current = selection;
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        const latest = sessionRef.current;
+        if (!latest || latest.account.id !== selection.accountId
+          || !latest.tenants.some((tenant) => tenant.id === tenantId)) {
+          throw new Error(`Your account does not have access to tenant ${tenantId}.`);
+        }
+        try {
+          await props.client.authenticate({
+            project: props.projectId,
+            tenant: tenantId,
+            token: latest.accessToken,
+            fetchToken: fetchAccessToken,
+            identity: { sub: latest.account.id, iss: props.projectId },
+          });
+          break;
+        } catch (cause) {
+          // A background install of the same account (for example the provider
+          // token exchange that runs on load) replaced this frame. It already
+          // carries the selected tenant; authenticate again with its newest
+          // token. A newer selection, sign-out or account change wins instead.
+          const superseded = cause instanceof GonvexClientError && cause.code === "superseded";
+          if (!superseded || attempt >= TENANT_SELECTION_MAX_RETRIES
+            || pendingTenantSelectionRef.current !== selection
+            || authInvalidationVersion !== authInvalidationVersionRef.current) {
+            throw cause;
+          }
+        }
+      }
+      const accepted = sessionRef.current;
+      if (pendingTenantSelectionRef.current !== selection || !accepted
+        || accepted.account.id !== selection.accountId
+        || authInvalidationVersion !== authInvalidationVersionRef.current) {
+        throw new GonvexClientError("Tenant selection was replaced by a newer session.", { code: "superseded" });
+      }
+      // Publish the new tenant only after the runtime accepted it and the client
+      // activated its authoritative Local Replica scope. This keeps React hooks
+      // from observing a tenant that is not usable yet. Use the newest session:
+      // its token may have rotated while the selection was in flight.
+      pendingTenantSelectionRef.current = null;
+      installSession({ ...accepted, activeTenantId: tenantId }, true, false);
+    } finally {
+      if (pendingTenantSelectionRef.current === selection) pendingTenantSelectionRef.current = null;
+    }
   }, [fetchAccessToken, installSession, props.client, props.projectId]);
 
   const refreshMemberships = useCallback(async () => {
@@ -1306,6 +1348,21 @@ function sessionFromNativeGrant(value: JsonValue, previous?: GonvexAuthSession):
   }
   const session = value as GonvexAuthSession;
   return preserveActiveTenant(session, previous);
+}
+
+type PendingTenantSelection = { accountId: string; tenantId: string };
+const TENANT_SELECTION_MAX_RETRIES = 3;
+
+function withPendingTenantSelection(
+  session: GonvexAuthSession,
+  pending: PendingTenantSelection | null,
+): GonvexAuthSession {
+  if (!pending || pending.accountId !== session.account.id
+    || session.activeTenantId === pending.tenantId
+    || !session.tenants.some((tenant) => tenant.id === pending.tenantId)) {
+    return session;
+  }
+  return { ...session, activeTenantId: pending.tenantId };
 }
 
 function preserveActiveTenant(
@@ -1933,6 +1990,50 @@ export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: st
   }, [client, entity, selectedIDs, version, cache, store]);
 }
 
+/** A bounded, read-only render projection of the existing Local Replica.
+ * No full-row clones, second cache or transport subscription.
+ * For transferable ownership, request a separate entityColumns() snapshot. */
+export type EntityColumnState = { page: ReplicaColumnPage; limited: false } | { page: undefined; limited: true };
+
+/** A bounded projection may exceed its byte budget. Record consumers can keep
+ * rendering the same replica without allocating an oversized column page. */
+export function useEntityColumnsState(
+  entity: string,
+  ids: readonly string[],
+  projection: ColumnProjection,
+  limits: ColumnPageLimits,
+): EntityColumnState {
+  const client = useGonvexClient();
+  const idsKey = JSON.stringify(ids);
+  const projectionKey = JSON.stringify(projection);
+  // Retain only this active window; persistence hydration remains SDK-owned.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => client.retainReplicaEntities(entity, ids), [client, entity, idsKey]);
+  const version = useSyncExternalStore(
+    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
+    useCallback(() => `${client.localReplica.freshness()}:${ids.map(id => client.localReplica.entityVersion(entity, id)).join(',')}`,
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [client, entity, idsKey]),
+    () => '',
+  );
+  return useMemo(() => {
+    try { return {page:client.localReplica.entityColumns(entity, ids, projection, limits),limited:false} as const; }
+    catch(error){
+      if(error instanceof RangeError && error.message==='Column page payload budget exceeded')return{page:undefined,limited:true} as const;
+      throw error;
+    }
+  },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, entity, idsKey, projectionKey, limits.maxRows, limits.maxPayloadBytes, version]);
+}
+
+/** Required column page. Use useEntityColumnsState for a record fallback. */
+export function useEntityColumns(entity:string,ids:readonly string[],projection:ColumnProjection,limits:ColumnPageLimits):ReplicaColumnPage{
+  const state=useEntityColumnsState(entity,ids,projection,limits);
+  if(state.limited)throw new RangeError('Column page payload budget exceeded');
+  return state.page;
+}
+
 /** Read a persisted Live Query window without opening another server subscription. */
 export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(
   signatureOrReference: string | FunctionReference,
@@ -2002,6 +2103,25 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
 }
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */
+const NO_PRESENCE: PresenceFeedSnapshot = { supported: false, ready: false, members: new Map() };
+
+/**
+ * Presence v2 feed for the connected tenant: online Members keyed by Member
+ * id (`active` or `idle`; absent means offline). `supported` is false on a
+ * runtime without presence v2, so callers can fall back to their old path.
+ * Pass `"skip"` to stay unsubscribed.
+ */
+export function usePresence(mode?: "skip"): PresenceFeedSnapshot {
+  const client = useGonvexClient();
+  const skip = mode === "skip";
+  const subscribe = useCallback(
+    (listener: () => void) => (skip ? () => undefined : client.subscribePresence(listener)),
+    [client, skip],
+  );
+  const getSnapshot = useCallback(() => (skip ? NO_PRESENCE : client.presenceSnapshot()), [client, skip]);
+  return useReactSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
 export function useQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
   const client = useGonvexClient();
   const sessionScopeGeneration = useSessionScopeGeneration(client);

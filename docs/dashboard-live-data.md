@@ -1,5 +1,8 @@
 # Dashboard live data
 
+> Historical: written while Gonvex stored data in PostgreSQL. Storage moved to
+> SQLite on 2026-11-02; see [SQLite storage](sqlite-storage.md).
+
 The dashboard uses a host-owned system service at `/dev/dashboard/ws`. It is not a row in `gonvex_runtime_projects`, has no project key, and does not need provisioning, module deployment, a tenant, or a separate database. It cannot appear in project discovery, account memberships, or user project billing.
 
 `@gonvex/client` subscribes to the `dashboard.read` control query on this connection. Its arguments identify an allowlisted operator resource, project, tenant, and an optional legacy development key. Authentication uses the SDK's auth frame, not the URL. Every snapshot invokes the existing read-only operator handler, including its account, project, token-permission, and tenant routing checks. Reauthentication cancels existing reads; subscription generations discard queued responses from earlier reads.

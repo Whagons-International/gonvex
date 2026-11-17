@@ -5,12 +5,12 @@ The public guide lives in
 This file records the contributor-level contract.
 
 Replica Collections are authorized, bounded entity sets. They complement
-structured Live Queries, which own exact PostgreSQL-computed membership and
+structured Live Queries, which own exact server-computed membership and
 ordering for datasets too large to replicate.
 
 Each source table has one required TypeScript `visibility(...)` declaration.
 The runtime resolves a revisioned tenant-local context, compiles the rule into
-Postgres SQL for snapshots and Live Queries, and evaluates the same rule over
+SQLite SQL for snapshots and Live Queries, and evaluates the same rule over
 the change feed's old/new rows. Dependency tables are derived from the plan;
 role, team, workspace, or audience changes invalidate the context and regroup
 Live Queries before results can fan out. `{ operator: "public" }` is the only
@@ -55,4 +55,4 @@ entity, `useReplicaCollection` reads a bounded collection, and
 - Search, arbitrary sorting, joins, aggregates, and unbounded pagination stay
   in indexed structured Live Queries.
 - A partial cache is always labeled partial offline.
-- PostgreSQL-specific Live Query expressions are explicitly online-only.
+- SQLite-specific Live Query expressions are explicitly online-only.

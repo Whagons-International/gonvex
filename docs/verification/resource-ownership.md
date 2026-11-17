@@ -1,5 +1,10 @@
 # Resource ownership audit
 
+> Storage moved from PostgreSQL to SQLite on 2026-11-02 (see
+> [SQLite storage](../sqlite-storage.md)). Evidence below that names PostgreSQL
+> was established on the earlier backend and must be re-run on SQLite before it
+> is relied on for the current runtime.
+
 RES-1 covers admission capacity, native worker lifetime and snapshot wire credit.
 A numeric timeout or credit helper alone cannot establish the caller's cleanup
 behavior. This register separates those decisions from actual lifetime evidence.

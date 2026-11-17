@@ -14,7 +14,7 @@ const cards = [
   {
     href: '/docs/live-queries',
     title: 'Realtime grid',
-    body: 'Understand exact PostgreSQL result windows, persistent Local Replica state, and small result deltas.',
+    body: 'Understand exact server result windows, persistent Local Replica state, and small result deltas.',
   },
 ];
 
@@ -25,7 +25,7 @@ export default function HomePage() {
         <p className="gonvex-home__eyebrow">TypeScript modules on a Rust-ready Gonvex host</p>
         <h1>Gonvex Docs</h1>
         <p className="gonvex-home__lede">
-          Gonvex is a Postgres-backed realtime runtime with TypeScript modules,
+          Gonvex is a SQLite-backed realtime runtime with TypeScript modules,
           generated bindings, WebSocket delivery, and a persistent Local Replica.
         </p>
         <div className="gonvex-home__actions">

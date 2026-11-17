@@ -1,5 +1,10 @@
 # Gonvex data guarantees program
 
+> Storage moved from PostgreSQL to SQLite on 2026-11-02 (see
+> [SQLite storage](../sqlite-storage.md)). Evidence below that names PostgreSQL
+> was established on the earlier backend and must be re-run on SQLite before it
+> is relied on for the current runtime.
+
 ## Objective and completion criteria
 
 Make Gonvex's authenticated mutation and replica pipeline preserve committed

@@ -230,6 +230,7 @@ async fn watch(
     let router = read_router(&runtime);
     let mut writes = runtime.inner.dashboard_changes.subscribe();
     let mut events = runtime.inner.runtime_events.subscribe();
+    let mut presence_events = runtime.inner.presence_events.subscribe();
     let mut previous = None;
     let mut feed = None;
     let telemetry =
@@ -275,7 +276,7 @@ async fn watch(
                     .get(&format!("{}:{}", read.project, read.tenant))
             };
             let route = if let Some(database_url) = configured {
-                Some(gonvex_postgres::TenantRoute {
+                Some(gonvex_store::TenantRoute {
                     project_id: read.project.clone(),
                     tenant_id: if read.tenant.is_empty() {
                         read.project.clone()
@@ -335,6 +336,7 @@ async fn watch(
             _ = reconcile.tick() => {},
             _ = writes.recv() => {},
             _ = events.recv() => {},
+            _ = presence_events.recv() => {},
             _ = async { match &mut feed { Some(feed) => { let _ = feed.recv().await; }, None => std::future::pending::<()>().await } } => {},
             _ = sender.closed() => return,
         }
@@ -342,6 +344,7 @@ async fn watch(
         tokio::time::sleep(Duration::from_millis(100)).await;
         while writes.try_recv().is_ok() {}
         while events.try_recv().is_ok() {}
+        while presence_events.try_recv().is_ok() {}
         if let Some(feed) = &mut feed {
             while feed.try_recv().is_ok() {}
         }

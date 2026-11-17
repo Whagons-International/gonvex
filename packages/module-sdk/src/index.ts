@@ -215,6 +215,8 @@ export type ReadDB = {
 };
 
 export type WriteDB = ReadDB & {
+  /** Host adapter metadata for a logical SQL record. Public values keep their declared types across normalized storage. */
+  readonly recordColumns?: (table: string) => Promise<Record<string, {type:string}> | undefined>;
   /** Adapter hook for short deterministic non-database work, such as ID hashing. Never wrap database reads in this hook. */
   readonly keepAliveFor?: <T>(promise: Promise<T>) => Promise<T>;
   readonly lock?: (key: string) => Promise<void>;
@@ -258,7 +260,43 @@ export type ReducerContext = AuthContext & TenantContext & InvocationAware & {
   readonly actions: ReducerActions;
   readonly scheduler: Scheduler;
   readonly now: number;
+  /**
+   * The invoking member's committed permission bits, from the module's
+   * `permissionGrants` projection, answered in memory by the host. Absent in
+   * local/optimistic executors and on hosts without the projection.
+   */
+  readonly permissions?: Permissions;
 };
+
+/** One bit per (permission, scope). `""` (the default) is the tenant-wide scope. */
+export type Permissions = {
+  /**
+   * Whether the member holds `permission` in exactly `scope`. Reads the
+   * committed state (never this Reducer's own uncommitted grant rows).
+   */
+  readonly has: (permission: string, scope?: string) => Promise<boolean>;
+};
+
+/**
+ * A table whose rows grant `member` the `permission` in `scope`. The module
+ * keeps it current inside the Reducers that change permissions, flattening
+ * derived grants (role defaults, spot-tree descendants) into rows. Rows with a
+ * non-null `whereNull` column grant nothing; `key` is the row id column
+ * (default `_id`).
+ */
+export type PermissionGrantSource = {
+  readonly table: string;
+  readonly member: string;
+  readonly permission: string;
+  readonly scope: string;
+  readonly whereNull?: readonly string[];
+  readonly key?: string;
+};
+
+/** Declare the module's permission grant projection (backs `ctx.permissions`). Use literal values. */
+export function permissionGrants(source: PermissionGrantSource): Readonly<PermissionGrantSource> {
+  return freeze({ ...source, ...(source.whereNull ? { whereNull: freeze([...source.whereNull]) } : {}) });
+}
 
 export type ActionStorage = {
   readonly generateUploadUrl: (options?: JsonObject) => Promise<JsonValue>;
@@ -618,6 +656,16 @@ export type CronSpec = Readonly<{
   function: string;
   args?: JsonValue;
   scope: CronScope;
+  /**
+   * Optional "anything due?" pre-check: one read-only SQL statement the
+   * runtime evaluates on a tenant reader before each run, with `$1` bound to
+   * the current time (Unix ms). The function runs only when the first column
+   * of the first row is truthy (not NULL, 0 or ''); otherwise the run is
+   * recorded as skipped without entering the JavaScript engine. If the check
+   * fails (for example a missing table), the function runs. Requires a
+   * runtime that understands `dueWhen` (older runtimes reject the manifest).
+   */
+  dueWhen?: string;
 } & CronSchedule>;
 export type CronOptions = Omit<CronSpec, "scope">;
 
@@ -655,6 +703,7 @@ export type ModuleManifest = {
   readonly artifact?: { readonly hash: string; readonly mediaType: string; readonly entrypoint: string };
   readonly visibility?: Readonly<Record<string, VisibilityPlan>>;
   readonly invitationAcceptanceReducer?: string;
+  readonly permissionGrants?: PermissionGrantSource;
 };
 
 /** Declare the host-invoked internal Reducer that applies invitation payloads. */
@@ -1241,11 +1290,16 @@ const validateCron = (options: CronSpec): CronSpec => {
   }
   const expression = options.expression?.trim();
   if (hasExpression && !expression) throw new Error(`cron ${JSON.stringify(name)} expression must be non-empty`);
+  const dueWhen = options.dueWhen?.trim();
+  if (options.dueWhen !== undefined && (!dueWhen || !/^(select|with|values)\b/i.test(dueWhen))) {
+    throw new Error(`cron ${JSON.stringify(name)} dueWhen must be one read-only SELECT statement`);
+  }
   return freeze({
     name,
     function: functionPath,
     scope: options.scope,
     ...(options.args === undefined ? {} : { args: options.args }),
+    ...(dueWhen ? { dueWhen } : {}),
     ...(hasInterval ? { intervalMs: options.intervalMs } : { expression: expression! }),
   } as CronSpec);
 };
@@ -1671,7 +1725,7 @@ export class ModuleBuilder {
 
 /**
  * Host-side executable registry. It is deliberately unaware of V8,
- * Postgres, or network transport; an engine supplies the capability-bearing
+ * the database, or network transport; an engine supplies the capability-bearing
  * context and this registry only selects and invokes the registered handler.
  */
 export class ModuleRuntimeRegistry {

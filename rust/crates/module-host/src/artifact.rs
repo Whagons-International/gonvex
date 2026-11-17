@@ -14,9 +14,12 @@ use gonvex_module_runtime::{FunctionContract, ModuleArtifact, ModuleLanguage, Mo
 use sha2::{Digest, Sha256};
 
 use crate::protocol::{codes, parse_kind, FunctionSummary, ModuleArtifactWire, WireError};
+use gonvex_module_runtime_v8::ReducerBundle;
 
 pub struct DecodedArtifact {
     pub artifact: ModuleArtifact,
+    /// The split Query/Reducer bundle, verified against its recorded hash.
+    pub reducer_bundle: Option<ReducerBundle>,
     pub summaries: Vec<FunctionSummary>,
 }
 
@@ -71,6 +74,32 @@ pub fn decode(
             format!("module {module_id} JavaScript is not valid UTF-8"),
         ));
     }
+
+    let reducer_bundle = match wire.reducer_bundle {
+        None => None,
+        Some(bundle) => {
+            let code = BASE64.decode(bundle.code.as_bytes()).map_err(|err| {
+                WireError::new(
+                    codes::INVALID_ARTIFACT,
+                    format!("module {module_id} reducer bundle is not valid base64: {err}"),
+                )
+            })?;
+            let expected = bundle.hash.trim().to_ascii_lowercase();
+            let actual = hex_digest(&code);
+            if expected.is_empty() || actual != expected {
+                return Err(WireError::new(
+                    codes::ARTIFACT_HASH_MISMATCH,
+                    format!(
+                        "module {module_id} reducer bundle hash {actual} does not match the manifest hash {expected}"
+                    ),
+                ));
+            }
+            Some(ReducerBundle {
+                code,
+                functions: bundle.functions,
+            })
+        }
+    };
 
     let mut functions = Vec::with_capacity(wire.functions.len());
     let mut summaries = Vec::with_capacity(wire.functions.len());
@@ -143,6 +172,7 @@ pub fn decode(
             },
             payload: code,
         },
+        reducer_bundle,
         summaries,
     })
 }

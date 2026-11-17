@@ -15,6 +15,8 @@ export type LocalColumnType =
   | "bigint"
   | "integer"
   | "double precision"
+  | "real"
+  | "json"
   | "jsonb"
   | "uuid";
 export type LocalTables = Readonly<

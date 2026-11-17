@@ -24,11 +24,13 @@ dev:
 			sleep 1; \
 		done'
 
+# The runtime stores every database as a SQLite file under GONVEX_DATA_DIR
+# (default ./data), so there is no database service to start.
 services:
-	docker compose -f infra/docker-compose.dev.yml up -d --wait postgres
+	@echo "No database service: the runtime keeps SQLite files in $${GONVEX_DATA_DIR:-./data}."
 
 stack:
-	docker compose up -d --build --wait postgres minio runtime dashboard
+	docker compose up -d --build --wait minio runtime dashboard
 	docker compose run --rm minio-init
 
 stack-storage: stack

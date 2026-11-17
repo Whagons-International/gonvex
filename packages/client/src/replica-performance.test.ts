@@ -3,6 +3,41 @@ import { LocalReplica } from './local-replica';
 
 const materialize = (replica: LocalReplica, entity = 'tasks', signature = entity, rows = [{id:'a',value:1},{id:'b',value:2}]) => replica.materializeWindow({signature,entity,key:'id',rows,completeness:'complete',source:'server'});
 
+it('does not rebuild unchanged reverse memberships for a single-row collection edit', async () => {
+  const replica = new LocalReplica();
+  const rows = Array.from({length:2000}, (_, i) => ({id:String(i), value:i}));
+  await replica.materializeWindow({signature:'large',kind:'replica',entity:'tasks',key:'id',rows,completeness:'complete',source:'server'});
+  await materialize(replica, 'tasks', 'small', rows.slice(0,2));
+  const repin = vi.spyOn(replica as any, 'refreshPin');
+  const changed = vi.fn(), untouched = vi.fn();
+  replica.subscribe(changed, {window:'large'});
+  replica.subscribe(untouched, {window:'small'});
+  await replica.applyWindowDelta({signature:'large',kind:'replica',entity:'tasks',key:'id',upserts:[{id:'1000',value:9}],deleted:[]});
+  expect(replica.entity('tasks','1000')!.value).toBe(9);
+  expect(changed).toHaveBeenCalledOnce();
+  expect(untouched).not.toHaveBeenCalled();
+  expect(repin.mock.calls.filter(([, id]) => id !== '1000')).toEqual([]);
+  repin.mockRestore();
+  await replica.applyWindowDelta({signature:'large',kind:'replica',entity:'tasks',key:'id',upserts:[{id:'new',value:4}],deleted:['0']});
+  expect(replica.getWindow('large')!.ids).toEqual([...rows.slice(1).map(row=>row.id), 'new']);
+  changed.mockClear();
+  await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'new',operation:'update',newValue:{value:5}}]});
+  expect(changed).toHaveBeenCalledOnce();
+  replica.dispose();
+});
+
+it('accounts for integrity maps added or removed without changing membership', async () => {
+  const replica = new LocalReplica();
+  const input = {signature:'tasks',kind:'replica' as const,entity:'tasks',key:'id',rows:[{id:'a'},{id:'b'}],completeness:'complete' as const,source:'server' as const};
+  await replica.materializeWindow(input);
+  const before = replica['membershipBytes'];
+  await replica.materializeWindow({...input,hashes:{a:'0'.repeat(64),b:'1'.repeat(64)}});
+  expect(replica['membershipBytes']).toBe(before + 2 * 112);
+  await replica.materializeWindow(input);
+  expect(replica['membershipBytes']).toBe(before);
+  replica.dispose();
+});
+
 it('shares deeply frozen owned JSON through single, batch, table and watch reads', async () => {
   const replica = new LocalReplica();
   const input = {id:'a',nested:{list:[{value:1}]}};

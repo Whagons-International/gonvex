@@ -3,7 +3,8 @@ resolver = "2"
 members = [
   "crates/admin-cli",
   "crates/protocol",
-  "crates/postgres",
+  "crates/store",
+  "crates/profiler",
   "crates/runtime",
   "crates/websocket",
   "crates/module-runtime",
@@ -12,6 +13,7 @@ members = [
   "crates/server",
   "crates/sandbox-worker",
 ]
+exclude = ["vendor"]
 
 [workspace.package]
 edition = "2021"
@@ -32,11 +34,11 @@ futures-util = "0.3"
 hmac = "0.12"
 ipnet = "2"
 libc = "0.2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 ryu-js = "1"
 sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json", "chrono", "uuid", "bigdecimal"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "sqlite", "regexp", "json", "chrono", "uuid", "bigdecimal"] }
 bigdecimal = "0.4"
 calamine = "0.36.1"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -64,3 +66,25 @@ tokio = { version = "1", features = [
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# The runtime binary is CPU-bound on JSON, SQL and protocol work. Cross-crate
+# inlining (thin LTO, fewer codegen units) targets CPU per request; the
+# measured effect is recorded in docs/performance/sqlite-capacity.md.
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+# Local capacity runs: release code generation, with debug assertions kept so
+# the test-only auth-emulator guard stays available. Never deploy this profile.
+[profile.local-load]
+inherits = "release"
+debug-assertions = true
+
+# serde_json with `preserve_order` (enabled by deno_core) stores every JSON
+# object in an IndexMap with std SipHash, ~7 % of runtime CPU at 1,000 users.
+# The vendored copy only swaps the map's hasher for foldhash; see
+# docs/performance/fast-hash.md. Drop this patch when upgrading serde_json
+# (re-apply the 4-line change in vendor/serde_json/src/map.rs).
+[patch.crates-io]
+serde_json = { path = "vendor/serde_json" }
+

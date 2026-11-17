@@ -111,7 +111,7 @@ server-created agent execution ID. Delegated work sets
 `onBehalfOfMemberId` to the acting Member. Client arguments cannot replace any
 of these fields.
 
-Reducer commits record sanitized provenance once in the same Postgres
+Reducer commits record sanitized provenance once in the same SQLite
 transaction as the business rows. The change feed preserves
 `originCommandId` for optimistic reconciliation and carries the sanitized
 transaction provenance to the Local Replica. Rollback commits neither business

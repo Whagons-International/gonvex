@@ -9,6 +9,80 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// One replica row as JSON text, serialized verbatim (delivery v4: snapshot
+/// rows stay the bytes SQLite produced; they are never parsed into a
+/// `Value` and re-encoded). Equality compares the text. Clones share the
+/// text (the shared snapshot cache hands the same rows to every open).
+#[derive(Clone, Debug)]
+pub struct JsonRow(std::sync::Arc<serde_json::value::RawValue>);
+
+impl JsonRow {
+    /// `text` must be one JSON value (validated).
+    pub fn from_json(text: String) -> Result<Self, serde_json::Error> {
+        serde_json::value::RawValue::from_string(text).map(|raw| Self(raw.into()))
+    }
+
+    /// One allocation (the shared text), no validation pass.
+    ///
+    /// # Safety
+    /// `text` must be exactly one well-formed JSON value with no leading or
+    /// trailing whitespace (e.g. checked by the runtime's row scanner).
+    pub unsafe fn from_str_unchecked(text: &str) -> Self {
+        debug_assert!(
+            serde_json::from_str::<&serde_json::value::RawValue>(text)
+                .is_ok_and(|raw| raw.get().len() == text.len()),
+            "from_str_unchecked: not one well-formed JSON value"
+        );
+        let shared: std::sync::Arc<str> = std::sync::Arc::from(text);
+        // SAFETY: `RawValue` is `#[repr(transparent)]` over `str`, so an
+        // `Arc<str>` and an `Arc<RawValue>` have the same layout (serde_json
+        // casts `Box<str>` to `Box<RawValue>` the same way); the text is one
+        // JSON value per the caller's contract.
+        Self(unsafe {
+            std::sync::Arc::from_raw(
+                std::sync::Arc::into_raw(shared) as *const serde_json::value::RawValue
+            )
+        })
+    }
+
+    pub fn from_value(value: &Value) -> Self {
+        Self(
+            serde_json::value::to_raw_value(value)
+                .expect("a JSON value encodes")
+                .into(),
+        )
+    }
+
+    /// The row's JSON text.
+    pub fn get(&self) -> &str {
+        self.0.get()
+    }
+
+    /// The row parsed (tests and rare consumers).
+    pub fn to_value(&self) -> Value {
+        serde_json::from_str(self.0.get()).unwrap_or(Value::Null)
+    }
+}
+
+impl PartialEq for JsonRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl Serialize for JsonRow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (*self.0).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonRow {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Any deserializer (including `from_value`): through a `Value`.
+        Value::deserialize(deserializer).map(|value| Self::from_value(&value))
+    }
+}
+
 pub mod replica_digest;
 mod replica_wire;
 pub mod row_patch;
@@ -200,6 +274,46 @@ pub struct ClientCapabilities {
     pub query_fanout: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_result_batch: Option<u8>,
+    /// Accepts `replica.batch` messages (delivery v2, see ServerCapabilities).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_batch_frames: Option<u8>,
+    /// Presence v2: the client reports its state with `presence.set`
+    /// transitions only (no reducer heartbeats) and may `presence.subscribe`.
+    /// Its liveness is the WebSocket itself (server Ping, any inbound frame).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<u8>,
+}
+
+/// Presence v2 state of one tenant Member, as reported by the server.
+///
+/// `offline` only appears in `presence.patch`; snapshots list online
+/// (active or idle) Members only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PresenceState {
+    Active,
+    Idle,
+    Offline,
+}
+
+impl PresenceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Idle => "idle",
+            Self::Offline => "offline",
+        }
+    }
+}
+
+/// One Member's aggregated presence: `since` is the server time (Unix ms)
+/// at which the Member entered `state`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresenceMember {
+    pub member_id: String,
+    pub state: PresenceState,
+    pub since: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -407,6 +521,17 @@ pub enum ClientMessage {
     TelemetryBatch {
         events: Vec<PerformanceTelemetryEvent>,
     },
+    /// Presence v2: this connection's own state. Sent on transitions and
+    /// after every successful `auth`; never periodically. `state` is
+    /// `active`, `idle` or `offline` (`gone` is accepted as `offline`).
+    #[serde(rename = "presence.set")]
+    PresenceSet { state: String },
+    /// Presence v2: receive `presence.snapshot` (same `id`) and then
+    /// `presence.patch` frames for the connection's tenant.
+    #[serde(rename = "presence.subscribe")]
+    PresenceSubscribe { id: String },
+    #[serde(rename = "presence.unsubscribe")]
+    PresenceUnsubscribe {},
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -485,6 +610,15 @@ pub struct ServerCapabilities {
     pub reducer_receipt_lookup: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_watermark: Option<u8>,
+    /// Delivery v2: replica feed frames arrive in `replica.batch` messages of
+    /// shared, stream-addressed items (one message per connection per tick).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_batch_frames: Option<u8>,
+    /// Presence v2 (in-memory, transition-only presence feed). When set the
+    /// runtime also answers support/error heartbeats from memory, so clients
+    /// should stop sending periodic heartbeats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -674,7 +808,8 @@ pub enum ServerMessage {
     #[serde(rename = "replica.snapshot")]
     ReplicaSnapshot {
         id: String,
-        result: Vec<Value>,
+        /// Rows as the JSON text SQLite produced, sent verbatim.
+        result: Vec<JsonRow>,
         cursor: ReplicaCursor,
         key: String,
         #[serde(flatten)]
@@ -699,7 +834,8 @@ pub enum ServerMessage {
         sequence: u64,
         last: bool,
         id: String,
-        result: Vec<Value>,
+        /// Rows as the JSON text SQLite produced, sent verbatim.
+        result: Vec<JsonRow>,
         cursor: ReplicaCursor,
         key: String,
         #[serde(flatten)]
@@ -773,6 +909,25 @@ pub enum ServerMessage {
     },
     #[serde(rename = "support.command")]
     SupportCommand { id: String, result: Value },
+    /// Presence v2: every online Member of the tenant, answering
+    /// `presence.subscribe` (same `id`) or resynchronizing a lagging
+    /// connection. Replaces the client's whole presence map.
+    #[serde(rename = "presence.snapshot")]
+    PresenceSnapshot {
+        id: String,
+        #[serde(rename = "serverTime")]
+        server_time: i64,
+        members: Vec<PresenceMember>,
+    },
+    /// Presence v2: coalesced state transitions since the previous frame.
+    #[serde(rename = "presence.patch")]
+    PresencePatch {
+        #[serde(rename = "serverTime")]
+        server_time: i64,
+        changes: Vec<PresenceMember>,
+    },
+    #[serde(rename = "presence.error")]
+    PresenceError { id: String, error: String },
     #[serde(rename = "client.updateRequired")]
     ClientUpdateRequired { reason: String, contract: u64 },
     #[serde(rename = "system.reload")]
@@ -902,6 +1057,24 @@ mod tests {
             serde_json::from_value(expected.clone()).expect("client frame");
         let actual = serde_json::to_value(message).expect("serialized client frame");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn presence_v2_frames_round_trip() {
+        round_trip_client(r#"{"type":"auth","id":"a","capabilities":{"presence":1}}"#);
+        round_trip_client(r#"{"type":"presence.set","state":"idle"}"#);
+        round_trip_client(r#"{"type":"presence.subscribe","id":"p1"}"#);
+        round_trip_client(r#"{"type":"presence.unsubscribe"}"#);
+        round_trip_server(r#"{"type":"session.ready","capabilities":{"presence":1}}"#);
+        round_trip_server(
+            r#"{"type":"presence.snapshot","id":"p1","serverTime":5,"members":[{"memberId":"m1","state":"active","since":1}]}"#,
+        );
+        round_trip_server(
+            r#"{"type":"presence.patch","serverTime":9,"changes":[{"memberId":"m1","state":"offline","since":9}]}"#,
+        );
+        round_trip_server(
+            r#"{"type":"presence.error","id":"p1","error":"no tenant member session"}"#,
+        );
     }
 
     fn round_trip_server(source: &str) {

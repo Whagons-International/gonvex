@@ -1,0 +1,39 @@
+{
+  "source": "44a0908efbe58c7f4bc002c51cd5161358d3fe28",
+  "authorizedBatch": "387ce467838ab3b29dd0c317625d0403105cca00",
+  "checks": {
+    "targeted": {
+      "exit": 0,
+      "log": "/mnt/data/work/gonvex-gate6-baseline/reload-integrated-targeted.log",
+      "logSHA256": "2af5f4cbb84715317b157eff80093823a21d12da991bdba175da221eecc600d2",
+      "result": "5 test binaries passed; queued revoke test covers3cases"
+    },
+    "lib": {
+      "exit": 0,
+      "log": "/mnt/data/work/gonvex-gate6-baseline/reload-integrated-lib.log",
+      "logSHA256": "6603da0949c70e904382f3f5673456702aeca213c325dddd8f1c0a7c14742e64",
+      "result": "398 passed,0 failed,8 ignored;debug default features"
+    },
+    "docs": {
+      "exit": 0,
+      "log": "/mnt/data/work/gonvex-gate6-baseline/reload-integrated-docs.log",
+      "logSHA256": "64b991f8201e6109e19b5401096d7bdd7a2ac88cee22a9d7e3aec1d27eb4d60d"
+    },
+    "clippy": {
+      "exit": 0,
+      "log": "/mnt/data/work/gonvex-gate6-baseline/reload-integrated-clippy.log",
+      "logSHA256": "a0811808f8fe7a9094874d34ca452083e639de879248fd8b2dfc1b72a5b566bb"
+    },
+    "harness": {
+      "exit": 0,
+      "log": "/mnt/data/work/gonvex-gate6-baseline/reload-integrated-harness.log",
+      "logSHA256": "d411becf6e3af69d9f620059c87154e8bffd2c8b60426d779fff2c05983d5feb",
+      "result": "34 passed"
+    }
+  },
+  "pythonSummary": "5passed",
+  "runSyntax": "passed",
+  "importCycles": "12modules15edges0cycles on05e85737and44a0908e",
+  "optimizedSuite": "Not rerun in integration slot; reviewed batch reports398pass1existingfuturebudgetfailure8ignored,29664>28672,exacte581same layout;not fully green",
+  "heavyJobsCompletedUTC": "2026-11-05T06:13:35.685884+00:00"
+}

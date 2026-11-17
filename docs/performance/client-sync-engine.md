@@ -1,5 +1,8 @@
 # Off-main-thread SQLite client sync engine
 
+> Historical: written while Gonvex stored data in PostgreSQL. Storage moved to
+> SQLite on 2026-11-02; see [SQLite storage](../sqlite-storage.md).
+
 Design proposal, reviewed against `95da6c930211e47b798fd66bc4b65ca42d0a5cd7` on `staging`, SDK `0.5.2-staging.28`. This PR changes documentation only. Targets below are acceptance gates, not measured results.
 
 ## Decision

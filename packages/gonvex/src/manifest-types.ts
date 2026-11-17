@@ -256,6 +256,18 @@ export type ModuleJavaScript = {
   sourceMap?: string;
 };
 
+/**
+ * Query/Reducer-only bundle emitted when gonvex.json sets `module.split`.
+ * Its ESM namespace exports every listed function under its exact path
+ * (`export { beat as "presence.beat" }`), and hosts resolve these functions by
+ * path. `ModuleArtifact.javascript` stays the complete bundle and serves every
+ * function that is not listed here (Actions, and anything the split skipped).
+ */
+export type ModuleReducerBundle = ModuleJavaScript & {
+  /** Sorted function paths this bundle serves. Only Queries and Reducers. */
+  functions: string[];
+};
+
 export type ModuleArtifact = {
   language: ModuleLanguage;
   /** Artifact format generation; bumped when the layout changes. */
@@ -268,9 +280,21 @@ export type ModuleArtifact = {
   /** Project-relative POSIX path to base64 contents, in sorted key order. */
   files: Record<string, string>;
   javascript?: ModuleJavaScript;
+  reducerBundle?: ModuleReducerBundle;
   visibility: Record<string, VisibilityPlan>;
   crons?: ModuleCron[];
   invitationAcceptanceReducer?: string;
+  permissionGrants?: PermissionGrantSource;
+};
+
+/** Backs `ctx.permissions`: rows of `table` grant `member` a `permission` in `scope`. */
+export type PermissionGrantSource = {
+  table: string;
+  member: string;
+  permission: string;
+  scope: string;
+  whereNull?: string[];
+  key?: string;
 };
 
 export type ModuleCron = {
@@ -280,4 +304,6 @@ export type ModuleCron = {
   scope: "project" | "tenant";
   intervalMs?: number;
   expression?: string;
+  /** Read-only SQL pre-check (`$1` = now, Unix ms); the run enters V8 only when it is truthy. */
+  dueWhen?: string;
 };

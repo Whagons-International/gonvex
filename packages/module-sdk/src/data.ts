@@ -30,7 +30,9 @@ export type DataRead = {
     transform?: "numericSuffix";
   }[];
   limit?: number;
-  /** Locks authoritative rows until commit; the local intent lane is serialized. */
+  /** Accepted for compatibility. SQLite runs every Reducer transaction on the
+   * tenant's single writer connection, so rows read in a Reducer cannot change
+   * before commit and no row lock is emitted. */
   lock?: "update";
 };
 export type DataReader = {
@@ -68,6 +70,12 @@ export const dataValues = (value: unknown): DataScalar[] => {
   return value.map(dataValue);
 };
 
+/** Trailing ASCII digits as a number, NULL when the text has none. SQLite has
+ * no regular-expression extraction, so strip the digits with rtrim and take
+ * the remainder. */
+const numericSuffix = (column: string): string =>
+  `CAST(NULLIF(substr(${column}, length(rtrim(${column}, '0123456789')) + 1), '') AS REAL)`;
+
 /** The SQL adapter only emits identifiers and bound parameters, never caller SQL. */
 export function compileDataRead(
   read: DataRead,
@@ -83,33 +91,46 @@ export function compileDataRead(
     if ("and" in value)
       return value.and.length
         ? `(${value.and.map(predicate).join(" AND ")})`
-        : "TRUE";
+        : "1";
     if ("or" in value)
       return value.or.length
         ? `(${value.or.map(predicate).join(" OR ")})`
-        : "FALSE";
+        : "0";
     let column = identifier(value.column);
     if (value.transform) {
       if (value.transform === "lower") column = `lower(${column})`;
-      else if (value.transform === "trim") column = `btrim(${column})`;
+      else if (value.transform === "trim") column = `trim(${column})`;
       else if (value.transform === "lowerTrim")
-        column = `lower(btrim(${column}))`;
+        column = `lower(trim(${column}))`;
       else throw new Error("Invalid column transform");
     }
     if (value.op === "isNull") return `${column} IS NULL`;
     if (value.op === "notNull") return `${column} IS NOT NULL`;
     if (value.op === "matches") {
       validateDataPattern(value.pattern);
-      return `${column} ~ ${bind(value.pattern)}`;
+      // SQLite's REGEXP operator calls regexp(pattern, value), which the
+      // runtime registers on every tenant connection.
+      return `${column} REGEXP ${bind(value.pattern)}`;
     }
     if (value.op === "arrayContains") {
-      parameters.push(JSON.stringify([dataValue(value.value)]));
-      return `(jsonb_typeof(${column}) = 'array' AND ${column} @> $${parameters.length}::text::jsonb)`;
+      const element = dataValue(value.value);
+      // Match JSON element types exactly, like JSON containment: the string
+      // "1" never matches the number 1 and true never matches 1.
+      let match: string;
+      if (element === null) match = "element.type = 'null'";
+      else if (typeof element === "boolean")
+        match = `element.type = '${element ? "true" : "false"}'`;
+      else if (typeof element === "number")
+        match = `element.type IN ('integer', 'real') AND element.value = ${bind(element)}`;
+      else match = `element.type = 'text' AND element.value = ${bind(element)}`;
+      return `(CASE WHEN json_type(${column}) = 'array' THEN EXISTS (SELECT 1 FROM json_each(${column}) AS element WHERE ${match}) ELSE 0 END)`;
     }
     if (value.op === "in") {
-      if (!value.values.length) return "FALSE";
-      parameters.push(dataValues(value.values));
-      return `${column} = ANY($${parameters.length})`;
+      if (!value.values.length) return "0";
+      // One JSON array parameter keeps the statement shape independent of
+      // the list length. Booleans compare as the 0/1 SQLite stores.
+      parameters.push(JSON.stringify(dataValues(value.values)));
+      return `${column} IN (SELECT value FROM json_each($${parameters.length}))`;
     }
     const operator = {
       eq: "=",
@@ -149,7 +170,7 @@ export function compileDataRead(
           throw new Error("Invalid sort transform");
         const column =
           order.transform === "numericSuffix"
-            ? `substring(${identifier(order.column)} from '[0-9]+$')::numeric`
+            ? numericSuffix(identifier(order.column))
             : identifier(order.column);
         return `${column} ${direction.toUpperCase()} NULLS ${(order.nulls ?? (direction === "asc" ? "last" : "first")).toUpperCase()}`;
       })
@@ -162,7 +183,7 @@ export function compileDataRead(
   }
   if (read.lock !== undefined) {
     if (read.lock !== "update") throw new Error("Invalid data lock");
-    statement += " FOR UPDATE";
+    // Single writer per tenant: nothing to lock (see DataRead.lock).
   }
   return { statement, parameters };
 }
@@ -188,8 +209,11 @@ export async function selectFirst<T = JsonObject>(
   )[0];
 }
 
-/** Independent reads share one server host call. Local reads use the same
- * transaction view; no network or asynchronous work can escape that view. */
+/** Independent reads. Local reads use the same transaction view; no network or
+ * asynchronous work can escape that view. On the server each read is one
+ * statement against the tenant's in-process SQLite file, so rows come back
+ * through the runtime's declared-type decoder (JSON columns as JSON, BOOLEAN
+ * columns as booleans) instead of being re-encoded as JSON inside SQL. */
 export async function selectDataBatch(
   db: ReadDB,
   reads: readonly DataRead[],
@@ -197,29 +221,12 @@ export async function selectDataBatch(
   if (db.select)
     return Promise.all(reads.map((read) => selectRows<JsonObject>(db, read)));
   const result: JsonObject[][] = [];
-  for (let offset = 0; offset < reads.length; offset += 32) {
-    const parameters: JsonValue[] = [];
-    const expressions = reads.slice(offset, offset + 32).map((read, index) => {
-      const compiled = compileDataRead(read);
-      const base = parameters.length;
-      const statement = compiled.statement.replace(
-        /\$(\d+)/g,
-        (_, number) => `$${Number(number) + base}`,
-      );
-      parameters.push(...compiled.parameters);
-      return `(SELECT COALESCE(jsonb_agg(to_jsonb(source)), '[]'::jsonb) FROM (${statement}) AS source) AS read_${index}`;
-    });
-    const [row] = await db.query<Record<string, JsonObject[]>>(
-      `SELECT ${expressions.join(", ")}`,
-      parameters,
+  // Compile every read first so invalid input fails before any SQL runs.
+  const compiled = reads.map((read) => compileDataRead(read));
+  for (const sql of compiled)
+    result.push(
+      Array.from(await db.query<JsonObject>(sql.statement, sql.parameters)),
     );
-    if (
-      !row ||
-      expressions.some((_, index) => !Array.isArray(row[`read_${index}`]))
-    )
-      throw new Error("Database returned an invalid batch read result");
-    result.push(...expressions.map((_, index) => row[`read_${index}`]!));
-  }
   return result;
 }
 
@@ -247,8 +254,8 @@ export async function existingDataTables(
   if (db.tables)
     return new Set(tables.filter((table) => db.tables!.includes(table)));
   const rows = await db.query<{ name: string }>(
-    "SELECT name FROM unnest($1::text[]) AS name WHERE to_regclass(quote_ident(name)) IS NOT NULL",
-    [[...tables]],
+    "SELECT name FROM sqlite_schema WHERE type IN ('table', 'view') AND name IN (SELECT value FROM json_each($1))",
+    [JSON.stringify(tables)],
   );
   return new Set(rows.map((row) => row.name));
 }
@@ -288,16 +295,19 @@ export async function existsDataRows(
       parameters.push(...sql.parameters);
       return `EXISTS (${statement}) AS found_${index}`;
     });
-    const [row] = await db.query<Record<string, boolean>>(
+    const [row] = await db.query<Record<string, boolean | number>>(
       `SELECT ${expressions.join(", ")}`,
       parameters,
     );
+    // EXISTS is an untyped expression column: SQLite returns 0 or 1.
+    const found = (value: unknown): boolean | undefined =>
+      value === true || value === 1 ? true : value === false || value === 0 ? false : undefined;
     if (
       !row ||
-      expressions.some((_, index) => typeof row[`found_${index}`] !== "boolean")
+      expressions.some((_, index) => found(row[`found_${index}`]) === undefined)
     )
       throw new Error("Database returned an invalid existence result");
-    results.push(...expressions.map((_, index) => row[`found_${index}`]!));
+    results.push(...expressions.map((_, index) => found(row[`found_${index}`])!));
   }
   return results;
 }
@@ -363,10 +373,14 @@ export async function summarizeRows(
         { ordered: false },
       );
       const offset = parameters.length;
+      // Everything after the first WHERE; predicates may contain nested
+      // subqueries with their own WHERE (arrayContains).
+      const where = compiled.statement.slice(
+        compiled.statement.indexOf(" WHERE ") + " WHERE ".length,
+      );
       filter =
         " FILTER (WHERE " +
-        compiled.statement
-          .split(" WHERE ")[1]!
+        where
           .replace(/\$(\d+)/g, (_, n) => `$${Number(n) + offset}`) +
         ")";
       parameters.push(...compiled.parameters);
@@ -382,20 +396,19 @@ export async function summarizeRows(
   );
 }
 
-/** Serialize a named business resource for the authoritative transaction. */
+/** Serialize a named business resource for the authoritative transaction.
+ * On the server this is a no-op: every Reducer transaction for a tenant runs
+ * on that tenant's single SQLite writer connection, one at a time, so a
+ * Reducer already holds every resource until it commits. Adapters that run
+ * concurrent transactions provide `db.lock`. */
 export async function lockData(db: WriteDB, key: string): Promise<void> {
   if (!key || typeof key !== "string")
     throw new Error("Data lock requires a nonempty key");
   if (db.lock) await db.lock(key);
-  else
-    await db.query(
-      "SELECT $1::text FROM pg_advisory_xact_lock(hashtextextended($1, 0))",
-      [key],
-    );
 }
 
 function validateDataPattern(pattern: string): void {
-  // Deliberately exclude PostgreSQL/JS-specific regex extensions. Application
+  // Deliberately exclude engine-specific regex extensions. Application
   // patterns use common anchors, literals, groups and character classes.
   if (
     typeof pattern !== "string" ||
@@ -420,7 +433,7 @@ export function matchesDataPredicate(
   if (left != null && predicate.transform) {
     if (typeof left !== "string")
       throw new Error("Text transform requires a string");
-    // PostgreSQL btrim without a character argument strips ASCII spaces only.
+    // SQLite trim without a character argument strips ASCII spaces only.
     if (predicate.transform === "trim" || predicate.transform === "lowerTrim")
       left = left.replace(/^ +| +$/g, "");
     if (predicate.transform === "lower" || predicate.transform === "lowerTrim")

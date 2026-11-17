@@ -165,6 +165,7 @@ async fn run() -> Result<(JsonValue, Vec<LogLine>), String> {
             max_result_bytes: request.max_output_bytes,
             recycle_after_calls: 0,
             isolate_pool_size: 1,
+            ..V8Config::default()
         },
     )
     .map_err(|error| error.to_string())?;

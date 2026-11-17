@@ -25,3 +25,6 @@ rust/target/
 
 rust/target-websocket/
 verification/**/__pycache__/
+
+# Local runtime SQLite data directory (GONVEX_DATA_DIR default)
+/data/

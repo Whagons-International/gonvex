@@ -1,7 +1,6 @@
-import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { internalReducer, reducer, schema, type ReducerContext } from "@gonvex/module-sdk";
-import { LocalReducerRuntime, type LocalExecution, type LocalSnapshot } from "../test/postgres-reference.js";
+import { LocalReducerRuntime, type LocalExecution, type LocalSnapshot } from "../test/sqlite-reference.js";
 
 const tables = {
   tasks: { _id: "text", statusId: "text", count: "bigint" },
@@ -108,8 +107,11 @@ describe("local reducer execution", () => {
     await expect(host.execute("read", {}, partial, execution())).rejects.toThrow(/incomplete/i);
   });
 
-  it("captures SQL writes and data-modifying CTEs in the reducer transaction", async () => {
-    const host = runtime({ write: define((ctx) => ctx.db.query(`WITH deleted AS (DELETE FROM "tasks" WHERE "_id" = 't1' RETURNING *) INSERT INTO "logs" ("_id", "taskId", "message") SELECT 'log1', "_id", 'removed' FROM deleted RETURNING *`)) });
+  it("captures SQL writes made by separate statements in the reducer transaction", async () => {
+    const host = runtime({ write: define(async (ctx) => {
+      const [removed] = await ctx.db.query<any>(`DELETE FROM "tasks" WHERE "_id" = 't1' RETURNING *`);
+      return ctx.db.query(`INSERT INTO "logs" ("_id", "taskId", "message") VALUES ('log1', $1, 'removed') RETURNING *`, [removed._id]);
+    }) });
     const result = await host.execute("write", {}, snapshot(), execution());
     expect(result.patches).toContainEqual({ entity: "tasks", rowId: "t1", op: "delete" });
     expect(result.patches).toContainEqual(expect.objectContaining({ entity: "logs", rowId: "log1", op: "insert" }));
@@ -171,10 +173,8 @@ describe("local reducer execution", () => {
     await expect(host.execute("read", {}, input, execution())).rejects.toThrow(/logs.*incomplete/i);
   });
 
-  it("captures writes hidden inside a read CTE", async () => {
-    const host = runtime({ write: define((ctx) => ctx.db.query(
-      'WITH removed AS (DELETE FROM "tasks" RETURNING *) SELECT * FROM removed',
-    )) });
+  it("captures a whole-table delete that SQLite compiles to a table clear", async () => {
+    const host = runtime({ write: define((ctx) => ctx.db.query('DELETE FROM "tasks"')) });
     expect((await host.execute("write", {}, snapshot(), execution())).patches).toEqual([{ entity: "tasks", rowId: "t1", op: "delete" }]);
   });
 
@@ -217,10 +217,8 @@ describe("local reducer execution", () => {
     expect((await host.execute("count", {}, snapshot(), { ...execution(), commandId: "next" })).result).toBe(1);
  });
 
-it("executes isolated reducer transactions from the prebuilt empty cluster", async () => {
-  const encoded = await readFile(new URL("../assets/empty-database.b64", import.meta.url), "utf8");
-  const template = new Blob([Buffer.from(encoded.trim(), "base64")]);
-  const host = new LocalReducerRuntime({ tables, databaseTemplate: template, artifactHash: "artifact-1", reducers: {
+it("executes isolated reducer transactions in one reused workspace", async () => {
+  const host = new LocalReducerRuntime({ tables, artifactHash: "artifact-1", reducers: {
     increment: define(async ctx => {
       const [task] = await ctx.db.query<any>('SELECT * FROM "tasks" WHERE "_id" = $1', ["t1"]);
       await ctx.db.update("tasks", "t1", { count: task.count + 1 });

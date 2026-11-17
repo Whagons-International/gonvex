@@ -1,5 +1,8 @@
 # Negotiated replica snapshot pages
 
+> Historical: written while Gonvex stored data in PostgreSQL. Storage moved to
+> SQLite on 2026-11-02; see [SQLite storage](../sqlite-storage.md).
+
 The audit at `95da6c9` found that Replica Collections use one `replica.snapshot` JSON frame. See [the wire design](client-sync-engine.md#wire-and-server-changes), [TypeScript protocol](../../packages/protocol/src/index.ts), [Rust protocol](../../rust/crates/protocol/src/lib.rs), and [snapshot construction](../../rust/crates/runtime/src/replica.rs). Encoding and parsing that frame require a collection-sized string, and snapshot construction cloned the rows again after creating the subscription's row map.
 
 ## Wire behavior

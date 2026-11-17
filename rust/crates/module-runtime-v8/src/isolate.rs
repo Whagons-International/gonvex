@@ -19,12 +19,14 @@ use deno_core::{
     extension, op2, v8, JsRuntime, ModuleSpecifier, OpState, PollEventLoopOptions, RuntimeOptions,
 };
 use gonvex_module_runtime::{
-    Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse, Invocation,
-    InvocationResult, ModuleError,
+    Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse, InlineHost,
+    Invocation, InvocationResult, ModuleError,
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit};
+use tokio::sync::{mpsc, oneshot, Notify};
+
+use crate::admission::AdmissionPermit;
 
 use crate::dispatch::{
     decode_result, kind_name, CapabilityFlags, DispatchRequest, HostCallOutcome, HostCallRequest,
@@ -46,6 +48,9 @@ const WEB_STREAMS: &str = include_str!("vendor/web_streams_ponyfill.js");
 pub(crate) struct ModuleSource {
     specifier: ModuleSpecifier,
     code: String,
+    /// A split reducer bundle exports every function under its exact path,
+    /// so it is resolved by path alone and no other candidate can shadow it.
+    resolve_by_path: bool,
     #[cfg(test)]
     pub(crate) probe: Arc<WorkerTestProbe>,
 }
@@ -76,9 +81,23 @@ impl ModuleSource {
         Ok(Self {
             specifier,
             code,
+            resolve_by_path: false,
             #[cfg(test)]
             probe: Arc::default(),
         })
+    }
+}
+
+impl ModuleSource {
+    /// The Query/Reducer-only bundle of a split artifact. Its specifier is
+    /// distinct from the complete bundle's so stack traces name the bundle.
+    pub(crate) fn reducer_bundle(module_id: &str, code: String) -> Result<Self, ModuleError> {
+        let mut source = Self::new(module_id, code)?;
+        source.specifier = source.specifier.join("reducers.js").map_err(|err| {
+            ModuleError::InvalidArtifact(format!("reducer bundle specifier: {err}"))
+        })?;
+        source.resolve_by_path = true;
+        Ok(source)
     }
 }
 
@@ -131,6 +150,7 @@ pub(crate) struct CallSpec {
     pub(crate) timeout: Option<Duration>,
     pub(crate) max_result_bytes: usize,
     pub(crate) host: mpsc::UnboundedSender<HostRequest>,
+    pub(crate) inline: Option<Arc<dyn InlineHost>>,
 }
 
 pub(crate) struct WorkerCall {
@@ -154,7 +174,7 @@ pub(crate) struct IsolateWorker {
 #[derive(Default)]
 struct WorkerState {
     handle: Option<v8::IsolateHandle>,
-    retiring_permit: Option<OwnedSemaphorePermit>,
+    retiring_permit: Option<AdmissionPermit>,
     stopped: bool,
 }
 
@@ -207,6 +227,33 @@ impl Drop for WorkerExit {
     }
 }
 
+/// Returns freed native heap to the operating system. V8 parses and compiles
+/// a module bundle with malloc-backed zones on the isolate's own thread; glibc
+/// keeps those freed pages in that thread's arena, so without a trim every
+/// isolate start or stop leaves tens of megabytes resident.
+pub fn trim_native_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let enabled = *ENABLED.get_or_init(|| {
+            std::env::var("GONVEX_MODULE_MALLOC_TRIM")
+                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(true)
+        });
+        if enabled {
+            let _timed = gonvex_profiler::ScopeTimer::new(
+                gonvex_profiler::Stage::MallocTrim,
+                gonvex_profiler::Label::None,
+            );
+            // SAFETY: malloc_trim has no preconditions; it only releases
+            // free memory held by the allocator.
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        }
+    }
+}
+
 impl IsolateWorker {
     /// Starts the thread and its isolate. The returned receiver resolves once
     /// the bundle has loaded and evaluated, so a broken artifact surfaces as a
@@ -219,12 +266,14 @@ impl IsolateWorker {
         let (ready, ready_receiver) = oneshot::channel();
         let control = Arc::<WorkerControl>::default();
         let worker_control = Arc::clone(&control);
-        thread::Builder::new()
-            .name("gonvex-module-isolate".to_owned())
-            .spawn(move || worker_main(source, config, ready, call_receiver, worker_control))
-            .map_err(|err| {
-                ModuleError::Execution(format!("failed to start module isolate thread: {err}"))
-            })?;
+        // Base priority whoever starts it (an on-demand isolate may be started
+        // from the niced scheduled lane or offload pool).
+        gonvex_profiler::thread_priority::spawn_at("gonvex-module-isolate", 0, move || {
+            worker_main(source, config, ready, call_receiver, worker_control)
+        })
+        .map_err(|err| {
+            ModuleError::Execution(format!("failed to start module isolate thread: {err}"))
+        })?;
         Ok((Self { calls, control }, ready_receiver))
     }
 
@@ -236,7 +285,7 @@ impl IsolateWorker {
 
     /// Transfer admission capacity to the worker until its runtime has been
     /// disposed. Cancellation remains nonblocking for the caller.
-    pub(crate) fn retire(self, permit: OwnedSemaphorePermit) {
+    pub(crate) fn retire(self, permit: AdmissionPermit) {
         let mut state = self.control.state.lock().expect("isolate control lock");
         if !state.stopped {
             assert!(state.retiring_permit.is_none(), "worker retired twice");
@@ -252,6 +301,42 @@ impl Drop for IsolateWorker {
     }
 }
 
+/// Isolate threads alive now (started, not yet torn down), process-wide.
+static LIVE_ISOLATES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Of those, isolates of a complete bundle (an unsplit artifact, or the
+/// on-demand Action bundle of a split one).
+static LIVE_COMPLETE_ISOLATES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// `(all, complete bundle)` isolate threads alive in this process.
+pub fn live_isolates() -> (usize, usize) {
+    (
+        LIVE_ISOLATES.load(Ordering::Relaxed),
+        LIVE_COMPLETE_ISOLATES.load(Ordering::Relaxed),
+    )
+}
+
+struct LiveIsolate(bool);
+
+impl LiveIsolate {
+    fn enter(complete: bool) -> Self {
+        LIVE_ISOLATES.fetch_add(1, Ordering::Relaxed);
+        if complete {
+            LIVE_COMPLETE_ISOLATES.fetch_add(1, Ordering::Relaxed);
+        }
+        Self(complete)
+    }
+}
+
+impl Drop for LiveIsolate {
+    fn drop(&mut self) {
+        LIVE_ISOLATES.fetch_sub(1, Ordering::Relaxed);
+        if self.0 {
+            LIVE_COMPLETE_ISOLATES.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 fn worker_main(
     source: Arc<ModuleSource>,
     config: V8Config,
@@ -262,6 +347,7 @@ fn worker_main(
     // Declared first, so the runtime and test teardown guard drop before this
     // releases the retired worker's permit, including on early return/panic.
     let _exit = WorkerExit(Arc::clone(&control));
+    let _live = LiveIsolate::enter(!source.resolve_by_path);
     #[cfg(test)]
     let _lifetime = {
         source.probe.started.fetch_add(1, Ordering::SeqCst);
@@ -284,6 +370,8 @@ fn worker_main(
         &runtime,
         worker_loop(source, config, ready, calls, &control),
     );
+    drop(runtime);
+    trim_native_heap();
 }
 
 async fn worker_loop(
@@ -296,20 +384,30 @@ async fn worker_loop(
     let initialized = tokio::select! {
         biased;
         _ = control.canceled() => Err(ModuleError::Execution("module isolate startup was canceled".into())),
-        result = ModuleIsolate::create(&source, config, control) => result,
+        result = async {
+            let _timed = gonvex_profiler::ScopeTimer::new(
+                gonvex_profiler::Stage::V8IsolateStart,
+                gonvex_profiler::Label::None,
+            );
+            ModuleIsolate::create(&source, config, control).await
+        } => result,
     };
+    // Parsing and top-level evaluation are done; release their scratch memory.
+    trim_native_heap();
     let mut isolate = match initialized {
         Ok(isolate) => {
             if ready.send(Ok(())).is_err() {
                 return;
             }
-            isolate
+            TimedTeardown(Some(isolate))
         }
         Err(err) => {
             let _ = ready.send(Err(err));
             return;
         }
     };
+    let mut served: u64 = 0;
+    let tally = HeapTallySlot::new();
     loop {
         let call = tokio::select! {
             biased;
@@ -322,10 +420,168 @@ async fn worker_loop(
             reply = isolate.run(call.spec) => reply,
         };
         let healthy = reply.healthy;
+        served += 1;
+        let gc = isolate.gc.values();
+        tally.update(&mut isolate.runtime, gc, served);
+        if heap_stats_enabled() && (served == 1 || served.is_multiple_of(200)) {
+            log_heap_statistics(
+                &mut isolate.runtime,
+                &source.specifier,
+                &format!("after-{served}-calls"),
+            );
+        }
         let _ = call.reply.send(reply);
         if !healthy {
             break;
         }
+    }
+}
+
+/// Times the isolate's teardown (`v8.isolate_stop`) whichever way the worker
+/// loop ends.
+struct TimedTeardown(Option<ModuleIsolate>);
+
+impl std::ops::Deref for TimedTeardown {
+    type Target = ModuleIsolate;
+    fn deref(&self) -> &ModuleIsolate {
+        self.0.as_ref().expect("isolate present until teardown")
+    }
+}
+
+impl std::ops::DerefMut for TimedTeardown {
+    fn deref_mut(&mut self) -> &mut ModuleIsolate {
+        self.0.as_mut().expect("isolate present until teardown")
+    }
+}
+
+impl Drop for TimedTeardown {
+    fn drop(&mut self) {
+        if let Some(isolate) = self.0.take() {
+            let _timed = gonvex_profiler::ScopeTimer::new(
+                gonvex_profiler::Stage::V8IsolateStop,
+                gonvex_profiler::Label::None,
+            );
+            drop(isolate);
+        }
+    }
+}
+
+/// Per-isolate GC counters, fed by V8 GC prologue/epilogue callbacks on the
+/// isolate's own thread (relaxed atomics, no allocation). Each pause is also
+/// recorded in the process-wide `v8.gc_minor` / `v8.gc_major` histograms.
+/// Boxed so the callbacks' data pointer stays put; it must outlive the
+/// isolate (see `ModuleIsolate` field order).
+#[derive(Default)]
+pub(crate) struct GcStats {
+    started_ns: std::sync::atomic::AtomicU64,
+    minor: std::sync::atomic::AtomicU64,
+    minor_ns: std::sync::atomic::AtomicU64,
+    major: std::sync::atomic::AtomicU64,
+    major_ns: std::sync::atomic::AtomicU64,
+}
+
+// `v8::Isolate::AddGCEpilogueCallback(GCCallbackWithData, void*, GCType)`:
+// rusty_v8 130 binds only the prologue, but V8 itself (linked statically
+// from the same archive) exports both. Itanium C++ ABI (Linux, macOS): a
+// non-virtual member function is a plain function taking `this` first.
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "_ZN2v87Isolate21AddGCEpilogueCallbackEPFvPS0_NS_6GCTypeENS_15GCCallbackFlagsEPvES4_S2_"]
+    fn v8_isolate_add_gc_epilogue_callback(
+        isolate: *mut v8::Isolate,
+        callback: GcCallback,
+        data: *mut std::ffi::c_void,
+        gc_type_filter: v8::GCType,
+    );
+}
+
+type GcCallback =
+    extern "C" fn(*mut v8::Isolate, v8::GCType, v8::GCCallbackFlags, *mut std::ffi::c_void);
+
+/// Pauses only: incremental marking steps and weak-callback processing are
+/// not stop-the-world pauses of their own.
+fn gc_pause_types() -> v8::GCType {
+    v8::GCType::SCAVENGE | v8::GCType::MINOR_MARK_COMPACT | v8::GCType::MARK_SWEEP_COMPACT
+}
+
+extern "C" fn gc_prologue(
+    _isolate: *mut v8::Isolate,
+    _gc_type: v8::GCType,
+    _flags: v8::GCCallbackFlags,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: `data` is the isolate's boxed `GcStats`, which outlives it.
+    let stats = unsafe { &*(data as *const GcStats) };
+    stats
+        .started_ns
+        .store(gonvex_profiler::now_ns(), Ordering::Relaxed);
+}
+
+extern "C" fn gc_epilogue(
+    _isolate: *mut v8::Isolate,
+    gc_type: v8::GCType,
+    _flags: v8::GCCallbackFlags,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as in `gc_prologue`.
+    let stats = unsafe { &*(data as *const GcStats) };
+    let started = stats.started_ns.swap(0, Ordering::Relaxed);
+    if started == 0 {
+        return;
+    }
+    let elapsed = gonvex_profiler::now_ns().saturating_sub(started);
+    let (stage, count, total) = if gc_type == v8::GCType::MARK_SWEEP_COMPACT {
+        (
+            gonvex_profiler::Stage::V8GcMajor,
+            &stats.major,
+            &stats.major_ns,
+        )
+    } else {
+        (
+            gonvex_profiler::Stage::V8GcMinor,
+            &stats.minor,
+            &stats.minor_ns,
+        )
+    };
+    count.fetch_add(1, Ordering::Relaxed);
+    total.fetch_add(elapsed, Ordering::Relaxed);
+    gonvex_profiler::record(stage, gonvex_profiler::Label::None, elapsed);
+}
+
+impl GcStats {
+    /// Installs the GC callbacks on `isolate` (when the profiler is on).
+    fn install(&self, isolate: &mut v8::Isolate) {
+        if !gonvex_profiler::enabled() {
+            return;
+        }
+        let data = (self as *const GcStats)
+            .cast_mut()
+            .cast::<std::ffi::c_void>();
+        #[cfg(unix)]
+        {
+            isolate.add_gc_prologue_callback(gc_prologue, data, gc_pause_types());
+            // SAFETY: `isolate` is a live V8 isolate on this thread; the
+            // callback and its data outlive it.
+            unsafe {
+                v8_isolate_add_gc_epilogue_callback(
+                    isolate as *mut v8::Isolate,
+                    gc_epilogue,
+                    data,
+                    gc_pause_types(),
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (isolate, data);
+    }
+
+    fn values(&self) -> [u64; 4] {
+        [
+            self.minor.load(Ordering::Relaxed),
+            self.minor_ns.load(Ordering::Relaxed),
+            self.major.load(Ordering::Relaxed),
+            self.major_ns.load(Ordering::Relaxed),
+        ]
     }
 }
 
@@ -343,6 +599,10 @@ struct ActiveCall {
     capabilities: Capabilities,
     action_tools: BTreeSet<String>,
     host: mpsc::UnboundedSender<HostRequest>,
+    /// Calls the host answers on this thread (see `InlineHost`).
+    inline: Option<Arc<dyn InlineHost>>,
+    /// Ordered host calls sent to the invoking task and not yet answered.
+    serial_outstanding: u32,
     violation: Option<Violation>,
 }
 
@@ -377,7 +637,9 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
         Err(message) => return HostCallOutcome::failed(message),
     };
 
-    let response = {
+    let mut call = call;
+    let mut inline_tried = false;
+    let (response, serial) = loop {
         let mut op_state = state.borrow_mut();
         let Some(active) = op_state.borrow_mut::<InvocationSlot>().active.as_mut() else {
             return HostCallOutcome::failed("no module invocation is active".to_owned());
@@ -420,6 +682,24 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 return HostCallOutcome::denied(message);
             }
         }
+        let serial = !matches!(call, HostCall::Fetch { .. });
+        // Answer on this thread when the host can (in-process database work on
+        // the connection leased to this invocation): no hop to the invoking
+        // task and back. Only while no ordered host call is outstanding, so a
+        // call never overtakes one issued before it.
+        if serial && !inline_tried && active.serial_outstanding == 0 {
+            if let Some(inline) = active.inline.clone() {
+                inline_tried = true;
+                drop(op_state);
+                match inline.call_inline(call) {
+                    Ok(result) => return outcome_of(result),
+                    Err(back) => {
+                        call = back;
+                        continue;
+                    }
+                }
+            }
+        }
         let (reply, response) = oneshot::channel();
         if active.host.send(HostRequest { call, reply }).is_err() {
             let message = "module host bridge closed".to_owned();
@@ -428,19 +708,21 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 .get_or_insert(Violation::Bridge(message.clone()));
             return HostCallOutcome::failed(message);
         }
-        response
+        if serial {
+            active.serial_outstanding += 1;
+        }
+        break (response, serial);
     };
 
-    match response.await {
-        // Host responses travel as bytes in the ABI; this engine speaks JSON,
-        // so a non-UTF-8 response is a host/module contract mismatch.
-        Ok(Ok(HostResponse { value })) => match String::from_utf8(value) {
-            Ok(text) => HostCallOutcome::ok(text),
-            Err(_) => HostCallOutcome::failed("host response is not valid UTF-8 JSON".to_owned()),
-        },
-        // A host-side failure is the host's error, not a broken module: it stays
-        // catchable so a handler can fall back or report it.
-        Ok(Err(err)) => HostCallOutcome::failed(err.to_string()),
+    let response = response.await;
+    if serial {
+        let mut op_state = state.borrow_mut();
+        if let Some(active) = op_state.borrow_mut::<InvocationSlot>().active.as_mut() {
+            active.serial_outstanding = active.serial_outstanding.saturating_sub(1);
+        }
+    }
+    match response {
+        Ok(result) => outcome_of(result),
         Err(_) => {
             let message = "module host bridge closed before responding".to_owned();
             let mut op_state = state.borrow_mut();
@@ -451,6 +733,20 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
             }
             HostCallOutcome::failed(message)
         }
+    }
+}
+
+/// Host responses travel as bytes in the ABI; this engine speaks JSON, so a
+/// non-UTF-8 response is a host/module contract mismatch. A host-side failure
+/// is the host's error, not a broken module: it stays catchable so a handler
+/// can fall back or report it.
+fn outcome_of(result: Result<HostResponse, HostError>) -> HostCallOutcome {
+    match result {
+        Ok(HostResponse { value }) => match String::from_utf8(value) {
+            Ok(text) => HostCallOutcome::ok(text),
+            Err(_) => HostCallOutcome::failed("host response is not valid UTF-8 JSON".to_owned()),
+        },
+        Err(err) => HostCallOutcome::failed(err.to_string()),
     }
 }
 
@@ -534,6 +830,143 @@ extension!(
     ]
 );
 
+fn heap_stats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GONVEX_V8_HEAP_STATS")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Diagnostic only (`GONVEX_V8_HEAP_STATS=1`): one stderr line of V8 heap
+/// statistics, so memory studies can attribute RSS to isolate heaps.
+/// Process-wide V8 heap tally (perf: /dev/metrics `memory.v8`): one slot per
+/// live isolate worker, refreshed after each call, removed when the worker ends.
+static HEAP_TALLY: std::sync::Mutex<
+    std::collections::BTreeMap<u64, [u64; ISOLATE_STAT_FIELDS.len()]>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Per-isolate values reported by [`isolate_stats`]: the five heap figures
+/// of [`heap_tally`], then calls served and GC pause counts and time.
+pub const ISOLATE_STAT_FIELDS: [&str; 10] = [
+    "totalHeapBytes",
+    "usedHeapBytes",
+    "physicalBytes",
+    "externalBytes",
+    "mallocedBytes",
+    "calls",
+    "gcMinor",
+    "gcMinorNs",
+    "gcMajor",
+    "gcMajorNs",
+];
+static HEAP_TALLY_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct HeapTallySlot(u64);
+
+impl HeapTallySlot {
+    fn new() -> Self {
+        Self(HEAP_TALLY_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn update(&self, runtime: &mut JsRuntime, gc: [u64; 4], calls: u64) {
+        let mut stats = v8::HeapStatistics::default();
+        runtime.v8_isolate().get_heap_statistics(&mut stats);
+        let values = [
+            stats.total_heap_size() as u64,
+            stats.used_heap_size() as u64,
+            stats.total_physical_size() as u64,
+            stats.external_memory() as u64,
+            stats.malloced_memory() as u64,
+            calls,
+            gc[0],
+            gc[1],
+            gc[2],
+            gc[3],
+        ];
+        HEAP_TALLY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(self.0, values);
+    }
+}
+
+impl Drop for HeapTallySlot {
+    fn drop(&mut self) {
+        HEAP_TALLY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// `(isolates reporting, [total heap, used heap, physical, external, malloced])`
+/// summed over live isolate workers, as of each one's last call.
+pub fn heap_tally() -> (usize, [u64; 5]) {
+    let tally = HEAP_TALLY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut sum = [0u64; 5];
+    for values in tally.values() {
+        for (total, value) in sum.iter_mut().zip(values) {
+            *total += value;
+        }
+    }
+    (tally.len(), sum)
+}
+
+/// One row per live isolate worker ([`ISOLATE_STAT_FIELDS`]), as of its last
+/// call.
+pub fn isolate_stats() -> Vec<[u64; ISOLATE_STAT_FIELDS.len()]> {
+    HEAP_TALLY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .copied()
+        .collect()
+}
+
+fn log_heap_statistics(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, moment: &str) {
+    let mut stats = v8::HeapStatistics::default();
+    runtime.v8_isolate().get_heap_statistics(&mut stats);
+    eprintln!(
+        "[gonvex-module-host] v8-heap {{\"moment\":\"{moment}\",\"module\":\"{specifier}\",\"total\":{},\"executable\":{},\"physical\":{},\"used\":{},\"malloced\":{},\"external\":{},\"limit\":{},\"contexts\":{}}}",
+        stats.total_heap_size(),
+        stats.total_heap_size_executable(),
+        stats.total_physical_size(),
+        stats.used_heap_size(),
+        stats.malloced_memory(),
+        stats.external_memory(),
+        stats.heap_size_limit(),
+        stats.number_of_native_contexts(),
+    );
+}
+
+/// Diagnostic only (`GONVEX_V8_HEAP_SNAPSHOT_DIR`): writes a `.heapsnapshot`
+/// of the freshly initialized isolate for offline attribution.
+fn write_heap_snapshot(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, directory: &str) {
+    use std::io::Write as _;
+    let name = specifier.path().trim_matches('/').replace('/', "-");
+    let path = std::path::Path::new(directory).join(format!(
+        "{name}-{}-{:?}.heapsnapshot",
+        std::process::id(),
+        thread::current().id()
+    ));
+    let Ok(file) = std::fs::File::create(&path) else {
+        eprintln!(
+            "[gonvex-module-host] cannot write heap snapshot {}",
+            path.display()
+        );
+        return;
+    };
+    let mut file = std::io::BufWriter::new(file);
+    runtime
+        .v8_isolate()
+        .take_heap_snapshot(|chunk| file.write_all(chunk).is_ok());
+    let _ = file.flush();
+}
+
 /// Field order is drop order: the watchdog stops before the V8 handles and the
 /// runtime go away, so it can never terminate an isolate that is being torn
 /// down.
@@ -542,9 +975,12 @@ struct ModuleIsolate {
     dispatch: v8::Global<v8::Function>,
     namespace: v8::Global<v8::Object>,
     runtime: JsRuntime,
+    /// After `runtime`: the GC callbacks' data outlives the isolate.
+    gc: Box<GcStats>,
     terminated: Arc<AtomicBool>,
     heap_exhausted: Arc<AtomicBool>,
     config: V8Config,
+    resolve_by_path: bool,
 }
 
 impl ModuleIsolate {
@@ -565,6 +1001,9 @@ impl ModuleIsolate {
                     "module initialization timeout exceeds the monotonic clock range".into(),
                 )
             })?;
+        // Declared before `runtime` so that, on an early return, the isolate
+        // is disposed before its GC callbacks' data.
+        let gc = Box::<GcStats>::default();
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions: vec![gonvex_host::init_ops()],
             // No module loader is installed: the artifact must be one
@@ -577,6 +1016,7 @@ impl ModuleIsolate {
             .op_state()
             .borrow_mut()
             .put(InvocationSlot::default());
+        gc.install(runtime.v8_isolate());
 
         let terminated = Arc::new(AtomicBool::new(false));
         let heap_exhausted = Arc::new(AtomicBool::new(false));
@@ -617,14 +1057,22 @@ impl ModuleIsolate {
             )));
         }
         let (dispatch, namespace) = initialized.expect("initialization timeout checked")?;
+        if heap_stats_enabled() {
+            log_heap_statistics(&mut runtime, &source.specifier, "initialized");
+        }
+        if let Ok(directory) = std::env::var("GONVEX_V8_HEAP_SNAPSHOT_DIR") {
+            write_heap_snapshot(&mut runtime, &source.specifier, &directory);
+        }
         Ok(Self {
             watchdog,
             dispatch,
             namespace,
             runtime,
+            gc,
             terminated,
             heap_exhausted,
             config,
+            resolve_by_path: source.resolve_by_path,
         })
     }
 
@@ -835,6 +1283,8 @@ impl ModuleIsolate {
                     .cloned()
                     .collect(),
                 host: spec.host,
+                inline: spec.inline,
+                serial_outstanding: 0,
                 violation: None,
             });
 
@@ -940,7 +1390,11 @@ impl ModuleIsolate {
         &mut self,
         contract: &FunctionContract,
     ) -> Result<v8::Global<v8::Value>, ModuleError> {
-        let candidates = handler_candidates(contract);
+        let candidates = if self.resolve_by_path {
+            vec![contract.path.clone()]
+        } else {
+            handler_candidates(contract)
+        };
         let exports = &self.namespace;
         let scope = &mut self.runtime.handle_scope();
         // A namespace lookup can throw on a cyclic import, so it runs under a
@@ -1032,12 +1486,12 @@ struct Watchdog {
 impl Watchdog {
     fn spawn(handle: v8::IsolateHandle, terminated: Arc<AtomicBool>) -> Result<Self, ModuleError> {
         let (signals, inbox) = sync_mpsc::channel();
-        thread::Builder::new()
-            .name("gonvex-module-watchdog".to_owned())
-            .spawn(move || watchdog_main(handle, terminated, inbox))
-            .map_err(|err| {
-                ModuleError::Execution(format!("failed to start module watchdog thread: {err}"))
-            })?;
+        gonvex_profiler::thread_priority::spawn_at("gonvex-module-watchdog", 0, move || {
+            watchdog_main(handle, terminated, inbox)
+        })
+        .map_err(|err| {
+            ModuleError::Execution(format!("failed to start module watchdog thread: {err}"))
+        })?;
         Ok(Self { signals })
     }
 

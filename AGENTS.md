@@ -21,3 +21,12 @@ Source: 2026-10-18 code-quality comparison F8 (client stale generators: 35/51 fi
 - Resolve confirmed, deployed fixes and preserve their event history. Do not delete groups to clear the inbox.
 - New accepted occurrences reopen resolved groups as regressions. Ignore only intentional noise.
 - Whagons application functions belong in the client repository's `gonvex/` directory, not this runtime framework.
+
+## Schema and relationships
+
+Read `apps/docs/content/docs/schema.mdx` and `reference-integrity.mdx` beside it before changing schema behavior.
+Keep one authoritative fact; derived copies need a concrete access path, maintenance owner and rebuild path.
+Gonvex owns generic discovery, enforcement and diagnostics. Application names, domain semantics and declarations stay in the application.
+Prefer simple native SQL constraints; shared transactional runtime validation is also valid. Cover target changes/deletes, concurrency, atomicity and JSON/polymorphic references; metadata or an offline audit is not enforcement. Avoid scattered Reducer checks and expensive generated SQL.
+Discover from actual FKs and explicit metadata. ID-like names produce warnings, never invented targets or policies. Design/cost findings are advisory deltas with locations and actionable explanations; genuine integrity failures remain errors. Do not use arbitrary object limits or one complexity score.
+Versioned migrations are the current authoring source. A declarative schema compiler generating storage/migrations/types is the target, not an existing capability. Keep bounded application repairs separate from framework redesign.

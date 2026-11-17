@@ -1,27 +1,21 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
 use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
 use gonvex_runtime::Runtime;
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
 use tower::ServiceExt;
 
-fn scoped_url(base: &str, schema: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}options=-csearch_path%3D{schema}")
-}
-
-fn test_config(database_url: String) -> Config {
+fn test_config(control_url: String, data_url: String) -> Config {
     Config {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        control_plane_database_url: Some(database_url.clone()),
-        default_database_url: Some(database_url),
+        control_plane_database_url: Some(control_url),
+        default_database_url: Some(data_url),
         tenant_database_urls: BTreeMap::new(),
         project_database_urls: BTreeMap::new(),
         require_auth: false,
@@ -42,6 +36,8 @@ fn test_config(database_url: String) -> Config {
         database_idle_timeout: std::time::Duration::from_secs(60),
         module_host: ModuleHostConfig {
             enabled: false,
+            in_process: false,
+            max_heap_bytes: 64 << 20,
             binary: None,
             endpoint: None,
             start_timeout: Duration::from_secs(1),
@@ -57,6 +53,23 @@ fn test_config(database_url: String) -> Config {
         storage: StorageConfig::default(),
         service_principals: Vec::new(),
         public_functions: Default::default(),
+        presence: Default::default(),
+        connection: Default::default(),
+    }
+}
+
+/// A fresh data directory under `GONVEX_TEST_DATA_DIR` when set (CI volume),
+/// otherwise a system tempdir.
+fn test_data_dir() -> tempfile::TempDir {
+    match std::env::var("GONVEX_TEST_DATA_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(root) => {
+            std::fs::create_dir_all(&root).unwrap();
+            tempfile::tempdir_in(root).unwrap()
+        }
+        None => tempfile::tempdir().unwrap(),
     }
 }
 
@@ -81,41 +94,16 @@ async fn json_response(runtime: &Runtime, mut request: Request<Body>) -> (Status
 
 #[tokio::test]
 async fn rust_operator_routes_preserve_data_and_membership_contracts() {
-    let Some(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping operator contract test");
-        return;
-    };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let control_schema = format!("gonvex_operator_control_{nonce}");
-    let tenant_schema = format!("gonvex_operator_tenant_{nonce}");
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base_url)
-        .await
-        .unwrap();
-    for schema in [&control_schema, &tenant_schema] {
-        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-            .execute(&admin)
-            .await
-            .unwrap();
-    }
-    let control_url = scoped_url(&base_url, &control_schema);
-    let tenant_url = scoped_url(&base_url, &tenant_schema);
+    let data = test_data_dir();
+    let data_url = gonvex_store::database_url(data.path());
+    let control_url = gonvex_store::database_url(&data.path().join("control.db"));
+    let tenant_url =
+        gonvex_store::database_url(&data.path().join("projects/project/tenants/tenant.db"));
     let pools = PoolRegistry::new(PoolLimits::default());
     let control = ControlPlane::connect(&control_url, pools.clone(), BTreeMap::new())
         .await
         .unwrap();
-    let control_fixture = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&control_url)
-        .await
-        .unwrap();
+    let control_fixture = pools.pool(&control_url).await.unwrap();
     sqlx::query(
         r#"INSERT INTO gonvex_runtime_projects
            (id,name,database_mode,database_url,status,auth_mode)
@@ -128,7 +116,7 @@ async fn rust_operator_routes_preserve_data_and_membership_contracts() {
     sqlx::query(
         r#"INSERT INTO gonvex_runtime_tenants
            (relationship_id,project_id,tenant_id,name,database_url,status,provisioned)
-           VALUES('relationship','project','tenant','Tenant',$1,'active',TRUE)"#,
+           VALUES('relationship','project','tenant','Tenant',$1,'active',1)"#,
     )
     .bind(&tenant_url)
     .execute(&control_fixture)
@@ -152,11 +140,7 @@ async fn rust_operator_routes_preserve_data_and_membership_contracts() {
         )
         .await
         .unwrap();
-    let tenant_fixture = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&tenant_url)
-        .await
-        .unwrap();
+    let tenant_fixture = pools.pool(&tenant_url).await.unwrap();
     sqlx::query(
         "INSERT INTO members(id,account_id,display_name,role) VALUES('member','account','Person','admin')",
     )
@@ -164,17 +148,17 @@ async fn rust_operator_routes_preserve_data_and_membership_contracts() {
     .await
     .unwrap();
     sqlx::query(
-        "CREATE TABLE tasks(id text PRIMARY KEY,title text NOT NULL,owner_id text,metadata jsonb NOT NULL DEFAULT '{}'::jsonb,created_at timestamptz NOT NULL DEFAULT now())",
+        "CREATE TABLE tasks(id TEXT PRIMARY KEY,title TEXT NOT NULL,owner_id TEXT,metadata JSON NOT NULL DEFAULT '{}',created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000 AS INTEGER)))",
     )
     .execute(&tenant_fixture)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO tasks(id,title,owner_id,metadata) VALUES('task-1','First','old',jsonb_build_object('owner','old'))")
+    sqlx::query("INSERT INTO tasks(id,title,owner_id,metadata) VALUES('task-1','First','old',json_object('owner','old'))")
         .execute(&tenant_fixture)
         .await
         .unwrap();
 
-    let runtime = Runtime::new(test_config(control_url.clone()));
+    let runtime = Runtime::new(test_config(control_url.clone(), data_url));
     runtime.start().await.unwrap();
     let scope = "project=project&tenant=tenant";
 
@@ -318,40 +302,19 @@ async fn rust_operator_routes_preserve_data_and_membership_contracts() {
     assert_eq!(metadata.0["owner"], "new");
 
     runtime.shutdown().await;
-    tenant_fixture.close().await;
-    control_fixture.close().await;
+    drop((tenant_fixture, control_fixture));
     pools.close().await;
-    for schema in [&tenant_schema, &control_schema] {
-        sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-            .execute(&admin)
-            .await
-            .unwrap();
-    }
-    admin.close().await;
 }
 
 #[tokio::test]
 async fn dashboard_sessions_follow_account_security_lifecycle() {
-    let base_url = std::env::var("GONVEX_TEST_POSTGRES_URL")
-        .expect("dashboard security test requires a disposable GONVEX_TEST_POSTGRES_URL");
-    let schema = format!("dashboard_sessions_{}", uuid::Uuid::new_v4().simple());
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base_url)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let url = scoped_url(&base_url, &schema);
-    let runtime = Runtime::new(test_config(url.clone()));
+    let data = test_data_dir();
+    let data_url = gonvex_store::database_url(data.path());
+    let url = gonvex_store::database_url(&data.path().join("control.db"));
+    let runtime = Runtime::new(test_config(url.clone(), data_url));
     runtime.start().await.unwrap();
-    let fixture = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .unwrap();
+    let fixture_pools = PoolRegistry::new(PoolLimits::default());
+    let fixture = fixture_pools.pool(&url).await.unwrap();
     async fn save(runtime: &Runtime, password: &str, role: &str) {
         let (status, _) = json_response(runtime, Request::post("/dev/auth/accounts")
             .header("content-type", "application/json")
@@ -418,12 +381,22 @@ async fn dashboard_sessions_follow_account_security_lifecycle() {
     valid(&runtime, &first, StatusCode::OK).await;
     save(&runtime, "replacement-password", "admin").await;
     valid(&runtime, &first, StatusCode::UNAUTHORIZED).await;
-    assert!(tokio::time::timeout(Duration::from_secs(10), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap()
-        .is_close());
+    // The rename may still deliver an update frame before the revoked session
+    // is closed; skip data frames until the close arrives.
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(frame)) if frame.is_text() => continue,
+                other => return other,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(closed, Some(Ok(ref frame)) if frame.is_close()),
+        "expected close, got {closed:?}"
+    );
     server.abort();
     let second = login_token(&runtime, "replacement-password").await;
     sqlx::query(
@@ -452,10 +425,7 @@ async fn dashboard_sessions_follow_account_security_lifecycle() {
     sqlx::query("UPDATE gonvex_dashboard_accounts SET password_hash='!disabled' WHERE email='security@example.test'")
         .execute(&fixture).await.unwrap();
     valid(&runtime, &fourth, StatusCode::UNAUTHORIZED).await;
-    fixture.close().await;
-    drop(runtime);
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
+    drop(fixture);
+    runtime.shutdown().await;
+    fixture_pools.close().await;
 }

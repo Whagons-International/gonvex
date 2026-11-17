@@ -1,0 +1,44 @@
+Running as unit: gonvex-reload-permission-race-phase-aef2e8f39b6a.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T05:35:34.780851+00:00", "attempt": "48d141a7a41842299a74eecbdf2f7ee6", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-permission-race-phase-aef2e8f39b6a.service", "event": "wait-start", "kind": "build", "pid": 1293823, "schema": "coach.resources.v1", "start_ticks": "2020164", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-permission-race-phase-aef2e8f39b6a.service", "why": "reload permission race target /mnt/data/work/gonvex-open-cost/target"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T05:35:34.781035+00:00", "attempt": "48d141a7a41842299a74eecbdf2f7ee6", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-permission-race-phase-aef2e8f39b6a.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "build", "outcome": "admitted", "pid": 1293823, "position": 0, "schema": "coach.resources.v1", "start_ticks": "2020164", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-permission-race-phase-aef2e8f39b6a.service", "why": "reload permission race target /mnt/data/work/gonvex-open-cost/target"}
+warning: use of deprecated associated function `core::num::<impl usize>::max_value`: replaced by the `MAX` associated constant on this type
+   --> vendor/serde_json/src/lexical/math.rs:458:33
+    |
+458 |             .map_or_else(usize::max_value, |v| v - nlz)
+    |                                 ^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: `serde_json` (lib) generated 1 warning
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/module-host/src/session.rs:127:14
+    |
+127 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+127 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+127 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    |
+
+warning: `gonvex-module-host` (lib) generated 1 warning (run `cargo fix --lib -p gonvex-module-host` to apply 1 suggestion)
+   Compiling gonvex-runtime v0.1.0 (/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a/rust/crates/runtime)
+    Finished `release` profile [optimized] target(s) in 1m 05s
+     Running tests/resume_permission_race.rs (/mnt/data/work/gonvex-open-cost/target/release/deps/resume_permission_race-686c7d5240bcf2ac)
+
+running 1 test
+SeeAllSpots: queued before admission; writer 1->2; 247 revoked rows; authoritative messages/subscription/rows agree
+TeamMembership: queued before admission; writer 1->2; 308 revoked rows; authoritative messages/subscription/rows agree
+MemberRoleAndPermissions: queued before admission; writer 1->2; 301 revoked rows; authoritative messages/subscription/rows agree
+test queued_metadata_resume_rechecks_committed_permission_revocations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 122897758, "exit_code": 0, "io_source": "unavailable", "memory_peak": 1579593728, "wall_seconds": 66.432}, "arbitration": "kernel-v1", "at": "2026-11-05T05:36:41.219982+00:00", "attempt": "48d141a7a41842299a74eecbdf2f7ee6", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-permission-race-phase-aef2e8f39b6a.service", "event": "lease-release", "exit_code": 0, "kind": "build", "pid": 1293823, "schema": "coach.resources.v1", "start_ticks": "2020164", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-permission-race-phase-aef2e8f39b6a.service", "why": "reload permission race target /mnt/data/work/gonvex-open-cost/target"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 1min 6.584s
+             CPU time consumed: 2min 3.017s
+                   Memory peak: 1.4G (swap: 0B)

@@ -58,7 +58,7 @@ INVARIANTS TypeOK AtMostOnce ReceiptImpliesEffect ReplyHasBarrier CachedResult
         cases.append(dict(name=name, maxClock=clock, actors=2, generatedStates=int(counts[1].replace(',', '')),
                           distinctStates=int(counts[2].replace(',', '')), allowNewTransport=new_transport, allowPruning=pruning, expectedViolation=violation, exitCode=result.returncode))
     receipt = dict(modelSha256=digest(HERE / 'ReducerReceipts.tla'), checkerSha256=digest(Path(__file__)),
-                   toolchain=tool, cases=cases, boundary='Finite protocol safety model: one receipt key/namespace, two transport identities, declared clock bounds. Atomic PostgreSQL visibility, exclusive claim behavior and monotonic clock are assumptions connected to native tests. No implementation refinement proof, permanent retention, power-loss or liveness claim.')
+                   toolchain=tool, cases=cases, boundary='Finite protocol safety model: one receipt key/namespace, two transport identities, declared clock bounds. Atomic SQLite commit visibility, exclusive claim behavior and monotonic clock are assumptions connected to native tests. No implementation refinement proof, permanent retention, power-loss or liveness claim.')
     (args.output / 'receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
     print(json.dumps(receipt))
 

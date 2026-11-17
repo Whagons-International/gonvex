@@ -32,7 +32,7 @@ export const list = query({
 ## Reducer
 
 Reducers are the only normal durable write path. Each invocation is one atomic
-Postgres transaction: all database changes commit together or none commit.
+SQLite transaction: all database changes commit together or none commit.
 Every interactive Reducer declares an optimistic transaction or an explicit
 reviewed `nonOptimisticReason`.
 

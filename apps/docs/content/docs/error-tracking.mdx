@@ -90,9 +90,9 @@ database. Event IDs are idempotent, and aggregate updates use a transaction lock
 so concurrent runtime replicas cannot lose counts. A resolved group that appears
 in a different release is reopened and marked as a regression.
 
-When PostgreSQL is unavailable in a minimal local runtime, Gonvex uses a bounded
-in-memory inbox. Production projects should configure PostgreSQL so groups
-survive restarts.
+When the Control Plane database is unavailable in a minimal local runtime, Gonvex
+uses a bounded in-memory inbox. Production runtimes keep a persistent data
+directory so groups survive restarts.
 
 ## Native reporting and operator endpoints
 

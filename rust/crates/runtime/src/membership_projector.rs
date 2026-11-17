@@ -83,7 +83,7 @@ fn next_delay(previous: Duration, projected: bool) -> Duration {
     }
 }
 
-async fn drain_all(runtime: &Runtime) -> Result<bool, gonvex_postgres::DatabaseError> {
+async fn drain_all(runtime: &Runtime) -> Result<bool, gonvex_store::DatabaseError> {
     let mut projected = false;
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
         return Ok(false);
@@ -122,9 +122,9 @@ async fn drain_all(runtime: &Runtime) -> Result<bool, gonvex_postgres::DatabaseE
 
 #[doc(hidden)]
 pub async fn project_membership_outbox_once(
-    control: &gonvex_postgres::ControlPlane,
-    route: &gonvex_postgres::TenantRoute,
-) -> Result<bool, gonvex_postgres::DatabaseError> {
+    control: &gonvex_store::ControlPlane,
+    route: &gonvex_store::TenantRoute,
+) -> Result<bool, gonvex_store::DatabaseError> {
     let mut projected = false;
     loop {
         let mut tenant = control.begin_tenant_transaction(route, true).await?;
@@ -145,16 +145,17 @@ pub async fn project_membership_outbox_once(
             let status: String = row.get("status");
             let revision: i64 = row.get("membership_revision");
             let mut directory = control.begin_control_transaction(false).await?;
-            sqlx::query(
+            sqlx::query(&format!(
                 r#"INSERT INTO account_tenant_index
                    (account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-                   VALUES($1,$2,$3,$4,$5,now())
+                   VALUES($1,$2,$3,$4,$5,{now})
                    ON CONFLICT(account_id,tenant_id) DO UPDATE SET
-                     member_id=EXCLUDED.member_id,status=EXCLUDED.status,
-                     tenant_membership_revision=EXCLUDED.tenant_membership_revision,updated_at=now()
-                   WHERE EXCLUDED.tenant_membership_revision >=
+                     member_id=excluded.member_id,status=excluded.status,
+                     tenant_membership_revision=excluded.tenant_membership_revision,updated_at={now}
+                   WHERE excluded.tenant_membership_revision >=
                          account_tenant_index.tenant_membership_revision"#,
-            )
+                now = gonvex_store::NOW_MS
+            ))
             .bind(&account_id)
             .bind(&route.tenant_id)
             .bind(&member_id)

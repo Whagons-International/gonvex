@@ -1,6 +1,6 @@
 ---
 title: Schema and Migrations
-description: Define Postgres tables and indexes with versioned SQL migrations.
+description: Define SQLite tables and indexes with versioned SQL migrations.
 ---
 
 # Schema and Migrations
@@ -8,6 +8,74 @@ description: Define Postgres tables and indexes with versioned SQL migrations.
 Gonvex application schemas are versioned SQL migrations in the app's
 `migrations/` directory. TypeScript module declarations describe function
 arguments and results; they do not replace the database schema.
+
+The target authoring model is a declarative application schema from which
+Gonvex generates storage, migrations and types. That compiler is not implemented
+by the current migration/codegen path. Domain declarations belong to the
+application; generic discovery, enforcement and diagnostics belong to Gonvex.
+
+## Model policy
+
+Store each fact once. Keep a derived copy only for a concrete read, index or
+compatibility path, with an owner that maintains it and a documented rebuild.
+Distinguish current relationships from external identities and historical
+snapshots; snapshots must not silently follow later edits to their source.
+
+Declare each relationship's target, optionality, cardinality/uniqueness, ownership
+and delete behavior. Use native SQL constraints when they are simple and cheap.
+Shared Gonvex validation in the same transaction is also valid; avoid per-Reducer
+copies and expensive generated SQL. Test valid and invalid writes, target updates
+and deletes, concurrent commit orders and atomic rollback. JSON and polymorphic
+references need the same explicit semantics. Metadata describes a contract;
+an offline audit detects violations. Neither proves write-time enforcement.
+
+Discover relationships from actual foreign keys and explicit application
+metadata. A name such as `ownerId` can suggest a missing declaration, but must
+not silently establish its target, ownership or deletion policy.
+
+Advisory diagnostics should identify a source location, the concrete concern,
+the change against the PR base and an actionable simplification. Likely duplicate
+representations, overlapping indexes, generated machinery growth and broad
+validation for small edits are warnings. Address a warning or explain the
+domain/workload reason for keeping the design. Do not gate PRs on arbitrary
+counts, a single complexity score or the unchanged warning backlog. Genuine
+integrity failures remain errors. Keep heuristic cost concerns distinct from
+benchmark measurements of reads, writes, startup, memory and upgrades.
+
+## Advisory schema check
+
+`gonvex schema check --project . --base origin/staging --json` reports design
+deltas. Codegen and dev print the same advisories. They reuse local schema
+compilation's SQLite connection and cache: no second schema registry or extra
+replay of historical migrations. The derived
+`gonvex/_generated/schema-inspection.json` is owned by codegen, has no runtime
+consumer, and can be rebuilt by rerunning codegen. Commit it so CI can inspect
+the exact PR base without executing its migrations. For codegen/dev in CI, set
+`BASE_SHA` to the fetched PR base; the local default is `HEAD`.
+
+The report covers added scalar/list pairs, identity-like names without native
+FKs or explicit runtime declarations, overlapping indexes, trigger/view SQL
+growth and unguarded update triggers that perform SELECT work. It preserves
+unique, partial, expression, collation and sort-direction distinctions. Source
+locations are best-effort migration DDL locations; SQLite determines the schema.
+ID names do not infer a target. SQL bytes/counts are inspection measurements;
+cost warnings are heuristics, not a benchmark or an integrity proof.
+
+On first adoption, or when the base inspection is missing/incompatible, the
+report states the coverage gap and emits no old backlog. Commit a codegen
+inspection on the base to enable later PR deltas. Advisory findings exit zero;
+invalid SQL or failed schema compilation remains an error. This command does
+not replace migration checks, application contract tests, or runtime probes.
+
+Application CI can retain the report as an artifact:
+
+```sh
+gonvex schema check --base "$BASE_SHA" --json > schema-advisories.json
+```
+
+The framework's CLI integration suite exercises codegen and the command against
+a real Git base; Runtime regression CI retains that transcript. Address a
+warning or explain the domain/workload reason for retaining the representation.
 
 ```txt
 my-app/
@@ -25,8 +93,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+  updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
 );
 
 CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks (status);
@@ -41,8 +109,8 @@ destructive changes and large backfills.
 ## Live Query indexes
 
 Index the columns used by Live Query visibility predicates, filters, ordering,
-and search. PostgreSQL-specific search features remain available to the SQL
-migration and can be marked server-only in the Live Query plan.
+and search. SQLite-specific features (for example FTS5 virtual tables) remain
+available to the SQL migration and can be marked server-only in the Live Query plan.
 
 ## Generated schema metadata
 
@@ -57,3 +125,43 @@ import { controlPlane, tenant } from "./gonvex/_generated/schema";
 The runtime rejects schema changes that would silently lose existing data.
 Plan destructive changes as explicit migration work with backups and a tested
 rollback or restore procedure.
+
+## Migration files in module artifacts
+
+Artifact generation 9 stores a migration as plain base64 or, when smaller,
+`deflate-raw-v1:<decoded-byte-length>:<base64-raw-DEFLATE>`. Other source files
+retain their existing encoding. The artifact signature covers the encoded value.
+The runtime still calculates migration checksums from the exact decoded SQL
+bytes; recorded SQL, UTF-8, CRLF and migration directives are preserved.
+
+The runtime accepts both formats. It requires one complete compressed stream,
+no trailing data, the exact declared length and valid UTF-8. Total decoded
+migration bytes share the existing 64 MiB artifact request budget, preventing
+compressed inputs from allowing unbounded expansion.
+
+Deploy the decoder-capable runtime before using the new CLI's compressed
+artifacts. Older runtimes reject such files before applying migrations.
+This is a transport/storage encoding change, not a new migration lineage or
+application record contract.
+
+The control-plane migration archive also stores this envelope when it is
+smaller than SQL text. It keeps one body per decoded checksum and loads only
+pending migrations. Existing plain archives remain readable and are not
+rewritten on boot. Both formats use the same bounded decoder, followed by
+checksum verification before execution. An older runtime refuses a pending
+encoded body at its checksum check; keep the decoder-capable runtime deployed
+when rolling back an application artifact.
+
+After startup provisioning, the runtime releases bootstrap SQLx statements and
+discardable SQLite pager pages. Open connections, parsed schemas, direct
+application statements, compiled reference policy and configured cache capacities
+remain in place. Later queries refill data pages as needed; measure first-use
+latency together with startup memory when changing this boundary.
+
+First tenant authentication streams the existing replica epoch JSON from
+borrowed module metadata into its digest. It preserves the previous hash bytes
+without cloning the full function manifest or retaining another encoded copy.
+The initial feed-clock read uses the shared read acquisition path, allowing a
+returning warm reader to be reused before another schema is parsed. Include
+first authentication in measurements so startup cleanup does not move its cost
+into the first user request.

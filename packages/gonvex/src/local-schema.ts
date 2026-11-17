@@ -1,52 +1,108 @@
-import { PGlite } from "@electric-sql/pglite";
-import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
-
+import{sqliteSchemaBootstrap,sqliteReferenceInspectionBootstrap}from'@gonvex/local-runtime/schema';
 import type { LocalSchema } from "@gonvex/local-runtime/schema";
 
 // The framework's tenant identity table exists before application migrations.
-// Keep this in parity with TENANT_IDENTITY_SQL in postgres/src/provision.rs.
+// Keep this in parity with TENANT_IDENTITY_SQL in rust/crates/store/src/provision.rs.
 const identitySchema = `CREATE TABLE members (
-  id text PRIMARY KEY, account_id text NOT NULL UNIQUE, status text NOT NULL DEFAULT 'active',
-  display_name text NOT NULL DEFAULT '', avatar_url text NOT NULL DEFAULT '',
-  role text NOT NULL DEFAULT 'member', permissions jsonb NOT NULL DEFAULT '{}'::jsonb,
-  membership_revision bigint NOT NULL DEFAULT 1,
-  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+  id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active',
+  display_name TEXT NOT NULL DEFAULT '', avatar_url TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'member', permissions JSON NOT NULL DEFAULT '{}',
+  membership_revision INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+  updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
 )`;
 
-/** Compile schema using PostgreSQL itself, without connecting to a service. */
-export async function compileLocalSchema(migrations: readonly { name: string; sql: string }[]): Promise<LocalSchema> {
-  const db = new PGlite({ extensions: { pg_trgm } });
+type SqliteModule = typeof import("node:sqlite");
+
+async function loadSqlite(): Promise<SqliteModule> {
   try {
-    await db.exec(identitySchema);
+    return await import("node:sqlite");
+  } catch (error) {
+    throw new Error(
+      `Local schema compilation needs Node's built-in node:sqlite (Node 22.13 or newer); running ${process.version}`,
+      { cause: error },
+    );
+  }
+}
+
+/** Compile schema using SQLite itself, the engine tenants run on: apply the
+ * migrations to an in-memory database and read the declared columns back. */
+export async function compileLocalSchema(migrations: readonly { name: string; sql: string }[], observe?: (db: InstanceType<SqliteModule['DatabaseSync']>, schema: LocalSchema) => void): Promise<LocalSchema> {
+  const { DatabaseSync } = await loadSqlite();
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec(identitySchema);
+    db.exec(sqliteSchemaBootstrap);
+    // Authoring inspection keeps migration requests, but does not install the
+    // Rust ledger or pretend that a partial Local Replica can enforce them.
+    // Authoritative provisioning validates and consumes these requests inside
+    // the migration transaction; local optimistic writes can still be rejected.
+    db.exec(sqliteReferenceInspectionBootstrap);
     for (const migration of migrations) {
-      // gen_random_uuid is built into modern PostgreSQL. PGlite does not ship
-      // pgcrypto's OpenSSL extension; remaining references fail explicitly.
-      const sql = migration.sql.replace(/CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?["']?pgcrypto["']?\s*;/gi, "");
-      try { await db.exec(sql); }
+      const rebuild=migration.sql.split(/\r?\n/).some(line=>line.trim()==='-- gonvex:foreign-key-rebuild');
+      try {
+        if(rebuild)db.exec('PRAGMA foreign_keys=OFF');
+        db.exec('BEGIN');
+        db.exec(migration.sql);
+        if(rebuild){
+          const invalid=db.prepare('PRAGMA foreign_key_check').all();
+          if(invalid.length)throw new Error(`Foreign-key rebuild rejected: ${JSON.stringify(invalid[0])}`);
+        }
+        db.exec('COMMIT');
+      }
       catch (error) { throw new Error(`Local schema compilation failed in ${migration.name}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+      finally { if(db.isTransaction)db.exec('ROLLBACK');if(rebuild)db.exec('PRAGMA foreign_keys=ON'); }
     }
-    const { rows } = await db.query<{
-      table_name: string; column_name: string; type: string; nullable: boolean;
-      column_default: string | null; primary_key: boolean;
-    }>(`SELECT c.relname AS table_name, a.attname AS column_name,
-      format_type(a.atttypid, a.atttypmod) AS type, NOT a.attnotnull AS nullable,
-      pg_get_expr(d.adbin, d.adrelid) AS column_default,
-      EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=c.oid AND i.indisprimary AND a.attnum=ANY(i.indkey)) AS primary_key
-      FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid
-      JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
-      LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
-      WHERE n.nspname='public' AND c.relkind='r'
-      ORDER BY c.relname, a.attnum`);
+    const rows = db.prepare(`SELECT t.name AS table_name, c.name AS column_name, c.type AS type,
+      c."notnull" AS not_null, c.dflt_value AS column_default, c.pk AS primary_key
+      FROM pragma_table_list AS t JOIN pragma_table_info(t.name) AS c
+      WHERE t.schema = 'main' AND t.type = 'table' AND t.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+      ORDER BY t.name, c.cid`).all() as {
+      table_name: string; column_name: string; type: string; not_null: number;
+      column_default: string | null; primary_key: number;
+    }[];
+    const records=db.prepare('SELECT name,storage_table,schema FROM _gonvex_record_views ORDER BY name').all() as {name:string;storage_table:string;schema:string}[];
+    const recordNames=new Set(records.map(record=>record.name));
+    const storageTables=new Set(records.map(record=>record.storage_table));
+    const internal=new Set((db.prepare("SELECT name FROM _gonvex_table_options WHERE capture<>'entity'").all() as {name:string}[]).map(row=>row.name));
     const schema: LocalSchema = {};
     for (const row of rows) {
-      if (row.table_name.startsWith("_gonvex")) continue;
+      if (row.table_name.startsWith("_gonvex") || row.table_name.startsWith("gonvex_") || internal.has(row.table_name) || storageTables.has(row.table_name)) continue;
       const table = schema[row.table_name] ??= { key: "_id", columns: {} };
-      if (row.primary_key) table.key = row.column_name;
+      // The first primary key column is the row key (composite keys keep
+      // their leading column, as before).
+      if (row.primary_key === 1) table.key = row.column_name;
       table.columns[row.column_name] = {
-        type: row.type, nullable: row.nullable,
+        // Declared type as written, lower-cased; local-runtime classifies it
+        // with SQLite's declared-type rules (JSON, BOOL, INT, REAL, TEXT).
+        type: row.type.toLowerCase(),
+        // SQLite lets non-INTEGER primary keys hold NULL unless declared NOT
+        // NULL; Gonvex row keys are always required.
+        nullable: !row.not_null && !row.primary_key,
         ...(row.column_default ? { default: row.column_default } : {}),
       };
     }
+    for(const record of records){
+      const logical=JSON.parse(record.schema) as LocalSchema[string];
+      const source=db.prepare("SELECT type FROM sqlite_schema WHERE name=?").get(record.storage_table) as {type:string}|undefined;
+      const view=db.prepare("SELECT type FROM sqlite_schema WHERE name=?").get(record.name) as {type:string}|undefined;
+      if(source?.type!=='table'||!view||(record.name!==record.storage_table&&view.type!=='view'))throw new Error(`Invalid record view ${record.name}`);
+      const projected=new Set((db.prepare('SELECT name FROM pragma_table_info(?)').all(record.name) as {name:string}[]).map(row=>row.name));
+      if(!logical.columns?.[logical.key]||projected.size!==Object.keys(logical.columns).length||Object.keys(logical.columns).some(column=>!projected.has(column)))throw new Error(`Record view ${record.name} differs from its declared schema`);
+      schema[record.name]=logical;
+    }
+    for(const[name,table]of Object.entries(schema)){
+      if(recordNames.has(name))continue;
+      const rows=db.prepare('SELECT * FROM pragma_foreign_key_list(?) ORDER BY id,seq').all(name) as {id:number;seq:number;table:string;from:string;to:string;on_delete:string;on_update:string}[];
+      const keys=new Map<number,{columns:string[];targetTable:string;targetColumns:string[];onDelete:string;onUpdate:string}>();
+      for(const row of rows){
+        if(!keys.has(row.id))keys.set(row.id,{columns:[],targetTable:row.table,targetColumns:[],onDelete:row.on_delete,onUpdate:row.on_update});
+        const key=keys.get(row.id)!;key.columns.push(row.from);key.targetColumns.push(row.to);
+      }
+      if(keys.size)table.foreignKeys=[...keys.values()];
+    }
+    observe?.(db, schema);
     return schema;
-  } finally { await db.close(); }
+  } finally { db.close(); }
 }

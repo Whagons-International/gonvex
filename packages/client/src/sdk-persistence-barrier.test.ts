@@ -64,8 +64,8 @@ afterEach(async () => {
 });
 const ref: FunctionReference = { kind: "query", path: "statuses.all", delivery: "replica", replica: { table: "statuses", key: "id", columns: ["id", "name"], maxRows: 100 } };
 const directive = { protocolVersion: 1 as const, scope: "tenant", visibilityScope: "visible", epoch: "e" };
-function session(socket: Socket) {
-  socket.open(); socket.receive({ type: "session.ready", capabilities: { replicaWatermark: 1, replicaSnapshotPages: 1, reducerReceiptLookup: 1 }, replica: directive });
+function session(socket: Socket, receiptLookup = true) {
+  socket.open(); socket.receive({ type: "session.ready", capabilities: { replicaWatermark: 1, replicaSnapshotPages: 1, reducerReceiptLookup: receiptLookup ? 1 : undefined }, replica: directive });
   const auth = socket.sent.find(m => m.type === "auth");
   if (auth?.type === "auth") socket.receive({ type: "auth.result", id: auth.id, result: { replica: directive } });
 }
@@ -629,5 +629,66 @@ it.each(kinds)("keeps an intent when an old data write succeeds while replacemen
     expect(f.client.localReplica.entity("statuses", "status-2")).toEqual({ id: "status-2", name: "Saved late" });
     expect(await f.outbox.load()).toHaveLength(1);
     expect(f.outcome()).toBe("queued");
+  } finally { release(); }
+});
+
+it.each(kinds)("fresh quiet-cohort watermark retires a global barrier only after storage, %s", async kind => {
+  vi.stubGlobal("WebSocket", Socket);
+  const storage = storageFor(kind), outbox = createKvOutboxStore(createMemoryGonvexKv());
+  const client = new GonvexClient("ws://runtime.test/ws", { errorReporting: false,
+    localReplica: { storage }, outbox: { store: outbox } });
+  clients.push(client);
+  client.watchReplica(ref, { window: "A" });
+  client.watchReplica(ref, { window: "B" });
+  const socket = Socket.instances.at(-1)!;
+  session(socket, false);
+  await vi.waitFor(() => expect(socket.sent.filter(m => m.type === "replica.open")).toHaveLength(2));
+  const opens = socket.sent.filter(m => m.type === "replica.open");
+  const reducer: FunctionReference = { kind: "reducer", path: "quiet.save", offline: { mode: "allowed" } };
+  // No dependency metadata: this intent is the global outbox barrier.
+  const first = client.reducer(reducer, {}, { offline: "queue" }).catch(error => error);
+  await vi.waitFor(() => expect(socket.sent.filter(m => m.type === "reducer.call")).toHaveLength(1));
+  const call = socket.sent.find(m => m.type === "reducer.call")!;
+  if (call.type !== "reducer.call") throw Error("missing accepted call");
+  socket.receive({ type: "reducer.result", id: call.id, result: "accepted", originCommandId: call.id, committedRevision: 259 });
+  socket.receive({ type: "replica.watermark", revision: 259 });
+  // Queue the independent operation while transport is temporarily unavailable.
+  // Restoring transport cannot bypass the already accepted global barrier.
+  socket.readyState = Socket.CONNECTING;
+  const second = await client.reducer({ ...reducer, path: "independent.create" }, {}, { offline: "queue" });
+  expect(second).toMatchObject({ status: "queued" });
+  socket.readyState = Socket.OPEN;
+  const rows = [{ id: "status-1", name: "Unchanged" }];
+  const hashes = await replicaRowsHashes(rows, "id"), digest = await replicaHashesDigest(hashes);
+  for (const [index, open] of opens.entries()) {
+    if (open.type !== "replica.open") throw Error("missing open");
+    const cursor = { epoch: "e", revision: 258 + index };
+    socket.receive({ type: "replica.snapshot", id: open.id, result: rows, cursor, key: "id", hashes, digest, truncated: false });
+    socket.receive({ type: "replica.ready", id: open.id, cursor, digest, truncated: false });
+  }
+  await join(client);
+  await vi.waitFor(async () => expect(await outbox.load()).toHaveLength(2));
+  expect(socket.sent.filter(m => m.type === "reducer.call")).toHaveLength(1);
+  // The earlier W259 cannot certify A258. Hold the NEW W259's durable write.
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const persist = storage.advanceWatermark!.bind(storage);
+  vi.spyOn(storage, "advanceWatermark").mockImplementationOnce(async (...args) => {
+    enter(); await held; return persist(...args);
+  });
+  try {
+    socket.receive({ type: "replica.watermark", revision: 259 });
+    await entered;
+    expect(await outbox.load()).toHaveLength(2);
+    expect(socket.sent.filter(m => m.type === "reducer.call")).toHaveLength(1);
+    release(); await join(client); await first;
+    await vi.waitFor(() => expect(socket.sent.filter(m => m.type === "reducer.call")).toHaveLength(2));
+    expect(socket.sent.some(m => m.type === "query.call")).toBe(false);
+    const next = socket.sent.filter(m => m.type === "reducer.call").at(-1)!;
+    if (next.type !== "reducer.call") throw Error("missing independent call");
+    socket.receive({ type: "reducer.result", id: next.id, result: "accepted", originCommandId: next.id, committedRevision: 259 });
+    await join(client); await second;
+    await vi.waitFor(async () => expect(await outbox.load()).toEqual([]));
   } finally { release(); }
 });

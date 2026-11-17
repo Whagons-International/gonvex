@@ -1,0 +1,5 @@
+# Change capture reads row values through SQLite's pre-update hook
+# (gonvex-store `capture`). The bundled SQLite must be compiled with it; the
+# store refuses to open databases otherwise.
+[env]
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_PREUPDATE_HOOK"

@@ -980,6 +980,7 @@ describe("GonvexClient", () => {
     expect(replica.materializeWindow).toBeUndefined();
     expect(replica.replaceWindow).toBeUndefined();
     expect(replica.clear).toBeUndefined();
+    expect(client.localReplica.entityColumns('tasks',['missing'],{title:{kind:'string'}},{maxRows:200,maxPayloadBytes:1024}).completeProjection).toBe(false);
   });
 
   it("queues subscription messages while an auth update is in flight", async () => {

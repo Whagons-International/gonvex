@@ -1,5 +1,9 @@
 # Diagnosing PostgreSQL stalls
 
+> Historical: written while Gonvex stored data in PostgreSQL. Storage moved to
+> SQLite on 2026-11-02; see [SQLite storage](sqlite-storage.md). The recorder
+> script was removed with the move; recover it from Git history if needed.
+
 The 2026-10-28 staging incident exhausted SQLx pools and then the shared SQL
 admission budget. `agents.dispatch`, `deepResearch.tick` and
 `journeySync.processDue` failed waiting for connections. Requests resumed

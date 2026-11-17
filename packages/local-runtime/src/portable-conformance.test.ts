@@ -1,6 +1,6 @@
 import {afterAll,expect,it} from 'vitest';
 import {reducer,schema,insertDataRows,updateDataRows,deleteDataRows,selectRows,lockData,applyDataWrites,summarizeRows,updateDataWhere,deleteDataWhere,existsDataRows,selectDataBatch} from '@gonvex/module-sdk';
-import {LocalReducerRuntime, type LocalSnapshot} from '../test/postgres-reference.js';
+import {LocalReducerRuntime, type LocalSnapshot} from '../test/sqlite-reference.js';
 import {createPortableReducer} from './portable-client.js';
 
 const definition=reducer({args:schema.object({}),result:schema.any(),run:async ctx=>{
@@ -43,26 +43,26 @@ const existence=reducer({args:schema.object({}),result:schema.any(),run:ctx=>exi
 const batched=reducer({args:schema.object({}),result:schema.any(),run:ctx=>selectDataBatch(ctx.db,Array.from({length:35},(_,i)=>({table:"items",columns:["name","count"],where:{column:"count",op:"gt",value:i},orderBy:[{column:"count",direction:"desc"}],limit:2})))});
 const numericSuffix=reducer({args:schema.object({}),result:schema.any(),run:ctx=>selectRows(ctx.db,{table:'items',columns:['name'],orderBy:[{column:'name',transform:'numericSuffix',direction:'desc',nulls:'last'}],limit:3})});
 const options={schema:{...localSchema,links:localSchema.items},reducers:{edit:definition,fanout,failedBatch,mixedInserts,metrics,sparseUpdates,existence,batched,numericSuffix},artifactHash:'test'};
-const postgres=new LocalReducerRuntime(options),portable=createPortableReducer(options);
-afterAll(async()=>{portable.close();await postgres.close();});
+const reference=new LocalReducerRuntime(options),portable=createPortableReducer(options);
+afterAll(async()=>{portable.close();await reference.close();});
 const execution={scope:'test',commandId:'intent',now:1,artifactHash:'test',identity:{auth:{account:{id:'person'}},tenant:{id:'tenant'},member:{id:'member',accountId:'person',permissions:{}}}};
 it('sorts document counters numerically across digit boundaries and padded imports',async()=>{
   const rows=['PR-999','PR-1000','PR-0001001','missing'].map((name,i)=>({_id:String(i),name,count:0,note:null}));
   const snapshot:LocalSnapshot={scope:'test',tables:{items:{complete:true,rows}}};
   const local=await portable.execute('numericSuffix',{},snapshot,execution);
-  expect(local.result).toEqual((await postgres.execute('numericSuffix',{},snapshot,execution)).result);
+  expect(local.result).toEqual((await reference.execute('numericSuffix',{},snapshot,execution)).result);
   expect(local.result).toEqual([{name:'PR-0001001'},{name:'PR-1000'},{name:'PR-999'}]);
 },20000);
-it('matches bounded existence batches across PostgreSQL and local reads',async()=>{
+it('matches bounded existence batches across SQLite and local reads',async()=>{
   const snapshot:LocalSnapshot={scope:'test',tables:{items:{complete:true,rows:[{_id:'a',name:'name-2',count:1,note:null},{_id:'b',name:'name-267',count:1,note:null},{_id:'c',name:'name-268',count:1,note:'excluded'}]}}};
   const local=await portable.execute('existence',{},snapshot,execution);
-  expect(local.result).toEqual((await postgres.execute('existence',{},snapshot,execution)).result);
+  expect(local.result).toEqual((await reference.execute('existence',{},snapshot,execution)).result);
   expect(local.result).toEqual(Array.from({length:300},(_,i)=>i===2||i===267));
 },20000);
-it('runs the same typed bulk writes with PostgreSQL and the portable engine',async()=>{
+it('runs the same typed bulk writes with SQLite and the portable engine',async()=>{
   const snapshot:LocalSnapshot={scope:'test',tables:{items:{complete:true,rows:[]}}};
   const actual=await portable.execute('edit',{},snapshot,execution);
-  const authoritative=await postgres.execute('edit',{},snapshot,execution);
+  const authoritative=await reference.execute('edit',{},snapshot,execution);
   expect(actual.result).toEqual(authoritative.result);
   expect((actual.result as any[]).map(row=>[row.name,row.count,row.note])).toEqual([['first',7,'changed'],['second',8,null]]);
   expect(await portable.execute('edit',{},snapshot,execution)).toEqual(actual);
@@ -71,13 +71,13 @@ it('runs the same typed bulk writes with PostgreSQL and the portable engine',asy
 it('matches missing-row bulk updates and returns affected counts without transferring every ID',async()=>{
   const input:LocalSnapshot={scope:'test',tables:{items:{complete:true,rows:[{_id:'a',name:'A',count:1,note:null},{_id:'b',name:'B',count:-1,note:null}]}}};
   const actual=await portable.execute('sparseUpdates',{},input,execution);
-  expect(actual.result).toEqual((await postgres.execute('sparseUpdates',{},input,execution)).result);
+  expect(actual.result).toEqual((await reference.execute('sparseUpdates',{},input,execution)).result);
   expect(actual.result).toEqual({updated:1,deleted:1,rows:[{_id:'a',name:'A',count:4,note:'updated'}]});
 });
-it('matches PostgreSQL for multi-table writes and predicate deletion',async()=>{
+it('matches SQLite for multi-table writes and predicate deletion',async()=>{
   const snapshot:LocalSnapshot={scope:'test',tables:{items:{complete:true,rows:[{_id:'existing',name:'keep',count:0,note:null}]},links:{complete:true,rows:[{_id:'gone',name:'remove',count:1,note:null},{_id:'kept',name:'keep',count:1,note:null}]}}};
   const actual=await portable.execute('fanout',{},snapshot,execution);
-  expect(actual.result).toEqual((await postgres.execute('fanout',{},snapshot,execution)).result);
+  expect(actual.result).toEqual((await reference.execute('fanout',{},snapshot,execution)).result);
   expect((actual.result as any).links.map((row:any)=>row._id)).toEqual(['kept']);
 });
 it('does not publish partial writes when a batch failure is caught by the reducer',async()=>{
@@ -90,7 +90,7 @@ it('does not publish partial writes when a batch failure is caught by the reduce
 it('keeps the same IDs when mixing explicit, generated, batch, and individual inserts',async()=>{
   const snapshot:LocalSnapshot={scope:'test',tables:{items:{complete:true,rows:[]}}};
   const local=await portable.execute('mixedInserts',{},snapshot,execution);
-  expect(local.result).toEqual((await postgres.execute('mixedInserts',{},snapshot,execution)).result);
+  expect(local.result).toEqual((await reference.execute('mixedInserts',{},snapshot,execution)).result);
 });
 it('inserts intent-owned batch IDs without requiring the entire history table',async()=>{
   const partial:LocalSnapshot={scope:'test',tables:{items:{complete:false,rows:[]}}};
@@ -102,7 +102,7 @@ it('inserts intent-owned batch IDs without requiring the entire history table',a
 it('matches filtered aggregates and deterministic ties despite different row arrival order',async()=>{
   const rows=[{_id:'z',name:'other',count:8,note:null},{_id:'b',name:' Match ',count:3,note:null},{_id:'a',name:'MATCH',count:3,note:null},{_id:'c',name:'match',count:-1,note:null}];
   const local=await portable.execute('metrics',{}, {scope:'test',tables:{items:{complete:true,rows}}},execution);
-  const server=await postgres.execute('metrics',{}, {scope:'test',tables:{items:{complete:true,rows:[...rows].reverse()}}},execution);
+  const server=await reference.execute('metrics',{}, {scope:'test',tables:{items:{complete:true,rows:[...rows].reverse()}}},execution);
   expect(local.result).toEqual(server.result);
   expect((local.result as any).totals).toEqual({count:3,sum:5,positive:2});
   expect((local.result as any).ordered.map((row:any)=>row._id)).toEqual(['c','a','b']);
@@ -111,7 +111,48 @@ it('matches filtered aggregates and deterministic ties despite different row arr
 it('matches independent batched projections, parameters, ordering and empty reads',async()=>{
  const snapshot:LocalSnapshot={scope:'test',tables:{items:{complete:true,rows:[{_id:'a',name:'A',count:1,note:null},{_id:'b',name:'B',count:33,note:null},{_id:'c',name:'C',count:34,note:null}]}}};
  const local=await portable.execute('batched',{},snapshot,execution);
- expect(local.result).toEqual((await postgres.execute('batched',{},snapshot,execution)).result);
+ expect(local.result).toEqual((await reference.execute('batched',{},snapshot,execution)).result);
  expect((local.result as any[])[0]).toEqual([{name:'C',count:34},{name:'B',count:33}]);
  expect((local.result as any[])[34]).toEqual([]);
+});
+
+const docsSchema={docs:{key:'_id',columns:{_id:{type:'TEXT',nullable:false},tags:{type:'JSON',nullable:false},meta:{type:'JSON',nullable:true},done:{type:'BOOLEAN',nullable:false},code:{type:'TEXT',nullable:false},rank:{type:'INTEGER',nullable:false,default:'0'}}}};
+const jsonWrites=reducer({args:schema.object({}),result:schema.any(),run:async ctx=>{
+  await insertDataRows(ctx,'docs',[{_id:'d1',tags:['a','b'],meta:'plain',done:true,code:'A-1'},{_id:'d2',tags:['c',1,true],meta:null,done:false,code:'B-2'}]);
+  await updateDataRows(ctx.db,'docs',[{id:'d2',fields:{meta:{nested:[1,{x:'y'}]},tags:[]}}]);
+  const updated=await updateDataWhere(ctx.db,{table:'docs',where:{column:'tags',op:'arrayContains',value:'b'}},{done:false,meta:{changed:true}});
+  return {
+    updated,
+    rows:await selectRows(ctx.db,{table:'docs'}),
+    matched:await selectRows(ctx.db,{table:'docs',columns:['_id'],where:{or:[{column:'code',op:'matches',pattern:'^A-[0-9]$'},{column:'tags',op:'arrayContains',value:'c'}]}}),
+    flags:await selectRows(ctx.db,{table:'docs',columns:['_id'],where:{column:'done',op:'in',values:[false]}}),
+    totals:await summarizeRows(ctx.db,{table:'docs'},{tagged:{op:'count',where:{column:'tags',op:'arrayContains',value:'a'}},all:{op:'count'}}),
+  };
+}});
+const atomicBatch=reducer({args:schema.object({}),result:schema.any(),run:async ctx=>{
+  try {await applyDataWrites(ctx,[{kind:'update',table:'docs',rows:[{id:'d1',fields:{rank:5}}]},{kind:'insert',table:'docs',rows:[{_id:'d0',tags:[],done:true,code:'duplicate key'}]}]);} catch {}
+  return selectRows(ctx.db,{table:'docs',columns:['_id','rank']});
+}});
+const docsOptions={schema:docsSchema,reducers:{jsonWrites,atomicBatch},artifactHash:'test'};
+const docsReference=new LocalReducerRuntime(docsOptions),docsPortable=createPortableReducer(docsOptions);
+afterAll(async()=>{docsPortable.close();await docsReference.close();});
+it('matches SQLite JSON and BOOLEAN columns, array containment and regular expressions',async()=>{
+  const snapshot:LocalSnapshot={scope:'test',tables:{docs:{complete:true,rows:[]}}};
+  const local=await docsPortable.execute('jsonWrites',{},snapshot,execution);
+  const server=await docsReference.execute('jsonWrites',{},snapshot,execution);
+  expect(server.result).toEqual(local.result);
+  expect(server.result).toEqual({
+    updated:1,
+    rows:[{_id:'d1',tags:['a','b'],meta:{changed:true},done:false,code:'A-1',rank:0},{_id:'d2',tags:[],meta:{nested:[1,{x:'y'}]},done:false,code:'B-2',rank:0}],
+    matched:[{_id:'d1'}],
+    flags:[{_id:'d1'},{_id:'d2'}],
+    totals:{tagged:1,all:2},
+  });
+});
+it('keeps a failed data batch all-or-nothing on the server even when the reducer catches the error',async()=>{
+  const snapshot:LocalSnapshot={scope:'test',tables:{docs:{complete:true,rows:[{_id:'d0',tags:[],meta:null,done:false,code:'Z',rank:0},{_id:'d1',tags:[],meta:null,done:false,code:'A',rank:0}]}}};
+  const server=await docsReference.execute('atomicBatch',{},snapshot,execution);
+  expect(server.result).toEqual([{_id:'d0',rank:0},{_id:'d1',rank:0}]);
+  expect(server.patches).toEqual([]);
+  expect((await docsPortable.execute('atomicBatch',{},snapshot,execution)).result).toEqual(server.result);
 });

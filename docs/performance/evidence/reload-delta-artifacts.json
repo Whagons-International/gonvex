@@ -1,0 +1,58 @@
+{
+  "/mnt/data/work/gonvex-reload-delta/before-mixed.jsonl": {
+    "sha256": "22cb7268a15fb937766af1649a8a048f8a23e030ff2c499d054564b2683c01fc",
+    "bytes": 512751
+  },
+  "/mnt/data/work/gonvex-reload-delta/codec-0.jsonl": {
+    "sha256": "54b8844467a19dec86f9a1521607e9c928fda1cb2aa213e8a8fd2a2f32cb8b07",
+    "bytes": 611743
+  },
+  "/mnt/data/work/gonvex-reload-delta/codec-1.jsonl": {
+    "sha256": "19cde88cd8fb85a8a1f65c3cca227e34ea530ddc84d2a6e1a08d7dc37a40bfd5",
+    "bytes": 587523
+  },
+  "/mnt/data/work/gonvex-reload-delta/build-final-artifacts.log": {
+    "sha256": "9762be3774cd2fbe34bb6702cfd652c4bfc23c237fb2aa974623bfd7f306d7ad",
+    "bytes": 2669
+  },
+  "/mnt/data/work/gonvex-reload-delta/tests2.log": {
+    "sha256": "49b1a04a1b69fb56c6d32ae589621f59da64601ec4ba9a5917f652f33cc9d2a8",
+    "bytes": 5007
+  },
+  "/mnt/data/work/gonvex-reload-delta/tests-boxed.log": {
+    "sha256": "b5625cc851cba4175a5e05e02ec929c7e93d5f312c32c9f15a3197ccd0702522",
+    "bytes": 42233
+  },
+  "/mnt/data/work/gonvex-reload-delta/layout-baseline.log": {
+    "sha256": "cdaff0cbbf0233479b7fd90498be6c340c3451c11e870e348ab0d6141d233e9e",
+    "bytes": 5154
+  },
+  "/mnt/data/work/gonvex-reload-delta/layout2.log": {
+    "sha256": "a32496416af1b3ef0ed015b829ce80821f396ca2492906590f9ad90672e39fa4",
+    "bytes": 5120
+  },
+  "/mnt/data/work/gonvex-reload-delta/final-tests.log": {
+    "sha256": "0cd3f3c1b459c3d30e3c5b8ce33b07677b6d7e743d97a4f96c8da50824e2c825",
+    "bytes": 42233
+  },
+  "/mnt/data/work/gonvex-reload-delta/integration-tests.log": {
+    "sha256": "a55234e2dd0f5d8ebba70edf9a67c9377f96b90dd136e2cd139a9e5a16c79484",
+    "bytes": 3092
+  },
+  "/mnt/data/work/gonvex-reload-delta/generators3.log": {
+    "sha256": "483749a8b91a15a28cee8ac8296ba9513520dbdbe74f5c04811739dea064ec52",
+    "bytes": 2651
+  },
+  "/home/gabriel/work/gonvex-perf/integrate/bench/whagons/app-opens-7d97617cf.json": {
+    "sha256": "288a7fcb58566adc7eb4bdaa0d03d402bd58562b051491109cbc4f85b15b47dd",
+    "bytes": 8423
+  },
+  "/home/gabriel/work/gonvex-perf/app-opens/reload-opens.json": {
+    "sha256": "18e2d079090be3f4d5b4d661274f69c82eeeeba7728873394e189f95a7f14511",
+    "bytes": 19526
+  },
+  "/mnt/data/work/gonvex-open-cost/sessions.json": {
+    "sha256": "4288fbf76e7959e5ce85dc9768ee2b33eda6933f8f947e5afeafb52f394fbd55",
+    "bytes": 1436
+  }
+}

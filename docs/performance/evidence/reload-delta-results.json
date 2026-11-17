@@ -1,0 +1,6304 @@
+{
+  "0": {
+    "phases": {
+      "offline/t0-u0-admin/first": {
+        "iterations": 1,
+        "wall_ms": 844.544213,
+        "user_ms": 525.777,
+        "cpu_ms": 698.126,
+        "allocations": 995809,
+        "allocated_mb": 256.780344,
+        "peak_heap_mb": 56.243668,
+        "sites": {
+          "cache_row_raw": {
+            "calls": 15985,
+            "rows": 0,
+            "allocations": 126691,
+            "ms": 86.534742
+          },
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00596
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 11105,
+            "allocations": 1698,
+            "ms": 2.516967
+          },
+          "acl_decode": {
+            "calls": 130,
+            "rows": 15985,
+            "allocations": 89057,
+            "ms": 19.562094
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u0-admin/reload": {
+        "iterations": 3,
+        "wall_ms": 25.467936,
+        "user_ms": 20.78,
+        "cpu_ms": 25.364,
+        "allocations": 110128,
+        "allocated_mb": 19.009375,
+        "peak_heap_mb": 1.419003,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 8,
+            "rows": 0,
+            "allocations": 64,
+            "ms": 0.016938
+          },
+          "collapse": {
+            "calls": 217,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.007106
+          },
+          "cache_view": {
+            "calls": 128,
+            "rows": 11097,
+            "allocations": 1682,
+            "ms": 3.175018
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u0-admin/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t0-u1-admin/first": {
+        "iterations": 1,
+        "wall_ms": 67.854618,
+        "user_ms": 42.668,
+        "cpu_ms": 67.544,
+        "allocations": 195121,
+        "allocated_mb": 87.573558,
+        "peak_heap_mb": 1.881995,
+        "sites": {
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00584
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 11104,
+            "allocations": 1707,
+            "ms": 3.735367
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.000141
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u1-admin/reload": {
+        "iterations": 3,
+        "wall_ms": 24.872599,
+        "user_ms": 16.804,
+        "cpu_ms": 24.737,
+        "allocations": 109966,
+        "allocated_mb": 18.997179,
+        "peak_heap_mb": 1.418663,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 8,
+            "rows": 0,
+            "allocations": 64,
+            "ms": 0.016193
+          },
+          "collapse": {
+            "calls": 217,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.008394
+          },
+          "cache_view": {
+            "calls": 128,
+            "rows": 11096,
+            "allocations": 1691,
+            "ms": 3.173445
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u1-admin/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t0-u2-member/first": {
+        "iterations": 1,
+        "wall_ms": 52.763958,
+        "user_ms": 35.668,
+        "cpu_ms": 51.536,
+        "allocations": 188155,
+        "allocated_mb": 23.382113,
+        "peak_heap_mb": 0.719774,
+        "sites": {
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004779
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 1033,
+            "allocations": 1673,
+            "ms": 2.132608
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00012
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u2-member/reload": {
+        "iterations": 3,
+        "wall_ms": 20.5895,
+        "user_ms": 15.89,
+        "cpu_ms": 20.507,
+        "allocations": 106561,
+        "allocated_mb": 9.411507,
+        "peak_heap_mb": 0.234319,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 3,
+            "rows": 0,
+            "allocations": 34,
+            "ms": 0.015098
+          },
+          "collapse": {
+            "calls": 216,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006842
+          },
+          "cache_view": {
+            "calls": 127,
+            "rows": 1030,
+            "allocations": 1650,
+            "ms": 2.149352
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u2-member/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t0-u3-member/first": {
+        "iterations": 1,
+        "wall_ms": 65.621384,
+        "user_ms": 35.423,
+        "cpu_ms": 65.388,
+        "allocations": 193089,
+        "allocated_mb": 53.281914,
+        "peak_heap_mb": 1.197485,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 4,
+            "rows": 0,
+            "allocations": 34,
+            "ms": 0.019387
+          },
+          "collapse": {
+            "calls": 128,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.005027
+          },
+          "cache_view": {
+            "calls": 128,
+            "rows": 5316,
+            "allocations": 1680,
+            "ms": 2.084853
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.000311
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u3-member/reload": {
+        "iterations": 3,
+        "wall_ms": 21.93312,
+        "user_ms": 15.876,
+        "cpu_ms": 21.846,
+        "allocations": 107313,
+        "allocated_mb": 10.63059,
+        "peak_heap_mb": 0.764917,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 5,
+            "rows": 0,
+            "allocations": 48,
+            "ms": 0.020455
+          },
+          "collapse": {
+            "calls": 216,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006832
+          },
+          "cache_view": {
+            "calls": 127,
+            "rows": 5315,
+            "allocations": 1673,
+            "ms": 2.520907
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u3-member/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t1-u0-admin/first": {
+        "iterations": 1,
+        "wall_ms": 546.865102,
+        "user_ms": 213.288,
+        "cpu_ms": 280.371,
+        "allocations": 714177,
+        "allocated_mb": 152.2607,
+        "peak_heap_mb": 30.358172,
+        "sites": {
+          "cache_row_raw": {
+            "calls": 11165,
+            "rows": 0,
+            "allocations": 92936,
+            "ms": 51.452789
+          },
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006016
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 6285,
+            "allocations": 1680,
+            "ms": 1.404001
+          },
+          "acl_decode": {
+            "calls": 130,
+            "rows": 11165,
+            "allocations": 56057,
+            "ms": 10.876925
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u0-admin/reload": {
+        "iterations": 3,
+        "wall_ms": 22.872727,
+        "user_ms": 17.779,
+        "cpu_ms": 22.775,
+        "allocations": 109923,
+        "allocated_mb": 16.860873,
+        "peak_heap_mb": 0.853052,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 8,
+            "rows": 0,
+            "allocations": 64,
+            "ms": 0.016237
+          },
+          "collapse": {
+            "calls": 217,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006704
+          },
+          "cache_view": {
+            "calls": 128,
+            "rows": 6277,
+            "allocations": 1664,
+            "ms": 1.634924
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u0-admin/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t1-u1-admin/first": {
+        "iterations": 1,
+        "wall_ms": 54.206957,
+        "user_ms": 34.042,
+        "cpu_ms": 53.982,
+        "allocations": 192744,
+        "allocated_mb": 52.299092,
+        "peak_heap_mb": 0.939509,
+        "sites": {
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.005088
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 6285,
+            "allocations": 1680,
+            "ms": 1.837541
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.000221
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u1-admin/reload": {
+        "iterations": 3,
+        "wall_ms": 26.727167,
+        "user_ms": 20.606,
+        "cpu_ms": 26.61,
+        "allocations": 109957,
+        "allocated_mb": 16.868569,
+        "peak_heap_mb": 0.853052,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 8,
+            "rows": 0,
+            "allocations": 64,
+            "ms": 0.016731
+          },
+          "collapse": {
+            "calls": 217,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006858
+          },
+          "cache_view": {
+            "calls": 128,
+            "rows": 6277,
+            "allocations": 1664,
+            "ms": 1.719024
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u1-admin/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t1-u2-member/first": {
+        "iterations": 1,
+        "wall_ms": 52.724614,
+        "user_ms": 30.165,
+        "cpu_ms": 48.156,
+        "allocations": 185826,
+        "allocated_mb": 19.440612,
+        "peak_heap_mb": 0.704337,
+        "sites": {
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004749
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 493,
+            "allocations": 1651,
+            "ms": 1.267457
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00013
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u2-member/reload": {
+        "iterations": 3,
+        "wall_ms": 19.234136,
+        "user_ms": 18.147,
+        "cpu_ms": 19.157,
+        "allocations": 106530,
+        "allocated_mb": 9.323611,
+        "peak_heap_mb": 0.234319,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 3,
+            "rows": 0,
+            "allocations": 34,
+            "ms": 0.015068
+          },
+          "collapse": {
+            "calls": 216,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006848
+          },
+          "cache_view": {
+            "calls": 127,
+            "rows": 490,
+            "allocations": 1628,
+            "ms": 1.0526
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u2-member/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t1-u3-member/first": {
+        "iterations": 1,
+        "wall_ms": 54.835325,
+        "user_ms": 32.756,
+        "cpu_ms": 53.879,
+        "allocations": 191960,
+        "allocated_mb": 34.185173,
+        "peak_heap_mb": 0.869455,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 4,
+            "rows": 0,
+            "allocations": 34,
+            "ms": 0.011252
+          },
+          "collapse": {
+            "calls": 128,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004811
+          },
+          "cache_view": {
+            "calls": 128,
+            "rows": 2539,
+            "allocations": 1654,
+            "ms": 1.100941
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 9e-05
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u3-member/reload": {
+        "iterations": 3,
+        "wall_ms": 19.681822,
+        "user_ms": 16.614,
+        "cpu_ms": 19.604,
+        "allocations": 107291,
+        "allocated_mb": 9.968294,
+        "peak_heap_mb": 0.436229,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 5,
+            "rows": 0,
+            "allocations": 48,
+            "ms": 0.017903
+          },
+          "collapse": {
+            "calls": 216,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006731
+          },
+          "cache_view": {
+            "calls": 127,
+            "rows": 2538,
+            "allocations": 1647,
+            "ms": 1.170481
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u3-member/oracle": {
+        "exactRowComparisons": 130
+      }
+    },
+    "metadata": {
+      "entries": 0,
+      "chargedBytes": 2312,
+      "freedAllocatorBytes": 0,
+      "rssBefore": 751620096,
+      "rssAfter": 751620096
+    },
+    "cursorOpens": 712,
+    "coldOpens": 328,
+    "cursorCacheViews": 696,
+    "cursorScans": 44,
+    "cursorFills": 0,
+    "medianReloadCpuMs": 22.310499999999998,
+    "representativeTrace": {
+      "__local.advancedVoiceSessions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.advancedVoiceSessions",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 914,
+        "wireBytes": 914,
+        "wireCpuNs": 7000,
+        "cpuNs": 119000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.bugReports": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.bugReports",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 871,
+        "wireBytes": 871,
+        "wireCpuNs": 7000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.centers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.centers",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 858,
+        "wireBytes": 858,
+        "wireCpuNs": 6000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.cleaningReportDeliveries": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.cleaningReportDeliveries",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 927,
+        "wireBytes": 927,
+        "wireCpuNs": 7000,
+        "cpuNs": 95000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.cleaningReportSchedules": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.cleaningReportSchedules",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 923,
+        "wireBytes": 923,
+        "wireCpuNs": 7000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.cleaningResetRules": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.cleaningResetRules",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 903,
+        "wireBytes": 903,
+        "wireCpuNs": 7000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.clockInEvents": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.clockInEvents",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 883,
+        "wireBytes": 883,
+        "wireCpuNs": 6000,
+        "cpuNs": 95000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.clockInSessions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.clockInSessions",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 890,
+        "wireBytes": 890,
+        "wireCpuNs": 6000,
+        "cpuNs": 95000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.deepResearchAssignments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.deepResearchAssignments",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 924,
+        "wireBytes": 924,
+        "wireCpuNs": 6000,
+        "cpuNs": 94000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.deepResearchSettings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.deepResearchSettings",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 908,
+        "wireBytes": 908,
+        "wireCpuNs": 7000,
+        "cpuNs": 99000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.fcmTokens": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.fcmTokens",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 868,
+        "wireBytes": 868,
+        "wireCpuNs": 6000,
+        "cpuNs": 90000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.githubConnections": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.githubConnections",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 896,
+        "wireBytes": 896,
+        "wireCpuNs": 6000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.journeySyncConfigurations": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.journeySyncConfigurations",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 929,
+        "wireBytes": 929,
+        "wireCpuNs": 7000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.learnProgress": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.learnProgress",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 883,
+        "wireBytes": 883,
+        "wireCpuNs": 7000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.marketProjects": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.marketProjects",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 888,
+        "wireBytes": 888,
+        "wireCpuNs": 6000,
+        "cpuNs": 101000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.memberAuthStates": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.memberAuthStates",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 891,
+        "wireBytes": 891,
+        "wireCpuNs": 7000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.nfcTapLogs": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.nfcTapLogs",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 870,
+        "wireBytes": 870,
+        "wireCpuNs": 6000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.opsManagerConfigs": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.opsManagerConfigs",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 898,
+        "wireBytes": 898,
+        "wireCpuNs": 6000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.opsManagerReports": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.opsManagerReports",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 899,
+        "wireBytes": 899,
+        "wireCpuNs": 7000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.peopleFlowTemplates": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.peopleFlowTemplates",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 907,
+        "wireBytes": 907,
+        "wireCpuNs": 6000,
+        "cpuNs": 103000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.peopleLinks": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.peopleLinks",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 874,
+        "wireBytes": 874,
+        "wireCpuNs": 7000,
+        "cpuNs": 102000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.phoneContacts": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.phoneContacts",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 884,
+        "wireBytes": 884,
+        "wireCpuNs": 7000,
+        "cpuNs": 411000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.phoneScripts": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.phoneScripts",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 880,
+        "wireBytes": 880,
+        "wireCpuNs": 6000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.plugins": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.plugins",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 1310,
+        "wireBytes": 1174,
+        "wireCpuNs": 28000,
+        "cpuNs": 121000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "__local.pmsConnections": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.pmsConnections",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 888,
+        "wireBytes": 888,
+        "wireCpuNs": 6000,
+        "cpuNs": 96000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.purchasingDocumentCounters": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.purchasingDocumentCounters",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 932,
+        "wireBytes": 932,
+        "wireCpuNs": 7000,
+        "cpuNs": 95000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.relayCallPolicies": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.relayCallPolicies",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 899,
+        "wireBytes": 899,
+        "wireCpuNs": 7000,
+        "cpuNs": 94000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.relayNumberAssignments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.relayNumberAssignments",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 919,
+        "wireBytes": 919,
+        "wireCpuNs": 6000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.relayPhoneNumbers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.relayPhoneNumbers",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 898,
+        "wireBytes": 898,
+        "wireCpuNs": 6000,
+        "cpuNs": 90000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.reportDocuments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.reportDocuments",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 890,
+        "wireBytes": 890,
+        "wireCpuNs": 6000,
+        "cpuNs": 99000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.reportTemplates": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.reportTemplates",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 891,
+        "wireBytes": 891,
+        "wireCpuNs": 6000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.researchCompanies": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.researchCompanies",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 900,
+        "wireBytes": 900,
+        "wireCpuNs": 6000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.researchRuns": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.researchRuns",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 880,
+        "wireBytes": 880,
+        "wireCpuNs": 6000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.researchSettings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.researchSettings",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 893,
+        "wireBytes": 893,
+        "wireCpuNs": 6000,
+        "cpuNs": 145000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.taskNumberCounters": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.taskNumberCounters",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 992,
+        "wireBytes": 992,
+        "wireCpuNs": 7000,
+        "cpuNs": 171000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "__local.tenantBilling": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.tenantBilling",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 879,
+        "wireBytes": 879,
+        "wireCpuNs": 6000,
+        "cpuNs": 82000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.tenantBranding": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.tenantBranding",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 884,
+        "wireBytes": 884,
+        "wireCpuNs": 6000,
+        "cpuNs": 96000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.webhooks": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.webhooks",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 863,
+        "wireBytes": 863,
+        "wireCpuNs": 6000,
+        "cpuNs": 102000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.workspaceViewPublicShares": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.workspaceViewPublicShares",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 931,
+        "wireBytes": 931,
+        "wireCpuNs": 10000,
+        "cpuNs": 98000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.workspaceViewWorkspaces": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.workspaceViewWorkspaces",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 923,
+        "wireBytes": 923,
+        "wireCpuNs": 7000,
+        "cpuNs": 96000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "members.listMembers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "members.listMembers",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 1515930,
+        "wireBytes": 239853,
+        "wireCpuNs": 1979000,
+        "cpuNs": 1094000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 2031
+          }
+        }
+      },
+      "tasks.recentWorkspaceTasks": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "tasks.recentWorkspaceTasks",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 284,
+        "wireBytes": 284,
+        "wireCpuNs": 3000,
+        "cpuNs": 3583000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 8851
+          }
+        }
+      },
+      "memberAuthStates.mine": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "memberAuthStates.mine",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 101000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "billing.current": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "billing.current",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 256,
+        "wireBytes": 256,
+        "wireCpuNs": 3000,
+        "cpuNs": 96000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "tenantBranding.getPublic": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "tenantBranding.getPublic",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 274,
+        "wireBytes": 274,
+        "wireCpuNs": 3000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "settingsReplicas.globalSettings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "settingsReplicas.globalSettings",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 288,
+        "wireBytes": 288,
+        "wireCpuNs": 3000,
+        "cpuNs": 96000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 6
+          }
+        }
+      },
+      "properties.properties": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "properties.properties",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 88000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "centers.centers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "centers.centers",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 256,
+        "wireBytes": 256,
+        "wireCpuNs": 3000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "centers.jobPositionCenters": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "centers.jobPositionCenters",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 278,
+        "wireBytes": 278,
+        "wireCpuNs": 3000,
+        "cpuNs": 95000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "centers.preferences": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "centers.preferences",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "settings.plugins": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "settings.plugins",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 258,
+        "wireBytes": 258,
+        "wireCpuNs": 3000,
+        "cpuNs": 86000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "workspacePreferences.workspacePreferences": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspacePreferences.workspacePreferences",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 308,
+        "wireBytes": 308,
+        "wireCpuNs": 3000,
+        "cpuNs": 89000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "chat.conversationParticipants": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "chat.conversationParticipants",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 284,
+        "wireBytes": 284,
+        "wireCpuNs": 3000,
+        "cpuNs": 102000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "chat.directMessages": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "chat.directMessages",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 2000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "notifications.listNotifications": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "notifications.listNotifications",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 288,
+        "wireBytes": 288,
+        "wireCpuNs": 2000,
+        "cpuNs": 86000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.listSharedToMe": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.listSharedToMe",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 288,
+        "wireBytes": 288,
+        "wireCpuNs": 3000,
+        "cpuNs": 391000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "members.listMemberTeams": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "members.listMemberTeams",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 272,
+        "wireBytes": 272,
+        "wireCpuNs": 3000,
+        "cpuNs": 1186000,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 4,
+            "rows": 0
+          },
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskWorkspaceContexts.contexts": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskWorkspaceContexts.contexts",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 388000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 50
+          }
+        }
+      },
+      "taskResources.recentTaskAcknowledgments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.recentTaskAcknowledgments",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 310,
+        "wireBytes": 310,
+        "wireCpuNs": 3000,
+        "cpuNs": 222000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.recentTaskAcknowledgmentReads": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.recentTaskAcknowledgmentReads",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 318,
+        "wireBytes": 318,
+        "wireCpuNs": 3000,
+        "cpuNs": 223000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "categories.categories": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "categories.categories",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 4000,
+        "cpuNs": 164000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 3
+          }
+        }
+      },
+      "workspaceGroups.workspaceGroups": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspaceGroups.workspaceGroups",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 288,
+        "wireBytes": 288,
+        "wireCpuNs": 3000,
+        "cpuNs": 105000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "statuses.statuses": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "statuses.statuses",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 260,
+        "wireBytes": 260,
+        "wireCpuNs": 3000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 3
+          }
+        }
+      },
+      "learn.progress": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "learn.progress",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 254,
+        "wireBytes": 254,
+        "wireCpuNs": 3000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "learn.positionFits": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "learn.positionFits",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 262,
+        "wireBytes": 262,
+        "wireCpuNs": 3000,
+        "cpuNs": 94000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "jobPositions.jobPositions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "jobPositions.jobPositions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 276,
+        "wireBytes": 276,
+        "wireCpuNs": 3000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "roles.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "roles.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 246,
+        "wireBytes": 246,
+        "wireCpuNs": 3000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "roles.listPermissions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "roles.listPermissions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 7
+          }
+        }
+      },
+      "roles.rolePermissions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "roles.rolePermissions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "roles.memberTeams": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "roles.memberTeams",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 260,
+        "wireBytes": 260,
+        "wireCpuNs": 4000,
+        "cpuNs": 949000,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 4,
+            "rows": 0
+          },
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "broadcasts.listAllAcknowledgments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "broadcasts.listAllAcknowledgments",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 103000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "workspaces.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspaces.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 256,
+        "wireBytes": 256,
+        "wireCpuNs": 3000,
+        "cpuNs": 196000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 2
+          }
+        }
+      },
+      "teams.teams": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "teams.teams",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 248,
+        "wireBytes": 248,
+        "wireCpuNs": 3000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 4
+          }
+        }
+      },
+      "boards.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "boards.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 248,
+        "wireBytes": 248,
+        "wireCpuNs": 3000,
+        "cpuNs": 117000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.pointActionSettings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.pointActionSettings",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 290,
+        "wireBytes": 290,
+        "wireCpuNs": 3000,
+        "cpuNs": 94000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.userPoints": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.userPoints",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 272,
+        "wireBytes": 272,
+        "wireCpuNs": 3000,
+        "cpuNs": 99000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.pointTransactions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.pointTransactions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 98000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.userActionStats": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.userActionStats",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 282,
+        "wireBytes": 282,
+        "wireCpuNs": 3000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.userBadges": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.userBadges",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 272,
+        "wireBytes": 272,
+        "wireCpuNs": 3000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.badges": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.badges",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 90000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.levels": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.levels",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 90000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "schedulingReplicas.scheduleBoards": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "schedulingReplicas.scheduleBoards",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 99000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "complianceReplicas.complianceStandards": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "complianceReplicas.complianceStandards",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 302,
+        "wireBytes": 302,
+        "wireCpuNs": 21000,
+        "cpuNs": 143000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "complianceReplicas.complianceRequirements": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "complianceReplicas.complianceRequirements",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 308,
+        "wireBytes": 308,
+        "wireCpuNs": 3000,
+        "cpuNs": 85000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "complianceReplicas.complianceMappings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "complianceReplicas.complianceMappings",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 300,
+        "wireBytes": 300,
+        "wireCpuNs": 2000,
+        "cpuNs": 83000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "complianceReplicas.complianceAudits": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "complianceReplicas.complianceAudits",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 296,
+        "wireBytes": 296,
+        "wireCpuNs": 3000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "assistant.listThreads": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "assistant.listThreads",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 103000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "workplans.workplans": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workplans.workplans",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 103000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.taskUsers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.taskUsers",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 278,
+        "wireBytes": 278,
+        "wireCpuNs": 3000,
+        "cpuNs": 311000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 51
+          }
+        }
+      },
+      "priorities.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "priorities.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 256,
+        "wireBytes": 256,
+        "wireCpuNs": 3000,
+        "cpuNs": 95000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 2
+          }
+        }
+      },
+      "spots.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "spots.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 246,
+        "wireBytes": 246,
+        "wireCpuNs": 3000,
+        "cpuNs": 194000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 16
+          }
+        }
+      },
+      "tags.tags": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "tags.tags",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 244,
+        "wireBytes": 244,
+        "wireCpuNs": 3000,
+        "cpuNs": 96000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "customFields.customFields": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "customFields.customFields",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 276,
+        "wireBytes": 276,
+        "wireCpuNs": 3000,
+        "cpuNs": 103000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "workspaceViews.listAvailable": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspaceViews.listAvailable",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 282,
+        "wireBytes": 282,
+        "wireCpuNs": 3000,
+        "cpuNs": 119000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "workspaces.workspaceTeams": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspaces.workspaceTeams",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 276,
+        "wireBytes": 276,
+        "wireCpuNs": 3000,
+        "cpuNs": 181000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 4
+          }
+        }
+      },
+      "workplans.listWorkplans": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workplans.listWorkplans",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 272,
+        "wireBytes": 272,
+        "wireCpuNs": 3000,
+        "cpuNs": 89000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "templates.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "templates.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 254,
+        "wireBytes": 254,
+        "wireCpuNs": 3000,
+        "cpuNs": 105000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "statusTransitions.statusTransitions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "statusTransitions.statusTransitions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 296,
+        "wireBytes": 296,
+        "wireCpuNs": 3000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 2
+          }
+        }
+      },
+      "statusTransitions.statusTransitionGroups": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "statusTransitions.statusTransitionGroups",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 306,
+        "wireBytes": 306,
+        "wireCpuNs": 3000,
+        "cpuNs": 90000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "approvals.approvals": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "approvals.approvals",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "approvals.approvalApprovers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "approvals.approvalApprovers",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 280,
+        "wireBytes": 280,
+        "wireCpuNs": 3000,
+        "cpuNs": 90000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 3
+          }
+        }
+      },
+      "approvals.taskApprovalInstances": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "approvals.taskApprovalInstances",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 294,
+        "wireBytes": 294,
+        "wireCpuNs": 3000,
+        "cpuNs": 225000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "workflowRuntime.workflows": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workflowRuntime.workflows",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 276,
+        "wireBytes": 276,
+        "wireCpuNs": 3000,
+        "cpuNs": 99000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "sla.slas": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "sla.slas",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 242,
+        "wireBytes": 242,
+        "wireCpuNs": 3000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "customFields.categoryCustomFields": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "customFields.categoryCustomFields",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 87000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "assets.assetItems": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "assets.assetItems",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 260,
+        "wireBytes": 260,
+        "wireCpuNs": 2000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "analytics.listTaskTagsForAnalytics": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "analytics.listTaskTagsForAnalytics",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 300,
+        "wireBytes": 300,
+        "wireCpuNs": 3000,
+        "cpuNs": 222000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "analytics.listKpiCards": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "analytics.listKpiCards",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 270,
+        "wireBytes": 270,
+        "wireCpuNs": 2000,
+        "cpuNs": 94000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "customFields.taskValues": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "customFields.taskValues",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 278,
+        "wireBytes": 278,
+        "wireCpuNs": 3000,
+        "cpuNs": 235000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "chat.workspaceChat": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "chat.workspaceChat",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 262,
+        "wireBytes": 262,
+        "wireCpuNs": 3000,
+        "cpuNs": 111000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "calls.listForUser": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "calls.listForUser",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 260,
+        "wireBytes": 260,
+        "wireCpuNs": 3000,
+        "cpuNs": 88000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.listTaskRelations": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.listTaskRelations",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 294,
+        "wireBytes": 294,
+        "wireCpuNs": 3000,
+        "cpuNs": 238000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskFindings.routingLinks": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.routingLinks",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 282,
+        "wireBytes": 282,
+        "wireCpuNs": 3000,
+        "cpuNs": 219000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "cleaningStatuses.cleaningStatuses": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "cleaningStatuses.cleaningStatuses",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 82000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "reminderRules.reminderRules": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "reminderRules.reminderRules",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 280,
+        "wireBytes": 280,
+        "wireCpuNs": 3000,
+        "cpuNs": 102000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "forms.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "forms.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 246,
+        "wireBytes": 246,
+        "wireCpuNs": 3000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "notificationSoundRules.notificationSoundRules": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "notificationSoundRules.notificationSoundRules",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 316,
+        "wireBytes": 316,
+        "wireCpuNs": 3000,
+        "cpuNs": 90000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "audiences.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "audiences.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 254,
+        "wireBytes": 254,
+        "wireCpuNs": 3000,
+        "cpuNs": 89000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "emailTemplates.emailTemplates": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "emailTemplates.emailTemplates",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 284,
+        "wireBytes": 284,
+        "wireCpuNs": 2000,
+        "cpuNs": 89000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.noteCountsByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.noteCountsByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 296,
+        "wireBytes": 296,
+        "wireCpuNs": 3000,
+        "cpuNs": 226000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "taskFindings.countsByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.countsByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 286,
+        "wireBytes": 286,
+        "wireCpuNs": 3000,
+        "cpuNs": 208000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskFindings.linkedTasksByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.linkedTasksByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 296,
+        "wireBytes": 296,
+        "wireCpuNs": 3000,
+        "cpuNs": 212000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskFindings.routesByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.routesByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 286,
+        "wireBytes": 286,
+        "wireCpuNs": 3000,
+        "cpuNs": 278000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 50
+          }
+        }
+      },
+      "taskFindings.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 266,
+        "wireBytes": 266,
+        "wireCpuNs": 3000,
+        "cpuNs": 206000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "forms.listVersions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "forms.listVersions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 262,
+        "wireBytes": 262,
+        "wireCpuNs": 3000,
+        "cpuNs": 96000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "forms.listTaskForms": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "forms.listTaskForms",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 270,
+        "wireBytes": 270,
+        "wireCpuNs": 3000,
+        "cpuNs": 210000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.noteSummariesByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.noteSummariesByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 302,
+        "wireBytes": 302,
+        "wireCpuNs": 3000,
+        "cpuNs": 207000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "taskResources.listTaskIdsWithSignatures": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.listTaskIdsWithSignatures",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 310,
+        "wireBytes": 310,
+        "wireCpuNs": 3000,
+        "cpuNs": 210000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "documents.listEntityIdsWithDocuments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "documents.listEntityIdsWithDocuments",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 304,
+        "wireBytes": 304,
+        "wireCpuNs": 3000,
+        "cpuNs": 210000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.listTaskIdsWithAttachments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.listTaskIdsWithAttachments",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 312,
+        "wireBytes": 312,
+        "wireCpuNs": 3000,
+        "cpuNs": 206000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      }
+    }
+  },
+  "1": {
+    "phases": {
+      "offline/t0-u0-admin/first": {
+        "iterations": 1,
+        "wall_ms": 570.791015,
+        "user_ms": 456.604,
+        "cpu_ms": 568.139,
+        "allocations": 1002796,
+        "allocated_mb": 257.951213,
+        "peak_heap_mb": 56.480712,
+        "sites": {
+          "cache_row_raw": {
+            "calls": 15985,
+            "rows": 0,
+            "allocations": 126691,
+            "ms": 95.299567
+          },
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.005117
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 11105,
+            "allocations": 1698,
+            "ms": 6.54861
+          },
+          "acl_decode": {
+            "calls": 130,
+            "rows": 15985,
+            "allocations": 89057,
+            "ms": 21.597107
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u0-admin/reload": {
+        "iterations": 3,
+        "wall_ms": 23.559295,
+        "user_ms": 19.508,
+        "cpu_ms": 23.449,
+        "allocations": 123370,
+        "allocated_mb": 18.863896,
+        "peak_heap_mb": 0.854721,
+        "sites": {
+          "collapse": {
+            "calls": 219,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006691
+          },
+          "cache_view": {
+            "calls": 41,
+            "rows": 2033,
+            "allocations": 198,
+            "ms": 0.192914
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u0-admin/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t0-u1-admin/first": {
+        "iterations": 1,
+        "wall_ms": 67.139455,
+        "user_ms": 45.922,
+        "cpu_ms": 66.868,
+        "allocations": 206157,
+        "allocated_mb": 89.391616,
+        "peak_heap_mb": 1.957469,
+        "sites": {
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004559
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 11104,
+            "allocations": 1707,
+            "ms": 3.474245
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00011
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u1-admin/reload": {
+        "iterations": 3,
+        "wall_ms": 21.854983,
+        "user_ms": 15.811,
+        "cpu_ms": 21.774,
+        "allocations": 123150,
+        "allocated_mb": 18.817636,
+        "peak_heap_mb": 0.854076,
+        "sites": {
+          "collapse": {
+            "calls": 219,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006611
+          },
+          "cache_view": {
+            "calls": 41,
+            "rows": 2033,
+            "allocations": 198,
+            "ms": 0.179548
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u1-admin/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t0-u2-member/first": {
+        "iterations": 1,
+        "wall_ms": 54.347883,
+        "user_ms": 39.093,
+        "cpu_ms": 54.078,
+        "allocations": 199277,
+        "allocated_mb": 25.191304,
+        "peak_heap_mb": 0.796503,
+        "sites": {
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00455
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 1033,
+            "allocations": 1673,
+            "ms": 2.725111
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.0001
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u2-member/reload": {
+        "iterations": 3,
+        "wall_ms": 17.316519,
+        "user_ms": 15.856,
+        "cpu_ms": 17.236,
+        "allocations": 119915,
+        "allocated_mb": 11.740601,
+        "peak_heap_mb": 0.233815,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 1,
+            "rows": 0,
+            "allocations": 14,
+            "ms": 0.009204
+          },
+          "collapse": {
+            "calls": 218,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006256
+          },
+          "cache_view": {
+            "calls": 40,
+            "rows": 2,
+            "allocations": 182,
+            "ms": 0.043068
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u2-member/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t0-u3-member/first": {
+        "iterations": 1,
+        "wall_ms": 67.714973,
+        "user_ms": 50.406,
+        "cpu_ms": 67.419,
+        "allocations": 204287,
+        "allocated_mb": 55.137661,
+        "peak_heap_mb": 1.292368,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 4,
+            "rows": 0,
+            "allocations": 34,
+            "ms": 0.013266
+          },
+          "collapse": {
+            "calls": 128,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004431
+          },
+          "cache_view": {
+            "calls": 128,
+            "rows": 5316,
+            "allocations": 1680,
+            "ms": 2.780621
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00012
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u3-member/reload": {
+        "iterations": 3,
+        "wall_ms": 18.002486,
+        "user_ms": 13.539,
+        "cpu_ms": 17.939,
+        "allocations": 120347,
+        "allocated_mb": 11.759116,
+        "peak_heap_mb": 0.227834,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 1,
+            "rows": 0,
+            "allocations": 14,
+            "ms": 0.010155
+          },
+          "collapse": {
+            "calls": 218,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006292
+          },
+          "cache_view": {
+            "calls": 40,
+            "rows": 2,
+            "allocations": 182,
+            "ms": 0.043324
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t0-u3-member/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t1-u0-admin/first": {
+        "iterations": 1,
+        "wall_ms": 341.136388,
+        "user_ms": 181.6,
+        "cpu_ms": 248.961,
+        "allocations": 722658,
+        "allocated_mb": 153.558164,
+        "peak_heap_mb": 30.586721,
+        "sites": {
+          "cache_row_raw": {
+            "calls": 11165,
+            "rows": 0,
+            "allocations": 92936,
+            "ms": 48.44555
+          },
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004652
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 6285,
+            "allocations": 1680,
+            "ms": 1.6894
+          },
+          "acl_decode": {
+            "calls": 130,
+            "rows": 11165,
+            "allocations": 56057,
+            "ms": 11.046634
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u0-admin/reload": {
+        "iterations": 3,
+        "wall_ms": 20.987793,
+        "user_ms": 14.589,
+        "cpu_ms": 20.91,
+        "allocations": 123150,
+        "allocated_mb": 18.66109,
+        "peak_heap_mb": 0.854076,
+        "sites": {
+          "collapse": {
+            "calls": 219,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006773
+          },
+          "cache_view": {
+            "calls": 41,
+            "rows": 2032,
+            "allocations": 197,
+            "ms": 0.180865
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u0-admin/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t1-u1-admin/first": {
+        "iterations": 1,
+        "wall_ms": 55.378192,
+        "user_ms": 29.213,
+        "cpu_ms": 55.166,
+        "allocations": 203902,
+        "allocated_mb": 54.132901,
+        "peak_heap_mb": 1.02463,
+        "sites": {
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004521
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 6285,
+            "allocations": 1680,
+            "ms": 1.963476
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00011
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u1-admin/reload": {
+        "iterations": 3,
+        "wall_ms": 19.722869,
+        "user_ms": 15.864,
+        "cpu_ms": 19.625,
+        "allocations": 123136,
+        "allocated_mb": 18.657714,
+        "peak_heap_mb": 0.854076,
+        "sites": {
+          "collapse": {
+            "calls": 219,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006152
+          },
+          "cache_view": {
+            "calls": 41,
+            "rows": 2032,
+            "allocations": 197,
+            "ms": 0.156386
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u1-admin/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t1-u2-member/first": {
+        "iterations": 1,
+        "wall_ms": 54.618355,
+        "user_ms": 36.356,
+        "cpu_ms": 54.373,
+        "allocations": 196888,
+        "allocated_mb": 21.24196,
+        "peak_heap_mb": 0.782188,
+        "sites": {
+          "collapse": {
+            "calls": 130,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004401
+          },
+          "cache_view": {
+            "calls": 130,
+            "rows": 493,
+            "allocations": 1651,
+            "ms": 1.674457
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00012
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u2-member/reload": {
+        "iterations": 3,
+        "wall_ms": 18.229515,
+        "user_ms": 14.158,
+        "cpu_ms": 18.166,
+        "allocations": 119930,
+        "allocated_mb": 11.742705,
+        "peak_heap_mb": 0.233815,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 1,
+            "rows": 0,
+            "allocations": 14,
+            "ms": 0.010626
+          },
+          "collapse": {
+            "calls": 218,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.0065
+          },
+          "cache_view": {
+            "calls": 40,
+            "rows": 1,
+            "allocations": 181,
+            "ms": 0.044323
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u2-member/oracle": {
+        "exactRowComparisons": 130
+      },
+      "offline/t1-u3-member/first": {
+        "iterations": 1,
+        "wall_ms": 57.731873,
+        "user_ms": 37.576,
+        "cpu_ms": 57.506,
+        "allocations": 203150,
+        "allocated_mb": 36.054363,
+        "peak_heap_mb": 0.972338,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 4,
+            "rows": 0,
+            "allocations": 34,
+            "ms": 0.013395
+          },
+          "collapse": {
+            "calls": 128,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.004318
+          },
+          "cache_view": {
+            "calls": 128,
+            "rows": 2539,
+            "allocations": 1654,
+            "ms": 1.419583
+          },
+          "acl_decode": {
+            "calls": 2,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.00011
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": false,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u3-member/reload": {
+        "iterations": 3,
+        "wall_ms": 18.377816,
+        "user_ms": 14.393,
+        "cpu_ms": 18.308,
+        "allocations": 120370,
+        "allocated_mb": 11.76966,
+        "peak_heap_mb": 0.227834,
+        "sites": {
+          "scan_row_raw": {
+            "calls": 1,
+            "rows": 0,
+            "allocations": 14,
+            "ms": 0.01071
+          },
+          "collapse": {
+            "calls": 218,
+            "rows": 0,
+            "allocations": 0,
+            "ms": 0.006606
+          },
+          "cache_view": {
+            "calls": 40,
+            "rows": 1,
+            "allocations": 181,
+            "ms": 0.04352
+          }
+        },
+        "extra": {
+          "opens": 130,
+          "cursorReload": true,
+          "mixedCapture": true
+        }
+      },
+      "offline/t1-u3-member/oracle": {
+        "exactRowComparisons": 130
+      }
+    },
+    "metadata": {
+      "entries": 1040,
+      "chargedBytes": 4139440,
+      "freedAllocatorBytes": 2142312,
+      "rssBefore": 817123328,
+      "rssAfter": 817123328
+    },
+    "cursorOpens": 712,
+    "coldOpens": 328,
+    "cursorCacheViews": 0,
+    "cursorScans": 0,
+    "cursorFills": 0,
+    "medianReloadCpuMs": 18.9665,
+    "representativeTrace": {
+      "__local.advancedVoiceSessions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.advancedVoiceSessions",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 914,
+        "wireBytes": 914,
+        "wireCpuNs": 7000,
+        "cpuNs": 122000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.bugReports": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.bugReports",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 871,
+        "wireBytes": 871,
+        "wireCpuNs": 6000,
+        "cpuNs": 113000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.centers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.centers",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 858,
+        "wireBytes": 858,
+        "wireCpuNs": 6000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.cleaningReportDeliveries": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.cleaningReportDeliveries",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 927,
+        "wireBytes": 927,
+        "wireCpuNs": 6000,
+        "cpuNs": 111000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.cleaningReportSchedules": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.cleaningReportSchedules",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 923,
+        "wireBytes": 923,
+        "wireCpuNs": 6000,
+        "cpuNs": 116000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.cleaningResetRules": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.cleaningResetRules",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 903,
+        "wireBytes": 903,
+        "wireCpuNs": 6000,
+        "cpuNs": 109000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.clockInEvents": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.clockInEvents",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 883,
+        "wireBytes": 883,
+        "wireCpuNs": 6000,
+        "cpuNs": 114000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.clockInSessions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.clockInSessions",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 890,
+        "wireBytes": 890,
+        "wireCpuNs": 6000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.deepResearchAssignments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.deepResearchAssignments",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 924,
+        "wireBytes": 924,
+        "wireCpuNs": 6000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.deepResearchSettings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.deepResearchSettings",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 908,
+        "wireBytes": 908,
+        "wireCpuNs": 6000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.fcmTokens": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.fcmTokens",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 868,
+        "wireBytes": 868,
+        "wireCpuNs": 6000,
+        "cpuNs": 110000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.githubConnections": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.githubConnections",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 896,
+        "wireBytes": 896,
+        "wireCpuNs": 6000,
+        "cpuNs": 111000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.journeySyncConfigurations": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.journeySyncConfigurations",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 929,
+        "wireBytes": 929,
+        "wireCpuNs": 7000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.learnProgress": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.learnProgress",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 883,
+        "wireBytes": 883,
+        "wireCpuNs": 6000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.marketProjects": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.marketProjects",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 888,
+        "wireBytes": 888,
+        "wireCpuNs": 6000,
+        "cpuNs": 119000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.memberAuthStates": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.memberAuthStates",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 891,
+        "wireBytes": 891,
+        "wireCpuNs": 5000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.nfcTapLogs": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.nfcTapLogs",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 870,
+        "wireBytes": 870,
+        "wireCpuNs": 6000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.opsManagerConfigs": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.opsManagerConfigs",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 898,
+        "wireBytes": 898,
+        "wireCpuNs": 6000,
+        "cpuNs": 109000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.opsManagerReports": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.opsManagerReports",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 899,
+        "wireBytes": 899,
+        "wireCpuNs": 6000,
+        "cpuNs": 224000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.peopleFlowTemplates": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.peopleFlowTemplates",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 907,
+        "wireBytes": 907,
+        "wireCpuNs": 6000,
+        "cpuNs": 115000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.peopleLinks": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.peopleLinks",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 874,
+        "wireBytes": 874,
+        "wireCpuNs": 6000,
+        "cpuNs": 218000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.phoneContacts": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.phoneContacts",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 884,
+        "wireBytes": 884,
+        "wireCpuNs": 6000,
+        "cpuNs": 258000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.phoneScripts": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.phoneScripts",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 880,
+        "wireBytes": 880,
+        "wireCpuNs": 6000,
+        "cpuNs": 109000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.plugins": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.plugins",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 1310,
+        "wireBytes": 1174,
+        "wireCpuNs": 22000,
+        "cpuNs": 112000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "__local.pmsConnections": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.pmsConnections",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 888,
+        "wireBytes": 888,
+        "wireCpuNs": 7000,
+        "cpuNs": 116000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.purchasingDocumentCounters": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.purchasingDocumentCounters",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 932,
+        "wireBytes": 932,
+        "wireCpuNs": 6000,
+        "cpuNs": 111000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.relayCallPolicies": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.relayCallPolicies",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 899,
+        "wireBytes": 899,
+        "wireCpuNs": 6000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.relayNumberAssignments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.relayNumberAssignments",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 919,
+        "wireBytes": 919,
+        "wireCpuNs": 6000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.relayPhoneNumbers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.relayPhoneNumbers",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 898,
+        "wireBytes": 898,
+        "wireCpuNs": 6000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.reportDocuments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.reportDocuments",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 890,
+        "wireBytes": 890,
+        "wireCpuNs": 6000,
+        "cpuNs": 112000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.reportTemplates": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.reportTemplates",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 891,
+        "wireBytes": 891,
+        "wireCpuNs": 6000,
+        "cpuNs": 102000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.researchCompanies": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.researchCompanies",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 900,
+        "wireBytes": 900,
+        "wireCpuNs": 5000,
+        "cpuNs": 88000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.researchRuns": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.researchRuns",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 880,
+        "wireBytes": 880,
+        "wireCpuNs": 6000,
+        "cpuNs": 98000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.researchSettings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.researchSettings",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 893,
+        "wireBytes": 893,
+        "wireCpuNs": 5000,
+        "cpuNs": 100000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.taskNumberCounters": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.taskNumberCounters",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 992,
+        "wireBytes": 992,
+        "wireCpuNs": 8000,
+        "cpuNs": 242000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 1
+          }
+        }
+      },
+      "__local.tenantBilling": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.tenantBilling",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 879,
+        "wireBytes": 879,
+        "wireCpuNs": 7000,
+        "cpuNs": 117000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.tenantBranding": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.tenantBranding",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 884,
+        "wireBytes": 884,
+        "wireCpuNs": 7000,
+        "cpuNs": 96000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.webhooks": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.webhooks",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 863,
+        "wireBytes": 863,
+        "wireCpuNs": 6000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.workspaceViewPublicShares": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.workspaceViewPublicShares",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 931,
+        "wireBytes": 931,
+        "wireCpuNs": 6000,
+        "cpuNs": 98000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "__local.workspaceViewWorkspaces": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "__local.workspaceViewWorkspaces",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 923,
+        "wireBytes": 923,
+        "wireCpuNs": 7000,
+        "cpuNs": 2325000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 0
+          }
+        }
+      },
+      "members.listMembers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "members.listMembers",
+        "sentCursor": false,
+        "snapshot": true,
+        "jsonBytes": 1515930,
+        "wireBytes": 239889,
+        "wireCpuNs": 1859000,
+        "cpuNs": 1046000,
+        "sites": {
+          "collapse": {
+            "calls": 1,
+            "rows": 0
+          },
+          "cache_view": {
+            "calls": 1,
+            "rows": 2031
+          }
+        }
+      },
+      "tasks.recentWorkspaceTasks": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "tasks.recentWorkspaceTasks",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 284,
+        "wireBytes": 284,
+        "wireCpuNs": 3000,
+        "cpuNs": 206000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "memberAuthStates.mine": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "memberAuthStates.mine",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 104000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "billing.current": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "billing.current",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 256,
+        "wireBytes": 256,
+        "wireCpuNs": 3000,
+        "cpuNs": 201000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "tenantBranding.getPublic": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "tenantBranding.getPublic",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 274,
+        "wireBytes": 274,
+        "wireCpuNs": 3000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "settingsReplicas.globalSettings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "settingsReplicas.globalSettings",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 288,
+        "wireBytes": 288,
+        "wireCpuNs": 2000,
+        "cpuNs": 103000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "properties.properties": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "properties.properties",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 94000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "centers.centers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "centers.centers",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 256,
+        "wireBytes": 256,
+        "wireCpuNs": 3000,
+        "cpuNs": 302000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "centers.jobPositionCenters": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "centers.jobPositionCenters",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 278,
+        "wireBytes": 278,
+        "wireCpuNs": 3000,
+        "cpuNs": 99000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "centers.preferences": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "centers.preferences",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 102000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "settings.plugins": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "settings.plugins",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 258,
+        "wireBytes": 258,
+        "wireCpuNs": 3000,
+        "cpuNs": 95000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "workspacePreferences.workspacePreferences": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspacePreferences.workspacePreferences",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 308,
+        "wireBytes": 308,
+        "wireCpuNs": 2000,
+        "cpuNs": 734000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "chat.conversationParticipants": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "chat.conversationParticipants",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 284,
+        "wireBytes": 284,
+        "wireCpuNs": 3000,
+        "cpuNs": 101000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "chat.directMessages": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "chat.directMessages",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 2000,
+        "cpuNs": 99000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "notifications.listNotifications": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "notifications.listNotifications",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 288,
+        "wireBytes": 288,
+        "wireCpuNs": 3000,
+        "cpuNs": 100000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.listSharedToMe": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.listSharedToMe",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 288,
+        "wireBytes": 288,
+        "wireCpuNs": 3000,
+        "cpuNs": 264000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "members.listMemberTeams": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "members.listMemberTeams",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 272,
+        "wireBytes": 272,
+        "wireCpuNs": 3000,
+        "cpuNs": 100000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskWorkspaceContexts.contexts": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskWorkspaceContexts.contexts",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 242000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.recentTaskAcknowledgments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.recentTaskAcknowledgments",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 310,
+        "wireBytes": 310,
+        "wireCpuNs": 3000,
+        "cpuNs": 223000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.recentTaskAcknowledgmentReads": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.recentTaskAcknowledgmentReads",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 318,
+        "wireBytes": 318,
+        "wireCpuNs": 3000,
+        "cpuNs": 224000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "categories.categories": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "categories.categories",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 165000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "workspaceGroups.workspaceGroups": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspaceGroups.workspaceGroups",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 288,
+        "wireBytes": 288,
+        "wireCpuNs": 3000,
+        "cpuNs": 87000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "statuses.statuses": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "statuses.statuses",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 260,
+        "wireBytes": 260,
+        "wireCpuNs": 3000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "learn.progress": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "learn.progress",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 254,
+        "wireBytes": 254,
+        "wireCpuNs": 2000,
+        "cpuNs": 100000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "learn.positionFits": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "learn.positionFits",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 262,
+        "wireBytes": 262,
+        "wireCpuNs": 2000,
+        "cpuNs": 85000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "jobPositions.jobPositions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "jobPositions.jobPositions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 276,
+        "wireBytes": 276,
+        "wireCpuNs": 3000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "roles.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "roles.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 246,
+        "wireBytes": 246,
+        "wireCpuNs": 3000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "roles.listPermissions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "roles.listPermissions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 88000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "roles.rolePermissions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "roles.rolePermissions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "roles.memberTeams": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "roles.memberTeams",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 260,
+        "wireBytes": 260,
+        "wireCpuNs": 3000,
+        "cpuNs": 98000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "broadcasts.listAllAcknowledgments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "broadcasts.listAllAcknowledgments",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 4000,
+        "cpuNs": 2297000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "workspaces.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspaces.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 256,
+        "wireBytes": 256,
+        "wireCpuNs": 3000,
+        "cpuNs": 265000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "teams.teams": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "teams.teams",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 248,
+        "wireBytes": 248,
+        "wireCpuNs": 2000,
+        "cpuNs": 116000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "boards.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "boards.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 248,
+        "wireBytes": 248,
+        "wireCpuNs": 3000,
+        "cpuNs": 121000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.pointActionSettings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.pointActionSettings",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 290,
+        "wireBytes": 290,
+        "wireCpuNs": 2000,
+        "cpuNs": 222000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.userPoints": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.userPoints",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 272,
+        "wireBytes": 272,
+        "wireCpuNs": 3000,
+        "cpuNs": 225000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.pointTransactions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.pointTransactions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 132000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.userActionStats": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.userActionStats",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 282,
+        "wireBytes": 282,
+        "wireCpuNs": 3000,
+        "cpuNs": 127000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.userBadges": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.userBadges",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 272,
+        "wireBytes": 272,
+        "wireCpuNs": 3000,
+        "cpuNs": 117000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.badges": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.badges",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 2000,
+        "cpuNs": 113000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "gamification.levels": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "gamification.levels",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 111000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "schedulingReplicas.scheduleBoards": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "schedulingReplicas.scheduleBoards",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 122000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "complianceReplicas.complianceStandards": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "complianceReplicas.complianceStandards",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 302,
+        "wireBytes": 302,
+        "wireCpuNs": 2000,
+        "cpuNs": 113000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "complianceReplicas.complianceRequirements": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "complianceReplicas.complianceRequirements",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 308,
+        "wireBytes": 308,
+        "wireCpuNs": 3000,
+        "cpuNs": 109000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "complianceReplicas.complianceMappings": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "complianceReplicas.complianceMappings",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 300,
+        "wireBytes": 300,
+        "wireCpuNs": 3000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "complianceReplicas.complianceAudits": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "complianceReplicas.complianceAudits",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 296,
+        "wireBytes": 296,
+        "wireCpuNs": 3000,
+        "cpuNs": 112000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "assistant.listThreads": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "assistant.listThreads",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 268,
+        "wireBytes": 268,
+        "wireCpuNs": 3000,
+        "cpuNs": 111000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "workplans.workplans": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workplans.workplans",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 122000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.taskUsers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.taskUsers",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 278,
+        "wireBytes": 278,
+        "wireCpuNs": 3000,
+        "cpuNs": 312000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "priorities.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "priorities.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 256,
+        "wireBytes": 256,
+        "wireCpuNs": 3000,
+        "cpuNs": 115000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "spots.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "spots.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 246,
+        "wireBytes": 246,
+        "wireCpuNs": 2000,
+        "cpuNs": 226000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "tags.tags": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "tags.tags",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 244,
+        "wireBytes": 244,
+        "wireCpuNs": 2000,
+        "cpuNs": 108000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "customFields.customFields": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "customFields.customFields",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 276,
+        "wireBytes": 276,
+        "wireCpuNs": 3000,
+        "cpuNs": 109000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "workspaceViews.listAvailable": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspaceViews.listAvailable",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 282,
+        "wireBytes": 282,
+        "wireCpuNs": 3000,
+        "cpuNs": 126000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "workspaces.workspaceTeams": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workspaces.workspaceTeams",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 276,
+        "wireBytes": 276,
+        "wireCpuNs": 3000,
+        "cpuNs": 206000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "workplans.listWorkplans": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workplans.listWorkplans",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 272,
+        "wireBytes": 272,
+        "wireCpuNs": 2000,
+        "cpuNs": 118000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "templates.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "templates.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 254,
+        "wireBytes": 254,
+        "wireCpuNs": 3000,
+        "cpuNs": 116000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "statusTransitions.statusTransitions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "statusTransitions.statusTransitions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 296,
+        "wireBytes": 296,
+        "wireCpuNs": 3000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "statusTransitions.statusTransitionGroups": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "statusTransitions.statusTransitionGroups",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 306,
+        "wireBytes": 306,
+        "wireCpuNs": 3000,
+        "cpuNs": 103000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "approvals.approvals": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "approvals.approvals",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 264,
+        "wireBytes": 264,
+        "wireCpuNs": 3000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "approvals.approvalApprovers": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "approvals.approvalApprovers",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 280,
+        "wireBytes": 280,
+        "wireCpuNs": 3000,
+        "cpuNs": 103000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "approvals.taskApprovalInstances": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "approvals.taskApprovalInstances",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 294,
+        "wireBytes": 294,
+        "wireCpuNs": 3000,
+        "cpuNs": 252000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "workflowRuntime.workflows": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "workflowRuntime.workflows",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 276,
+        "wireBytes": 276,
+        "wireCpuNs": 3000,
+        "cpuNs": 106000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "sla.slas": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "sla.slas",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 242,
+        "wireBytes": 242,
+        "wireCpuNs": 3000,
+        "cpuNs": 106000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "customFields.categoryCustomFields": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "customFields.categoryCustomFields",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "assets.assetItems": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "assets.assetItems",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 260,
+        "wireBytes": 260,
+        "wireCpuNs": 3000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "analytics.listTaskTagsForAnalytics": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "analytics.listTaskTagsForAnalytics",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 300,
+        "wireBytes": 300,
+        "wireCpuNs": 3000,
+        "cpuNs": 235000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "analytics.listKpiCards": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "analytics.listKpiCards",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 270,
+        "wireBytes": 270,
+        "wireCpuNs": 3000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "customFields.taskValues": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "customFields.taskValues",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 278,
+        "wireBytes": 278,
+        "wireCpuNs": 2000,
+        "cpuNs": 232000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "chat.workspaceChat": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "chat.workspaceChat",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 262,
+        "wireBytes": 262,
+        "wireCpuNs": 2000,
+        "cpuNs": 110000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "calls.listForUser": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "calls.listForUser",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 260,
+        "wireBytes": 260,
+        "wireCpuNs": 2000,
+        "cpuNs": 91000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.listTaskRelations": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.listTaskRelations",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 294,
+        "wireBytes": 294,
+        "wireCpuNs": 3000,
+        "cpuNs": 245000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskFindings.routingLinks": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.routingLinks",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 282,
+        "wireBytes": 282,
+        "wireCpuNs": 3000,
+        "cpuNs": 246000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "cleaningStatuses.cleaningStatuses": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "cleaningStatuses.cleaningStatuses",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 292,
+        "wireBytes": 292,
+        "wireCpuNs": 3000,
+        "cpuNs": 89000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "reminderRules.reminderRules": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "reminderRules.reminderRules",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 280,
+        "wireBytes": 280,
+        "wireCpuNs": 2000,
+        "cpuNs": 93000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "forms.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "forms.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 246,
+        "wireBytes": 246,
+        "wireCpuNs": 2000,
+        "cpuNs": 107000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "notificationSoundRules.notificationSoundRules": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "notificationSoundRules.notificationSoundRules",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 316,
+        "wireBytes": 316,
+        "wireCpuNs": 3000,
+        "cpuNs": 88000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "audiences.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "audiences.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 254,
+        "wireBytes": 254,
+        "wireCpuNs": 2000,
+        "cpuNs": 92000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "emailTemplates.emailTemplates": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "emailTemplates.emailTemplates",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 284,
+        "wireBytes": 284,
+        "wireCpuNs": 3000,
+        "cpuNs": 97000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.noteCountsByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.noteCountsByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 296,
+        "wireBytes": 296,
+        "wireCpuNs": 3000,
+        "cpuNs": 214000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskFindings.countsByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.countsByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 286,
+        "wireBytes": 286,
+        "wireCpuNs": 3000,
+        "cpuNs": 215000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskFindings.linkedTasksByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.linkedTasksByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 296,
+        "wireBytes": 296,
+        "wireCpuNs": 3000,
+        "cpuNs": 214000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskFindings.routesByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.routesByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 286,
+        "wireBytes": 286,
+        "wireCpuNs": 3000,
+        "cpuNs": 213000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskFindings.list": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskFindings.list",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 266,
+        "wireBytes": 266,
+        "wireCpuNs": 3000,
+        "cpuNs": 203000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "forms.listVersions": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "forms.listVersions",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 262,
+        "wireBytes": 262,
+        "wireCpuNs": 6000,
+        "cpuNs": 2977000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "forms.listTaskForms": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "forms.listTaskForms",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 270,
+        "wireBytes": 270,
+        "wireCpuNs": 3000,
+        "cpuNs": 393000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.noteSummariesByTenant": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.noteSummariesByTenant",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 302,
+        "wireBytes": 302,
+        "wireCpuNs": 4000,
+        "cpuNs": 318000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.listTaskIdsWithSignatures": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.listTaskIdsWithSignatures",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 310,
+        "wireBytes": 310,
+        "wireCpuNs": 3000,
+        "cpuNs": 286000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "documents.listEntityIdsWithDocuments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "documents.listEntityIdsWithDocuments",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 304,
+        "wireBytes": 304,
+        "wireCpuNs": 2000,
+        "cpuNs": 258000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      },
+      "taskResources.listTaskIdsWithAttachments": {
+        "session": "t0-u0-admin",
+        "phase": "reload",
+        "path": "taskResources.listTaskIdsWithAttachments",
+        "sentCursor": true,
+        "snapshot": false,
+        "jsonBytes": 312,
+        "wireBytes": 312,
+        "wireCpuNs": 3000,
+        "cpuNs": 245000,
+        "sites": {
+          "collapse": {
+            "calls": 2,
+            "rows": 0
+          }
+        }
+      }
+    }
+  }
+}

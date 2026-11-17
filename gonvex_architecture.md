@@ -1,12 +1,12 @@
 # Gonvex Architecture
 
-Gonvex is a transactional Postgres-backed realtime Local Replica system with
+Gonvex is a transactional SQLite-backed realtime Local Replica system with
 an indexed server-query escape hatch for datasets that are too large to
 replicate. This document is the architecture contract, not a future wishlist.
 
 ## Constitution
 
-1. Postgres commits are the only realtime truth.
+1. SQLite commits are the only realtime truth.
 2. Reducers are the only normal durable write path.
 3. Actions cannot access application database handles; they call Reducers.
 4. One Reducer represents one atomic business intent.
@@ -26,12 +26,12 @@ Application code has exactly three executable function kinds.
 ### Query
 
 A Query is read-only and one-shot. Gonvex executes it in a repeatable-read,
-read-only Postgres transaction. It is called with `useQuery` or `client.query`.
+read-only SQLite read transaction (one WAL snapshot). It is called with `useQuery` or `client.query`.
 
 ### Reducer
 
 A Reducer is the only public durable state transition. Gonvex begins one
-Postgres transaction and exposes only the bounded `ctx.db` capability to application code. Raw pools
+SQLite write transaction on the tenant's single writer connection and exposes only the bounded `ctx.db` capability to application code. Raw pools
 are hidden so an operation cannot accidentally commit outside the business
 transaction. Failure rolls the complete intent back.
 
@@ -90,8 +90,9 @@ revision / ordinal / origin command / table / row id
 operation / old value / new value / changed columns
 ```
 
-Postgres sends a small `gonvex_change_feed` notification only to announce that
-a revision exists. Gonvex reads the durable revision before routing it. The
+After `COMMIT`, the runtime publishes `{epoch, revision, tables}` on the
+database's in-process broadcast channel only to announce that a revision
+exists (see `docs/sqlite-storage.md`). Gonvex reads the durable revision before routing it. The
 former `gonvex_table_change` statement triggers are removed during migration
 and have no installer or runtime fallback.
 
@@ -151,7 +152,7 @@ export const taskGrid = liveQuery({
 });
 ```
 
-The plan compiles to parameterized PostgreSQL. Identifiers are allowlisted by
+The plan compiles to parameterized SQLite SQL. Identifiers are allowlisted by
 the plan. Portable operators—equality, inequality, ranges, membership,
 contains, case-insensitive contains, boolean composition, sort, and window—can
 also run against cached replica rows. A plan can explicitly mark a capability
@@ -189,7 +190,7 @@ overlays, Live Query ID memberships, completeness/freshness, pending commands,
 and the server revision. Live Queries store ordering and membership IDs—not
 duplicate entities.
 
-The server emits one `replica.transaction` per visible Postgres transaction:
+The server emits one `replica.transaction` per visible SQLite transaction:
 
 ```text
 cursor: database epoch + revision

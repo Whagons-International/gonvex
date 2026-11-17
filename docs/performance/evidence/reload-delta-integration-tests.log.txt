@@ -1,0 +1,23 @@
+Running as unit: gonvex-reload-integration-tests-phase-b12d1c52ce85.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T05:12:01.044581+00:00", "attempt": "128688647d044a58959ed81d8a5ff4dd", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-integration-tests-phase-b12d1c52ce85.service", "event": "wait-start", "kind": "fixture-perf", "pid": 989406, "schema": "coach.resources.v1", "start_ticks": "1878790", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-integration-tests-phase-b12d1c52ce85.service", "why": "reload integration tests target /mnt/data/work/gonvex-reload-delta"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T05:12:01.044805+00:00", "attempt": "128688647d044a58959ed81d8a5ff4dd", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-integration-tests-phase-b12d1c52ce85.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "fixture-perf", "outcome": "admitted", "pid": 989406, "position": 0, "schema": "coach.resources.v1", "start_ticks": "1878790", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-integration-tests-phase-b12d1c52ce85.service", "why": "reload integration tests target /mnt/data/work/gonvex-reload-delta"}
+
+running 1 test
+test validated_resumes_preserve_integrity_and_scope_and_cancellation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+build-headroom: OK: root 129,047,666,688 bytes; build filesystem 677,586,890,752 bytes; memory full avg10 0.00%
+
+running 1 test
+perf fixture: built template /mnt/data/work/gonvex-open-cost/fixture/v2-959fab1f7b17 in 0.5s
+test valid_cursor_resumes_read_no_full_set_even_on_a_sparse_key ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 1074809, "exit_code": 0, "io_source": "unavailable", "memory_peak": 78757888, "wall_seconds": 1.574}, "arbitration": "kernel-v1", "at": "2026-11-05T05:12:02.625447+00:00", "attempt": "128688647d044a58959ed81d8a5ff4dd", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-integration-tests-phase-b12d1c52ce85.service", "event": "lease-release", "exit_code": 0, "kind": "fixture-perf", "pid": 989406, "schema": "coach.resources.v1", "start_ticks": "1878790", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-integration-tests-phase-b12d1c52ce85.service", "why": "reload integration tests target /mnt/data/work/gonvex-reload-delta"}
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 1.724s
+             CPU time consumed: 1.188s
+                   Memory peak: 75.1M (swap: 0B)

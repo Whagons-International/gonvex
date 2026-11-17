@@ -266,7 +266,7 @@ fn optional(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use gonvex_postgres::{Account, SessionIdentity};
+    use gonvex_store::{Account, SessionIdentity};
 
     use super::*;
 

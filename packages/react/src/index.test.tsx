@@ -1354,6 +1354,137 @@ describe("GonvexAuthProvider", () => {
     });
   });
 
+  it("keeps a tenant selection that a background Firebase exchange interrupts", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-tenant-race.test:shop";
+    const tenants = [
+      { id: "tenant-1", name: "First", role: "owner", permissions: {}, domain: "first", timezone: "UTC", description: "", profile: {} },
+      { id: "tenant-2", name: "Second", role: "owner", permissions: {}, domain: "second", timezone: "UTC", description: "", profile: {} },
+    ];
+    const persisted = {
+      accessToken: "access-before-switch", expiresAt: now + 900_000,
+      refreshToken: "refresh-before-switch", refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants,
+      activeTenantId: "tenant-1",
+    };
+    localStorage.setItem(storageKey, JSON.stringify(persisted));
+
+    // Model the real client: a wire auth change cancels the pending managed
+    // authentication with a superseded error.
+    let installed: Record<string, unknown> = {};
+    let pendingAuth: { resolve: () => void; reject: (error: Error) => void } | undefined;
+    client.setAuth.mockImplementation((next: Record<string, unknown>) => {
+      const merged = { ...installed, ...next };
+      if (merged.tenant !== installed.tenant || merged.token !== installed.token) {
+        pendingAuth?.reject(new GonvexClientError("Authentication was replaced by a newer session.", { code: "superseded" }));
+        pendingAuth = undefined;
+      }
+      installed = merged;
+    });
+    client.authenticate.mockImplementation((next: unknown) => {
+      pendingAuth?.reject(new GonvexClientError("Authentication was replaced by a newer session.", { code: "superseded" }));
+      pendingAuth = undefined;
+      installed = { ...installed, ...(next as Record<string, unknown>) };
+      return new Promise<void>((resolve, reject) => { pendingAuth = { resolve, reject }; });
+    });
+
+    let finishExchange: ((session: typeof persisted) => void) | undefined;
+    client.action.mockImplementation(() => new Promise((resolve) => { finishExchange = resolve; }));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-tenant-race.test"
+        projectId="shop"
+        initialTenantId={null}
+        externalAuth={externalAuth}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+    await act(async () => {
+      tokenListener?.({ uid: "firebase-uid" });
+      await Promise.resolve();
+    });
+
+    let switching!: Promise<void>;
+    act(() => { switching = auth!.setActiveTenant("tenant-2"); });
+    const outcome = switching.then(() => "accepted", (error: unknown) => error);
+
+    // The exchange that started on load finishes while the selection waits.
+    await act(async () => {
+      finishExchange?.({
+        ...persisted,
+        accessToken: "access-after-exchange",
+        refreshToken: "refresh-after-exchange",
+        activeTenantId: "tenant-1",
+      });
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+
+    // The background install authenticates the selected tenant, never the old one.
+    expect(installed).toMatchObject({ tenant: "tenant-2", token: "access-after-exchange" });
+    expect(client.authenticate).toHaveBeenLastCalledWith(expect.objectContaining({
+      tenant: "tenant-2",
+      token: "access-after-exchange",
+    }));
+
+    await act(async () => {
+      pendingAuth?.resolve();
+      await switching.catch(() => undefined);
+    });
+    expect(await outcome).toBe("accepted");
+    expect(auth?.activeTenant?.id).toBe("tenant-2");
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({
+      accessToken: "access-after-exchange",
+      activeTenantId: "tenant-2",
+    });
+  });
+
+  it("rejects a tenant selection that a newer selection replaced", async () => {
+    const client = new FakeGonvexClient();
+    client.action.mockResolvedValue({
+      accessToken: "access", expiresAt: Date.now() + 900_000, refreshToken: "refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-1", email: "person@example.test", emailVerified: true, name: "Person", picture: "", provider: "password" },
+      tenants: [
+        { id: "tenant-1", name: "First", role: "admin", permissions: {}, domain: "first", timezone: "UTC", profile: {} },
+        { id: "tenant-2", name: "Second", role: "admin", permissions: {}, domain: "second", timezone: "UTC", profile: {} },
+        { id: "tenant-3", name: "Third", role: "admin", permissions: {}, domain: "third", timezone: "UTC", profile: {} },
+      ],
+      activeTenantId: "tenant-1",
+    });
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://runtime-replaced.test" projectId="shop"><Consumer /></GonvexAuthProvider>);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await auth!.signInWithPassword("person@example.test", "correct-password"); });
+
+    let pendingAuth: { resolve: () => void; reject: (error: Error) => void } | undefined;
+    client.authenticate.mockImplementation(() => {
+      pendingAuth?.reject(new GonvexClientError("Authentication was replaced by a newer session.", { code: "superseded" }));
+      return new Promise<void>((resolve, reject) => { pendingAuth = { resolve, reject }; });
+    });
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => { first = auth!.setActiveTenant("tenant-2"); });
+    const firstOutcome = first.then(() => "accepted", (error: unknown) => error);
+    act(() => { second = auth!.setActiveTenant("tenant-3"); });
+
+    await expect(firstOutcome).resolves.toMatchObject({ code: "superseded" });
+    expect(client.authenticate).toHaveBeenCalledTimes(2);
+    await act(async () => { pendingAuth?.resolve(); await second; });
+    expect(auth?.activeTenant?.id).toBe("tenant-3");
+  });
+
   it("preserves a canonical Firebase session when background exchange has a transient host failure", async () => {
     const client = new FakeGonvexClient();
     const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-degraded.test:shop";

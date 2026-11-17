@@ -1,0 +1,921 @@
+//! Row-image capture through SQLite's pre-update hook.
+//!
+//! Change capture used to build each row image in SQL inside per-table
+//! triggers (`json_object` over every column, twice for updates). Those
+//! trigger bodies dominated the schema (2.4 MB for the Whagons tenant), and
+//! SQLite keeps a parsed schema in every connection: 27 MB per connection
+//! instead of 2 MB.
+//!
+//! Now each capture trigger is a few hundred bytes. It calls
+//! `gonvex_capture(table, rowid, op)`, which returns `[old, new, changed]`
+//! for the row being changed. The values come from the pre-update hook,
+//! which SQLite invokes with the exact old and new column values just before
+//! each row change on this connection. The trigger still inserts the change
+//! row in the same statement, so statement and savepoint rollback keep
+//! working exactly as before.
+//!
+//! The hook and function are installed on writer connections only. A
+//! connection without them cannot write a captured table ("no such function:
+//! gonvex_capture"), which also keeps foreign writers from bypassing capture.
+
+use std::collections::HashMap;
+use std::ffi::{c_char, c_int, c_void, CStr};
+use std::sync::{Arc, Mutex, RwLock};
+
+use libsqlite3_sys as ffi;
+use serde_json::{Map, Number, Value};
+use sqlx::SqliteConnection;
+
+use crate::rows::JsonKind;
+use crate::DatabaseError;
+
+pub const CAPTURE_FUNCTION: &str = "gonvex_capture";
+
+extern "C" {
+    fn sqlite3_preupdate_hook(
+        db: *mut ffi::sqlite3,
+        callback: Option<
+            unsafe extern "C" fn(
+                *mut c_void,
+                *mut ffi::sqlite3,
+                c_int,
+                *const c_char,
+                *const c_char,
+                i64,
+                i64,
+            ),
+        >,
+        context: *mut c_void,
+    ) -> *mut c_void;
+    fn sqlite3_preupdate_old(
+        db: *mut ffi::sqlite3,
+        index: c_int,
+        value: *mut *mut ffi::sqlite3_value,
+    ) -> c_int;
+    fn sqlite3_preupdate_new(
+        db: *mut ffi::sqlite3,
+        index: c_int,
+        value: *mut *mut ffi::sqlite3_value,
+    ) -> c_int;
+    fn sqlite3_preupdate_count(db: *mut ffi::sqlite3) -> c_int;
+}
+
+/// Whether the linked SQLite was built with the pre-update hook.
+pub fn supported() -> bool {
+    unsafe { ffi::sqlite3_compileoption_used(c"ENABLE_PREUPDATE_HOOK".as_ptr()) != 0 }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Cell {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+#[derive(Debug)]
+struct Event {
+    table: String,
+    rowid: i64,
+    op: c_int,
+    old: Option<Vec<Cell>>,
+    new: Option<Vec<Cell>>,
+}
+
+/// Captured table: column names and kinds in declaration order, plus the
+/// index of an `INTEGER PRIMARY KEY` (rowid alias), whose value the
+/// pre-update hook reports through the rowid argument.
+#[derive(Debug, Default)]
+struct TableShape {
+    columns: Vec<(String, JsonKind)>,
+    rowid_alias: Option<usize>,
+    /// Indexes of the primary-key columns.
+    key: Vec<usize>,
+}
+
+/// Captured tables of one schema, shared by every connection whose schema
+/// has the same digest (every tenant of a module, typically).
+// Keyed by the tenant schema's table names, looked up per captured row.
+type Shapes = Arc<HashMap<String, Arc<TableShape>, foldhash::fast::RandomState>>;
+
+#[derive(Default)]
+struct Context {
+    tables: RwLock<Shapes>,
+    /// Digest of the definitions `tables` was built from.
+    digest: Mutex<[u8; 32]>,
+    /// `PRAGMA schema_version` when `digest` was read: SQLite bumps it on
+    /// every schema change, so an unchanged cookie means an unchanged digest.
+    cookie: Mutex<Option<i64>>,
+    events: Mutex<Vec<Event>>,
+    records: RwLock<HashMap<String, Arc<crate::record_views::RecordDescriptor>>>,
+    /// Open [`KeyChanges`] guards: migrations may change primary keys.
+    key_changes: std::sync::atomic::AtomicUsize,
+}
+
+/// While alive, captured UPDATEs on its writer may change primary keys.
+/// Dropping it (also on cancellation) restores the guard.
+pub(crate) struct KeyChanges(Option<Arc<Context>>);
+
+impl Drop for KeyChanges {
+    fn drop(&mut self) {
+        if let Some(context) = &self.0 {
+            context
+                .key_changes
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// Allows key-changing UPDATEs on this connection for a migration.
+pub(crate) async fn allow_key_changes(
+    connection: &mut SqliteConnection,
+) -> Result<KeyChanges, DatabaseError> {
+    let key = {
+        let mut handle = connection.lock_handle().await?;
+        handle.as_raw_handle().as_ptr() as usize
+    };
+    let context = contexts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade);
+    if let Some(context) = &context {
+        context
+            .key_changes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    Ok(KeyChanges(context))
+}
+
+/// Contexts of open writer connections, keyed by `sqlite3*`.
+fn contexts() -> &'static Mutex<HashMap<usize, std::sync::Weak<Context>>> {
+    static CONTEXTS: std::sync::OnceLock<Mutex<HashMap<usize, std::sync::Weak<Context>>>> =
+        std::sync::OnceLock::new();
+    CONTEXTS.get_or_init(Default::default)
+}
+
+pub(crate) unsafe fn value_cell(value: *mut ffi::sqlite3_value) -> Cell {
+    if value.is_null() {
+        return Cell::Null;
+    }
+    match ffi::sqlite3_value_type(value) {
+        ffi::SQLITE_INTEGER => Cell::Integer(ffi::sqlite3_value_int64(value)),
+        ffi::SQLITE_FLOAT => Cell::Real(ffi::sqlite3_value_double(value)),
+        ffi::SQLITE_TEXT => {
+            let text = ffi::sqlite3_value_text(value);
+            let len = ffi::sqlite3_value_bytes(value).max(0) as usize;
+            if text.is_null() {
+                Cell::Text(String::new())
+            } else {
+                Cell::Text(
+                    String::from_utf8_lossy(std::slice::from_raw_parts(text, len)).into_owned(),
+                )
+            }
+        }
+        ffi::SQLITE_BLOB => {
+            let blob = ffi::sqlite3_value_blob(value).cast::<u8>();
+            let len = ffi::sqlite3_value_bytes(value).max(0) as usize;
+            Cell::Blob(if blob.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(blob, len).to_vec()
+            })
+        }
+        _ => Cell::Null,
+    }
+}
+
+unsafe extern "C" fn preupdate(
+    context: *mut c_void,
+    db: *mut ffi::sqlite3,
+    op: c_int,
+    database: *const c_char,
+    table: *const c_char,
+    old_rowid: i64,
+    new_rowid: i64,
+) {
+    let context = &*(context as *const Context);
+    if database.is_null() || table.is_null() || CStr::from_ptr(database).to_bytes() != b"main" {
+        return;
+    }
+    let table = String::from_utf8_lossy(CStr::from_ptr(table).to_bytes()).into_owned();
+    let Some(shape) = context.tables.read().unwrap().get(&table).cloned() else {
+        return;
+    };
+    let count = sqlite3_preupdate_count(db).max(0);
+    let read = |getter: unsafe extern "C" fn(
+        *mut ffi::sqlite3,
+        c_int,
+        *mut *mut ffi::sqlite3_value,
+    ) -> c_int,
+                rowid: i64| {
+        let mut cells = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let mut value = std::ptr::null_mut();
+            let cell = if getter(db, index, &mut value) == ffi::SQLITE_OK {
+                value_cell(value)
+            } else {
+                Cell::Null
+            };
+            cells.push(
+                if shape.rowid_alias == Some(index as usize) && cell == Cell::Null {
+                    Cell::Integer(rowid)
+                } else {
+                    cell
+                },
+            );
+        }
+        cells
+    };
+    let (old, new, rowid) = match op {
+        ffi::SQLITE_INSERT => (
+            None,
+            Some(read(sqlite3_preupdate_new, new_rowid)),
+            new_rowid,
+        ),
+        ffi::SQLITE_DELETE => (
+            Some(read(sqlite3_preupdate_old, old_rowid)),
+            None,
+            old_rowid,
+        ),
+        ffi::SQLITE_UPDATE => (
+            Some(read(sqlite3_preupdate_old, old_rowid)),
+            Some(read(sqlite3_preupdate_new, new_rowid)),
+            new_rowid,
+        ),
+        _ => return,
+    };
+    context.events.lock().unwrap().push(Event {
+        table,
+        rowid,
+        op,
+        old,
+        new,
+    });
+}
+
+/// Events left unconsumed (a statement that failed after the hook fired)
+/// end with the transaction.
+unsafe extern "C" fn transaction_end(context: *mut c_void) -> c_int {
+    (*(context as *const Context))
+        .events
+        .lock()
+        .unwrap()
+        .clear();
+    0
+}
+
+unsafe extern "C" fn transaction_rollback(context: *mut c_void) {
+    (*(context as *const Context))
+        .events
+        .lock()
+        .unwrap()
+        .clear();
+}
+
+pub(crate) fn cell_json(cell: &Cell, kind: JsonKind) -> Value {
+    match (cell, kind) {
+        (Cell::Null, _) => Value::Null,
+        (Cell::Integer(value), JsonKind::Boolean) => Value::Bool(*value != 0),
+        (Cell::Real(value), JsonKind::Boolean) => Value::Bool(*value != 0.0),
+        (Cell::Text(text), JsonKind::Json) => {
+            serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
+        }
+        (Cell::Integer(value), _) => Value::Number((*value).into()),
+        (Cell::Real(value), _) => Number::from_f64(*value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        (Cell::Text(text), _) => Value::String(text.clone()),
+        (Cell::Blob(bytes), _) => {
+            Value::String(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+        }
+    }
+}
+
+fn image(shape: &TableShape, cells: &[Cell]) -> Value {
+    let mut object = Map::new();
+    for (index, (name, kind)) in shape.columns.iter().enumerate() {
+        let cell = cells.get(index).unwrap_or(&Cell::Null);
+        object.insert(name.clone(), cell_json(cell, *kind));
+    }
+    Value::Object(object)
+}
+
+/// `gonvex_capture(table, rowid, op)`: `[old, new, changed]` JSON for the
+/// matching pending event, or NULL when an update changed no column.
+unsafe extern "C" fn capture_function(
+    context: *mut ffi::sqlite3_context,
+    argc: c_int,
+    argv: *mut *mut ffi::sqlite3_value,
+) {
+    let fail = |message: &str| {
+        ffi::sqlite3_result_error(context, message.as_ptr().cast(), message.len() as c_int);
+    };
+    if argc != 3 {
+        return fail("gonvex_capture(table, rowid, op) takes three arguments");
+    }
+    let state = &*(ffi::sqlite3_user_data(context) as *const Arc<Context>);
+    let args = std::slice::from_raw_parts(argv, 3);
+    let table = match value_cell(args[0]) {
+        Cell::Text(table) => table,
+        _ => return fail("gonvex_capture: table must be text"),
+    };
+    let rowid = ffi::sqlite3_value_int64(args[1]);
+    let op = match ffi::sqlite3_value_int64(args[2]) {
+        0 => ffi::SQLITE_INSERT,
+        1 => ffi::SQLITE_UPDATE,
+        _ => ffi::SQLITE_DELETE,
+    };
+    let Some(shape) = state.tables.read().unwrap().get(&table).cloned() else {
+        return fail("gonvex_capture: table is not captured on this connection");
+    };
+    let event = {
+        let mut events = state.events.lock().unwrap();
+        let Some(position) = events
+            .iter()
+            .rposition(|event| event.table == table && event.rowid == rowid && event.op == op)
+        else {
+            drop(events);
+            return fail(
+                "gonvex_capture: no pending row change (writer without the capture hook?)",
+            );
+        };
+        events.remove(position)
+    };
+    if let (Some(old), Some(new)) = (&event.old, &event.new) {
+        // A row's key is its identity in the change feed and in every
+        // client replica: an UPDATE that changes it would orphan both.
+        if shape
+            .key
+            .iter()
+            .any(|index| old.get(*index) != new.get(*index))
+            && state.key_changes.load(std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return fail(&format!(
+                "gonvex_capture: an UPDATE cannot change the primary key of {table:?}; delete the row and insert a new one"
+            ));
+        }
+    }
+    let old = event.old.as_deref().map(|cells| image(&shape, cells));
+    let new = event.new.as_deref().map(|cells| image(&shape, cells));
+    let changed = match (&event.old, &event.new) {
+        (Some(old), Some(new)) => {
+            let names = shape
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| old.get(*index) != new.get(*index))
+                .map(|(_, (name, _))| Value::String(name.clone()))
+                .collect::<Vec<_>>();
+            if names.is_empty() {
+                ffi::sqlite3_result_null(context);
+                return;
+            }
+            Value::Array(names)
+        }
+        _ => Value::Array(Vec::new()),
+    };
+    let text = Value::Array(vec![
+        old.unwrap_or(Value::Null),
+        new.unwrap_or(Value::Null),
+        changed,
+    ])
+    .to_string();
+    ffi::sqlite3_result_text(
+        context,
+        text.as_ptr().cast(),
+        text.len() as c_int,
+        ffi::SQLITE_TRANSIENT(),
+    );
+}
+
+unsafe extern "C" fn record_value_function(
+    context: *mut ffi::sqlite3_context,
+    argc: c_int,
+    argv: *mut *mut ffi::sqlite3_value,
+) {
+    let fail = |message: &str| {
+        ffi::sqlite3_result_error(context, message.as_ptr().cast(), message.len() as c_int)
+    };
+    if argc != 2 {
+        return fail("gonvex_record_value requires a logical record and public key");
+    }
+    let args = std::slice::from_raw_parts(argv, 2);
+    let (Cell::Text(name), Cell::Text(key)) = (value_cell(args[0]), value_cell(args[1])) else {
+        return fail("record snapshots require public text identities");
+    };
+    let state = &*(ffi::sqlite3_user_data(context) as *const Arc<Context>);
+    let record = state.records.read().unwrap().get(&name).cloned();
+    let Some(record) = record else {
+        return fail("logical record view is not registered on this connection");
+    };
+    match crate::record_views::image(ffi::sqlite3_context_db_handle(context), &record, &key) {
+        Ok(Some(value)) => {
+            let text = value.to_string();
+            ffi::sqlite3_result_text(
+                context,
+                text.as_ptr().cast(),
+                text.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            );
+        }
+        Ok(None) => ffi::sqlite3_result_null(context),
+        Err(error) => fail(&error),
+    }
+}
+
+unsafe extern "C" fn destroy_context(data: *mut c_void) {
+    drop(Box::from_raw(data as *mut Arc<Context>));
+}
+
+/// Installs the hook and `gonvex_capture` on a writer connection and loads
+/// the captured-table catalog. Call again after DDL changes captured tables.
+pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseError> {
+    if !supported() {
+        return Err(DatabaseError::Decode(
+            "the linked SQLite lacks SQLITE_ENABLE_PREUPDATE_HOOK; build with rust/.cargo/config.toml".into(),
+        ));
+    }
+    let cookie = committed_schema_cookie(connection).await?;
+    let digest = catalog_digest(connection).await?;
+    let shapes = load_shapes(connection, digest).await?;
+    let records = record_descriptors(connection).await?;
+    let mut handle = connection.lock_handle().await?;
+    let db = handle.as_raw_handle().as_ptr();
+    let key = db as usize;
+    let existing = contexts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade);
+    let context = match existing {
+        Some(context) => context,
+        None => {
+            let context = Arc::new(Context::default());
+            let data = Box::into_raw(Box::new(context.clone()));
+            let raw = Arc::as_ptr(&context) as *mut c_void;
+            unsafe {
+                let name = std::ffi::CString::new(CAPTURE_FUNCTION).unwrap();
+                let rc = ffi::sqlite3_create_function_v2(
+                    db,
+                    name.as_ptr(),
+                    3,
+                    ffi::SQLITE_UTF8,
+                    data.cast(),
+                    Some(capture_function),
+                    None,
+                    None,
+                    Some(destroy_context),
+                );
+                if rc != ffi::SQLITE_OK {
+                    return Err(DatabaseError::Decode(format!(
+                        "register {CAPTURE_FUNCTION}: code {rc}"
+                    )));
+                }
+                let record_name =
+                    std::ffi::CString::new(crate::record_views::VALUE_FUNCTION).unwrap();
+                let record_data = Box::into_raw(Box::new(context.clone()));
+                let rc = ffi::sqlite3_create_function_v2(
+                    db,
+                    record_name.as_ptr(),
+                    2,
+                    ffi::SQLITE_UTF8,
+                    record_data.cast(),
+                    Some(record_value_function),
+                    None,
+                    None,
+                    Some(destroy_context),
+                );
+                if rc != ffi::SQLITE_OK {
+                    return Err(DatabaseError::Decode(format!(
+                        "register record snapshots: code {rc}"
+                    )));
+                }
+                sqlite3_preupdate_hook(db, Some(preupdate), raw);
+                ffi::sqlite3_commit_hook(db, Some(transaction_end), raw);
+                ffi::sqlite3_rollback_hook(db, Some(transaction_rollback), raw);
+            }
+            let mut map = contexts().lock().unwrap();
+            map.retain(|_, weak| weak.strong_count() > 0);
+            map.insert(key, Arc::downgrade(&context));
+            context
+        }
+    };
+    *context.tables.write().unwrap() = shapes;
+    *context.digest.lock().unwrap() = digest;
+    *context.cookie.lock().unwrap() = cookie;
+    *context.records.write().unwrap() = records;
+    Ok(())
+}
+
+/// Reloads the captured-table catalog of this connection, if it captures.
+/// Only a digest is read when the captured tables did not change (scripts
+/// re-run at every boot mostly leave them untouched).
+pub async fn refresh(connection: &mut SqliteConnection) -> Result<(), DatabaseError> {
+    let key = {
+        let mut handle = connection.lock_handle().await?;
+        handle.as_raw_handle().as_ptr() as usize
+    };
+    let context = contexts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade);
+    if let Some(context) = context {
+        // Logical record views are rows of `_gonvex_record_views`, not
+        // schema: the catalog digest does not cover them, so reload them on
+        // every refresh (two small reads).
+        let records = record_descriptors(connection).await?;
+        *context.records.write().unwrap() = records;
+        // Reading the digest concatenates and hashes every table definition;
+        // provisioning refreshes after each step, mostly with no DDL between.
+        // Only committed cookies are compared: they only ever increase,
+        // while a rolled-back transaction can reuse the value it had raised.
+        let cookie = committed_schema_cookie(connection).await?;
+        if cookie.is_some() && *context.cookie.lock().unwrap() == cookie {
+            return Ok(());
+        }
+        let digest = catalog_digest(connection).await?;
+        if digest != *context.digest.lock().unwrap() {
+            let shapes = load_shapes(connection, digest).await?;
+            *context.tables.write().unwrap() = shapes;
+            *context.digest.lock().unwrap() = digest;
+        }
+        *context.cookie.lock().unwrap() = cookie;
+    }
+    Ok(())
+}
+
+/// The committed schema cookie of `main` (`PRAGMA schema_version`), or
+/// `None` inside a transaction, whose own uncommitted changes it would see.
+async fn committed_schema_cookie(
+    connection: &mut SqliteConnection,
+) -> Result<Option<i64>, DatabaseError> {
+    let autocommit = {
+        let mut handle = connection.lock_handle().await?;
+        unsafe { ffi::sqlite3_get_autocommit(handle.as_raw_handle().as_ptr()) != 0 }
+    };
+    if !autocommit {
+        return Ok(None);
+    }
+    Ok(Some(
+        sqlx::query_scalar("PRAGMA main.schema_version")
+            .fetch_one(connection)
+            .await?,
+    ))
+}
+
+/// Logical record views registered on this database, by record name (for
+/// `gonvex_record_value`).
+async fn record_descriptors(
+    connection: &mut SqliteConnection,
+) -> Result<HashMap<String, Arc<crate::record_views::RecordDescriptor>>, DatabaseError> {
+    Ok(crate::record_views::descriptors(connection)
+        .await?
+        .into_values()
+        .map(|record| (record.name.clone(), Arc::new(record)))
+        .collect())
+}
+
+/// Digest of the `sqlite_schema` rows the capture catalog is a function of:
+/// every table definition and every capture trigger (one row).
+async fn catalog_digest(connection: &mut SqliteConnection) -> Result<[u8; 32], DatabaseError> {
+    use sha2::{Digest, Sha256};
+    let definitions: Option<String> = sqlx::query_scalar(
+        r#"SELECT group_concat(type || char(31) || name || char(31) || tbl_name || char(31)
+                               || coalesce(sql, ''), char(30) ORDER BY type, name)
+           FROM sqlite_schema
+           WHERE type = 'table'
+              OR (type = 'trigger' AND sql LIKE '%' || $1 || '(%')"#,
+    )
+    .bind(CAPTURE_FUNCTION)
+    .fetch_one(connection)
+    .await?;
+    Ok(Sha256::digest(definitions.unwrap_or_default().as_bytes()).into())
+}
+
+/// Catalogs by schema digest. Every tenant file of a module has the same
+/// schema, so a boot over N tenants builds the catalog once instead of N
+/// times (each build is a 4,303-row `pragma_table_info` join for Whagons).
+fn shape_cache() -> &'static Mutex<HashMap<[u8; 32], Shapes>> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<[u8; 32], Shapes>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Distinct schemas kept in [`shape_cache`]; more are rebuilt on demand.
+const SHAPE_CACHE_ENTRIES: usize = 16;
+
+/// Tables that carry capture triggers, with their column shapes, for the
+/// schema whose [`catalog_digest`] is `digest` (from the cache when any
+/// connection already built it).
+async fn load_shapes(
+    connection: &mut SqliteConnection,
+    digest: [u8; 32],
+) -> Result<Shapes, DatabaseError> {
+    if let Some(shapes) = shape_cache().lock().unwrap().get(&digest).cloned() {
+        return Ok(shapes);
+    }
+    // One JSON row instead of one row per column: each row crosses sqlx's
+    // worker thread separately, which made this the slowest boot statement.
+    let encoded: Option<String> = sqlx::query_scalar(
+        r#"WITH captured(name) AS MATERIALIZED (
+             SELECT DISTINCT tbl_name FROM sqlite_schema
+             WHERE type = 'trigger' AND sql LIKE '%' || $1 || '(%')
+           SELECT json_group_array(json_array(m.name, p.name, p.type, p.pk)
+                                   ORDER BY m.name, p.cid)
+           FROM sqlite_schema AS m JOIN pragma_table_info(m.name) AS p
+           WHERE m.type = 'table' AND m.name IN captured"#,
+    )
+    .bind(CAPTURE_FUNCTION)
+    .fetch_one(connection)
+    .await?;
+    let rows: Vec<(String, String, String, i64)> =
+        serde_json::from_str(encoded.as_deref().unwrap_or("[]"))
+            .map_err(|error| DatabaseError::Decode(format!("capture catalog: {error}")))?;
+    let mut shapes: HashMap<String, (TableShape, usize)> = HashMap::new();
+    for (table, name, declared, pk) in rows {
+        let (shape, pk_columns) = shapes.entry(table).or_default();
+        if pk > 0 {
+            *pk_columns += 1;
+            shape.key.push(shape.columns.len());
+        }
+        if pk == 1 && declared.trim().eq_ignore_ascii_case("INTEGER") {
+            shape.rowid_alias = Some(shape.columns.len());
+        }
+        shape
+            .columns
+            .push((name, JsonKind::from_declared(&declared)));
+    }
+    let shapes: Shapes = Arc::new(
+        shapes
+            .into_iter()
+            .map(|(table, (mut shape, pk_columns))| {
+                // Only a single-column INTEGER PRIMARY KEY aliases the rowid.
+                if pk_columns != 1 {
+                    shape.rowid_alias = None;
+                }
+                (table, Arc::new(shape))
+            })
+            .collect(),
+    );
+    let mut cache = shape_cache().lock().unwrap();
+    if cache.len() >= SHAPE_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(digest, shapes.clone());
+    Ok(shapes)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::feed::{capture_triggers_sql, finalize, Provenance, SYNC_INFRASTRUCTURE_SQL};
+    use crate::rows::table_columns;
+    use serde_json::{json, Value};
+    use sqlx::{Connection, Row, SqliteConnection};
+
+    #[tokio::test]
+    async fn refresh_recovers_after_rolled_back_schema_changes() {
+        let mut connection = connection_with(
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)",
+            "t",
+            "id",
+        )
+        .await;
+        sqlx::raw_sql("BEGIN; ALTER TABLE t ADD COLUMN discarded TEXT")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        super::refresh(&mut connection).await.unwrap();
+        sqlx::raw_sql("ROLLBACK; ALTER TABLE t ADD COLUMN kept INTEGER")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        super::refresh(&mut connection).await.unwrap();
+        // The committed ALTER reuses the rolled-back ALTER's schema cookie.
+        // Capture must use the committed shape, including the new column.
+        let mut tx = connection.begin().await.unwrap();
+        sqlx::query("INSERT INTO t VALUES(1, 'saved', 42)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        finalize(&mut tx, &Provenance::default()).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            changes(&mut connection).await[0].2,
+            json!({"id": 1, "value": "saved", "kept": 42})
+        );
+    }
+
+    /// The digest gate trusts only committed cookies: a rolled-back schema
+    /// change can bring back a cookie value with different definitions.
+    #[tokio::test]
+    async fn only_committed_schema_cookies_gate_the_catalog_digest() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        let before = super::committed_schema_cookie(&mut connection)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::raw_sql("BEGIN; CREATE TABLE rolled_back(id INTEGER PRIMARY KEY);")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::committed_schema_cookie(&mut connection)
+                .await
+                .unwrap(),
+            None
+        );
+        sqlx::raw_sql("ROLLBACK")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::committed_schema_cookie(&mut connection)
+                .await
+                .unwrap(),
+            Some(before)
+        );
+        sqlx::raw_sql("CREATE TABLE kept(id INTEGER PRIMARY KEY)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert!(
+            super::committed_schema_cookie(&mut connection)
+                .await
+                .unwrap()
+                .unwrap()
+                > before
+        );
+    }
+
+    async fn connection_with(table_sql: &str, table: &str, key: &str) -> SqliteConnection {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(SYNC_INFRASTRUCTURE_SQL)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::raw_sql(table_sql)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let columns = table_columns(&mut connection, table).await.unwrap();
+        sqlx::raw_sql(&capture_triggers_sql(table, key, &columns))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        super::install(&mut connection).await.unwrap();
+        connection
+    }
+
+    async fn changes(connection: &mut SqliteConnection) -> Vec<(String, Value, Value, Value)> {
+        sqlx::query("SELECT operation, old_value, new_value, changed_columns FROM _gonvex_sync_changes ORDER BY event_id")
+            .fetch_all(connection)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                let json = |index: usize| {
+                    row.get::<Option<String>, _>(index)
+                        .map(|text| serde_json::from_str(&text).unwrap())
+                        .unwrap_or(Value::Null)
+                };
+                (row.get(0), json(1), json(2), json(3))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn nested_same_row_trigger_updates_keep_their_own_images() {
+        // Like Whagons' member timestamps: an app trigger updates the row it fired for.
+        let mut connection = connection_with(
+            r#"CREATE TABLE m (id TEXT PRIMARY KEY, name TEXT, updated_at INTEGER);
+               CREATE TRIGGER stamp AFTER UPDATE OF name ON m BEGIN
+                 UPDATE m SET updated_at = 99 WHERE id = NEW.id;
+               END;"#,
+            "m",
+            "id",
+        )
+        .await;
+        let mut tx = connection.begin().await.unwrap();
+        sqlx::query("INSERT INTO m VALUES ('a', 'old', 1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE m SET name = 'new' WHERE id = 'a'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        finalize(&mut tx, &Provenance::default())
+            .await
+            .unwrap()
+            .unwrap();
+        tx.commit().await.unwrap();
+        let rows = changes(&mut connection).await;
+        assert_eq!(rows[0].0, "insert");
+        assert_eq!(rows[0].2, json!({"id":"a","name":"old","updated_at":1}));
+        let updates = rows
+            .iter()
+            .filter(|row| row.0 == "update")
+            .collect::<Vec<_>>();
+        assert_eq!(updates.len(), 2, "{rows:?}");
+        let name_change = updates.iter().find(|row| row.3 == json!(["name"])).unwrap();
+        assert_eq!(name_change.1, json!({"id":"a","name":"old","updated_at":1}));
+        assert_eq!(name_change.2, json!({"id":"a","name":"new","updated_at":1}));
+        let stamp = updates
+            .iter()
+            .find(|row| row.3 == json!(["updated_at"]))
+            .unwrap();
+        assert_eq!(stamp.1, json!({"id":"a","name":"new","updated_at":1}));
+        assert_eq!(stamp.2, json!({"id":"a","name":"new","updated_at":99}));
+    }
+
+    #[tokio::test]
+    async fn key_changes_are_rejected_outside_migrations() {
+        let mut connection = connection_with(
+            "CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER NOT NULL)",
+            "t",
+            "id",
+        )
+        .await;
+        sqlx::query("INSERT INTO t VALUES ('a', 1)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        // Restating the key is not a change.
+        sqlx::query("UPDATE t SET id = 'a', n = 2 WHERE id = 'a'")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let error = sqlx::query("UPDATE t SET id = 'b' WHERE id = 'a'")
+            .execute(&mut connection)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("cannot change the primary key"),
+            "{error}"
+        );
+        {
+            let _migration = super::allow_key_changes(&mut connection).await.unwrap();
+            sqlx::query("UPDATE t SET id = 'b' WHERE id = 'a'")
+                .execute(&mut connection)
+                .await
+                .unwrap();
+        }
+        assert!(sqlx::query("UPDATE t SET id = 'c' WHERE id = 'b'")
+            .execute(&mut connection)
+            .await
+            .is_err());
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM t")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(ids, ["b"]);
+    }
+
+    #[tokio::test]
+    async fn failed_statement_leaves_no_change_and_later_changes_capture_correctly() {
+        let mut connection = connection_with(
+            r#"CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER NOT NULL CHECK (n < 10))"#,
+            "t",
+            "id",
+        )
+        .await;
+        let mut tx = connection.begin().await.unwrap();
+        sqlx::query("INSERT INTO t VALUES ('a', 1), ('c', 4)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        // One statement: 'a' becomes 3 (hook fires, its change row is
+        // written), then 'c' becomes 12 and fails the CHECK. SQLite rolls the
+        // whole statement back, including the change row already written.
+        let failed = sqlx::query("UPDATE t SET n = n * 3")
+            .execute(&mut *tx)
+            .await;
+        assert!(failed.is_err());
+        sqlx::query("UPDATE t SET n = 2 WHERE id = 'a'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        finalize(&mut tx, &Provenance::default())
+            .await
+            .unwrap()
+            .unwrap();
+        tx.commit().await.unwrap();
+        let rows = changes(&mut connection).await;
+        let last = rows.last().unwrap();
+        assert_eq!(last.0, "update");
+        assert_eq!(last.2, json!({"id":"a","n":2}));
+        assert!(
+            rows.iter().all(|row| row.2 != json!({"id":"a","n":3})),
+            "{rows:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|row| row.0 == "update").count(),
+            1,
+            "{rows:?}"
+        );
+        assert_eq!(last.1, json!({"id":"a","n":1}));
+    }
+}

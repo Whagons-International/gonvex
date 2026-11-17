@@ -1,10 +1,10 @@
 # Gonvex
 
-Gonvex is an open source realtime backend built on Postgres, with TypeScript
+Gonvex is an open source realtime backend built on SQLite, with TypeScript
 backend functions and generated React bindings.
 
 Define reads, writes, and external work beside your app. Gonvex runs your
-functions on a Rust runtime, stores durable data in Postgres, and keeps clients
+functions on a Rust runtime, stores durable data in one SQLite file per tenant, and keeps clients
 up to date through Live Queries or a persistent Local Replica.
 
 [Documentation](https://whagons-international.github.io/gonvex/) ·
@@ -39,15 +39,15 @@ runtime or plugin fallback.
 
 - **Three executable kinds**: define read-only Queries, transactional Reducers, and external-work Actions in TypeScript.
 - **TypeScript client bindings**: generate stable API references, schema metadata, and React hook exports from your backend.
-- **Committed realtime truth**: route exact Postgres transaction changes through one durable change feed.
+- **Committed realtime truth**: route exact SQLite transaction changes through one durable change feed.
 - **Local Replica**: render normalized entities from IndexedDB or SQLite and apply each server transaction atomically.
 - **Live Queries**: keep exact indexed server windows over datasets too large to replicate.
-- **Postgres underneath**: keep your data in a database you already know how to run, back up, inspect, and tune.
+- **SQLite underneath**: each tenant is one SQLite file owned by the runtime, so reads and writes run in process with no database server, connection pool, or network round trip. Inspect, copy, and back up databases as ordinary files.
 - **Projects, tenants, and auth**: route isolated tenant databases, verify Members, and select Gonvex-native, Firebase, external OIDC, or hybrid project authentication.
 - **Agent API catalogs**: emit a deterministic, signed inventory of interactive functions and invoke them through the acting Member's normal authorization path.
 - **Background work**: commit Action outbox rows with business data and process external work after commit.
 - **Operational tooling**: inspect functions, data, files, errors, metrics, connections, and scheduler health in the dashboard.
-- **Self-hostable runtime**: run Gonvex with Postgres and optional S3-compatible object storage.
+- **Self-hostable runtime**: run Gonvex as one runtime process with a persistent data directory and optional S3-compatible object storage.
 - **Open source core**: the runtime, CLI, client packages, dashboard, docs, and starter templates live in this repo.
 
 ## Gonvex v2 model
@@ -265,7 +265,7 @@ const openCount = useReplicaSelector<Task, number>(
 ```
 
 Replica Collections render from a scope-isolated Local Replica, then resume
-from the retained Postgres revision. Writes go through Reducers. Optimistic
+from the retained server revision. Writes go through Reducers. Optimistic
 transactions are overlaid on normalized entities and reconcile through the
 origin command ID plus committed revision; callers can opt into offline replay with
 `{ offline: "queue" }`.
@@ -316,7 +316,7 @@ Gonvex is designed to be self-hosted. A full deployment has:
 
 ```txt
 Gonvex Rust runtime  Executes functions, serves HTTP/WebSocket traffic, routes projects and tenants
-Postgres            Stores app data and Gonvex control-plane data
+Data directory      SQLite files for app data (one per tenant) and the Control Plane, owned by the runtime
 Object storage      Optional S3-compatible storage for apps that use file APIs
 Dashboard           Optional web UI for inspecting projects, tables, functions, logs, and metrics
 ```
@@ -335,12 +335,11 @@ This starts:
 ```txt
 Runtime:   http://localhost:8080
 Dashboard: http://localhost:3000
-Postgres:  localhost:5432
 S3 API:    http://localhost:9000
 MinIO UI:  http://localhost:9001
 ```
 
-For production self-hosting, put the runtime behind TLS, provide managed Postgres, configure backups and allowed origins, and add S3-compatible storage when you need file APIs. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
+For production self-hosting, put the runtime behind TLS, mount a persistent volume at the runtime's `GONVEX_DATA_DIR`, run exactly one runtime per data directory (stop the old container before starting the new one), configure backups (the production Compose file includes a SQLite backup sidecar) and allowed origins, and add S3-compatible storage when you need file APIs. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
 
 The Rust runtime does not use Redis or Valkey. Older release notes and health
 response fields retain their historical names; the cache fields report disabled.
@@ -392,7 +391,7 @@ templates/vite-react/    Default starter template
 rust/crates/admin-cli/   Database migration and operator CLI
 rust/crates/runtime/     Rust HTTP, WebSocket, Control Plane, tenant, and execution runtime
 rust/crates/module-host/ Rust process supervising bounded V8 module generations
-rust/crates/postgres/    Rust Postgres routing, transactions, and provisioning
+rust/crates/store/       Rust SQLite storage: routing, transactions, change feed, and provisioning
 infra/                   Local infrastructure helpers
 releases/                Versioned release notes
 ```
@@ -447,7 +446,7 @@ cd rust && cargo test --workspace --all-targets
 Useful development commands:
 
 ```bash
-make services      # start local Postgres
+make services      # no-op: the runtime keeps SQLite files in ./data
 make runtime       # run the local runtime
 make dashboard     # run the dashboard app
 make packages      # watch/build npm packages

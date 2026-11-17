@@ -9,6 +9,7 @@ import type { LocalExecution } from "@gonvex/local-runtime";
 import type { LocalPatch } from '@gonvex/local-runtime';
 import type { ReducerReadView } from '@gonvex/local-runtime/portable';
 import { memoryReadView, overlayReadView, type ReadCoverage } from '@gonvex/local-runtime/read-view';
+import { packColumnPage, validateColumnRequest, type ColumnPage, type ColumnProjection, type ColumnPageLimits } from './column-page.js';
 
 export type LocalReplicaSession = {
   lastOnlineAtMs?: number;
@@ -190,6 +191,7 @@ type PendingCommand = {
 };
 
 export type ReplicaFreshness = "current" | "verifying" | "offline";
+export type ReplicaColumnPage = ColumnPage & { replicaVersion: number; freshness: ReplicaFreshness };
 
 export type LiveQueryResult<T extends ReplicaRow = ReplicaRow> = {
   rows: T[];
@@ -239,6 +241,8 @@ export interface LocalReplicaView {
   windowRows<T extends ReplicaRow = ReplicaRow>(signature: string): T[];
   entity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined;
   entityBatch<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined>;
+  /** Bounded field projection of explicit IDs, including predictions. No hydration. */
+  entityColumns(entity: string, ids: readonly string[], projection: ColumnProjection, limits: ColumnPageLimits): ReplicaColumnPage;
   entityRows<T extends ReplicaRow = ReplicaRow>(entity: string): T[];
   entityCompleteness(entity: string): "complete" | "partial";
   liveQuery<T extends ReplicaRow = ReplicaRow>(signature: string): LiveQueryResult<T>;
@@ -1205,6 +1209,22 @@ export class LocalReplica implements LocalReplicaView {
     return window ? cloneWindow(window) : undefined;
   }
 
+  /** Internal transport metadata: no membership, rows or result copies. Hash
+   * maps are immutable after publication and replaced on every integrity edit.
+   * Keep this off LocalReplicaView; public getWindow returns defensive copies. */
+  windowProtocolState(signature: string) {
+    const window = this.liveQueries.get(signature);
+    if (!window) return undefined;
+    if (window.hashes && !window.aggregateDigest) window.aggregateDigest = replicaAggregateDigest(window.hashes);
+    const { ids: _ids, ...metadata } = window;
+    return {
+      ...metadata,
+      cursor: window.cursor ? { ...window.cursor } : undefined,
+      subscriptionRevision: window.subscriptionRevision ? { ...window.subscriptionRevision } : undefined,
+      hashes: window.hashes as Readonly<Record<string, string>> | undefined,
+    };
+  }
+
   listWindows(): ReplicaWindow[] {
     return [...this.liveQueries.values()].map(cloneWindow);
   }
@@ -1350,6 +1370,12 @@ export class LocalReplica implements LocalReplicaView {
       aggregateDigest: input.hashes ? replicaAggregateDigest(input.hashes) : undefined,
       hashes: input.hashes ? { ...input.hashes } : undefined,
     };
+    const membershipChanged = !sameWindowRowDefinition(previous, window);
+    // A row edit usually leaves ordered membership unchanged. Share that
+    // immutable ID array so publishing does not rebuild reverse memberships
+    // and repin every unrelated row in the collection.
+    // Hash-map presence also contributes to membership memory accounting.
+    if (!membershipChanged && Boolean(window.hashes) === Boolean(previous!.hashes)) window.ids = previous!.ids;
     nextQueries.set(input.signature, window);
     const presentIDs = new Set(ids);
     for (const id of input.removedIDs ?? []) {
@@ -1367,7 +1393,6 @@ export class LocalReplica implements LocalReplicaView {
       ? { epoch: input.cursor.epoch, revision: 0 } : this.cursorValue;
     const nextCursor = replicaTransactionFloor(floorStart, nextQueries);
     const snapshot = storageSnapshotFrom(nextCursor, nextEntities, nextQueries);
-    const membershipChanged = !sameWindowRowDefinition(previous, window);
     const rowsChanged = membershipChanged || changedRowIDs.size > 0;
     const writeScope = this.scopeValue;
     let metadataCommit: void | ReplicaWriteReceipt = undefined;
@@ -1552,6 +1577,31 @@ export class LocalReplica implements LocalReplicaView {
       const row = rows.get(id);
       return row === undefined ? undefined : immutable(row) as T;
     });
+  }
+
+  /** One atomic replica version, without cloning unrequested text/JSON. This is
+   * a caller-owned view of the existing replica, not another entity store. */
+  entityColumns(entity: string, ids: readonly string[], projection: ColumnProjection, limits: ColumnPageLimits): ReplicaColumnPage {
+    const base = this.scopeLoaded ? this.entities.get(entity) : undefined;
+    if (!this.scopeLoaded || this.pendingCommands.size === 0) {
+      return { ...packColumnPage(ids, projection, id => base?.get(id), limits), replicaVersion: this.version(), freshness: this.freshness() };
+    }
+    validateColumnRequest(ids, projection, limits);
+    const columns = Object.keys(projection);
+    const select = (row: ReplicaRow): ReplicaRow => {
+      const result: ReplicaRow = Object.create(null) as ReplicaRow;
+      for (const column of columns) if (Object.hasOwn(row, column)) result[column] = row[column]!;
+      return result;
+    };
+    const rows = new Map<string, ReplicaRow | undefined>();
+    for (const id of ids) if (!rows.has(id)) { const row = base?.get(id); rows.set(id, row ? select(row) : undefined); }
+    for (const command of this.pendingCommands.values()) for (const patch of command.patches) {
+      if ((patch.entity ?? patch.collection) !== entity || !rows.has(patch.rowId)) continue;
+      if (patch.op === 'delete') rows.set(patch.rowId, undefined);
+      else if (patch.op === 'insert' || patch.op === 'upsert') rows.set(patch.rowId, select(patch.fields as ReplicaRow));
+      else if (patch.op === 'patch') rows.set(patch.rowId, { ...(rows.get(patch.rowId) ?? {}), ...select(patch.fields as ReplicaRow) });
+    }
+    return { ...packColumnPage(ids, projection, id => rows.get(id), limits), replicaVersion: this.version(), freshness: this.freshness() };
   }
 
   /** All cached rows for one normalized entity, including optimistic overlays. */

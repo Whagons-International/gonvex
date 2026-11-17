@@ -4,7 +4,7 @@ The Gonvex CLI for app-local development with the Gonvex runtime.
 
 Gonvex provides TypeScript backend functions, generated TypeScript bindings,
 React hooks, transaction-ordered realtime delivery, and a persistent Local
-Replica backed by Postgres.
+Replica backed by per-tenant SQLite databases.
 
 ## Install
 

@@ -53,36 +53,62 @@ export type PortableReducerOptions = {
 };
 
 const copy = <T>(value: T): T => structuredClone(value);
+
+/** Column kinds follow SQLite's declared-type rules (docs/sqlite-storage.md),
+ * so `JSON`, `BOOLEAN`, `INTEGER`, `REAL` and `TEXT` from SQLite migrations
+ * and the older PostgreSQL names (`jsonb`, `bigint`, `double precision`,
+ * `timestamp with time zone`, `uuid`) map to the same JSON values. */
+type ColumnKind = "json" | "boolean" | "integer" | "number" | "uuid" | "timestamp" | "text";
+export function columnKind(declared: string): ColumnKind {
+  const type = declared.trim().toUpperCase();
+  if (type === "UUID") return "uuid";
+  if (type === "TIMESTAMP WITH TIME ZONE" || type === "TIMESTAMPTZ") return "timestamp";
+  if (type.includes("JSON")) return "json";
+  if (type.includes("BOOL")) return "boolean";
+  if (type.includes("INT")) return "integer";
+  if (/REAL|DOUB|FLOA|NUMERIC|DECIMAL/.test(type)) return "number";
+  if (/CHAR|CLOB|TEXT/.test(type)) return "text";
+  throw new UnsupportedLocalOperationError(
+    `Column type ${declared} requires a portable adapter`,
+  );
+}
+
+/** `CAST(unixepoch('subsec')*1000 AS INTEGER)` (gonvex_store::sql::NOW_MS). */
+const NOW_MS =
+  /^\(?\s*CAST\s*\(\s*unixepoch\s*\(\s*'subsec'\s*\)\s*\*\s*1000\s+AS\s+INTEGER\s*\)\s*\)?$/i;
+
+/** `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`: ISO-8601 UTC text timestamps. */
+const NOW_ISO = /^strftime\s*\(\s*'%Y-%m-%dT%H:%M:%fZ'\s*,\s*'now'\s*\)$/i;
+
 function defaultValue(column: LocalColumn, now: number): JsonValue {
-  const expression = column.default?.trim();
+  let expression = column.default?.trim();
+  // SQLite keeps parenthesized defaults as written: DEFAULT ('{}').
+  while (expression && /^\((.*)\)$/s.test(expression) && !NOW_MS.test(expression))
+    expression = expression.slice(1, -1).trim();
   if (!expression || /^NULL(?:::.*)?$/i.test(expression)) return null;
+  const kind = columnKind(column.type);
+  if (kind === "integer" && NOW_MS.test(expression)) return now;
+  if (kind === "text" && NOW_ISO.test(expression))
+    return new Date(now).toISOString();
   if (
-    column.type === "timestamp with time zone" &&
+    kind === "timestamp" &&
     /^(?:clock_timestamp|now)\(\)$/i.test(expression)
   )
     return new Date(now).toISOString();
   if (/^(true|false)$/i.test(expression))
-    return expression.toLowerCase() === "true";
-  if (/^-?\d+(?:\.\d+)?$/.test(expression)) return Number(expression);
+    return kind === "integer" || kind === "number"
+      ? Number(expression.toLowerCase() === "true")
+      : expression.toLowerCase() === "true";
+  if (/^-?\d+(?:\.\d+)?$/.test(expression))
+    return kind === "boolean" ? Number(expression) !== 0 : Number(expression);
   const literal = /^'((?:[^']|'')*)'(?:::(?:[a-z ]+)(?:\[\])?)?$/i.exec(
     expression,
   );
   if (literal) {
     const text = literal[1]!.replaceAll("''", "'");
-    if (column.type === "jsonb" || column.type === "json")
-      return JSON.parse(text) as JsonValue;
-    if (column.type === "boolean") return text === "true";
-    if (
-      [
-        "integer",
-        "bigint",
-        "smallint",
-        "numeric",
-        "double precision",
-        "real",
-      ].includes(column.type)
-    )
-      return Number(text);
+    if (kind === "json") return JSON.parse(text) as JsonValue;
+    if (kind === "boolean") return text === "true" || text === "1";
+    if (kind === "integer" || kind === "number") return Number(text);
     return text;
   }
   throw new UnsupportedLocalOperationError(
@@ -101,33 +127,29 @@ function columnValue(
       throw new Error(`Required field ${table}.${name} is missing`);
     return null;
   }
-  const type = column.type;
-  if (["integer", "bigint", "smallint"].includes(type)) {
+  const kind = columnKind(column.type);
+  if (kind === "integer") {
     const number =
       typeof value === "string" && /^[-+]?\d+$/.test(value.trim())
         ? Number(value)
         : value;
     if (typeof number !== "number" || !Number.isSafeInteger(number))
       throw new Error(`Invalid integer for ${table}.${name}`);
-    if (type === "integer" && (number < -2147483648 || number > 2147483647))
-      throw new Error(`Integer out of range for ${table}.${name}`);
-    if (type === "smallint" && (number < -32768 || number > 32767))
-      throw new Error(`Integer out of range for ${table}.${name}`);
     return number;
   }
-  if (["double precision", "real", "numeric"].includes(type)) {
+  if (kind === "number") {
     const number =
       typeof value === "string" && value.trim() ? Number(value) : value;
     if (typeof number !== "number" || !Number.isFinite(number))
       throw new Error(`Invalid number for ${table}.${name}`);
     return number;
   }
-  if (type === "boolean") {
+  if (kind === "boolean") {
     if (typeof value !== "boolean")
       throw new Error(`Invalid boolean for ${table}.${name}`);
     return value;
   }
-  if (type === "uuid") {
+  if (kind === "uuid") {
     if (
       typeof value !== "string" ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
@@ -137,20 +159,15 @@ function columnValue(
       throw new Error(`Invalid UUID for ${table}.${name}`);
     return value.toLowerCase();
   }
-  if (type === "text" || type.startsWith("character varying")) {
+  if (kind === "text") {
     if (typeof value !== "string")
       throw new Error(`Invalid text for ${table}.${name}`);
     return value;
   }
-  if (type === "jsonb" || type === "json") return copy(value);
-  if (type === "timestamp with time zone") {
-    if (typeof value !== "string" || !Number.isFinite(Date.parse(value)))
-      throw new Error(`Invalid timestamp for ${table}.${name}`);
-    return new Date(value).toISOString();
-  }
-  throw new UnsupportedLocalOperationError(
-    `Column type ${type} requires a portable adapter`,
-  );
+  if (kind === "json") return copy(value);
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value)))
+    throw new Error(`Invalid timestamp for ${table}.${name}`);
+  return new Date(value).toISOString();
 }
 
 export function orderDataRows(rows: JsonObject[], read: DataRead): void {

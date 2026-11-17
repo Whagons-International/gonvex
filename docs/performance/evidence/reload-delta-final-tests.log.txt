@@ -1,0 +1,497 @@
+Running as unit: gonvex-reload-final-tests-phase-fd507413240c.service
+{"arbitration": "kernel-v1", "at": "2026-11-05T04:41:20.126749+00:00", "attempt": "d7ef116578824d4b9d90a110df574578", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-final-tests-phase-fd507413240c.service", "event": "wait-start", "kind": "build", "pid": 590247, "schema": "coach.resources.v1", "start_ticks": "1694699", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-final-tests-phase-fd507413240c.service", "why": "reload final tests target /mnt/data/work/gonvex-open-cost/target"}
+{"arbitration": "kernel-v1", "at": "2026-11-05T04:41:20.126933+00:00", "attempt": "d7ef116578824d4b9d90a110df574578", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-final-tests-phase-fd507413240c.service", "elapsed_seconds": 0.0, "event": "wait-end", "kind": "build", "outcome": "admitted", "pid": 590247, "position": 0, "schema": "coach.resources.v1", "start_ticks": "1694699", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-final-tests-phase-fd507413240c.service", "why": "reload final tests target /mnt/data/work/gonvex-open-cost/target"}
+warning: use of deprecated associated function `core::num::<impl usize>::max_value`: replaced by the `MAX` associated constant on this type
+   --> vendor/serde_json/src/lexical/math.rs:458:33
+    |
+458 |             .map_or_else(usize::max_value, |v| v - nlz)
+    |                                 ^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: `serde_json` (lib) generated 1 warning
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/module-host/src/session.rs:127:14
+    |
+127 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+127 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+127 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    |
+
+warning: `gonvex-module-host` (lib) generated 1 warning (run `cargo fix --lib -p gonvex-module-host` to apply 1 suggestion)
+   Compiling gonvex-runtime v0.1.0 (/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a/rust/crates/runtime)
+    Finished `release` profile [optimized] target(s) in 6m 11s
+     Running unittests src/lib.rs (/mnt/data/work/gonvex-open-cost/target/release/deps/gonvex_runtime-33a3da009b12cb57)
+
+running 407 tests
+test action_calls::fetch_tests::chunks_end_on_complete_utf8_characters ... ok
+test action_calls::fetch_tests::requests_cannot_outlive_the_action_deadline ... ok
+test action_calls::fetch_tests::a_cancelled_or_unknown_body_reads_as_finished ... ok
+test action_calls::fetch_tests::slow_responses_can_use_the_remaining_action_budget ... ok
+test accept::tests::bind_listens_and_accepts ... ok
+test accept::tests::unset_values_keep_platform_defaults ... ok
+test accept::tests::accepted_sockets_get_the_configured_caps ... ok
+test bridge_bench::bridge_bench_contention ... ignored, benchmark; see module docs
+test bridge_bench::bridge_bench_synthetic ... ignored, benchmark; see module docs
+test bridge_bench::bridge_bench_whagons ... ignored, benchmark; see module docs
+test action_gate::tests::capacity_two_admits_two ... ok
+test canonical_row::tests::member_values_parse_only_their_slice ... ok
+test action_calls::fetch_tests::ordinary_responses_stay_buffered_in_one_host_call ... ok
+test action_calls::fetch_tests::event_stream_bodies_are_read_while_the_server_is_still_writing ... ok
+test config::tests::postgres_database_variables_fail_startup ... ok
+test canonical_row::tests::targeted_cases_hash_like_the_value_path ... ok
+test config::tests::data_dir_defaults_to_an_absolute_data_directory ... ok
+test config::tests::rejects_invalid_security_configuration ... ok
+future_size   9432 Runtime::open_control_query
+future_size   9368 Runtime::refresh_control_queries
+future_size  19456 Runtime::execute_tenant_query
+future_size  20752 Runtime::execute_tenant_action
+future_size  29664 websocket
+
+thread 'connection_future_sizes::connection_future_sizes' (674596) panicked at crates/runtime/src/lib.rs:7290:9:
+connection future grew to 29664 bytes (budget 28672)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test config::tests::reads_the_existing_runtime_environment_contract ... ok
+test config::tests::connection_limits_config ... ok
+test config::tests::database_idle_timeout_is_configurable ... ok
+test connection_future_sizes::connection_future_sizes ... FAILED
+test config::tests::parses_service_principals ... ok
+test config::tests::parses_database_idle_timeout_without_changing_pool_defaults ... ok
+test control::invitation_authority_tests::current_issuer_must_still_be_allowed_to_create_the_invitation ... ok
+test control::tests::account_created_tenant_directory_insert_maps_domain_before_status ... ok
+test control::tests::browser_cannot_supply_database_selectors ... ok
+test control::tests::member_provider_prefers_the_concrete_external_sign_in_provider ... ok
+test control::tests::registry_has_only_three_function_kinds_and_preserves_live_contracts ... ok
+test dashboard::tests::subscription_resources_are_bounded_read_only_operator_views ... ok
+test delivery::tests::a_later_call_never_delays_an_earlier_covered_one ... ok
+test config::tests::websocket_compression_config ... ok
+test error_class::tests::classifies_connection_and_resource_failures_as_transient ... ok
+test delivery::tests::a_watermark_a_call_waits_for_is_due_at_once ... ok
+test config::tests::presence_v2_config ... ok
+test error_class::tests::classifies_control_errors ... ok
+test error_class::tests::classifies_database_errors ... ok
+test error_class::tests::classifies_execution_errors ... ok
+test error_class::tests::classifies_module_host_failures ... ok
+test error_class::tests::transient_fault_remembers_only_transient_causes ... ok
+test execution::tests::action_revision_tracker_keeps_the_highest_nested_reducer_revision ... ok
+test execution::tests::agent_profile_action_preserves_ui_root_until_host_delegation ... ok
+test execution::tests::anonymous_context_and_function_gates_preserve_member_sessions ... ok
+test execution::tests::compatible_client_contract_survives_artifact_rebuilds ... ok
+test config::tests::parses_service_principal_manifest_access ... ok
+test execution::tests::delegated_actions_have_bounded_depth_and_recursive_loop_detection ... ok
+test execution::tests::delegated_invocation_rejects_stale_internal_and_system_targets ... ok
+test execution::tests::delegated_sessions_start_on_the_api_channel_and_expose_the_delegation ... ok
+test execution::tests::nested_invocations_keep_the_api_root_and_the_delegation ... ok
+test execution::tests::resumed_action_uses_executing_artifact_and_preserves_ancestry ... ok
+test external_auth::tests::jwks_cache_control_is_bounded_by_the_caller ... ok
+test external_auth::tests::private_addresses_are_rejected ... ok
+test fast_hash::tests::serde_json_objects_keep_insertion_order ... ok
+test external_auth::tests::unsigned_firebase_tokens_rejected_by_default ... ok
+test config::tests::rejects_invalid_service_principals ... ok
+test cron_profile::tests::adds_land_only_inside_a_scheduled_run ... ok
+test dashboard::tests::snapshots_preserve_operator_authorization ... ok
+fast path: 99 of 113 mixed rows, 99 of 113 integer/text rows
+test canonical_row::tests::sqlite_rows_hash_like_the_value_path ... ok
+test config::tests::public_proxy_config_merges_cidrs_and_legacy_ips ... ok
+test action_gate::tests::a_cancelled_waiter_does_not_lose_the_permit ... ok
+test action_gate::tests::one_action_at_a_time_in_priority_order_fifo_within_a_class ... ok
+test action_calls::fetch_tests::a_body_timeout_is_reported_as_a_timeout_not_a_decode_failure ... ok
+test host_calls::tests::deferred_ids_match_the_browser_sdk_vectors ... ok
+test host_calls::tests::identifiers_are_plain_and_bounded ... ok
+test host_calls::parameter_tests::no_op_commits_publish_no_revision_and_report_their_outcome ... ok
+test host_calls::tests::query_statement_rejects_writes_and_batches ... ok
+test host_calls::tests::rejects_explicit_key_that_conflicts_with_declared_primary_key ... ok
+test host_calls::tests::resolves_declared_non_id_primary_key_for_omitted_host_key ... ok
+test host_calls::parameter_tests::raw_query_type_changes_and_array_parameters_preserve_values ... ok
+test host_calls::parameter_tests::query_admission_accepts_sqlite_literals_and_comments ... ok
+test host_calls::parameter_tests::rollback_to_savepoint_recovers_from_a_caught_sql_error ... ok
+test host_calls::parameter_tests::line_comment_batches_follow_sqlite_rules_and_keep_transaction_usable ... ok
+test host_calls::parameter_tests::caught_sql_errors_cannot_commit_earlier_writes ... ok
+test host_calls::parameter_tests::caught_query_sql_errors_can_return_a_fallback_after_snapshot_rollback ... ok
+test host_calls::parameter_tests::raw_transaction_boundaries_cannot_escape_invocation_rollback ... ok
+test host_calls::parameter_tests::crud_type_changes_cannot_commit_unrelated_row_writes ... ok
+test live_query::tests::explicit_null_literal_is_preserved ... ok
+test live_query::tests::export_external_live_query_benchmark_statements ... ok
+test live_query::tests::export_indexed_query_benchmark_statements ... ok
+test live_query::tests::hidden_related_search_text_still_affects_a_visible_root ... ok
+test live_query::tests::hidden_relation_cannot_suppress_projection_or_search_inputs ... ok
+test live_query::tests::indexed_search_preserves_phrases_boolean_precedence_and_literal_wildcards ... ok
+test live_query::tests::legacy_related_plans_keep_their_conservative_wake ... ok
+test live_query::tests::live_query_ignores_unreferenced_visibility_dependency_columns ... ok
+test live_query::tests::null_equality_compiles_to_is_null_without_a_parameter ... ok
+test live_query::tests::ordered_filters_bind_declared_numeric_columns_as_numbers ... ok
+test live_query::tests::ordered_filters_default_to_explicit_text_comparisons ... ok
+test live_query::tests::projection_wakes_follow_root_ids_and_both_sides_of_moves ... ok
+test live_query::tests::proven_projection_hints_do_not_wake_queries_but_untracked_sources_keep_waking ... ok
+test live_query::tests::rejects_arbitrary_server_predicates_and_invalid_columns ... ok
+test live_query::tests::related_rows_only_wake_members_who_can_observe_them ... ok
+test live_query::tests::related_scope_disjunction_stays_grouped_with_filters_and_visibility ... ok
+test live_query::tests::related_scopes_compile_as_guarded_subqueries_and_track_changes ... ok
+test live_query::tests::related_scopes_reject_unsafe_identifiers_and_unknown_contexts ... ok
+test live_query::tests::sdk_resume_unchanged_query_sends_progress_and_changed_query_sends_full_result ... ok
+test live_query::tests::shapes_exact_windows_at_result_path ... ok
+test membership_projector::tests::backoff_caps_and_resets_after_work ... ok
+test live_query::tests::source_rows_from_the_same_event_take_precedence_over_an_ahead_index ... ok
+test membership_projector::tests::wake_interrupts_idle_sleep ... ok
+test metrics::tests::connection_presence_is_project_scoped_and_removed_with_the_socket ... ok
+test metrics::tests::tenant_counts_include_only_authenticated_sockets_and_notify_on_close ... ok
+test module_host::dispatch_tests::heartbeat_completes_while_network_response_is_pending ... ok
+module diagnostic after readiness
+test host_calls::tests::binds_values_by_destination_column_type_and_deletes_many_rows ... ok
+test module_host::dispatch_tests::module_stdout_remains_writable_after_ready ... ok
+test modules::offline_contract_tests::unlimited_offline_policy_is_valid_but_missing_or_invalid_window_is_not ... ok
+test modules::tests::extracts_stored_typescript_artifact_without_rewriting_nulls ... ok
+test modules::tests::preserves_signed_interactive_metadata_and_portable_schemas ... ok
+test modules::tests::public_manifest_admission_is_explicit_and_server_only ... ok
+test modules::visibility_deprecation_tests::legacy_admission_warns_and_version_two_does_not ... ok
+test native_auth::tests::browser_token_exchange_preflight_is_cors_enabled ... ok
+test native_auth::tests::pkce_and_nonce_comparisons_are_strict ... ok
+test native_auth::tests::redirects_require_https_except_for_local_development ... ok
+test offload::tests::a_cancelled_waiter_passes_its_slot_on ... ok
+test offload::tests::a_waiter_that_does_not_run_never_holds_a_freed_slot ... ok
+test host_calls::parameter_tests::sync_finalization_savepoint_rollback_discards_staged_changes ... ok
+test modules::tests::cached_replica_epochs_preserve_hashes_and_tenant_identity ... ok
+test host_calls::parameter_tests::sync_finalization_reports_the_committed_revision ... ok
+
+thread 'tokio-rt-worker' (674850) panicked at crates/runtime/src/offload.rs:1653:60:
+boom
+
+thread 'gonvex-offload' (674852) panicked at crates/runtime/src/offload.rs:1653:60:
+boom
+test host_calls::parameter_tests::sync_finalization_batches_capture_every_insert_in_one_revision ... ok
+
+thread 'tokio-rt-worker' (674853) panicked at crates/runtime/src/offload.rs:1653:60:
+boom
+
+thread 'gonvex-offload-1' (674856) panicked at crates/runtime/src/offload.rs:1653:60:
+boom
+test offload::tests::every_strategy_runs_cancels_and_propagates_panics ... ok
+test host_calls::parameter_tests::sync_finalization_rollback_leaves_no_changes_for_the_next_commit ... ok
+test offload::tests::short_builds_go_first_and_large_ones_keep_all_but_one_slot ... ok
+test offload::tests::unknown_keys_fall_back_to_the_table_maximum ... ok
+test open_reasons::tests::shapes_and_reopens ... ok
+test offload::tests::a_waiter_that_lost_a_claim_race_is_woken_again ... ok
+test operations::tests::pat_permission_wildcards_are_bounded ... ok
+test operations::tests::project_keys_embed_the_project_id_for_cli_validation ... ok
+test operator_data::tests::identifiers_and_internal_tables_fail_closed ... ok
+test operator_data::tests::json_references_replace_exact_strings_only ... ok
+[gonvex-module-host] 1793854051528 loaded module t generation 1 with 4 functions
+[gonvex-module-host] 1793854051528 activated module t generation 1
+test in_process::tests::host_calls_reach_the_invocation_handler_in_order ... ok
+test permission_bits::tests::grants_are_bits_with_reference_counts_and_soft_deletes ... ok
+test presence::tests::changes_inside_the_window_coalesce_into_one_trailing_patch ... ok
+test presence::tests::disabled_hub_never_short_circuits ... ok
+test presence::tests::disconnect_goes_offline_only_after_grace_and_reconnect_hides_the_gap ... ok
+test presence::tests::grace_and_window_schedule_without_polling ... ok
+test presence::tests::leading_edge_publishes_the_first_change_at_once ... ok
+test presence::tests::legacy_beat_registers_once_and_never_overrides_reported_state ... ok
+test presence::tests::live_support_sessions_lists_every_open_session ... ok
+test presence::tests::moving_a_connection_to_another_tenant_leaves_the_old_one ... ok
+test presence::tests::multiple_tabs_aggregate_to_the_most_present_state ... ok
+test presence::tests::presence_never_crosses_tenants_or_projects ... ok
+test presence::tests::slow_connection_merges_batches_then_resyncs_with_a_snapshot ... ok
+test presence::tests::snapshot_lists_online_members_and_patches_follow_it ... ok
+test presence::tests::support_sessions_write_once_and_flush_last_seen_on_close ... ok
+test presence::tests::the_scheduler_is_woken_only_when_a_scope_becomes_due_earlier ... ok
+test presence::tests::transitions_are_published_once_per_tick_and_only_on_change ... ok
+test presence::tests::unsubscribed_or_closed_connections_receive_nothing ... ok
+test profiling::tests::summary_reports_recorded_stages_and_gauges ... ok
+test public_functions::tests::admission_cache_expires_between_batch_items_and_revocation_is_sticky ... ok
+test offload::tests::pool_jobs_record_queue_wait_busy_and_run ... ok
+test public_functions::tests::budgets_count_calls_and_release_connection_slots ... ok
+test public_functions::tests::canonical_public_scope_is_pinned ... ok
+test public_functions::tests::configured_headers_require_cidr_trust_and_valid_ips ... ok
+test public_functions::tests::forwarded_for_selects_rightmost_untrusted_ip ... ok
+test public_functions::tests::forwarding_headers_require_a_trusted_peer ... ok
+test public_functions::tests::ipv6_clients_share_all_budgets_within_a_64 ... ok
+test membership_projector::tests::wake_during_pass_is_retained_and_coalesced ... ok
+[gonvex-module-host] 1793854051541 loaded module t generation 1 with 4 functions
+[gonvex-module-host] 1793854051541 activated module t generation 1
+test host_calls::tests::primary_keys_come_from_pragma_table_info ... ok
+test offload::tests::oversized_build_runs_alone_instead_of_never ... ok
+test public_functions::tests::limiter_maps_are_bounded_and_release_or_evict_buckets ... ok
+test replica::resume::tests::lru_entry_limit_and_old_completion_never_replace_newer_anchor ... ok
+test raw_log::tests::raw_images_answer_like_their_values ... ok
+test replica::tests::complete_bounded_collection_stays_incremental_until_a_budget_is_crossed ... ok
+test replica::tests::dependency_updates_only_recompute_visibility_for_referenced_columns ... ok
+test public_functions::tests::admission_monitor_runs_while_execution_is_blocked ... ok
+test replica::tests::feed_deltas_follow_before_and_after_images_without_held_rows ... ok
+test replica::tests::integrity_hashes_match_the_client_canonical_json_contract ... ok
+test replica::resume::tests::ttl_disabled_byte_limit_and_boundaries_are_conservative ... ok
+test replica::tests::native_control_rows_preserve_exact_wire_values_and_omit_old_projection ... ok
+test replica::tests::negotiated_sum_digest_is_maintained_incrementally ... ok
+test replica::tests::normalized_changes_keep_entities_another_collection_holds ... ok
+test replica::tests::sdk_resume_aggregate_matches_client_xor_fixture ... ok
+test replica::tests::sdk_resume_expired_or_wrong_epoch_cursor_requires_snapshot ... ok
+test replica::tests::snapshot_pages_interruption_empty_and_oversized_rows ... ok
+test replica::tests::snapshot_pages_json_byte_len_matches_encoder ... ok
+test replica::tests::snapshot_pages_legacy_frame_preserves_original_metadata ... ok
+test replica::tests::snapshot_pages_materialized_generation_ignores_concurrent_changes ... ok
+test replica::tests::snapshot_stream_distinguishes_exact_boundary_from_truncation_and_errors ... ok
+test replica::tests::snapshot_stream_stops_after_row_or_byte_budget_lookahead ... ok
+test replica::tests::source_table_can_also_be_a_visibility_dependency ... ok
+test replica::tests::sql_order_matches_sqlite_storage_classes ... ok
+test replica::tests::subscription_state_is_small ... ok
+test replica::tests::transition_filter_is_old_and_new_aware ... ok
+test replica::tests::truncated_window_moves_only_within_its_boundary ... ok
+test replica::tests::unprojected_changes_and_net_noops_publish_nothing ... ok
+test replica_open_queue::tests::cancellation_drops_started_work_without_polling_completion ... ok
+test replica_open_queue::tests::close_and_replacement_never_publish_obsolete_work ... ok
+test replica::tests::native_snapshot_wire_fixture_matches_canonical_hashes ... ok
+test replica_open_queue::tests::lends_unused_capacity_without_blocking_a_later_small_source ... ok
+test replica_open_queue::tests::publishes_small_source_without_waiting_for_bulk_and_reserves_capacity ... ok
+test replica_open_queue::tests::rejected_replacement_keeps_the_previous_preparation ... ok
+test replica_open_queue::tests::streams_more_request_bytes_than_the_allowance_without_an_error ... ok
+test live_query::tests::exact_count_parameter_type_changes_match_rows_on_one_connection ... ok
+test sandbox::cancellation_tests::cancellation_cleanup_cannot_clear_a_different_execution_or_workspace ... ok
+test sandbox::cancellation_tests::cancelled_admission_releases_workspace_execution_ownership ... ok
+test offload::tests::overload_fails_fast_instead_of_queueing_without_bound ... ok
+test sandbox::cancellation_tests::explicit_cancel_boundary_preserves_an_uncancelled_worker_response ... ok
+test sandbox::cancellation_tests::cancelling_a_native_worker_releases_its_execution_reservation ... ok
+test host_calls::tests::sdk_write_statements_decode_returning_rows_by_declared_type ... ok
+test sandbox::cancellation_tests::explicit_cancel_finishes_queued_execution_before_admission_is_available ... ok
+test operations::tests::password_hashes_match_the_existing_dashboard_contract ... ok
+test sandbox::retirement_tests::native_child_exit_retains_capacity_until_retirement ... ignored, requires the parent-owned native exit coordinator
+test sandbox::tests::destroy_releases_a_completed_workspace_immediately ... ok
+test sandbox::tests::paths_cannot_escape_the_workspace ... ok
+test sandbox::tests::unavailable_duckdb_does_not_create_a_workspace ... ok
+test public_functions::tests::socket_admission_enforces_connection_ip_and_payload_limits ... ok
+test sandbox::cancellation_tests::explicit_cancel_covers_a_blocked_native_request_write ... ok
+test scheduled_lane::tests::the_dedicated_thread_runs_spawned_work ... ok
+test scheduled_lane::tests::permits_cap_concurrent_runs_and_tenants_serialize ... ok
+test scheduler::tests::a_cron_that_fell_behind_skips_missed_runs_instead_of_replaying_them ... ok
+test offload::tests::burst_never_exceeds_the_byte_budget ... ok
+test sandbox::cancellation_tests::retirement_wait_error_closes_admission_and_wakes_queued_work ... ok
+test scheduler::tests::interval_and_five_field_crons_have_a_next_occurrence ... ok
+test scheduled_lane::tests::scheduled_runs_wait_for_user_calls_up_to_the_limit ... ok
+test permission_bits::fixture_tests::permission_bits_match_sql_through_commits_and_never_see_rollbacks ... ok
+test scheduler::tests::stagger_offsets_are_deterministic_and_spread_tenants ... ok
+test scheduler::tests::staggered_runs_keep_the_period_and_bound_the_delay ... ok
+test scheduler::tests::startup_inside_the_stagger_window_keeps_the_current_occurrence ... ok
+test scheduler::tests::the_scheduler_sleeps_until_the_next_job_but_never_past_the_idle_cap ... ok
+test scheduler::tests::wake_keys_ignore_object_key_order_but_not_values ... ok
+20k JSON wire: monolithic=20580225 bytes, max_page=261719 bytes, total_pages=20607952 bytes, pages=79; peak single encoded String capacity: before=35291136 bytes, after=296960 bytes; resident/staged rows and transport queues excluded
+test replica::tests::snapshot_pages_byte_and_row_limits_20k_measurement ... ok
+test service_principal::tests::authentication_failures_are_indistinguishable ... ok
+test service_principal::tests::credentials_match_only_their_own_digest ... ok
+test replica_open_queue::tests::enforces_bytes_and_count_for_both_queued_and_active_work ... ok
+test service_principal::tests::delegation_actors_are_validated ... ok
+test service_principal::tests::delegation_arguments_are_validated_before_touching_the_control_plane ... ok
+test service_principal::tests::manifest_access_requires_the_flag_and_a_listed_project ... ok
+test service_principal::tests::manifest_route_gives_service_principals_only_the_function_catalog ... ok
+test service_principal::tests::service_identity_is_distinct_from_members_and_system ... ok
+test service_principal::tests::service_sockets_reject_everything_outside_their_capabilities ... ok
+test snapshot_cache::tests::cache_arguments_keep_only_equality_filter_arguments ... ok
+test snapshot_cache::tests::content_hash_ignores_the_generation_but_not_what_rows_depend_on ... ok
+test snapshot_cache::tests::evicts_least_recently_used_entries_beyond_the_budget ... ok
+test snapshot_cache::tests::sparse_entries_are_dropped_and_their_key_skips_the_cache ... ok
+test snapshot_delivery::tests::a_buffered_frame_is_not_sent_or_acknowledgeable_until_credit_returns ... ok
+test snapshot_delivery::tests::ack_prefix_preserves_wrapped_deque_records_and_replay_is_inert ... ok
+test snapshot_delivery::tests::active_and_retired_ack_prefixes_conserve_shared_credit_and_replays ... ok
+test snapshot_delivery::tests::canceled_and_replaced_snapshots_keep_wire_credit_until_durable_ack ... ok
+test snapshot_delivery::tests::canonical_strings_preserve_hash_encoding_and_batched_certificates_wait ... ok
+test snapshot_delivery::tests::closing_native_subscription_releases_credits_and_confirms_before_future_frames ... ok
+test replica_open_queue::tests::streams_more_sources_than_the_count_allowance_without_an_error ... ok
+test snapshot_delivery::tests::credits_are_connection_bounded_and_duplicate_acks_do_not_mint_more ... ok
+test snapshot_delivery::tests::exact_frame_admission_fills_the_window_without_minting_credit ... ok
+test snapshot_delivery::tests::frame_admission_handles_exact_limits_and_machine_integer_edges ... ok
+test snapshot_delivery::tests::final_ack_releases_latest_certificate_and_close_releases_credits ... ok
+test snapshot_delivery::tests::late_small_native_source_gets_next_returned_credit_before_bulk_continues ... ok
+test snapshot_delivery::tests::negotiated_only_with_native_hash_and_paging_contracts ... ok
+test snapshot_delivery::tests::oversized_rows_fail_explicitly_without_losing_other_deliveries ... ok
+test snapshot_delivery::tests::oversized_start_metadata_is_rejected_before_retaining_a_delivery ... ok
+test snapshot_delivery::tests::legacy_pages_rotate_and_hold_ready_until_the_last_page ... ok
+test snapshot_delivery::tests::retired_partial_ack_opens_exactly_one_frame_slot_and_replay_opens_none ... ok
+test snapshot_delivery::tests::retired_bytes_block_active_until_their_exact_prefix_is_acked ... ok
+test sql_admission::tests::counts_statements_with_sqlite_lexical_rules ... ok
+test sql_admission::tests::preserves_savepoints_and_keyword_boundaries ... ok
+test sql_admission::tests::refuses_statements_that_reach_outside_the_tenant_database ... ok
+test sql_admission::tests::rejects_invocation_transaction_boundaries ... ok
+test sql_admission::tests::reports_the_first_word ... ok
+test sql_parameters::tests::array_parameters_bind_as_json_for_json_each ... ok
+test sql_parameters::tests::changing_crud_id_types_cannot_commit_unrelated_row_writes ... ok
+test sql_parameters::tests::changing_json_parameter_types_preserves_values_on_one_connection ... ok
+test sql_parameters::tests::column_binding_follows_declared_kind ... ok
+test sql_statement_key::tests::description_namespace_cannot_alias_execution ... ok
+test sql_statement_key::tests::framing_is_unambiguous ... ok
+test sql_statement_key::tests::no_parameters_gets_execution_namespace ... ok
+test sql_statement_key::tests::order_is_part_of_key ... ok
+test sql_statement_key::tests::proposed_appenders_match_original_bytes ... ok
+test sql_statement_key::tests::trailing_line_comment_does_not_change_suffix ... ok
+test sql_statement_key::tests::types_partition_cache ... ok
+test storage::tests::object_keys_are_tenant_namespaced_and_paths_are_encoded ... ok
+test snapshot_delivery::tests::typed_start_precedes_first_binary_only_once_and_never_contains_rows ... ok
+test storage::tests::proxy_signatures_are_method_scoped_and_constant_time_checked ... ok
+test storage::tests::proxy_uploads_are_single_use_and_metadata_binds_immutable_bytes ... ok
+test telemetry::tests::connection_context_replaces_spoofed_attribution_and_scrubs_secrets ... ok
+test telemetry::tests::limiter_is_bounded_per_subject ... ok
+test scheduler::tests::a_cron_never_has_more_than_one_pending_run_per_tenant ... ok
+test scheduler::tests::due_when_values_follow_sql_truthiness ... ok
+test public_functions::tests::unauthenticated_transports_have_slots_deadlines_and_ingestion_limits ... ok
+test tests::authenticated_tenant_calls_without_replica_work_get_a_terminal_watermark ... ok
+test tests::cached_startup_auth_error_codes ... ok
+test tests::committed_feed_event_runs_between_back_to_back_socket_calls ... ok
+test tests::committed_feed_transactions_have_a_terminal_replica_watermark ... ok
+test scheduler::tests::pruning_deletes_only_old_completed_jobs ... ok
+test tests::control_completion_closes_after_every_refreshed_control_query ... ok
+test tests::control_telemetry_preserves_legacy_auth_and_removes_replica_data ... ok
+test tests::control_telemetry_tenant_control_keeps_authority_without_data ... ok
+test tests::configured_dashboard_sessions_revoke_on_credential_change ... ok
+test tests::failed_or_tenant_calls_do_not_emit_control_watermarks ... ok
+test tests::feed_first_snapshot_is_bounded_under_continuous_feed_traffic ... ok
+test tests::health_public_response_does_not_disclose_deployment ... ok
+test tests::health_authenticated_diagnostics_preserve_version_and_topology ... ok
+test tests::health_reports_the_canonical_control_plane_database_before_startup ... ok
+test tests::member_access_change_detection_matches_the_feed_columns ... ok
+test tests::membership_change_closes_the_session_with_the_transaction_watermark ... ok
+test tests::membership_replay_before_the_admission_snapshot_does_not_revoke_a_new_socket ... ok
+test in_process::tests::in_process_invocations_fill_the_invoke_stages_and_isolate_wait ... ok
+test in_process::tests::invocations_without_a_dispatcher_and_before_start_fail_closed ... ok
+test tests::operator_cors_does_not_bypass_authorization ... ok
+test tests::public_tenant_auth_and_execution_contract ... ok
+test tests::quiet_bootstrap_closes_only_after_acks_and_through_the_oldest_snapshot ... ok
+test tests::read_only_and_failed_calls_do_not_synthesize_watermarks ... ok
+test tests::receipt_guarantee_tests::accepted_receipt_lookup_never_claims_or_executes_a_reducer ... ok
+test tests::receipt_guarantee_tests::authenticated_sdk_module_upgrade_recovery ... ignored, requires the module-upgrade browser coordinator
+test tests::receipt_guarantee_tests::authenticated_sdk_receipt_replica_composition ... ignored, requires the authenticated SDK/storage coordinator and built packages
+test tests::receipt_guarantee_tests::competing_claim_executes_after_owner_rolls_back ... ok
+test tests::operator_preflights_are_cors_enabled ... ok
+test tests::receipt_guarantee_tests::competing_claim_replays_after_owner_commits ... ok
+test tests::receipt_guarantee_tests::failed_reducer_rolls_back_business_write_and_receipt_together ... ok
+test tests::receipt_guarantee_tests::noop_receipt_replays_with_a_zero_revision_barrier ... ok
+test tests::receipt_guarantee_tests::receipt_initialization_preserves_legacy_replay ... ok
+test tests::receipt_guarantee_tests::receipt_initialization_cancellation_releases_lock_and_admission ... ok
+test tests::receipt_guarantee_tests::receipt_initialization_refuses_ambiguous_histories ... ok
+test tests::receipt_guarantee_tests::receipt_initialization_repairs_missing_index_and_observes_schema_reset ... ok
+test tests::receipt_guarantee_tests::receipt_initialization_serializes_cold_callers ... ok
+test tests::receipt_guarantee_tests::receipt_recovery_after_process_crash ... ignored, requires the runtime process-crash coordinator
+test tests::receipt_guarantee_tests::receipt_lookup_progresses_while_snapshot_preparations_own_pool_connections ... ok
+test tests::receipt_guarantee_tests::receipt_rejects_path_reuse_and_separates_account_subjects ... ok
+test tests::receipt_guarantee_tests::replay_does_not_succeed_when_its_clock_cannot_be_read ... ok
+test tests::receipt_guarantee_tests::replay_retains_barrier_after_change_feed_pruning ... ok
+test tests::receipt_guarantee_tests::replay_retains_barrier_with_a_new_transport_id ... ok
+test tests::receipt_lookup_watermarks_cannot_pass_sent_replica_work ... ok
+test tests::replica_open_installation_is_ordered_and_excludes_failed_subscriptions ... ok
+test tests::replica_open_work_never_exceeds_the_database_concurrency_cap ... ok
+test tests::replica_open_work_preserves_request_order_after_reverse_completion ... ok
+test tests::sdk_resume_token_rotation_preserves_only_identical_authorization_scope ... ok
+test tests::required_module_host_fails_closed ... ok
+test tests::signed_storage_upload_preflight_is_cors_enabled ... ok
+test tests::snapshot_pages_negotiation_preserves_old_clients ... ok
+test tests::storage_response_blocks_active_and_unknown_content ... ok
+test tests::storage_response_preserves_safe_media_and_ranges ... ok
+test tests::subscribed_connections_wait_for_the_feed_ordered_watermark ... ok
+test visibility::mask_tests::derived_input_rows_do_not_become_unanchored_principal_changes ... ok
+test visibility::mask_tests::derived_sets_correlate_rows_by_a_non_unique_key ... ok
+test visibility::mask_tests::derived_sets_map_grants_through_the_shared_index_in_memory ... ok
+test visibility::mask_tests::derived_sets_reject_unsafe_shapes ... ok
+test visibility::mask_tests::grant_join_set_selects_the_members_join_tokens ... ok
+test visibility::mask_tests::grant_rows_are_decided_from_the_row_and_member_alone ... ok
+test visibility::mask_tests::inherited_parent_filters_and_permission_self_reads ... ok
+test visibility::mask_tests::inherited_parent_predicate_uses_the_child_principal ... ok
+test visibility::mask_tests::inherited_rows_follow_the_parent_in_memory ... ok
+test visibility::mask_tests::inherited_sql_mirrors_the_in_memory_rule ... ok
+test visibility::mask_tests::inherits_any_admits_rows_linked_to_any_visible_parent ... ok
+test visibility::mask_tests::mask_empty_derived_set_is_resolved_even_without_grants ... ok
+test visibility::mask_tests::mask_sql_compiles_role_pruned_sets_without_resolving_them ... ok
+test visibility::mask_tests::mask_sql_still_rejects_an_unresolved_active_set ... ok
+test visibility::mask_tests::only_permission_rows_naming_the_member_rebuild_its_principal ... ok
+test visibility::principal_change_regression::acl_ancestry_moves_keep_the_conservative_resync_path ... ok
+test visibility::principal_change_regression::cached_inputs_are_shared_metadata_not_a_members_principal ... ok
+test visibility::principal_change_regression::equality_anchors_follow_aliases_and_explicit_left_alias_only ... ok
+test visibility::principal_change_regression::irrelevant_member_writes_do_not_reopen_spots ... ok
+test visibility::principal_change_regression::principal_reopen_measurement ... ignored, short module timing; run only in reserved measurement window
+test tests::signed_storage_download_enforces_response_policy_and_ranges ... ok
+test visibility::principal_change_regression::sql_oracle_member_flag_and_membership_transitions ... ok
+test visibility::principal_change_regression::visibility_changes_and_membership_moves_still_reopen ... ok
+test visibility::principal_change_regression::unprovable_joins_and_inherited_principals_remain_conservative ... ok
+test visibility::registry_tests::applier_lag_poisons_the_index ... ok
+
+thread '<unnamed>' (675287) panicked at crates/runtime/src/visibility_registry_tests.rs:60:9:
+controlled applier failure while holding its index lock
+test visibility::registry_tests::epoch_change_poisons_and_foreign_epoch_is_never_ready ... ok
+test visibility::registry_tests::applier_panic_with_a_poisoned_lock_wakes_existing_waiters ... ok
+test visibility::registry_tests::index_keeps_advancing_with_no_consumers_for_a_new_query ... ok
+test visibility::registry_tests::ordered_single_writer_applies_each_transaction_once ... ok
+test visibility::registry_tests::projection_change_replaces_and_poisons_the_old_index ... ok
+test visibility::registry_tests::readiness_waits_for_the_applier_through_inherited_parents ... ok
+test visibility::registry_tests::reset_poisons_held_handles_and_ensure_rebuilds ... ok
+test visibility::registry_tests::subscribing_before_the_load_snapshot_closes_the_load_gap ... ok
+test visibility::registry_tests::unmaintained_index_behind_the_event_is_not_ready ... ok
+test scheduler::tests::schema_upgrade_collapses_an_existing_cron_backlog ... ok
+test scheduler::tests::wakes_coalesce_to_one_pending_run_at_the_earliest_time ... ok
+test storage::tests::proxied_downloads_stream_past_the_request_timeout ... ok
+test visibility::tests::admitted_role_skips_irrelevant_sets_but_never_member_revocation ... ok
+test visibility::tests::anchored_dependency_routes_inserts_deletes_and_reassignments ... ok
+test visibility::tests::bounded_sql_visibility_keeps_membership_in_sql_without_materialized_ids ... ok
+test visibility::tests::composite_predicates_are_grouped_before_callers_append_filters ... ok
+test visibility::tests::dependency_columns_resolve_aliases_to_physical_tables ... ok
+test tests::native_snapshot_socket_backpressures_until_durable_ack ... ok
+test visibility::tests::literal_predicates_compile_for_source_and_joined_rows ... ok
+test visibility::tests::nested_member_checks_share_only_the_account_context_binding ... ok
+test visibility::tests::nested_role_branches_prune_only_irrelevant_dependencies ... ok
+test visibility::tests::non_empty_flags_retain_dependencies_and_follow_set_contents ... ok
+test visibility::tests::nullable_negation_matches_sql_admission ... ok
+test visibility::tests::permission_and_row_predicates_keep_their_set_dependencies ... ok
+test visibility::tests::self_join_requires_aliases_and_compiles_both_occurrences ... ok
+test visibility::tests::unanchored_join_dependencies_are_never_skipped ... ok
+test visibility_class::scalar_eq_tests::scalar_eq_matches_scalar ... ok
+test visibility_corpus::candidates_cover_every_member_that_sees_a_row ... ok
+test visibility_corpus::compiled_evaluator_matches_the_interpreter_on_irregular_rows ... ok
+test visibility_corpus::identical_principals_share_a_class_and_principal_changes_move_members ... ok
+test scheduler::tests::claims_use_an_index_instead_of_scanning_job_history ... ok
+test visibility_index::tests::completeness_advances_without_marking_unchanged_acl_rows_modified ... ok
+test visibility_index::tests::duplicate_grants_revoke_only_after_last_contribution ... ok
+test visibility_index::tests::non_unique_keys_group_rows_and_move_with_their_row ... ok
+test visibility_index::tests::parent_transactions_are_shared_and_deletion_removes_access ... ok
+test visibility_index::tests::reassignment_routes_to_old_and_new_members ... ok
+test visibility_metrics::tests::counters_are_runtime_local_and_reset_preserves_the_instance ... ok
+test visibility_token_tests::membership_never_confuses_null_columns_with_the_string_null_token ... ok
+test visibility_corpus::sql_interpreted_and_compiled_evaluators_agree_on_the_corpus ... ok
+[gonvex-module-host] 1793854052114 loaded module t generation 1 with 3 functions
+[gonvex-module-host] 1793854052114 activated module t generation 1
+test in_process::tests::module_sql_runs_on_the_isolate_thread_with_the_async_path_results ... ok
+[gonvex-module-host] 1793854052131 loaded module t generation 1 with 4 functions
+[gonvex-module-host] 1793854052131 activated module t generation 1
+test visibility::snapshot::tests::derived_snapshot_ignores_a_stale_index ... ok
+test visibility::snapshot::tests::derived_snapshot_ignores_an_index_ahead_of_its_wal_snapshot ... ok
+gonvex-store: a SQLite writer connection was opened from a niced thread (nice 15) and cannot return to base priority (no CAP_SYS_NICE)
+test visibility::tests::developer_visibility_without_membership_preserves_admission ... ok
+test visibility::snapshot::tests::derived_snapshot_orders_chains_and_applies_all_constraints ... ok
+test in_process::tests::runaway_and_heap_hungry_scripts_fail_without_taking_the_runtime_down ... ok
+test service_principal::tests::delegated_sessions_are_member_scoped_single_use_and_revocable ... ok
+[gonvex-module-host] 1793854052799 loaded module project generation 1 with 5 functions
+[gonvex-module-host] 1793854052799 activated module project generation 1
+test sandbox::cancellation_tests::explicit_cancel_timeout_covers_a_blocked_native_request_write ... ok
+test visibility::registry_tests::real_feed_maintains_index_without_consumers_and_without_nested_admission ... ok
+test tests::action_depth::a_self_rescheduling_reducer_runs_past_depth_eight_and_stops_at_the_hop_bound ... ok
+[gonvex-module-host] 1793854058206 loaded module project generation 1 with 5 functions
+[gonvex-module-host] 1793854058206 activated module project generation 1
+test tests::action_depth::a_waiting_user_action_goes_before_queued_outbox_work ... ok
+[gonvex-module-host] 1793854058860 loaded module project generation 1 with 5 functions
+[gonvex-module-host] 1793854058861 activated module project generation 1
+test tests::action_depth::outbox_actions_run_one_at_a_time_with_the_backlog_in_sqlite ... ok
+[gonvex-module-host] 1793854060021 loaded module profiled generation 1 with 3 functions
+[gonvex-module-host] 1793854060021 activated module profiled generation 1
+test tests::in_process_profile_fills_function_counters_and_invoke_stages ... ok
+test action_calls::fetch_tests::response_body_can_arrive_after_thirty_seconds_within_the_action_deadline ... ok
+
+failures:
+
+failures:
+    connection_future_sizes::connection_future_sizes
+
+test result: FAILED. 398 passed; 1 failed; 8 ignored; 0 measured; 0 filtered out; finished in 31.00s
+
+error: test failed, to rerun pass `-p gonvex-runtime --lib`
+{"actual": {"arbitration": "kernel-v1", "contained_oom_kills": 0, "cpu_usec": 740080199, "exit_code": 101, "io_source": "unavailable", "memory_peak": 5296766976, "wall_seconds": 402.085}, "arbitration": "kernel-v1", "at": "2026-11-05T04:48:02.228708+00:00", "attempt": "d7ef116578824d4b9d90a110df574578", "build": "/home/gabriel/.t3/worktrees/gonvex/t3-06061a4a", "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-reload-final-tests-phase-fd507413240c.service", "event": "lease-release", "exit_code": 101, "kind": "build", "pid": 590247, "schema": "coach.resources.v1", "start_ticks": "1694699", "state": "/home/gabriel/.local/state/coach-resources", "unit": "gonvex-reload-final-tests-phase-fd507413240c.service", "why": "reload final tests target /mnt/data/work/gonvex-open-cost/target"}
+          Finished with result: exit-code
+Main processes terminated with: code=exited, status=101/n/a
+               Service runtime: 6min 42.242s
+             CPU time consumed: 12min 20.198s
+                   Memory peak: 4.9G (swap: 0B)

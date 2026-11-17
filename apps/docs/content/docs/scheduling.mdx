@@ -44,12 +44,12 @@ the Reducer commits. A rollback does not expose its scheduled job.
 
 External work belongs in an Action. If the Action needs durable state, call a
 Reducer. Database changes made by a Reducer are committed atomically and routed
-from the Postgres change feed; there is no write declaration or manual
+from the committed change feed; there is no write declaration or manual
 invalidation API.
 
 ## Durability
 
-Recurring and one-shot jobs are persisted in Postgres and claimed with
+Recurring and one-shot jobs are persisted in the tenant's SQLite database and claimed with
 renewable leases. They survive runtime restarts. Normal failures are recorded
 in runtime metrics; retention, public cancellation, manual retry, and
 dead-letter APIs remain limited beta features.

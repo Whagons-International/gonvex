@@ -1,5 +1,8 @@
 # Whagons Control Plane v2 handoff
 
+> Historical: written while Gonvex stored data in PostgreSQL. Storage moved to
+> SQLite on 2026-11-02; see [SQLite storage](sqlite-storage.md).
+
 This is the migration contract for `@gonvex/*` version `0.5.1`. Whagons should
 use one `GonvexClient` for Control Plane calls, tenant calls, live Control Plane
 queries, and the Local Replica stream. OAuth callbacks and public customer APIs
