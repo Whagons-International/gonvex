@@ -31,7 +31,7 @@ export function writeFixture(path, { rows = 1200 } = {}) {
     CREATE INDEX child_parent ON child (parent_id);
     CREATE VIEW parent_summary AS SELECT p.id, p.name, c.children FROM parent p LEFT JOIN parent_counts c ON c.parent_id = p.id;
   `);
-  const wide = Array.from({ length: 43 }, (_, i) => `c${i} ${i % 4 === 0 ? 'INTEGER' : i % 4 === 1 ? 'REAL' : 'TEXT'}`);
+  const wide = Array.from({ length: 99 }, (_, i) => `c${i} ${i % 4 === 0 ? 'INTEGER' : i % 4 === 1 ? 'REAL' : 'TEXT'}`);
   db.exec(`CREATE TABLE wide (id INTEGER PRIMARY KEY, ${wide.join(', ')})`);
 
   db.exec('BEGIN');
@@ -52,10 +52,11 @@ export function writeFixture(path, { rows = 1200 } = {}) {
   const docs = db.prepare('INSERT INTO docs VALUES (?, ?)');
   for (let i = 0; i < 300; i++) docs.run(`Title ${i}`, `searchable body text number ${i} with trigram matching`);
   db.exec('DELETE FROM docs WHERE rowid % 10 = 0');
-  const wideInsert = db.prepare(`INSERT INTO wide VALUES (${Array.from({ length: 44 }, () => '?').join(', ')})`);
+  const wideInsert = db.prepare(`INSERT INTO wide VALUES (${Array.from({ length: 100 }, () => '?').join(', ')})`);
   for (let r = 1; r <= 300; r++) {
-    wideInsert.run(r, ...Array.from({ length: 43 }, (_, i) => (i % 4 === 0 ? r * i : i % 4 === 1 ? r / (i + 1) : `r${r}c${i}`)));
+    wideInsert.run(r, ...Array.from({ length: 99 }, (_, i) => (i % 4 === 0 ? r * i : i % 4 === 1 ? r / (i + 1) : `r${r}c${i}`)));
   }
+  db.exec("UPDATE wide SET c48=9223372036854775807,c49=3.0,c50=CAST(X'FF00FE' AS TEXT),c51=X'00FF',c52=NULL,c53=-9e999 WHERE id=1");
   db.exec('COMMIT');
   file.close();
 }

@@ -24,7 +24,7 @@
 // does not advance during synchronous work, so it reads 0 there.
 
 import { createHash } from 'node:crypto';
-import { RowHasher, fromWire, keyIndexes, quoteIdent, selectSql, toWire } from './codec.mjs';
+import { RowHasher, fromWire, keyIndexes, quoteIdent, readTypedRows, toWire } from './codec.mjs';
 import { buildInserts, readPlans, readSchema, readSequences } from './sql.mjs';
 
 const MAX_READ_BYTES = 8 * 1024 * 1024;
@@ -141,11 +141,10 @@ export class TenantTransfer {
       if (bytes >= cap) break;
       const plan = this.plans().find((p) => p.name === table);
       if (!plan) throw new Error(`no table ${table}`);
-      const { sql, params } = selectSql(plan, { after });
       const keys = keyIndexes(plan);
       const rows = [];
       let full = false;
-      for (const raw of this.sql.exec(sql, ...params).raw()) {
+      for (const raw of readTypedRows(this.sql, plan, { after })) {
         const row = [];
         for (let i = 0; i < raw.length; i += 2) row.push(toWire(raw[i], raw[i + 1]));
         rows.push(row);
@@ -155,7 +154,6 @@ export class TenantTransfer {
           break;
         }
       }
-      // A cursor stays open only until the next exec; stopping early is fine.
       pages.push({ table, columns: plan.copyColumns, rows, next: full ? keys.map((i) => rows.at(-1)[i]) : null });
     }
     return { pages };
@@ -166,7 +164,7 @@ export class TenantTransfer {
     const out = {};
     for (const plan of plans) {
       const hasher = new RowHasher(createHash);
-      for (const raw of this.sql.exec(selectSql(plan).sql).raw()) hasher.addTyped(raw);
+      for (const raw of readTypedRows(this.sql, plan)) hasher.addTyped(raw);
       out[plan.name] = hasher.digest();
     }
     return { checksums: out };

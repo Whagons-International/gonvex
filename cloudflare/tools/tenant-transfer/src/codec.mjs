@@ -212,6 +212,30 @@ export function selectSql(plan, { after = null, limit = null } = {}) {
   };
 }
 
+/**
+ * Exact typed rows with at most 100 result columns per statement. Each value
+ * needs two fields, so wide tables use parallel, identically ordered scans of
+ * at most 50 source columns. Consume synchronously: no writes or await may
+ * interleave the scans. Only the current row is assembled in memory.
+ */
+export function* readTypedRows(storage, plan, options = {}) {
+  const cursors = [];
+  try {
+    for (let i = 0; i < plan.copyColumns.length; i += 50) {
+      const { sql, params } = selectSql({ ...plan, copyColumns: plan.copyColumns.slice(i, i + 50) }, options);
+      cursors.push(storage.exec(sql, ...params).raw());
+    }
+    while (cursors.length) {
+      const parts = cursors.map(cursor => cursor.next());
+      if (parts.every(part => part.done)) return;
+      if (parts.some(part => part.done)) throw new Error(`${plan.name}: typed column scans have different row counts`);
+      yield parts.flatMap(part => part.value);
+    }
+  } finally {
+    for (const cursor of cursors) cursor.return?.();
+  }
+}
+
 /** Indexes of the key columns inside plan.copyColumns. */
 export function keyIndexes(plan) {
   return plan.key.map((k) => {
