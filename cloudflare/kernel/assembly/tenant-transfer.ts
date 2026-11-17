@@ -28,7 +28,7 @@ export async function handleTenantTransfer(request: Request, env: TransferEnv & 
       !timingSafeEqual(given, wanted)) return new Response(null, { status: 404 });
   if (request.method !== 'POST' || !operations.has(match[2]!)) return new Response(null, { status: 405 });
   const bytes = await request.arrayBuffer();
-  if (bytes.byteLength > 2 * 1024 * 1024) return new Response(null, { status: 413 });
+  if (bytes.byteLength > 4 * 1024 * 1024) return new Response(null, { status: 413 });
   return rpc<{ assemblyTransfer(request: Request): Promise<Response> }>(env.TENANT, match[1]!).assemblyTransfer(new Request(request, { body: bytes }));
 }
 

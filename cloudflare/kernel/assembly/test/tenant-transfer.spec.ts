@@ -4,7 +4,7 @@ import { handleTenantTransfer, transferIntoTenant, transferAllowed } from '../te
 import { containerRequest } from '../builder';
 import { manifest } from './catalog';
 import type { CompositionTenant } from './worker';
-const config = { GONVEX_DEV_TRANSFER_TARGET:'gonvex-cf-dev-test',GONVEX_DEV_TRANSFER_TOKEN:'test-only',GONVEX_DEV_TRANSFER_TENANTS:'devcopy-test,devcopy-refusal' };
+const config = { GONVEX_DEV_TRANSFER_TARGET:'gonvex-cf-dev-test',GONVEX_DEV_TRANSFER_TOKEN:'test-only',GONVEX_DEV_TRANSFER_TENANTS:'devcopy-test,devcopy-refusal,devcopy-large' };
 const request = (tenant:string, op:string, body:unknown={}, token='test-only') => new Request(`https://dev/__tenant-transfer/t/${tenant}/${op}`, {method:'POST',headers:{authorization:`Bearer ${token}`},body:JSON.stringify(body)});
 it('forwards HTTPS service requests to Container HTTP without changing method, body or auth', async()=>{
  const result=containerRequest(new Request('https://release-builder/inspect?x=1',{method:'POST',headers:{authorization:'Bearer test'},body:'{"incoming":"id"}'}));
@@ -38,6 +38,9 @@ it('imports through AssemblyTenant, checks exact storage classes, refuses incomp
  expect((await call('complete'))?.status).toBe(200);
  expect((await call('wipe'))?.status).toBe(409);expect((await call('insert',{parts:[]}))?.status).toBe(409);
  await runInDurableObject(stub,async(instance,state)=>{
+  // No restart, activation, or lazy files RPC may create these on our behalf.
+  expect(state.storage.sql.exec('SELECT count(*) AS n FROM _gonvex_files').one().n).toBe(0);
+  expect(state.storage.sql.exec("SELECT name FROM sqlite_schema WHERE type='table' AND name='_gonvex_storage_uploads'").toArray()).toHaveLength(1);
   const actual=instance as CompositionTenant;await actual.activate('p',manifest,null);
   expect(actual.kernel.module?.projectId).toBe('p');
   const read=await actual.operatorReadRows('board',{limit:10,offset:0,search:'',sort:'',direction:'',filters:'',columns:'',count:''});expect(read.ok).toBe(true);
@@ -50,4 +53,20 @@ it('retains platform SQL refusals and refuses to complete an import containing t
  await call('wipe');const r=await call('schema',{statements:[{name:'bad',sql:'CREATE TABLE impossible ('},{name:'good',sql:'CREATE TABLE good (id INTEGER)'}]});
  expect(await r!.json()).toMatchObject({applied:1,failed:[{name:'bad'}]});await call('check');
  expect((await call('complete'))?.status).toBe(409);
+});
+
+it('accepts a legal base64 BLOB row whose wire request exceeds 2 MiB and still bounds requests',async()=>{
+ const call=async(op:string,body:unknown={})=>{
+  const response=(await handleTenantTransfer(request('devcopy-large',op,body),{...config,TENANT:env.TENANT}))!;
+  return new Response(await response.arrayBuffer(),{status:response.status});
+ };
+ expect((await call('wipe')).status).toBe(200);
+ expect((await call('schema',{statements:[{name:'large',sql:'CREATE TABLE large (id TEXT PRIMARY KEY, bytes BLOB)'}]})).status).toBe(200);
+ const body={parts:[{table:'large',columns:['id','bytes'],rows:[['legal',{b:btoa('a'.repeat(1_600_000))}]]}]};
+ expect(new TextEncoder().encode(JSON.stringify(body)).byteLength).toBeGreaterThan(2*1024*1024);
+ expect((await call('insert',body)).status).toBe(200);
+ await runInDurableObject(env.TENANT.getByName('devcopy-large'),async(_instance,state)=>{
+  expect(state.storage.sql.exec('SELECT length(bytes) AS n FROM large WHERE id=?','legal').one().n).toBe(1_600_000);
+ });
+ expect((await call('insert','a'.repeat(4*1024*1024))).status).toBe(413);
 });

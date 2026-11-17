@@ -373,6 +373,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     if (!transferAllowed(this.env, this.ctx.id.name ?? "")) return new Response(null, { status: 404 });
     return this.kernel.reducers.serial(async () => {
       const response = await transferIntoTenant(this.ctx, request, !!this.kernel.module || this.ctx.storage.kv.get(PROJECT_KEY) !== undefined);
+      // Import may have cleared the lazily created file tables on this same instance.
+      // The serial queue is not a Reducer transaction; initialize before reducers resume.
+      if (response.ok && this.ctx.storage.kv.get<{ phase: string }>(IMPORT_KEY)?.phase === "ready") this.files.ensureSchema();
       this.kernel.storage.invalidateSchema();
       return response;
     });

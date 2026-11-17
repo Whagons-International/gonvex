@@ -7,7 +7,7 @@
  "migrations":[{"tag":"v1","new_sqlite_classes":["CompositionTenant","CompositionGateway","CompositionControl"]}],
  "r2_buckets":[{"binding":"FILES","bucket_name":"gonvex-cf-dev-k22-composition-files"}],
  "services":[{"binding":"ACTIONS","service":"gonvex-cf-dev-k22-composition-test","entrypoint":"ActionWorker"}],
- "vars":{"GONVEX_DEV_TRANSFER_TARGET":"gonvex-cf-dev-test","GONVEX_DEV_TRANSFER_TOKEN":"test-only","GONVEX_DEV_TRANSFER_TENANTS":"devcopy-test,devcopy-refusal"},
+ "vars":{"GONVEX_DEV_TRANSFER_TARGET":"gonvex-cf-dev-test","GONVEX_DEV_TRANSFER_TOKEN":"test-only","GONVEX_DEV_TRANSFER_TENANTS":"devcopy-test,devcopy-refusal,devcopy-large"},
  "rules":[{"type":"Text","globs":["**/*.sql"],"fallthrough":true}],
  "workflows":[{"binding":"ACTION_WORKFLOW","name":"gonvex-cf-dev-k22-composition-actions","class_name":"ActionWorkflow"}]
 }
