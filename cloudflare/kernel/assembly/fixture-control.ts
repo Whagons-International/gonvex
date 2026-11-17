@@ -6,6 +6,8 @@ import type { BakedRelease } from "./releases";
 import type { AssemblyGateway } from "./gateway";
 import { CONTROLLER_CELLS } from "../gateway/placement";
 import { gatewayShards } from "../session/placement/gateway";
+import { capacityPage } from "./capacity";
+import { CAPACITY_PATH } from "./capacity-contract";
 // @ts-expect-error K19 release build alias.
 import * as generated from "gonvex:releases";
 interface Env {
@@ -15,12 +17,14 @@ interface Env {
   GONVEX_GATEWAY_SHARDS?: string;
   GONVEX_ASSEMBLY_FIXTURE_KEY?: string;
   WORKER_VERSION?: WorkerVersionMetadata;
+  GONVEX_RUNTIME_VERSION?: string;
 }
 type FixtureTenant = Pick<AssemblyTenant, "fixtureDeliveryState" | "fixtureFailRecoveryOnce" | "fixtureEpoch" | "fixtureRestart" | "fixtureChangeLog" | "pruneReceipts" | "deliveryStats">;
 export async function fixtureControl(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/__assembly/")) return null;
   if (!env.GONVEX_ASSEMBLY_FIXTURE_KEY || request.headers.get("authorization") !== `Bearer ${env.GONVEX_ASSEMBLY_FIXTURE_KEY}`) return new Response(null, { status: 404 });
+  if (url.pathname === CAPACITY_PATH) return capacityPage(request, env, generated);
   if (url.pathname === "/__assembly/version") {
     const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
     return Response.json({ version: (generated as { version?: string }).version ?? null, worker: env.WORKER_VERSION ?? null, releases: Object.fromEntries(Object.entries(releases).map(([id, release]) => [id, release.hash])) });
