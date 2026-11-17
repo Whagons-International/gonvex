@@ -1,0 +1,51 @@
+{
+  "runtimeSourceBase": "8646997ffd05875072c88101cdb9b75fd5e7d086",
+  "webSourceCommitFromImmutableHandoff": "3ad4fa47ed7f6c0c7d41d0b3d5a9cfd92c8d01b9",
+  "appModuleIdentityFromHandoff": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc",
+  "observedFiles": [
+    {
+      "role": "sdk-source",
+      "sha256": "86d2dfd55ff74d082165e3717785906bc2b7291f7a43584c6c16690c1f2132ed",
+      "bytes": 326074,
+      "containsReducerWithTransactionEvidence": true
+    },
+    {
+      "role": "transaction-evidence-source",
+      "sha256": "2efa35a28154d47de84503aaf4185f6a508eab1f2f622eba04f9f555e77ab8da",
+      "bytes": 6326,
+      "containsReducerWithTransactionEvidence": null
+    },
+    {
+      "role": "cached-web-sdk",
+      "sha256": "a98e674b4cdd8b41871e068d71dcffca3a68db715240407db016163f3cf3e24d",
+      "bytes": 304712,
+      "containsReducerWithTransactionEvidence": false
+    },
+    {
+      "role": "cached-web-sdk-package",
+      "sha256": "2dcf61a5a6afc97a4ba1036671e9525e88440d9f9b675232dfebd95f50a44d8e",
+      "bytes": 1667,
+      "containsReducerWithTransactionEvidence": false
+    },
+    {
+      "role": "generated-api",
+      "sha256": "dea80544a66cd8a9fb54819fb1d26ae07cbd1b71c97fcded7d94c3c474d6e0c6",
+      "bytes": 1537613,
+      "containsReducerWithTransactionEvidence": null
+    },
+    {
+      "role": "generated-local-executor",
+      "sha256": "e61e36e035fb918351572fc44e901718d1fd53c2394365961bca604c057e1dc4",
+      "bytes": 181672,
+      "containsReducerWithTransactionEvidence": null
+    },
+    {
+      "role": "actual-task-create-commands",
+      "sha256": "2e505fc644f08a90e09f987bcaad93efa9f00a5b07117b6bb7d9c204a74b2b0a",
+      "bytes": 16575,
+      "containsReducerWithTransactionEvidence": null
+    }
+  ],
+  "cachedSdkPackageVersion": "0.5.2-sqlite.1",
+  "readiness": "NOT_ELIGIBLE: cached SDK lacks current receipt API; compiled current SDK/localRuntime and reviewed live bindings still required"
+}

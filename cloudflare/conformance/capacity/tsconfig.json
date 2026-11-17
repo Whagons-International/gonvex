@@ -1,0 +1,13 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "@gonvex/protocol": ["../../../packages/protocol/src/index.ts"],
+      "@gonvex/local-runtime/*": ["../../../packages/local-runtime/src/*"],
+      "@gonvex/local-runtime": ["../../../packages/local-runtime/src/index.ts"],
+      "@gonvex/module-sdk": ["../../../packages/module-sdk/src/index.ts"]
+    }
+  },
+  "include": ["types.ts"]
+}
