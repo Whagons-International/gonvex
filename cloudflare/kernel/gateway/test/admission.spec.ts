@@ -201,10 +201,16 @@ describe("authenticated gateway routing identity and content-free admission fail
 
   it("preserves a holder refusal reason through the router and independently releases placement and address slots", async () => {
     let authoritative!: GatewayAssignment;
+    let unrelated!: GatewayAssignment;
+    let pendingBefore = 0;
     const wrapped = { ...bindings,
       GATEWAY_CONTROLLER: { getByName(name: string) {
         const actual = bindings.GATEWAY_CONTROLLER.getByName(name);
-        return { acquire: async (id: string) => authoritative = await actual.acquire(id), release: (a: GatewayAssignment) => actual.release(a) };
+        return { acquire: async (id: string) => {
+          unrelated = await actual.acquire(connection(controllerCell(id)));
+          pendingBefore = (await actual.status()).pending;
+          return authoritative = await actual.acquire(id);
+        }, release: (a: GatewayAssignment) => actual.release(a) };
       } },
       GATEWAY: { getByName(name: string) { return { fetch: (r: Request) => {
         const headers = new Headers(r.headers);
@@ -215,7 +221,10 @@ describe("authenticated gateway routing identity and content-free admission fail
     await failure(await handleWebSocketUpgrade(new Request("https://x/ws", { headers: {
       upgrade: "websocket", "cf-connecting-ip": "192.0.2.45",
     } }), wrapped), "parse-invalid");
-    expect((await control(authoritative.cell).status()).pending).toBe(0);
+    const owner = control(authoritative.cell);
+    expect((await owner.status()).pending).toBe(pendingBefore);
+    expect(await owner.claim(authoritative)).toBe(false);
+    expect(await owner.claim(unrelated)).toBe(true);
     const { limiterFor } = await import("../../public/limiter");
     expect(await limiterFor(bindings.PUBLIC_LIMITER!, "192.0.2.45").counts()).toEqual({ pending: 0, public: 0 });
   });
