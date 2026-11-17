@@ -56,13 +56,6 @@ functions) installs with no error.
   routing does not guarantee that a global `fetch()` to its own zone reaches Workers. This setting must
   remain in the source configuration packaged into the builder image as well as the initial deployment.
   See [Cloudflare's fetch routing contract](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public).
-  The kernel also declares `durable_objects.code_update_strategy.mode = "immediate"` in the same source
-  configuration. Cloudflare otherwise permits active objects to retain old code for 300 seconds, beyond
-  the 180-second publication budget. A fresh HTTP request can therefore reach new Worker code while its
-  Control RPC still runs the prior version. Immediate adoption may interrupt in-flight object work; the
-  durable publication fence and same-ID retry handle that reset. Publication still waits for actual baked
-  version, tenant activation and notification ACKs. No timeout or readiness assertion is relaxed.
-  See [Cloudflare's code update strategy](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/).
 - **Whole catalog ownership.** A unique active-owner index serializes different projects from preparation
   through publication. The durable sync row's identity fences every builder deployment at execution time.
   A later project recovers a staged predecessor before capturing its own catalog. The pinned catalog in
