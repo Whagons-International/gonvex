@@ -51,8 +51,11 @@ it('completed publication activates an existing tenant and notifies tenant/contr
     clientContract:contract===null?null:{version:contract,offlineMaxAgeMs:null},crons:[],invitationAcceptanceReducer:'',storedManifest:release.manifest,bundleBytes:0};
    const id=crypto.randomUUID();
    await runInDurableObject(control,(instance)=>{
+    const owner=instance.syncs.deployments.acquire(project,id);
+    if(!owner.acquired)throw new Error('publication fixture could not acquire deployment');
+    instance.syncs.deployments.catalog(id,owner.fence,[{project,hash:release.hash,generation:n}]);
+    instance.syncs.deployments.staged(id,owner.fence,'bootstrap');
     instance.sql.run("INSERT INTO gonvex_cf_releases(project_id,hash,summary) VALUES($1,$2,$3)",project,release.hash,JSON.stringify(summary));
-    instance.sql.run("INSERT INTO gonvex_cf_syncs(sync_id,project_id,state,expires_at) VALUES($1,$2,'publishing',$3)",id,project,Date.now()+60000);
     instance.sql.run("INSERT INTO gonvex_cf_publications(sync_id,project_id,hash,generation,version,tenants) VALUES($1,$2,$3,$4,'bootstrap',$5)",id,project,release.hash,n,JSON.stringify([tenant]));
    });
    expect(await control.publishRelease(id)).toEqual({ready:true});

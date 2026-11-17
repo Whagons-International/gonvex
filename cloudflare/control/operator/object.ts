@@ -22,9 +22,10 @@ import { OperatorAuth, bearer } from "./auth";
 import { operatorConfig, type OperatorConfig, type OperatorEnv } from "./config";
 import { DASHBOARD_TAG, LOGS_TAG, METRICS_TAG, OperatorSockets } from "./sockets";
 import { error, json, HttpError } from "./http";
-import { HttpReleaseBuilder, type ReleaseBuilder, type ReleaseSummary, type RolloutMessage, type RolloutReport } from "./release";
+import { HttpReleaseBuilder, type DeploymentRef, type DeploymentGrant, type ReleaseBuilder, type ReleaseSummary, type RolloutMessage, type RolloutReport } from "./release";
 import { handleOperatorRoute, type Op } from "./routes";
 import { OPERATOR_SCHEMA, SyncCoordinator, type SyncOutcome, type SyncRequest } from "./sync";
+import { installDeploymentSchema } from "./deployment";
 import { rustTenantError, waitForRelease, type OperatorTenantPort } from "./tenant/port";
 
 export interface OperatorObjectEnv extends ControlEnv, OperatorEnv {
@@ -53,6 +54,7 @@ export class OperatorControlObject extends ControlObject {
     this.operatorConfig = operatorConfig(env);
     state.blockConcurrencyWhile(async () => {
       this.sql.script(OPERATOR_SCHEMA);
+      installDeploymentSchema(this.sql);
     });
     this.syncs = new SyncCoordinator({
       sql: this.sql,
@@ -106,6 +108,19 @@ export class OperatorControlObject extends ControlObject {
     try { return await this.syncs.publish(syncId); }
     catch (cause) {
       if (cause instanceof HttpError) return {ready:false,error:cause.message,status:cause.status};
+      throw cause;
+    }
+  }
+  async publicationReference(id:string):Promise<DeploymentRef> { return this.syncs.deployments.reference(id); }
+  async currentDeployment():Promise<DeploymentRef|null> {return this.syncs.deployments.current();}
+  async deploymentRequest(action:"authorize"|"settle"|"abort", ref:DeploymentRef, result:{ok?:boolean;error?:string}):Promise<{ok:true;grant?:DeploymentGrant}|{ok:false;status:number;error:string}> {
+    try {
+      if (action === "authorize") return {ok:true,grant:this.syncs.deployments.authorize(ref)};
+      if (action === "settle") this.syncs.deployments.settle(ref,{ok:result.ok===true,...(result.error?{error:result.error}:{})});
+      else this.syncs.deployments.abort(ref,result.error ?? "publication aborted");
+      return {ok:true};
+    } catch (cause) {
+      if (cause instanceof HttpError) return {ok:false,status:cause.status,error:cause.message};
       throw cause;
     }
   }

@@ -14,7 +14,7 @@
  *   bind R2 itself).
  */
 import type { OperatorControlObject } from "../../control/operator/object.ts";
-import { HttpReleaseBuilder, incomingKey, type ReleaseBuilder, type RolloutMessage } from "../../control/operator/release.ts";
+import { HttpReleaseBuilder, incomingKey, type DeploymentRef, type ReleaseBuilder, type RolloutMessage } from "../../control/operator/release.ts";
 import type { SyncOutcome } from "../../control/operator/sync.ts";
 
 export interface DevRouterEnv {
@@ -71,6 +71,21 @@ export async function handleDevRequest(request: Request, env: DevRouterEnv, ctx:
 async function devRequest(request: Request, env: DevRouterEnv, ctx: ExecutionContext): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.pathname.startsWith("/_gonvex/k19/blobs/")) return handleBlob(request, env, url);
+  if (url.pathname.startsWith("/_gonvex/k19/deployments/")) {
+    const token=env.GONVEX_RELEASE_BUILDER_TOKEN;
+    if (!token || !sameText(request.headers.get("authorization") ?? "",`Bearer ${token}`)) return new Response(null,{status:404});
+    if (request.method === "GET" && url.pathname === "/_gonvex/k19/deployments/current") return Response.json(await env.CONTROL.getByName(CONTROL_NAME).currentDeployment());
+    if (request.method !== "POST") return new Response(null,{status:405});
+    const match=/^\/_gonvex\/k19\/deployments\/([0-9a-f-]{36})\/([1-9][0-9]*)\/(authorize|settle|abort)$/.exec(url.pathname);
+    if (!match || !Number.isSafeInteger(Number(match[2]))) return new Response(null,{status:400});
+    const text=await request.text();
+    if (text.length>4096) return new Response(null,{status:413});
+    const body=JSON.parse(text) as {version?:unknown;ok?:unknown;error?:unknown};
+    if (typeof body.version !== "string" || !body.version || body.version.length>128 || (body.error!==undefined&&typeof body.error!=="string")) return new Response(null,{status:400});
+    const result=await env.CONTROL.getByName(CONTROL_NAME).deploymentRequest(match[3] as "authorize"|"settle"|"abort",{id:match[1]!,fence:Number(match[2]),version:body.version},
+      {ok:body.ok===true,...(typeof body.error==="string"?{error:body.error.slice(0,1500)}:{})});
+    return result.ok ? Response.json(result) : jsonError(result.status,result.error);
+  }
   if (url.pathname.startsWith("/_gonvex/k19/publications/")) {
     const token = env.GONVEX_RELEASE_BUILDER_TOKEN;
     if (!token || !sameText(request.headers.get("authorization") ?? "", `Bearer ${token}`)) return new Response(null, {status:404});
@@ -114,8 +129,8 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
   const length = request.headers.get("content-length");
   if (length !== null && Number(length) > BODY_LIMIT) return plain(413, "Failed to buffer the request body: length limit exceeded");
   const headerProject = (request.headers.get("x-gonvex-project-id") ?? "").trim();
-  const requestId = request.headers.get("x-gonvex-sync-request-id");
-  if (requestId !== null && !/^[0-9a-f-]{36}$/.test(requestId)) return jsonError(400,"invalid sync request id");
+  const requestId = request.headers.get("x-gonvex-sync-request-id") ?? crypto.randomUUID();
+  if (!/^[0-9a-f-]{36}$/.test(requestId)) return jsonError(400,"invalid sync request id");
   const authorization = request.headers.get("authorization");
   const key = (authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : request.headers.get("x-gonvex-key") ?? "").trim();
   const control = env.CONTROL.getByName(CONTROL_NAME);
@@ -136,40 +151,29 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
     return jsonError(503, `the sync body could not be stored: ${(cause as Error).message}`);
   }
   try {
-    const outcome = (await control.devSync({ incoming, headerProject, key, ...(requestId ? {requestId} : {}) })) as SyncOutcome;
-    if (!outcome.ok) return outcome.plain ? plain(outcome.status, outcome.error) : jsonError(outcome.status, outcome.error);
-    if (outcome.deploy) {
-      const builder = releaseBuilder(env);
-      const deployed = builder ? await builder.deploy(outcome.deploy) : { ok: false as const, error: "no release builder is configured" };
-      // Rust answers 500 when the last step fails while the new code serves (D.2.2 item 12).
-      if (!deployed.ok) return jsonError(500, deployed.error);
+    const deadline=Date.now()+180_000;
+    let outcome:SyncOutcome;
+    for (;;) {
+      outcome=await control.devSync({incoming,headerProject,key,requestId}) as SyncOutcome;
+      if (outcome.ok || !outcome.recovery) break;
+      if (Date.now()>=deadline) return Response.json({error:"release publication recovery timed out",retryable:true},{status:503});
+      const failure=await completePublication(env,outcome.recovery,true);
+      if (failure) return failure;
+      // Recovery completed the preceding whole catalog. Only now may this
+      // request capture a snapshot; its body/request identity is unchanged.
     }
+    if (!outcome.ok) return outcome.plain ? plain(outcome.status,outcome.error) : Response.json({error:outcome.error,...(outcome.retryable?{retryable:true}:{})},{status:outcome.status});
     if (outcome.publication) {
-      const deadline = Date.now() + 180_000;
-      let lastError = "serving Worker version not ready";
-      for (;;) {
-        // A fresh HTTP ingress selects the deployed Worker. An in-flight
-        // router's old DO binding can otherwise keep serving its old catalog.
-        let ready: boolean;
-        if (env.GONVEX_PUBLIC_URL) {
-          const reply = await fetch(new URL(`/_gonvex/k19/publications/${outcome.publication}`, env.GONVEX_PUBLIC_URL), {
-            method: "POST", headers: {authorization:`Bearer ${env.GONVEX_RELEASE_BUILDER_TOKEN}`},
-          });
-          let result:{ready?:boolean;error?:string;retryable?:boolean};
-          try { result=await reply.json(); }
-          catch { return jsonError(503,`release publication HTTP ${reply.status}; cf-ray ${reply.headers.get("cf-ray") ?? "unavailable"}`); }
-          if (!reply.ok && !(result as {retryable?:boolean}).retryable) return jsonError(reply.status, result.error ?? `release publication HTTP ${reply.status}`);
-          if (result.error) lastError = result.error;
-          ready = result.ready === true;
-        } else {
-          const result=await env.CONTROL.getByName(CONTROL_NAME).publishRelease(outcome.publication);
-          if (result.error) return jsonError(result.status ?? 503,result.error);
-          ready=result.ready;
-        }
-        if (ready) break;
-        if (Date.now() >= deadline) return jsonError(503, `release publication timed out: ${lastError}`);
-        await new Promise(resolve => setTimeout(resolve, 100));
+      if (!outcome.fence) return jsonError(503,"publication has no deployment fence");
+      const ref={id:outcome.publication,fence:outcome.fence,version:outcome.deploy ?? ""};
+      // A completed/same-version resume need not deploy, but needs its exact
+      // durable version for any terminal builder barrier.
+      if (!ref.version) {
+        const reference=await env.CONTROL.getByName(CONTROL_NAME).publicationReference(ref.id);
+        ref.version=reference.version;
       }
+      const failure=await completePublication(env,ref,outcome.deploy!==null);
+      if (failure) return failure;
     }
     return Response.json(outcome.body);
   } catch (cause) {
@@ -177,6 +181,52 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
     return syncFailure(cause, env, "sync/deploy");
   } finally {
     ctx.waitUntil(env.RELEASES.delete(incomingKey(incoming)).catch(() => undefined));
+  }
+}
+
+/** The builder revalidates this fence when execution starts, after any older
+ * target operation. Caller failure alone never releases an in-flight deploy. */
+async function completePublication(env:DevRouterEnv,ref:DeploymentRef,deploy:boolean):Promise<Response|null> {
+  const builder=releaseBuilder(env);
+  try {
+    if (deploy) {
+      if (!builder) throw new Error("no release builder is configured");
+      const deployed=await builder.deploy(ref.version,ref);
+      if (!deployed.ok) return jsonError(500,deployed.error); // builder recorded its terminal result
+    }
+    const deadline=Date.now()+180_000;
+    let lastError="serving Worker version not ready";
+    for (;;) {
+      let ready:boolean;
+      if (env.GONVEX_PUBLIC_URL) {
+        const reply=await fetch(new URL(`/_gonvex/k19/publications/${ref.id}`,env.GONVEX_PUBLIC_URL),{
+          method:"POST",headers:{authorization:`Bearer ${env.GONVEX_RELEASE_BUILDER_TOKEN}`}});
+        let result:{ready?:boolean;error?:string;retryable?:boolean};
+        try {result=await reply.json();}
+        catch {throw new Error(`publication HTTP ${reply.status}; cf-ray ${reply.headers.get("cf-ray") ?? "unavailable"}`);}
+        if (!reply.ok && !result.retryable) {
+          await builder?.abort?.(ref,result.error ?? `publication HTTP ${reply.status}`);
+          return jsonError(reply.status,result.error ?? `publication HTTP ${reply.status}`);
+        }
+        if (result.error) lastError=result.error;
+        ready=result.ready===true;
+      } else {
+        const result=await env.CONTROL.getByName(CONTROL_NAME).publishRelease(ref.id);
+        if (result.error) {
+          await builder?.abort?.(ref,result.error);
+          return jsonError(result.status ?? 503,result.error);
+        }
+        ready=result.ready;
+      }
+      if (ready) return null;
+      if (Date.now()>=deadline) throw new Error(`publication timed out: ${lastError}`);
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+  } catch(cause) {
+    // Abort is queued behind actual target execution. If the builder is down,
+    // keep the durable owner so another request can recover it safely.
+    try {await builder?.abort?.(ref,cause instanceof Error?cause.message:"publication failed");}catch { /* recoverable owner remains */ }
+    return syncFailure(cause,env,"publication");
   }
 }
 

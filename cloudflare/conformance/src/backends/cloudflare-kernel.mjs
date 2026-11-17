@@ -9,6 +9,7 @@
 import { join } from 'node:path';
 import { Backend } from '../backend.mjs';
 import { REPO } from '../paths.mjs';
+import { postDevSync } from '../../../../packages/gonvex/src/sync-request.ts';
 
 export class CloudflareKernelBackend extends Backend {
   constructor(options) {
@@ -53,7 +54,9 @@ export class CloudflareKernelBackend extends Backend {
 
   async deploy(project, manifest) {
     const before = await this.workerVersion();
-    const r = await this.request('POST', '/dev/sync', { key: this.keys.get(project), body: { ...manifest, project } });
+    const response=await postDevSync(this.httpUrl+'/dev/sync',{headers:{authorization:`Bearer ${this.keys.get(project)}`,'content-type':'application/json','x-gonvex-project-id':project},body:JSON.stringify({...manifest,project})});
+    if(!response.ok)throw new Error(`POST /dev/sync -> ${response.status}: ${(await response.text()).slice(0,1500)}`);
+    const r=await response.json();
     await this.waitForWorkerVersion(before);
     return { ok: r.ok === true, functionCount: r.functionCount };
   }

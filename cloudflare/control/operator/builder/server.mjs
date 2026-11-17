@@ -29,6 +29,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { PRELUDE_SPECIFIER, ReleaseBuilderCore, RELEASES_ENTRY, ACTION_RELEASES_ENTRY } from './core.ts';
+import { PublicationExecutor } from './publication.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -102,17 +103,16 @@ class LocalTarget {
     if (entry === undefined) throw new Error(`version ${version} was not staged`);
     // workerd restarts on the swap and cuts every request in flight, including
     // the /dev/sync response; swap after it has gone out.
-    setTimeout(async () => {
-      const file = join(this.dir, RELEASES_ENTRY);
-      if (entry.actions) {
-        const actions = join(this.dir, ACTION_RELEASES_ENTRY);
-        await writeFile(`${actions}.tmp`, entry.actions);
-        await rename(`${actions}.tmp`, actions);
-      }
-      await writeFile(`${file}.tmp`, entry.kernel);
-      await rename(`${file}.tmp`, file);
-      log(`version ${version} is live (workerd reloads)`);
-    }, this.deferMs);
+    await new Promise(resolveSwap => setTimeout(resolveSwap,this.deferMs));
+    const file = join(this.dir, RELEASES_ENTRY);
+    if (entry.actions) {
+      const actions = join(this.dir, ACTION_RELEASES_ENTRY);
+      await writeFile(`${actions}.tmp`, entry.actions);
+      await rename(`${actions}.tmp`, actions);
+    }
+    await writeFile(`${file}.tmp`, entry.kernel);
+    await rename(`${file}.tmp`, file);
+    log(`version ${version} is live (workerd reloads)`);
   }
 }
 
@@ -181,6 +181,33 @@ const target =
 // app.js lives at <generated>/releases/<project>/<hash>/app.js: three levels below the generated dir.
 const builder = new ReleaseBuilderCore({ blobs: new HttpBlobStore(kernelUrl, token), target, preludeSpecifier: PRELUDE_SPECIFIER, log });
 
+// Fresh ingress also works when deployment resets Control during this call.
+// These authority operations are idempotent; no provider write is retried here.
+const authority = async (action,ref,result={}) => {
+  const deadline=Date.now()+120_000;
+  for(;;){
+    try{
+      const response=await fetch(`${kernelUrl}/_gonvex/k19/deployments/${ref.id}/${ref.fence}/${action}`,{
+        method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({version:ref.version,...result})});
+      let value;
+      try{value=await response.json();}catch{value={error:`deployment authority HTTP ${response.status}`};}
+      if(response.ok)return value;
+      if(response.status<500||Date.now()>=deadline)throw Object.assign(new Error(value.error??`deployment authority HTTP ${response.status}`),{terminal:true});
+    }catch(cause){if(cause.terminal||Date.now()>=deadline)throw cause;}
+    await new Promise(resolveRetry=>setTimeout(resolveRetry,100));
+  }
+};
+const publications=new PublicationExecutor(builder,{
+  authorize:async(ref)=>(await authority('authorize',ref)).grant,
+  settle:async(ref,result)=>{await authority('settle',ref,result);},
+  abort:async(ref,error)=>{await authority('abort',ref,{error});},
+},async(ref,catalog)=>{
+  // Container restart loses the in-memory stage map, not the pinned catalog.
+  if(target.staged.has(ref.version))return;
+  const staged=await builder.activate(catalog);
+  if(!staged.ok||staged.version!==ref.version)throw new Error(staged.ok?'recovered catalog version differs from its publication':staged.error);
+});
+
 const authorized = (request) => {
   const given = Buffer.from(request.headers.authorization ?? '');
   const expected = Buffer.from(`Bearer ${token}`);
@@ -224,7 +251,12 @@ createServer(async (request, response) => {
         result = await serial(() => builder.activate(body.releases ?? []));
         break;
       case '/deploy':
-        result = await serial(() => builder.deploy(String(body.version)));
+        if(!body.publication||body.version!==body.publication.version)return send(400,{error:'fenced publication required'});
+        result = await serial(() => publications.deploy(body.publication));
+        break;
+      case '/abort':
+        if(!body.publication)return send(400,{error:'fenced publication required'});
+        result = await serial(() => publications.abort(body.publication,String(body.error??'publication aborted')));
         break;
       default:
         return send(404, { error: 'not found' });

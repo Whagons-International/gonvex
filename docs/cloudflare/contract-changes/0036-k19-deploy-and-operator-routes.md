@@ -52,6 +52,12 @@ functions) installs with no error.
   the existing release-builder token. A successful sync therefore acknowledges tenant activation and reload
   delivery, rather than only the Worker's upload. Project holder watches survive Control resets and include
   control-only sockets registered before their auth acknowledgement.
+- **Whole catalog ownership.** A unique active-owner index serializes different projects from preparation
+  through publication. The durable sync row's identity fences every builder deployment at execution time.
+  A later project recovers a staged predecessor before capturing its own catalog. The pinned catalog in
+  Control allows a restarted builder to reconstruct the exact version; completed/failed delayed requests
+  cannot deploy an older snapshot. The builder waits for actual target execution, including the local
+  deferred swap, before another deploy or terminal abort passes its queue.
 - **Local only:** `wrangler dev` cuts HTTP requests and WebSockets on replacement. The CLI retains one
   `x-gonvex-sync-request-id` across a restart retry. The operator validates the same project and canonical
   artifact hash, then resumes the durable publication without another rollout or generation. Every attempt
@@ -72,7 +78,12 @@ functions) installs with no error.
   kernel answers Rust's `DatabaseError` text without them, and SQLite failures in sqlx's form.
 - After `GONVEX_SYNC_DEADLINE_MS` (default 10 minutes) the sync answers **503** `tenant migration rollout did not
   finish within N s`. Rust has no deadline. **Lead:** confirm 503.
-- The lock row expires at the deadline plus a minute, so a reset control object never keeps it.
+- A preparation lease expires at the deadline plus a minute. Its retired fence cannot later stage/deploy.
+  Once a publication is staged, its owner survives reset and lease expiry until successful publication or
+  the real builder's serialized terminal result/abort. Same-ID retries resume it; a different project's
+  sync can recover it before proceeding. An operator can inspect the pending reference at authenticated
+  `GET /_gonvex/k19/deployments/current` with the existing builder token, then resume `/deploy` and publication
+  or use the builder's `/abort` barrier. A caller timeout alone never releases an external deployment.
 
 ## 6. Operator authentication: Local only on explicit opt-in (CONTRACT D.3)
 
