@@ -174,7 +174,7 @@ export class SyncCoordinator {
     const prior = this.sql.get("SELECT project_id,hash,state FROM gonvex_cf_syncs WHERE sync_id=$1",syncId);
     if (prior && (prior.project_id !== project || (prior.hash && prior.hash !== inspection.hash) || ["finished","failed"].includes(str(prior.state)))) return {ok:false,status:409,error:"sync request id already used"};
     const lock=this.lock(project,syncId);
-    if (lock.kind === "project") return { ok: false, status: 409, error: `a /dev/sync of project ${project} is already running` };
+    if (lock.kind === "project") return { ok: false, status: 409, error: `a /dev/sync of project ${project} is already running`, ...(lock.recovery?{recovery:lock.recovery}:{}) };
     if (lock.kind === "deployment") return {ok:false,status:503,error:"release deployment waits for another project",retryable:true,...(lock.recovery?{recovery:lock.recovery}:{})};
     const fence=lock.fence;
     try {
@@ -304,11 +304,11 @@ export class SyncCoordinator {
 
   // ------------------------------------------------------------- lock (R5)
 
-  private lock(project: string, syncId: string): {kind:"acquired";fence:number}|{kind:"project"}|{kind:"deployment";recovery?:DeploymentRef} {
+  private lock(project: string, syncId: string): {kind:"acquired";fence:number}|{kind:"project";recovery?:DeploymentRef}|{kind:"deployment";recovery?:DeploymentRef} {
     return this.sql.tx(() => {
       if(this.waiters.has(`lock:${syncId}`))return {kind:"project"};
       const claim=this.deployments.acquire(project,syncId);
-      if(!claim.acquired)return claim.sameProject?{kind:"project"}:{kind:"deployment",...(claim.recovery?{recovery:claim.recovery}:{})};
+      if(!claim.acquired)return {kind:claim.sameProject?"project":"deployment",...(claim.recovery?{recovery:claim.recovery}:{})};
       this.waiters.set(`lock:${syncId}`, { resolve: () => undefined });
       return {kind:"acquired",fence:claim.fence};
     });

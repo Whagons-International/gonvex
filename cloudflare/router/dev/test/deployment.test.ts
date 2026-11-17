@@ -1,11 +1,12 @@
 // Actual DO SQLite, R2, release compiler and fenced executor. Controlled target
 // gates expose scheduling races; these are not platform deployment acceptance.
 import {evictDurableObject,runInDurableObject} from "cloudflare:test";
-import {expect,it} from "vitest";
+import {expect,it,vi} from "vitest";
 import {MemoryVersionTarget,PRELUDE_SPECIFIER,ReleaseBuilderCore,type BlobStore} from "../../../control/operator/builder/core";
 import {PublicationExecutor} from "../../../control/operator/builder/publication";
 import {installDeploymentSchema} from "../../../control/operator/deployment";
 import {SyncCoordinator,type SyncOutcome,type SyncPorts} from "../../../control/operator/sync";
+import {HttpError} from "../../../control/operator/http";
 import type {DeploymentRef,ReleaseBuilder} from "../../../control/operator/release";
 import type {OperatorControlObject} from "../../../control/operator/object";
 import {handleDevRequest,type DevRouterEnv} from "../routes";
@@ -20,7 +21,7 @@ async function fixture(run:(f:Awaited<ReturnType<typeof setup>>)=>Promise<void>)
  await runInDurableObject(object,async(instance:OperatorControlObject,state)=>{await run(await setup(instance,state));});
 }
 async function setup(instance:OperatorControlObject,state:DurableObjectState){
- let live='',prepareGate:ReturnType<typeof gate>|undefined,stageGate:ReturnType<typeof gate>|undefined,stageEntered:ReturnType<typeof gate>|undefined,deployGate:ReturnType<typeof gate>|undefined,failDeploy=false,failPrepare=false,failNotify=false,notifyGate:ReturnType<typeof gate>|undefined;
+ let live='',prepareGate:ReturnType<typeof gate>|undefined,stageGate:ReturnType<typeof gate>|undefined,stageEntered:ReturnType<typeof gate>|undefined,deployGate:ReturnType<typeof gate>|undefined,failDeploy=false,failPrepare=false,failNotify=false,notifyStatus:number|undefined,notifyGate:ReturnType<typeof gate>|undefined;
  const events:string[]=[],target=new MemoryVersionTarget();
  const baseDeploy=target.deploy.bind(target);
  target.deploy=async(version)=>{events.push('deploy:'+version);await deployGate?.promise;if(failDeploy)throw Error('target failed');await baseDeploy(version);live=version;};
@@ -28,7 +29,7 @@ async function setup(instance:OperatorControlObject,state:DurableObjectState){
  let builder=core();
  const wrapped:ReleaseBuilder={inspect:(...a)=>builder.inspect(...a),prepare:async(...a)=>{events.push('prepare:'+a[1]);await prepareGate?.promise;if(failPrepare)throw Error('prepare failed');return builder.prepare(...a);},activate:async(...a)=>{const held=stageGate,entered=stageEntered,result=await builder.activate(...a);entered?.release();await held?.promise;return result;},deploy:version=>builder.deploy(version)};
  const ports:SyncPorts={sql:instance.sql,builder:wrapped,enqueue:async()=>{throw Error('unexpected tenant rollout');},versionReady:version=>live===version,
-  activateTenants:async()=>true,moduleReloaded:async()=>{await notifyGate?.promise;if(failNotify)throw Error('holder unavailable');},syncCrons:async()=>{},deadlineMs:1000,devSyncKey:'synthetic',acceptsKey:(_p,key)=>key==='synthetic'};
+  activateTenants:async()=>true,moduleReloaded:async()=>{await notifyGate?.promise;if(failNotify)throw notifyStatus?new HttpError(notifyStatus,'holder unavailable'):Error('holder unavailable');},syncCrons:async()=>{},deadlineMs:1000,devSyncKey:'synthetic',acceptsKey:(_p,key)=>key==='synthetic'};
  let coordinator=new SyncCoordinator(ports);
  const authority={authorize:async(r:DeploymentRef)=>coordinator.deployments.authorize(r),settle:async(r:DeploymentRef,outcome:{ok:boolean;error?:string})=>{coordinator.deployments.settle(r,outcome);},abort:async(r:DeploymentRef,error:string)=>{coordinator.deployments.abort(r,error);}};
  const executor=()=>new PublicationExecutor(wrapped,authority,async(r,catalog)=>{
@@ -50,16 +51,22 @@ async function setup(instance:OperatorControlObject,state:DurableObjectState){
   prepareGate:(g:ReturnType<typeof gate>|undefined)=>{prepareGate=g;},deployGate:(g:ReturnType<typeof gate>|undefined)=>{deployGate=g;},notifyGate:(g:ReturnType<typeof gate>|undefined)=>{notifyGate=g;},
   stageGate:(g:ReturnType<typeof gate>|undefined,entered?:ReturnType<typeof gate>)=>{stageGate=g;stageEntered=entered;},
   failDeploy:(v:boolean)=>{failDeploy=v;},failPrepare:(v:boolean)=>{failPrepare=v;},failNotify:(v:boolean)=>{failNotify=v;},
+  notifyStatus:(status:number)=>{notifyStatus=status;},
   reset:()=>{coordinator=new SyncCoordinator(ports);builder=core();target.staged.clear();worker=executor();},
-  async http(r:Awaited<ReturnType<typeof request>>){
+  async http(r:Awaited<ReturnType<typeof request>>,publicIngress=false){
    const control={syncKeyAccepted:async(_p:string,key:string)=>key==='synthetic',devSync:(q:Parameters<SyncCoordinator['sync']>[0])=>coordinator.sync(q),
-    publishRelease:(id:string)=>coordinator.publish(id),publicationReference:(id:string)=>Promise.resolve(coordinator.deployments.reference(id))};
+    publishRelease:async(id:string)=>{try{return await coordinator.publish(id);}catch(cause){if(cause instanceof HttpError)return {ready:false,error:cause.message,status:cause.status};throw cause;}},publicationReference:(id:string)=>Promise.resolve(coordinator.deployments.reference(id))};
    const transport={fetch:async(input:RequestInfo|URL,init?:RequestInit)=>{
     const incoming=new Request(input,init),data=await incoming.json() as {publication:DeploymentRef;version:string;error:string};
     return Response.json(new URL(incoming.url).pathname==='/abort'?await worker.abort(data.publication,data.error):await worker.deploy(data.publication));
    }};
-   const env={CONTROL:{getByName:()=>control},RELEASES:testEnv.RELEASES,RELEASE_BUILDER:transport} as unknown as DevRouterEnv;
-   return handleDevRequest(new Request('https://fixture/dev/sync',{method:'POST',headers:{authorization:'Bearer synthetic','content-type':'application/json','x-gonvex-project-id':r.headerProject,'x-gonvex-sync-request-id':r.requestId},body:JSON.stringify(bodies.get(r.requestId))}),env,state as unknown as ExecutionContext);
+   const env={CONTROL:{getByName:()=>control},RELEASES:testEnv.RELEASES,RELEASE_BUILDER:transport,...(publicIngress?{GONVEX_PUBLIC_URL:'https://fixture',GONVEX_RELEASE_BUILDER_TOKEN:'synthetic-builder-token'}:{})} as unknown as DevRouterEnv;
+   const fetch=publicIngress?vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{
+    const result=await handleDevRequest(new Request(input,init),env,state as unknown as ExecutionContext);
+    if(!result)throw Error('unexpected ingress');return result;
+   }):undefined;
+   try{return await handleDevRequest(new Request('https://fixture/dev/sync',{method:'POST',headers:{authorization:'Bearer synthetic','content-type':'application/json','x-gonvex-project-id':r.headerProject,'x-gonvex-sync-request-id':r.requestId},body:JSON.stringify(bodies.get(r.requestId))}),env,state as unknown as ExecutionContext);}
+   finally{fetch?.mockRestore();}
   },
  };
 }
@@ -99,6 +106,37 @@ it('router recovers A before capturing B, including overlapping target execution
  const response=await next;expect(response?.status).toBe(200);await response!.arrayBuffer();
  expect(f.serving()).toContain('router-a');expect(f.serving()).toContain('router-b');
  expect(f.coordinator.activeReleases().map(release=>release.project)).toEqual(['router-a','router-b']);
+}));
+
+it.each(['rpc','rpc-status','http'])('retains a serving publication across a transient %s notification failure and same-ID retry',async mode=>fixture(async f=>{
+ const a=await f.request('notify-retry'),publicIngress=mode==='http';
+ if(mode==='rpc-status')f.notifyStatus(503);
+ f.failNotify(true);
+ const failed=await f.http(a,publicIngress);expect(failed?.status).toBe(503);
+ expect(await failed!.json()).toMatchObject({retryable:true,error:expect.stringContaining('holder unavailable')});
+ const current=f.coordinator.deployments.current()!,active=f.coordinator.activeRelease(a.headerProject)!;
+ expect(current.id).toBe(a.requestId);expect(f.live).toBe(current.version);expect(active.generation).toBe(1);
+ expect(f.target.deployed).toHaveLength(1);
+ f.failNotify(false);
+ const retried=await f.http(a,publicIngress);expect(retried?.status).toBe(200);await retried!.arrayBuffer();
+ expect(f.coordinator.deployments.current()).toBeNull();
+ expect(f.coordinator.activeRelease(a.headerProject)).toEqual(active);
+ expect(f.target.deployed).toHaveLength(1);expect(f.events.filter(event=>event.startsWith('prepare:'))).toHaveLength(1);
+ expect(f.instance.sql.value('SELECT completed FROM gonvex_cf_publications WHERE sync_id=$1',a.requestId)).toBe(1);
+}));
+
+it('a new same-project request recovers an abandoned publication but remains refused until retried',async()=>fixture(async f=>{
+ const a=await f.request('same-project',1),first=staged(await f.sync(a)),next=await f.request('same-project',2);
+ f.reset();
+ expect(await f.sync({...next,key:'wrong'})).toMatchObject({ok:false,status:401});
+ expect(await f.sync(next)).toMatchObject({ok:false,status:409,recovery:ref(first)});
+ const refused=await f.http(next);expect(refused?.status).toBe(409);await refused!.arrayBuffer();
+ expect(f.coordinator.deployments.current()).toBeNull();expect(f.coordinator.activeRelease('same-project')?.generation).toBe(1);
+ expect(f.events.filter(event=>event.startsWith('prepare:'))).toHaveLength(1);
+ expect(f.instance.sql.value('SELECT completed FROM gonvex_cf_publications WHERE sync_id=$1',a.requestId)).toBe(1);
+ const retried=await f.http(next);expect(retried?.status).toBe(200);await retried!.arrayBuffer();
+ expect(f.coordinator.activeRelease('same-project')?.generation).toBe(2);
+ expect(f.events.filter(event=>event.startsWith('prepare:'))).toHaveLength(2);
 }));
 
 it('an overlapping upgrade preserves both latest hashes and cannot redeploy a previously completed snapshot',async()=>fixture(async f=>{

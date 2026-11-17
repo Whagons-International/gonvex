@@ -58,6 +58,9 @@ functions) installs with no error.
   Control allows a restarted builder to reconstruct the exact version; completed/failed delayed requests
   cannot deploy an older snapshot. The builder waits for actual target execution, including the local
   deferred swap, before another deploy or terminal abort passes its queue.
+  A transient publication/notification error retains that owner for same-ID retry, including when the
+  deployment already serves. A new request for the same project can recover the preceding publication,
+  but still returns 409 without preparing its new body; the caller may then retry it normally.
 - **Local only:** `wrangler dev` cuts HTTP requests and WebSockets on replacement. The CLI retains one
   `x-gonvex-sync-request-id` across a restart retry. The operator validates the same project and canonical
   artifact hash, then resumes the durable publication without another rollout or generation. Every attempt

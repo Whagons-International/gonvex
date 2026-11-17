@@ -159,6 +159,9 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
       if (Date.now()>=deadline) return Response.json({error:"release publication recovery timed out",retryable:true},{status:503});
       const failure=await completePublication(env,outcome.recovery,true);
       if (failure) return failure;
+      // A new sync of the SAME project remains refused. It may finish the
+      // abandoned publication, but must not silently apply its own new body.
+      if (outcome.status===409) break;
       // Recovery completed the preceding whole catalog. Only now may this
       // request capture a snapshot; its body/request identity is unchanged.
     }
@@ -204,17 +207,14 @@ async function completePublication(env:DevRouterEnv,ref:DeploymentRef,deploy:boo
         let result:{ready?:boolean;error?:string;retryable?:boolean};
         try {result=await reply.json();}
         catch {throw new Error(`publication HTTP ${reply.status}; cf-ray ${reply.headers.get("cf-ray") ?? "unavailable"}`);}
-        if (!reply.ok && !result.retryable) {
-          await builder?.abort?.(ref,result.error ?? `publication HTTP ${reply.status}`);
-          return jsonError(reply.status,result.error ?? `publication HTTP ${reply.status}`);
-        }
+        if (!reply.ok && !result.retryable) return syncFailure(new Error(result.error ?? `publication HTTP ${reply.status}`),env,"publication",reply.status>=500,reply.status);
         if (result.error) lastError=result.error;
         ready=result.ready===true;
       } else {
         const result=await env.CONTROL.getByName(CONTROL_NAME).publishRelease(ref.id);
         if (result.error) {
-          await builder?.abort?.(ref,result.error);
-          return jsonError(result.status ?? 503,result.error);
+          const status=result.status ?? 503;
+          return syncFailure(new Error(result.error),env,"publication",status>=500,status);
         }
         ready=result.ready;
       }
@@ -223,18 +223,18 @@ async function completePublication(env:DevRouterEnv,ref:DeploymentRef,deploy:boo
       await new Promise(resolve=>setTimeout(resolve,100));
     }
   } catch(cause) {
-    // Abort is queued behind actual target execution. If the builder is down,
-    // keep the durable owner so another request can recover it safely.
-    try {await builder?.abort?.(ref,cause instanceof Error?cause.message:"publication failed");}catch { /* recoverable owner remains */ }
-    return syncFailure(cause,env,"publication");
+    // The target may already be serving, even if its RPC response was lost.
+    // Notification/ingress failures must retain the same fence for retry. Only
+    // the builder's actual target failure or an explicit abort is terminal.
+    return syncFailure(cause,env,"publication",true);
   }
 }
 
-function syncFailure(cause: unknown, env: DevRouterEnv, phase: string): Response {
+function syncFailure(cause: unknown, env: DevRouterEnv, phase: string, recoverable=false, status=503): Response {
   let message = cause instanceof Error ? cause.message : "unknown release error";
   if (env.GONVEX_RELEASE_BUILDER_TOKEN) message = message.replaceAll(env.GONVEX_RELEASE_BUILDER_TOKEN, "[redacted]");
-  const retryable = cause != null && typeof cause === "object" && "retryable" in cause && cause.retryable === true;
-  return Response.json({error:`release ${phase} failed: ${message.slice(0, 1500)}`, ...(retryable ? {retryable:true} : {})}, {status:503});
+  const retryable = recoverable || (cause != null && typeof cause === "object" && "retryable" in cause && cause.retryable === true);
+  return Response.json({error:`release ${phase} failed: ${message.slice(0, 1500)}`, ...(retryable ? {retryable:true} : {})}, {status});
 }
 
 function sameText(left: string, right: string): boolean {
