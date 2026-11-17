@@ -2,14 +2,14 @@
 // no alternate Query, Reducer, auth or delivery implementation lives here.
 import { rpc } from "../session/rpc";
 import type { AssemblyTenant } from "./tenant";
-import type { BakedRelease } from "./releases";
+import type { CatalogPort } from "./catalog-port";
 import type { AssemblyGateway } from "./gateway";
 import { CONTROLLER_CELLS } from "../gateway/placement";
 import { gatewayShards } from "../session/placement/gateway";
-// @ts-expect-error K19 release build alias.
-import * as generated from "gonvex:releases";
+
 interface Env {
   TENANT: DurableObjectNamespace<any>;
+  RUNTIME_CATALOG?:Fetcher;
   GATEWAY: DurableObjectNamespace<any>;
   GATEWAY_CONTROLLER?: DurableObjectNamespace<any>;
   GONVEX_GATEWAY_SHARDS?: string;
@@ -22,8 +22,10 @@ export async function fixtureControl(request: Request, env: Env): Promise<Respon
   if (!url.pathname.startsWith("/__assembly/")) return null;
   if (!env.GONVEX_ASSEMBLY_FIXTURE_KEY || request.headers.get("authorization") !== `Bearer ${env.GONVEX_ASSEMBLY_FIXTURE_KEY}`) return new Response(null, { status: 404 });
   if (url.pathname === "/__assembly/version") {
-    const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
-    return Response.json({ version: (generated as { version?: string }).version ?? null, worker: env.WORKER_VERSION ?? null, releases: Object.fromEntries(Object.entries(releases).map(([id, release]) => [id, release.hash])) });
+    if(!env.RUNTIME_CATALOG)return Response.json({error:"runtime catalog service is not bound"},{status:503});
+    const catalog=env.RUNTIME_CATALOG as unknown as CatalogPort,identity=await catalog.identity();
+    return Response.json({...identity,worker:env.WORKER_VERSION??null,runtimeWorker:identity.worker,
+      ready:identity.version!==null&&await catalog.ready(identity.version)});
   }
   if(request.method==="GET"&&url.pathname==="/__assembly/bootstrap-gate"){
     const holder=url.searchParams.get("holder");

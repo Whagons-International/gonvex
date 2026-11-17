@@ -100,9 +100,22 @@ export class OperatorControlObject extends ControlObject {
   }
 
   /** Generic K19 fixtures have no baked catalog; the serving assembly overrides this. */
-  protected publicationVersionReady(_version: string): boolean { return true; }
+  protected publicationVersionReady(_version: string): boolean | Promise<boolean> { return true; }
   protected activatePublicationTenant(tenant: string, release: {projectId:string;hash:string;generation:number}): Promise<boolean> {
     return this.tenantPort(tenant).operatorActivateRelease(release);
+  }
+  protected async runtimeNamespaceReady(_version:string):Promise<boolean>{return false;}
+  async runtimeTopology(action:"status"|"freeze"|"thaw",version?:string) {
+    let failure:{status:number;error:string}|undefined;
+    try{
+      if(action==="freeze")this.syncs.deployments.freezeTopology();
+      if(action==="thaw"){
+        if(!version||!await this.publicationVersionReady(version))throw new HttpError(503,"runtime catalog version not ready");
+        if(!await this.runtimeNamespaceReady(version))throw new HttpError(409,"runtime tenant namespace or active catalog differs");
+        this.syncs.deployments.thawTopology();
+      }
+    }catch(cause){if(!(cause instanceof HttpError))throw cause;failure={status:cause.status,error:cause.message};}
+    return {frozen:this.syncs.deployments.topologyFrozen(),deployment:this.syncs.deployments.current(),releases:this.syncs.activeReleases(),...failure};
   }
   async publishRelease(syncId: string): Promise<{ready:boolean;error?:string;status?:number}> {
     try { return await this.syncs.publish(syncId); }
@@ -113,10 +126,10 @@ export class OperatorControlObject extends ControlObject {
   }
   async publicationReference(id:string):Promise<DeploymentRef> { return this.syncs.deployments.reference(id); }
   async currentDeployment():Promise<DeploymentRef|null> {return this.syncs.deployments.current();}
-  async deploymentRequest(action:"authorize"|"settle"|"abort", ref:DeploymentRef, result:{ok?:boolean;error?:string}):Promise<{ok:true;grant?:DeploymentGrant}|{ok:false;status:number;error:string}> {
+  async deploymentRequest(action:"authorize"|"settle"|"abort", ref:DeploymentRef, result:{ok?:boolean;error?:string;retain?:boolean}):Promise<{ok:true;grant?:DeploymentGrant}|{ok:false;status:number;error:string}> {
     try {
-      if (action === "authorize") return {ok:true,grant:this.syncs.deployments.authorize(ref)};
-      if (action === "settle") this.syncs.deployments.settle(ref,{ok:result.ok===true,...(result.error?{error:result.error}:{})});
+      if (action === "authorize") return {ok:true,grant:await this.syncs.deployments.authorize(ref)};
+      if (action === "settle") await this.syncs.deployments.settle(ref,{ok:result.ok===true,retain:result.retain===true,...(result.error?{error:result.error}:{})});
       else this.syncs.deployments.abort(ref,result.error ?? "publication aborted");
       return {ok:true};
     } catch (cause) {

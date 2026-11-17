@@ -1,50 +1,146 @@
-// The assembled development kernel; never a staging/production target.
+// Stable socket owners and Control; app publication must never deploy this Worker.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "gonvex-cf-dev-k22",
   "main": "src/index.ts",
-  "version_metadata": { "binding": "WORKER_VERSION" },
+  "version_metadata": {
+    "binding": "WORKER_VERSION"
+  },
   "compatibility_date": "2026-10-23",
-  // The post-deploy publication request must reach the serving Worker through
-  // public ingress, rather than bypass Workers and use the zone's origin.
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
   "workers_dev": true,
   "preview_urls": false,
-  "observability": { "enabled": true },
-  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  "observability": {
+    "enabled": true
+  },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.sql"
+      ],
+      "fallthrough": true
+    }
+  ],
   "alias": {
-    "gonvex:releases": "./kernel/assembly/releases.ts",
     "gonvex:module-globals": "./kernel/host/src/module-globals.ts"
   },
-  "durable_objects": { "bindings": [
-    { "name": "GATEWAY", "class_name": "AssemblyGateway" },
-    { "name": "GATEWAY_CONTROLLER", "class_name": "GatewayControllerObject" },
-    { "name": "CONTROL", "class_name": "SessionControlObject" },
-    { "name": "TENANT", "class_name": "AssemblyTenant" },
-    { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" },
-    { "name": "INGRESS", "class_name": "IngressObject" }
-  ] },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["HelloObject"] },
-    { "tag": "v2", "new_sqlite_classes": ["GatewayObject", "ControlStubObject", "TenantStubObject"] },
-    { "tag": "v3", "new_sqlite_classes": ["PublicLimiterObject"] },
-    { "tag": "v4", "new_sqlite_classes": ["AssemblyGateway", "SessionControlObject", "AssemblyTenant", "IngressObject"], "deleted_classes": ["HelloObject", "GatewayObject", "ControlStubObject", "TenantStubObject"] },
-    { "tag": "v5", "new_sqlite_classes": ["GatewayControllerObject"] }
-  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GATEWAY",
+        "class_name": "AssemblyGateway"
+      },
+      {
+        "name": "GATEWAY_CONTROLLER",
+        "class_name": "GatewayControllerObject"
+      },
+      {
+        "name": "CONTROL",
+        "class_name": "SessionControlObject"
+      },
+      {
+        "name": "TENANT",
+        "class_name": "AssemblyTenant",
+        "script_name": "gonvex-cf-dev-k22-runtime"
+      },
+      {
+        "name": "PUBLIC_LIMITER",
+        "class_name": "PublicLimiterObject"
+      },
+      {
+        "name": "INGRESS",
+        "class_name": "IngressObject"
+      }
+    ]
+  },
   "r2_buckets": [
-    { "binding": "RELEASES", "bucket_name": "gonvex-cf-dev-k22-releases" },
-    { "binding": "FILES", "bucket_name": "gonvex-cf-dev-k22-files" }
+    {
+      "binding": "RELEASES",
+      "bucket_name": "gonvex-cf-dev-k22-releases"
+    },
+    {
+      "binding": "FILES",
+      "bucket_name": "gonvex-cf-dev-k22-files"
+    }
   ],
   "queues": {
-    "producers": [{ "binding": "ROLLOUT", "queue": "gonvex-cf-dev-k22-rollout" }],
-    "consumers": [{ "queue": "gonvex-cf-dev-k22-rollout", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 10 }]
+    "producers": [
+      {
+        "binding": "ROLLOUT",
+        "queue": "gonvex-cf-dev-k22-rollout"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "gonvex-cf-dev-k22-rollout",
+        "max_batch_size": 1,
+        "max_batch_timeout": 0,
+        "max_retries": 10
+      }
+    ]
   },
   "services": [
-    { "binding": "ACTIONS", "service": "gonvex-cf-dev-k22-actions", "entrypoint": "ActionWorker" },
-    { "binding": "RELEASE_BUILDER", "service": "gonvex-cf-dev-k22-builder" }
+    {
+      "binding": "ACTIONS",
+      "service": "gonvex-cf-dev-k22-actions",
+      "entrypoint": "ActionWorker"
+    },
+    {
+      "binding": "RELEASE_BUILDER",
+      "service": "gonvex-cf-dev-k22-builder"
+    },
+    {
+      "binding": "RUNTIME_CATALOG",
+      "service": "gonvex-cf-dev-k22-runtime",
+      "entrypoint": "RuntimeCatalog"
+    }
   ],
-  "workflows": [{ "binding": "ACTION_WORKFLOW", "name": "gonvex-cf-dev-k22-actions", "class_name": "ActionWorkflow", "script_name": "gonvex-cf-dev-k22-actions" }],
-  "analytics_engine_datasets": [{ "binding": "TELEMETRY_EVENTS", "dataset": "gonvex-cf-dev-k22-telemetry" }],
-  "limits": { "cpu_ms": 5000 },
-  "vars": { "GONVEX_RUNTIME_VERSION": "development", "GONVEX_PRESENCE": "1" }
+  "workflows": [
+    {
+      "binding": "ACTION_WORKFLOW",
+      "name": "gonvex-cf-dev-k22-actions",
+      "class_name": "ActionWorkflow",
+      "script_name": "gonvex-cf-dev-k22-actions"
+    }
+  ],
+  "analytics_engine_datasets": [
+    {
+      "binding": "TELEMETRY_EVENTS",
+      "dataset": "gonvex-cf-dev-k22-telemetry"
+    }
+  ],
+  "limits": {
+    "cpu_ms": 30000
+  },
+  "vars": {
+    "GONVEX_RUNTIME_VERSION": "development",
+    "GONVEX_PRESENCE": "1",
+    "GONVEX_TOPOLOGY_TRANSITION": "0"
+  },
+  "exports": {
+    "AssemblyGateway": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "GatewayControllerObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "SessionControlObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "PublicLimiterObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "IngressObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
 }

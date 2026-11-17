@@ -23,7 +23,6 @@ export class ReleaseBuilderContainer extends DurableObject<Env> {
         GONVEX_RELEASE_BUILDER_TOKEN: this.env.GONVEX_RELEASE_BUILDER_TOKEN,
         GONVEX_KERNEL_URL: this.env.GONVEX_KERNEL_URL,
         GONVEX_KERNEL_SCRIPT: this.env.GONVEX_KERNEL_SCRIPT,
-        GONVEX_KERNEL_WRANGLER_CONFIG: "/gonvex/cloudflare/wrangler.jsonc",
         GONVEX_KERNEL_GENERATED_DIR: "/gonvex/cloudflare/kernel/assembly/.generated",
         GONVEX_BUILDER_TARGET: "wrangler",
         CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,

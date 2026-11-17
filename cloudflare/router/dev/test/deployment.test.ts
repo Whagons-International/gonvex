@@ -21,17 +21,18 @@ async function fixture(run:(f:Awaited<ReturnType<typeof setup>>)=>Promise<void>)
  await runInDurableObject(object,async(instance:OperatorControlObject,state)=>{await run(await setup(instance,state));});
 }
 async function setup(instance:OperatorControlObject,state:DurableObjectState){
- let live='',prepareGate:ReturnType<typeof gate>|undefined,stageGate:ReturnType<typeof gate>|undefined,stageEntered:ReturnType<typeof gate>|undefined,deployGate:ReturnType<typeof gate>|undefined,failDeploy=false,failPrepare=false,failNotify=false,notifyStatus:number|undefined,notifyGate:ReturnType<typeof gate>|undefined;
+ let versionGate:ReturnType<typeof gate>|undefined;
+ let live='',prepareGate:ReturnType<typeof gate>|undefined,stageGate:ReturnType<typeof gate>|undefined,stageEntered:ReturnType<typeof gate>|undefined,deployGate:ReturnType<typeof gate>|undefined,failDeploy=false,retainDeploy=false,failPrepare=false,failNotify=false,notifyStatus:number|undefined,notifyGate:ReturnType<typeof gate>|undefined;
  const events:string[]=[],target=new MemoryVersionTarget();
  const baseDeploy=target.deploy.bind(target);
- target.deploy=async(version)=>{events.push('deploy:'+version);await deployGate?.promise;if(failDeploy)throw Error('target failed');await baseDeploy(version);live=version;};
+ target.deploy=async(version)=>{events.push('deploy:'+version);await deployGate?.promise;if(failDeploy)throw Object.assign(Error('target failed'),{retainPublication:retainDeploy});await baseDeploy(version);live=version;};
  const core=()=>new ReleaseBuilderCore({blobs:testEnv.RELEASES as unknown as BlobStore,target,preludeSpecifier:PRELUDE_SPECIFIER});
  let builder=core();
  const wrapped:ReleaseBuilder={inspect:(...a)=>builder.inspect(...a),prepare:async(...a)=>{events.push('prepare:'+a[1]);await prepareGate?.promise;if(failPrepare)throw Error('prepare failed');return builder.prepare(...a);},activate:async(...a)=>{const held=stageGate,entered=stageEntered,result=await builder.activate(...a);entered?.release();await held?.promise;return result;},deploy:version=>builder.deploy(version)};
- const ports:SyncPorts={sql:instance.sql,builder:wrapped,enqueue:async()=>{throw Error('unexpected tenant rollout');},versionReady:version=>live===version,
+ const ports:SyncPorts={sql:instance.sql,builder:wrapped,enqueue:async()=>{throw Error('unexpected tenant rollout');},versionReady:async version=>{await versionGate?.promise;return live===version;},
   activateTenants:async()=>true,moduleReloaded:async()=>{await notifyGate?.promise;if(failNotify)throw notifyStatus?new HttpError(notifyStatus,'holder unavailable'):Error('holder unavailable');},syncCrons:async()=>{},deadlineMs:1000,devSyncKey:'synthetic',acceptsKey:(_p,key)=>key==='synthetic'};
  let coordinator=new SyncCoordinator(ports);
- const authority={authorize:async(r:DeploymentRef)=>coordinator.deployments.authorize(r),settle:async(r:DeploymentRef,outcome:{ok:boolean;error?:string})=>{coordinator.deployments.settle(r,outcome);},abort:async(r:DeploymentRef,error:string)=>{coordinator.deployments.abort(r,error);}};
+ const authority={authorize:async(r:DeploymentRef)=>coordinator.deployments.authorize(r),settle:async(r:DeploymentRef,outcome:{ok:boolean;error?:string})=>{await coordinator.deployments.settle(r,outcome);},abort:async(r:DeploymentRef,error:string)=>{coordinator.deployments.abort(r,error);}};
  const executor=()=>new PublicationExecutor(wrapped,authority,async(r,catalog)=>{
   if(target.staged.has(r.version))return;
   const result=await wrapped.activate(catalog);expect(result).toEqual({ok:true,version:r.version});
@@ -48,24 +49,25 @@ async function setup(instance:OperatorControlObject,state:DurableObjectState){
  return {instance,state,target,events,request,serving,publish,bodies,
   sync:(r:Parameters<SyncCoordinator['sync']>[0])=>coordinator.sync(r),
   get coordinator(){return coordinator;},get worker(){return worker;},get live(){return live;},
+  versionGate:(g:ReturnType<typeof gate>|undefined)=>{versionGate=g;},
   prepareGate:(g:ReturnType<typeof gate>|undefined)=>{prepareGate=g;},deployGate:(g:ReturnType<typeof gate>|undefined)=>{deployGate=g;},notifyGate:(g:ReturnType<typeof gate>|undefined)=>{notifyGate=g;},
   stageGate:(g:ReturnType<typeof gate>|undefined,entered?:ReturnType<typeof gate>)=>{stageGate=g;stageEntered=entered;},
-  failDeploy:(v:boolean)=>{failDeploy=v;},failPrepare:(v:boolean)=>{failPrepare=v;},failNotify:(v:boolean)=>{failNotify=v;},
+  failDeploy:(v:boolean)=>{failDeploy=v;},retainDeploy:(v:boolean)=>{retainDeploy=v;},failPrepare:(v:boolean)=>{failPrepare=v;},failNotify:(v:boolean)=>{failNotify=v;},
   notifyStatus:(status:number)=>{notifyStatus=status;},
   reset:()=>{coordinator=new SyncCoordinator(ports);builder=core();target.staged.clear();worker=executor();},
-  async http(r:Awaited<ReturnType<typeof request>>,publicIngress=false){
+  async http(r:Awaited<ReturnType<typeof request>>,publicIngress=false,transition=false,key='synthetic'){
    const control={syncKeyAccepted:async(_p:string,key:string)=>key==='synthetic',devSync:(q:Parameters<SyncCoordinator['sync']>[0])=>coordinator.sync(q),
     publishRelease:async(id:string)=>{try{return await coordinator.publish(id);}catch(cause){if(cause instanceof HttpError)return {ready:false,error:cause.message,status:cause.status};throw cause;}},publicationReference:(id:string)=>Promise.resolve(coordinator.deployments.reference(id))};
    const transport={fetch:async(input:RequestInfo|URL,init?:RequestInit)=>{
     const incoming=new Request(input,init),data=await incoming.json() as {publication:DeploymentRef;version:string;error:string};
     return Response.json(new URL(incoming.url).pathname==='/abort'?await worker.abort(data.publication,data.error):await worker.deploy(data.publication));
    }};
-   const env={CONTROL:{getByName:()=>control},RELEASES:testEnv.RELEASES,RELEASE_BUILDER:transport,...(publicIngress?{GONVEX_PUBLIC_URL:'https://fixture',GONVEX_RELEASE_BUILDER_TOKEN:'synthetic-builder-token'}:{})} as unknown as DevRouterEnv;
+   const env={CONTROL:{getByName:()=>control},RELEASES:testEnv.RELEASES,RELEASE_BUILDER:transport,...(transition?{GONVEX_TOPOLOGY_TRANSITION:'1'}:{}),...(publicIngress?{GONVEX_PUBLIC_URL:'https://fixture',GONVEX_RELEASE_BUILDER_TOKEN:'synthetic-builder-token'}:{})} as unknown as DevRouterEnv;
    const fetch=publicIngress?vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{
     const result=await handleDevRequest(new Request(input,init),env,state as unknown as ExecutionContext);
     if(!result)throw Error('unexpected ingress');return result;
    }):undefined;
-   try{return await handleDevRequest(new Request('https://fixture/dev/sync',{method:'POST',headers:{authorization:'Bearer synthetic','content-type':'application/json','x-gonvex-project-id':r.headerProject,'x-gonvex-sync-request-id':r.requestId},body:JSON.stringify(bodies.get(r.requestId))}),env,state as unknown as ExecutionContext);}
+   try{return await handleDevRequest(new Request('https://fixture/dev/sync',{method:'POST',headers:{authorization:`Bearer ${key}`,'content-type':'application/json','x-gonvex-project-id':r.headerProject,'x-gonvex-sync-request-id':r.requestId},body:JSON.stringify(bodies.get(r.requestId))}),env,state as unknown as ExecutionContext);}
    finally{fetch?.mockRestore();}
   },
  };
@@ -254,4 +256,97 @@ it('migrates pre-fence interrupted preparations once, while preserving modern pu
  expect(f.coordinator.deployments.current()).toEqual(ref(first));
  expect(await f.sync(await f.request('modern-b'))).toMatchObject({ok:false,recovery:ref(first)});
  await f.publish(first);
+}));
+
+it('durable topology freeze refuses new publication across coordinator reset, without expiring or replacing an owner',async()=>fixture(async f=>{
+ const request=await f.request('topology-a');
+ f.coordinator.deployments.freezeTopology();f.reset();
+ expect(f.coordinator.deployments.topologyFrozen()).toBe(true);
+ await expect(f.sync(request)).rejects.toThrow('topology migration');
+ const mark=f.instance.sql.mark();f.coordinator.deployments.thawTopology();const cost=f.instance.sql.mark();
+ console.log('topology thaw SQL rows',cost.read-mark.read,cost.written-mark.written);
+ expect(cost.written-mark.written).toBe(1);
+ const pending=staged(await f.sync(request));expect(()=>f.coordinator.deployments.freezeTopology()).toThrow('complete the current publication');
+ f.reset();expect(f.coordinator.deployments.current()).toEqual(ref(pending));await f.publish(pending);
+ f.coordinator.deployments.freezeTopology();expect(f.coordinator.deployments.topologyFrozen()).toBe(true);
+}));
+it('asynchronous serving-version observation cannot authorize a fence that ended while its RPC was in flight',async()=>fixture(async f=>{
+ const pending=staged(await f.sync(await f.request('catalog-a'))),held=gate();f.versionGate(held);
+ const grant=f.coordinator.deployments.authorize(ref(pending));
+ f.coordinator.deployments.abort(ref(pending),'target failed before read returned');
+ const newer=staged(await f.sync(await f.request('catalog-b')));held.release();f.versionGate(undefined);
+ await expect(grant).rejects.toThrow('fence is no longer current');await f.publish(newer);
+}));
+it('topology maintenance may expire interrupted preparation but cannot expire a staged deployment',async()=>fixture(async f=>{
+ const request=await f.request('topology-expired');
+ const lock=f.coordinator.deployments.acquire(request.headerProject,request.requestId);
+ expect(lock.acquired).toBe(true);
+ f.instance.sql.run('UPDATE gonvex_cf_syncs SET expires_at=0 WHERE sync_id=$1',request.requestId);
+ f.coordinator.deployments.freezeTopology();f.reset();
+ expect(f.coordinator.deployments.topologyFrozen()).toBe(true);
+ expect(f.instance.sql.value('SELECT state FROM gonvex_cf_syncs WHERE sync_id=$1',request.requestId)).toBe('abandoned');
+ f.coordinator.deployments.thawTopology();
+ const pending=staged(await f.sync(await f.request('topology-staged')));
+ f.instance.sql.run('UPDATE gonvex_cf_syncs SET expires_at=0 WHERE sync_id=$1',pending.publication);
+ expect(()=>f.coordinator.deployments.freezeTopology()).toThrow('complete the current publication');
+ await f.publish(pending);
+}));
+it('completed settlement needs no catalog RPC and late asynchronous failure cannot abort a successor',async()=>fixture(async f=>{
+ const a=staged(await f.sync(await f.request('settle-a')));await f.publish(a);
+ const held=gate();f.versionGate(held);
+ // Completed operations return without touching an unavailable catalog service.
+ await f.coordinator.deployments.settle(ref(a),{ok:false});
+ held.release();f.versionGate(undefined);
+ const b=staged(await f.sync(await f.request('settle-b'))),delayed=gate();f.versionGate(delayed);
+ const late=f.coordinator.deployments.settle(ref(b),{ok:false,error:'late failure'});
+ f.coordinator.deployments.abort(ref(b),'target barrier completed');
+ const c=staged(await f.sync(await f.request('settle-c')));
+ delayed.release();f.versionGate(undefined);await late;
+ expect(f.coordinator.deployments.current()).toEqual(ref(c));await f.publish(c);
+}));
+it('a partial target retains its durable fence across restart and same-ID recovery, refusing abort and the next project',async()=>fixture(async f=>{
+ const request=await f.request('partial-a'),a=staged(await f.sync(request));
+ f.failDeploy(true);f.retainDeploy(true);
+ expect(await f.worker.deploy(ref(a))).toMatchObject({ok:false,retain:true});
+ expect(f.coordinator.deployments.current()).toEqual(ref(a));
+ await expect(f.worker.abort(ref(a),'caller gave up')).rejects.toThrow('same-ID recovery before abort');
+ f.reset();expect(staged(await f.sync(request)).publication).toBe(a.publication);
+ expect(await f.sync(await f.request('partial-b'))).toMatchObject({ok:false,status:503,recovery:ref(a)});
+ // Losing a Container does not make a second ordinary failure proof of no write.
+ f.retainDeploy(false);expect(await f.worker.deploy(ref(a))).toMatchObject({ok:false,retain:true});
+ await expect(f.worker.abort(ref(a),'caller gave up again')).rejects.toThrow('same-ID recovery before abort');
+ f.failDeploy(false);await f.publish(staged(await f.sync(request)));
+ const b=staged(await f.sync(await f.request('partial-b')));await f.publish(b);
+ expect(f.serving()).toContain('partial-a');expect(f.serving()).toContain('partial-b');
+}));
+it('authorization records a target attempt before mutation, so a lost builder cannot abandon it after restart',async()=>fixture(async f=>{
+ const request=await f.request('lost-builder'),a=staged(await f.sync(request));
+ expect(await f.coordinator.deployments.authorize(ref(a))).toMatchObject({allowed:true});
+ f.reset();await expect(f.worker.abort(ref(a),'old process disappeared')).rejects.toThrow('same-ID recovery before abort');
+ f.failDeploy(true);expect(await f.worker.deploy(ref(a))).toMatchObject({ok:false,retain:true});
+ f.failDeploy(false);await f.publish(staged(await f.sync(request)));
+ expect(f.coordinator.deployments.current()).toBeNull();
+}));
+it('writes one indexed attempt row before grant and removes it at a successful target barrier',async()=>fixture(async f=>{
+ const a=staged(await f.sync(await f.request('attempt-cost'))),before=f.instance.sql.mark();
+ expect(await f.coordinator.deployments.authorize(ref(a))).toMatchObject({allowed:true});
+ const granted=f.instance.sql.mark();await f.coordinator.deployments.settle(ref(a),{ok:true});const settled=f.instance.sql.mark();
+ const counts={grant:{read:granted.read-before.read,written:granted.written-before.written},settle:{read:settled.read-granted.read,written:settled.written-granted.written}};
+ console.log('target attempt SQL rows',JSON.stringify(counts));
+ // SQLite charges the metadata row and its TEXT-primary-key index on INSERT.
+ expect(counts.grant.written).toBe(2);expect(counts.settle.written).toBe(1);
+ expect(f.instance.sql.value('SELECT COUNT(*) FROM gonvex_cf_target_attempts')).toBe(0);
+ await f.publish(a);
+}));
+it('the maintenance router refuses new preparations while permitting ordinary same-ID recovery with its original key/hash checks',async()=>fixture(async f=>{
+ const a=await f.request('maintenance-a');const pending=staged(await f.sync(a));
+ const fresh=await f.request('maintenance-b'),before=f.events.length;
+ expect((await f.http(fresh,false,true))?.status).toBe(503);expect(f.events).toHaveLength(before);
+ expect((await f.http(a,false,true,'wrong-key'))?.status).toBe(401);
+ const original=f.bodies.get(a.requestId),different=await f.request('maintenance-a',2);
+ f.bodies.set(a.requestId,f.bodies.get(different.requestId)!);
+ expect((await f.http(a,false,true))?.status).toBe(409);f.bodies.set(a.requestId,original!);
+ const resumed=await f.http(a,false,true);expect(resumed?.status).toBe(200);
+ expect(f.coordinator.deployments.current()).toBeNull();
+ expect(await f.coordinator.publish(pending.publication)).toEqual({ready:true});
 }));

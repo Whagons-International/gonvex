@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "alias": { "gonvex:action-releases": "./releases.ts", "gonvex:module-globals": "../host/src/module-globals.ts" },
   "durable_objects": { "bindings": [
-    { "name": "TENANT", "class_name": "AssemblyTenant", "script_name": "gonvex-cf-dev-k22" },
+    { "name": "TENANT", "class_name": "AssemblyTenant", "script_name": "gonvex-cf-dev-k22-runtime" },
     { "name": "CONTROL", "class_name": "SessionControlObject", "script_name": "gonvex-cf-dev-k22" }
   ] },
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-k22-files" }],

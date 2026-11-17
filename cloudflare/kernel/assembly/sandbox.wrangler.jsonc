@@ -7,7 +7,7 @@
   "durable_objects": { "bindings": [
     { "name": "SANDBOX_CONTAINER", "class_name": "SandboxContainer" },
     { "name": "SANDBOX_REGISTRY", "class_name": "SandboxRegistry" },
-    { "name": "TENANT", "class_name": "AssemblyTenant", "script_name": "gonvex-cf-dev-k22" }
+    { "name": "TENANT", "class_name": "AssemblyTenant", "script_name": "gonvex-cf-dev-k22-runtime" }
   ] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SandboxContainer", "SandboxRegistry"] }],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-k22-files" }],
