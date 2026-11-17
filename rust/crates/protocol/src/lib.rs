@@ -769,6 +769,8 @@ pub enum ServerMessage {
     },
     #[serde(rename = "action.error")]
     ActionError {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
