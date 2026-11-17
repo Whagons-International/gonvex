@@ -68,7 +68,15 @@ The helper uses the documented [declarative namespace transfer](https://develope
 
 - The source bridge still exports AssemblyTenant and carries the captured complete catalog. Its
   router refuses new preparations while allowing staged same-ID sync recovery through the normal
-  hash/key checks. Control's durable freeze must report no deployment owner, and its actual
+  hash/key checks. Before any Tenant restore, the bridge requires the retained active hash and
+  generation to match its captured release. A stale capture or an uninstalled Tenant refuses
+  the wake before module code or metadata can change. A matching bridge restores the retained
+  manifest without auto-activation; release plans, changed pins and provisioning wait for maintenance
+  to finish. An already-active exact pin can still acknowledge a same-ID publication without mutation.
+  These guards also apply to the runtime source during reverse transfer. If a legacy publication
+  still needs a different Tenant pin, finish its ordinary same-ID recovery on its compatible serving
+  framework before retrying maintenance with a fresh capture; never abort it or rewrite its rows.
+  Control's durable freeze must report no deployment owner, and its actual
   active catalog must match the capture. An interrupted preparation may expire normally; a staged
   publication cannot expire. Framework code adoption can take the platform's default interval;
   the helper's separate maintenance retry does not change SDK or conformance publication deadlines.
@@ -110,8 +118,14 @@ control-only notification, failure/same-ID recovery, stale pins, contract refusa
 validation. The mutation endpoints and injected faults exist only in test Workers. They are not
 deployed runtime loaders or an assertion about managed adoption.
 
-Node config/transfer tests check target selection, namespace identity, partial failure, resume and
-reverse plans. They do not simulate provider migration success. A coordinated dev transfer and the
+Native Miniflare transfer regressions load the actual Tenant and Control classes, switch source code
+over retained SQLite, and inject stale hash or generation captures in both directions. They check
+failed freeze, real durable freeze, reconstruction, refused activation/provisioning and a frozen
+refresh interrupted before receiving. A temporary read-only inspection class checks that refused
+wakes have not changed the retained module or synthetic row. Provider namespace responses in these
+tests remain controlled inputs; no managed namespace transfer is inferred.
+Node config/transfer tests also check target selection, namespace identity, partial failure, resume and
+reverse plans. A coordinated dev transfer and the
 unchanged original remote connected scenarios remain necessary observations after review/merge.
 Full V01, terminal/OWNER acceptance and load remain separate; no latency, cost or load result is
 inferred from these local tests. Runtime keeps CPU30000; Actions and Sandbox retain their existing

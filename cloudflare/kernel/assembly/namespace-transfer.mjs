@@ -38,6 +38,9 @@ export async function transferConfigs(name,directory,{catalogEntry,actionCatalog
  kernel.durable_objects.bindings.find(b=>b.name==='TENANT').script_name=reverse?`${name}-runtime`:undefined;
  // Source bridge remains the old namespace's owner until the transfer commits.
  const source=reverse?runtime:kernel,target=reverse?kernel:runtime;
+ // Both directions must pin retained Tenant releases while installing the
+ // freeze API. A stale capture may refuse a wake, never adopt an older pin.
+ source.vars={...source.vars,GONVEX_TOPOLOGY_TRANSITION:'1'};
  const phases=[];
  const add=(phase,config)=>phases.push({phase,config:structuredClone(config),path:join(directory,`transfer-${reverse?'reverse-':''}${phase}.json`)});
  add('bridge',source);
