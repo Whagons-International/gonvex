@@ -1,0 +1,81 @@
+# Current staging frontend readiness
+
+Updated 2026-11-17. This file is the single source of truth for Cloudflare frontend readiness. ROOT owns matrix updates; implementation and verification owners supply evidence.
+
+**Acceptance: 0/6 criteria PASS. Feature cells: 0/90 PASS.** FAIL includes not yet verified, and does not by itself assert a product defect. The three test-tenant columns remain unselected until the complete current inventory and row counts identify the largest tenant and two typical tenants. Expand the import table for every actual staging tenant; do not treat these three test selections as the import denominator.
+
+## Exact target
+
+- Frontend: `Whagons-International/whagons5-client`, branch `staging`, head `678bdc80c2c55fc3a32aca91c6e2504b6a1d3834`. Latest successful staging deployment `xqldpc1wnircj38oil26sgqz` finished 2026-11-17 08:58:32 UTC at `https://staging.whagons.com`; captured at 19:43:46 UTC. [Deployment metadata](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/staging-frontend-deployment.json), [branch head](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/staging-head.txt). Confirm again before testing if staging advances.
+- Required dev build: exact unmodified frontend source/lockfile/generated refs from that SHA. Only backend URL/environment may differ. Source patches in the frontend are forbidden; incompatibilities are backend contract bugs. This dev build is not yet prepared or verified.
+- Dev: [assembled Worker](https://gonvex-cf-dev-integration-20261117.whagons-international.workers.dev). Last verified live backend `8646997ffd05875072c88101cdb9b75fd5e7d086`, four Workers; integration `471a01c6ca047c42865e2fd9668a9e3c9d73836e` Runtime migration is being resumed. [Last release](/mnt/data/work/gonvex-cf-dev-integration-20261117/release-439/REPORT.md). Record exact backend versions with each test batch.
+- Earlier browser evidence used frontend `3ad4fa47ed7f6c0c7d41d0b3d5a9cfd92c8d01b9`; none is credited as a PASS for this current target.
+- Staging, production, main and frontend source/deployment are read-only. Dev signing-key rotation is authorized; recovery/private-signer work is no longer a prerequisite. Capacity telemetry, driver and tuning are secondary and do not gate parity.
+
+## Six acceptance criteria
+
+| ID | Required result | Status | Evidence / remaining work |
+|---|---|---|---|
+| 1 | Exact current staging frontend, unmodified, against CF dev | FAIL | Current SHA identified; dev build/browser evidence pending. [Target log](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| 2 | Every current staging tenant imported with P03 and matching row counts | FAIL | Complete live inventory/snapshot reconciliation and per-tenant counts pending; historical two-copy import is insufficient. [Prior import](/mnt/data/work/gonvex-cf-dev-integration-20261117/import-431/report.json) |
+| 3 | Complete real-browser feature matrix on largest plus two typical tenants, with original copied-user logins | FAIL | No current-build rows verified. [Prior limited browser run](/mnt/data/work/gonvex-v01-864-browser-20261117/REPORT.md) is historical only. |
+| 4 | Continuous 30-minute session, 2+ clients, zero transport503/unexpected close/reset | FAIL | Latest limited run had503/1011/1006 and resets; recovered flow does not pass. [Failure log](/mnt/data/work/gonvex-v01-864-browser-20261117/REPORT.md). Workers Logs root cause (20:20 UTC): all three 1011 closes match gateway "Subrequest depth limit exceeded" errors in tenant→gateway `deliverReplicaInitial` context. The 503s are router deadline expiries (slow GatewayController/limiter) whose cause was swallowed. Resets and 1006 closes are unexplained. [Findings](/home/gabriel/work/gonvex-transport-rootcause-20261117/FINDINGS.md). Fix owner: X02 transport delegate. |
+| 5 | Full conformance green on exact deployed head | FAIL | Last complete run20PASS/18FAIL/1SKIP on older deployment; full current run pending. [Suite log](/mnt/data/work/gonvex-v01-dev-verification-20261117/REPORT.md) |
+| 6 | Current feature-by-tenant matrix with evidence for each result | FAIL | Matrix initialized; tenant selection, complete inventory and current execution evidence are unfinished. |
+
+## Every-tenant P03 import ledger
+
+Current authoritative tenant inventory is not yet complete. Do not infer that only two or three tenants exist from earlier snapshots. The deployment/import owner must add one row per current tenant with capture time, source and copied row totals, comparison count, checksum/schema result and evidence. Distinguish historical import success from a current-target import. Never publish raw rows, accounts, tokens or user credentials.
+
+| Tenant / dev copy | Current P03 | Source rows | Imported rows | Row match | Evidence |
+|---|---|---:|---:|---|---|
+| Complete current inventory | FAIL: unreconciled | unknown | unknown | unknown | [Historical source provenance](/mnt/data/work/gonvex-cf-dev-integration-20261117/staging-current/provenance.json); fresh inventory pending |
+| Historical `devcopy-source-2` | FAIL: current snapshot not qualified | 1001 historical | 1001 historical | Historical PASS only | [Old import](/mnt/data/work/gonvex-cf-dev-integration-20261117/import-431/report.json) |
+| Historical `devcopy-source-3` | FAIL: current snapshot not qualified | 2335 historical | 2335 historical | Historical PASS only | [Old import](/mnt/data/work/gonvex-cf-dev-integration-20261117/import-431/report.json) |
+
+## Feature by selected tenant
+
+Every FAIL below currently means not verified against frontend678bdc80 and the exact current dev backend, unless a specific defect/evidence link replaces it. Capture actual UI screenshots and content-free logs for each result; maintain original login/account ownership and copied-user authorization. Identify unsupported staging features from actual staging behavior rather than silently omitting them. No synthetic ready flag, fake receipt or mock can pass a row.
+
+| ID | Feature | Largest (selection pending) | Typical A (pending) | Typical B (pending) | Current evidence / blocker |
+|---|---|---|---|---|---|
+| auth-login | Login with an existing copied user | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| auth-logout | Logout | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| auth-refresh | Session refresh | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| workspace-load | Initial workspace load versus staging | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| navigation | Every main navigation screen; no backend HTTP/console errors | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| tasks-create | Create task | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| tasks-edit | Edit task | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| tasks-status | Change task status | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| tasks-assign | Assign task | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| tasks-delete | Delete task | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| tasks-bulk | Bulk task actions | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| comments | Comments | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| files-upload | File upload | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| files-download | File download | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| files-preview | File preview | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| files-private | Private-file owner and foreign-user checks | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| forms-fields | Forms and custom fields | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| boards-dashboards | Boards and dashboards | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| search-filters | Search and filters | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| notifications | Notifications | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| presence | Presence | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| admin-users | Settings/admin: users | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| admin-roles | Settings/admin: roles | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| admin-invitations | Settings/admin: invitations | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| admin-integrations | Settings/admin: integrations and API keys | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| realtime | Second-client update within 1 second | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| offline | Offline edit, reconnect and convergence | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| jobs-reports | UI-triggered scheduled reports/jobs | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| jobs-automations | UI-triggered automations/actions | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+| jobs-ai | AI/agent actions present on staging | FAIL | FAIL | FAIL | [Not yet run against current target](/mnt/data/work/gonvex-cloudflare-lead/frontend-readiness-20261117/current-target.json) |
+
+## Execution and failure handling
+
+1. Same K22 deployment owner rotates the DEV storage key, completes reviewed Runtime migration and reconciles/imports ALL current staging tenants. Preserve old evidence and data; do not claim old signed dev URLs survive rotation. Coordinate a provider-write lane so releases/imports do not disrupt browser or conformance observations.
+2. Prepare the exact current frontend outside its source repository with backend-only environment differences, verify source/generated-ref correspondence and actual served versions, and select test tenants from measured row counts. Use existing permitted real logins; missing credentials remain explicit and must not be replaced by fabricated access.
+3. Root-cause transport503/unexpected closes/resets first. Carry actual request/holder/epoch/service identity and safe refusal/close provenance; no cause inference from timing or a branch bit. Fix backend defects as ordinary PRs to cloudflare/integration; deploy and rerun affected rows only.
+4. Run the listed UI features on three tenants, compare initial workspace timing with read-only staging, measure second-client delivery latency, then conduct the uninterrupted30-minute two-client session. No deployments, fixture resets or operator cleanup inside its measurement interval.
+5. Run the full unchanged conformance suite on the recorded deployment, serially with its fixture-publication lane. Preserve failed assertions, original deadlines and truthful unsupported outcomes. Each completed batch updates this matrix and only its affected rows.
+
+Source-reviewed/CI-green backend PRs may merge while these downstream criteria remain open. Planned, implemented, drilled and continuously observed are different states. No capacity/load/soak/FIN/OWNER/monitor/production acceptance is implied here.
