@@ -85,7 +85,11 @@ export interface OperatorTenantPort {
   operatorActivateRelease(event: { projectId: string; hash: string; generation: number }): Promise<boolean>;
   /** `RuntimeEvent::ModuleReloaded` after activation: sockets get `system.reload` or `client.updateRequired`. */
   operatorModuleReloaded(event: { projectId: string; hash: string; generation: number; clientContract: number | null }): Promise<void>;
-  /** `DELETE /dev/tenants/{t}`, `DELETE /dev/projects/{p}`: the database file's removal. */
+  /**
+   * `DELETE /dev/tenants/{t}`, `DELETE /dev/projects/{p}`: the database file's removal. A Durable Object
+   * tenant resets itself after wiping its storage, which rejects this call with `TENANT_DELETED_REASON`;
+   * call it through `deleteTenantStorage`, which treats exactly that rejection as success.
+   */
   operatorDeleteAll(): Promise<void>;
 
   // ------------------------------------------------ data browser (operator_data.rs)
@@ -153,4 +157,20 @@ export function rustTenantError(error: string | null): string {
   text = text.replace(/; the restore point could not be scheduled \([\s\S]*\), so the chunks already committed remain$/, "");
   const failure = sqliteFailure(new Error(text));
   return failure.code !== undefined ? failure.message : text;
+}
+
+/** The reason a tenant object aborts with once `operatorDeleteAll` has wiped its storage and alarm. */
+export const TENANT_DELETED_REASON = "tenant deleted";
+
+/**
+ * Removes a tenant's storage. The object's own `ctx.abort(TENANT_DELETED_REASON)` runs only after
+ * `deleteAll()` succeeded, and it rejects the in-flight RPC with that reason: that rejection is the
+ * success signal. Any other failure (including one before the wipe) still propagates.
+ */
+export async function deleteTenantStorage(port: Pick<OperatorTenantPort, "operatorDeleteAll">): Promise<void> {
+  try {
+    await port.operatorDeleteAll();
+  } catch (cause) {
+    if (!(cause instanceof Error) || cause.message !== TENANT_DELETED_REASON) throw cause;
+  }
 }
