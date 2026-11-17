@@ -146,9 +146,7 @@ export class ModuleEngine {
   }
 
   private binding(contract: FunctionContract): unknown {
-    // Bundles export each function under its public path; `export` is the
-    // source export name, used only for single-module test bundles.
-    return this.exports[contract.path] ?? (contract.export === undefined ? undefined : this.exports[contract.export]);
+    return findExport(this.exports, contract);
   }
 
   private budget(contract: FunctionContract, context: InvocationContext, started: number): { deadline: number | undefined; timeoutMs: number | undefined; sliced: boolean } {
@@ -290,6 +288,57 @@ export class ModuleEngine {
     }
     return { value: envelope.value };
   }
+}
+
+/**
+ * The export names a contract may live under, in Rust's order
+ * (V8/isolate.rs `handler_candidates`): the manifest's `export`, then
+ * `handler`, the public path, its last segment, and `default` (where
+ * `createModule()` projects its registrations).
+ */
+export function handlerCandidates(contract: FunctionContract): string[] {
+  const candidates: string[] = [];
+  const metadata = contract.metadata ?? {};
+  const named = [metadata["export"] ?? contract.export, metadata["handler"]];
+  for (const name of named) if (typeof name === "string" && name.trim() !== "") candidates.push(name.trim());
+  candidates.push(contract.path);
+  const dot = contract.path.lastIndexOf(".");
+  if (dot >= 0) candidates.push(contract.path.slice(dot + 1));
+  candidates.push("default");
+  // Rust's `Vec::dedup` drops consecutive duplicates only.
+  return candidates.filter((name, index) => index === 0 || candidates[index - 1] !== name);
+}
+
+/**
+ * Finds the export a contract names (V8/isolate.rs `resolve_handler`). The
+ * complete bundle re-exports per-file namespaces (`export * as apiKeys`), so a
+ * dotted candidate falls back to walking the namespaces (`apiKeys.create`);
+ * the split Query/Reducer bundle exports each function under its full path.
+ * The first defined value wins; a candidate whose lookup throws (a module in
+ * its temporal dead zone) is not a match.
+ */
+export function findExport(exports: ModuleExports, contract: FunctionContract): unknown {
+  for (const candidate of handlerCandidates(contract)) {
+    let found: unknown;
+    try {
+      found = exports[candidate];
+      if (found === undefined && candidate.includes(".")) found = lookupPath(exports, candidate);
+    } catch {
+      continue;
+    }
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function lookupPath(root: unknown, path: string): unknown {
+  let current = root;
+  for (const segment of path.split(".")) {
+    if (current === null || (typeof current !== "object" && typeof current !== "function")) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+    if (current === undefined) return undefined;
+  }
+  return current;
 }
 
 type DispatchEnvelope =
