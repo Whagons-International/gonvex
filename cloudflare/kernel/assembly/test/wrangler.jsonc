@@ -37,6 +37,14 @@
     "name": "PUB_GATEWAY",
     "class_name": "TestGateway",
     "script_name": "gonvex-cf-dev-k22-test-stable"
+   },
+   {
+    "name": "CAPACITY_CONTROLLER",
+    "class_name": "CapacityController"
+   },
+   {
+    "name": "CAPACITY_GATEWAY",
+    "class_name": "CapacityGateway"
    }
   ]
  },
@@ -50,6 +58,13 @@
     "PublicationControl",
     "PublicationTenant",
     "PublicationGateway"
+   ]
+  },
+  {
+   "tag": "capacity-test-v1",
+   "new_sqlite_classes": [
+    "CapacityController",
+    "CapacityGateway"
    ]
   }
  ],
@@ -83,7 +98,8 @@
  "vars": {
   "GONVEX_DEV_TRANSFER_TARGET": "gonvex-cf-dev-test",
   "GONVEX_DEV_TRANSFER_TOKEN": "test-only",
-  "GONVEX_DEV_TRANSFER_TENANTS": "devcopy-test,devcopy-refusal,devcopy-large,devcopy-wide"
+  "GONVEX_DEV_TRANSFER_TENANTS": "devcopy-test,devcopy-refusal,devcopy-large,devcopy-wide",
+  "GONVEX_ASSEMBLY_FIXTURE_KEY": "capacity-local-only"
  },
  "rules": [
   {
