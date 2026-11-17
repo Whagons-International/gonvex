@@ -71,12 +71,12 @@ export async function handleDevRequest(request: Request, env: DevRouterEnv, ctx:
 
 async function devRequest(request: Request, env: DevRouterEnv, ctx: ExecutionContext): Promise<Response | null> {
   const url = new URL(request.url);
-  if(url.pathname==="/dev/sync"&&(env as DevRouterEnv & {GONVEX_TOPOLOGY_TRANSITION?:string}).GONVEX_TOPOLOGY_TRANSITION==="1")return new Response("runtime topology migration in progress",{status:503});
   if(url.pathname==="/_gonvex/k19/topology") {
     if(!env.GONVEX_ADMIN_KEY||!sameText(request.headers.get("authorization")??"",`Bearer ${env.GONVEX_ADMIN_KEY}`))return new Response(null,{status:404});
     const action=request.method==="GET"?"status":request.method==="POST"?url.searchParams.get("action"):null;
     if(!["status","freeze","thaw"].includes(action??""))return new Response(null,{status:400});
-    return Response.json(await env.CONTROL.getByName(CONTROL_NAME).runtimeTopology(action as "status"|"freeze"|"thaw",url.searchParams.get("version")??undefined));
+    const result=await env.CONTROL.getByName(CONTROL_NAME).runtimeTopology(action as "status"|"freeze"|"thaw",url.searchParams.get("version")??undefined);
+    return Response.json(result,{status:result.status??200});
   }
   if (url.pathname.startsWith("/_gonvex/k19/blobs/")) return handleBlob(request, env, url);
   if (url.pathname.startsWith("/_gonvex/k19/deployments/")) {
@@ -145,6 +145,12 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
   // Kernel: refuse a wrong key before storing the body, when the header names
   // the project (the CLI always sends it). Rust parses first; see note 0036 §3.
   if (headerProject !== "" && !(await control.syncKeyAccepted(headerProject, key))) return jsonError(401, "invalid Gonvex sync key");
+  if((env as DevRouterEnv & {GONVEX_TOPOLOGY_TRANSITION?:string}).GONVEX_TOPOLOGY_TRANSITION==="1"){
+    // Maintenance refuses new preparations, not recovery of an already staged
+    // publication. Its ordinary inspect/hash/key checks still run below.
+    try{await control.publicationReference(requestId);}
+    catch{return jsonError(503,"runtime topology migration in progress");}
+  }
 
   const incoming = crypto.randomUUID();
   try {

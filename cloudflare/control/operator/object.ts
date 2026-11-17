@@ -106,13 +106,16 @@ export class OperatorControlObject extends ControlObject {
   }
   protected async runtimeNamespaceReady(_version:string):Promise<boolean>{return false;}
   async runtimeTopology(action:"status"|"freeze"|"thaw",version?:string) {
-    if(action==="freeze")this.syncs.deployments.freezeTopology();
-    if(action==="thaw"){
-      if(!version||!await this.publicationVersionReady(version))throw new Error("runtime catalog version not ready");
-      if(!await this.runtimeNamespaceReady(version))throw new Error("runtime tenant namespace or active catalog differs");
-      this.syncs.deployments.thawTopology();
-    }
-    return {frozen:this.syncs.deployments.topologyFrozen(),deployment:this.syncs.deployments.current(),releases:this.syncs.activeReleases()};
+    let failure:{status:number;error:string}|undefined;
+    try{
+      if(action==="freeze")this.syncs.deployments.freezeTopology();
+      if(action==="thaw"){
+        if(!version||!await this.publicationVersionReady(version))throw new HttpError(503,"runtime catalog version not ready");
+        if(!await this.runtimeNamespaceReady(version))throw new HttpError(409,"runtime tenant namespace or active catalog differs");
+        this.syncs.deployments.thawTopology();
+      }
+    }catch(cause){if(!(cause instanceof HttpError))throw cause;failure={status:cause.status,error:cause.message};}
+    return {frozen:this.syncs.deployments.topologyFrozen(),deployment:this.syncs.deployments.current(),releases:this.syncs.activeReleases(),...failure};
   }
   async publishRelease(syncId: string): Promise<{ready:boolean;error?:string;status?:number}> {
     try { return await this.syncs.publish(syncId); }

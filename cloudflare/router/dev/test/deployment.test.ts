@@ -55,19 +55,19 @@ async function setup(instance:OperatorControlObject,state:DurableObjectState){
   failDeploy:(v:boolean)=>{failDeploy=v;},retainDeploy:(v:boolean)=>{retainDeploy=v;},failPrepare:(v:boolean)=>{failPrepare=v;},failNotify:(v:boolean)=>{failNotify=v;},
   notifyStatus:(status:number)=>{notifyStatus=status;},
   reset:()=>{coordinator=new SyncCoordinator(ports);builder=core();target.staged.clear();worker=executor();},
-  async http(r:Awaited<ReturnType<typeof request>>,publicIngress=false){
+  async http(r:Awaited<ReturnType<typeof request>>,publicIngress=false,transition=false,key='synthetic'){
    const control={syncKeyAccepted:async(_p:string,key:string)=>key==='synthetic',devSync:(q:Parameters<SyncCoordinator['sync']>[0])=>coordinator.sync(q),
     publishRelease:async(id:string)=>{try{return await coordinator.publish(id);}catch(cause){if(cause instanceof HttpError)return {ready:false,error:cause.message,status:cause.status};throw cause;}},publicationReference:(id:string)=>Promise.resolve(coordinator.deployments.reference(id))};
    const transport={fetch:async(input:RequestInfo|URL,init?:RequestInit)=>{
     const incoming=new Request(input,init),data=await incoming.json() as {publication:DeploymentRef;version:string;error:string};
     return Response.json(new URL(incoming.url).pathname==='/abort'?await worker.abort(data.publication,data.error):await worker.deploy(data.publication));
    }};
-   const env={CONTROL:{getByName:()=>control},RELEASES:testEnv.RELEASES,RELEASE_BUILDER:transport,...(publicIngress?{GONVEX_PUBLIC_URL:'https://fixture',GONVEX_RELEASE_BUILDER_TOKEN:'synthetic-builder-token'}:{})} as unknown as DevRouterEnv;
+   const env={CONTROL:{getByName:()=>control},RELEASES:testEnv.RELEASES,RELEASE_BUILDER:transport,...(transition?{GONVEX_TOPOLOGY_TRANSITION:'1'}:{}),...(publicIngress?{GONVEX_PUBLIC_URL:'https://fixture',GONVEX_RELEASE_BUILDER_TOKEN:'synthetic-builder-token'}:{})} as unknown as DevRouterEnv;
    const fetch=publicIngress?vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{
     const result=await handleDevRequest(new Request(input,init),env,state as unknown as ExecutionContext);
     if(!result)throw Error('unexpected ingress');return result;
    }):undefined;
-   try{return await handleDevRequest(new Request('https://fixture/dev/sync',{method:'POST',headers:{authorization:'Bearer synthetic','content-type':'application/json','x-gonvex-project-id':r.headerProject,'x-gonvex-sync-request-id':r.requestId},body:JSON.stringify(bodies.get(r.requestId))}),env,state as unknown as ExecutionContext);}
+   try{return await handleDevRequest(new Request('https://fixture/dev/sync',{method:'POST',headers:{authorization:`Bearer ${key}`,'content-type':'application/json','x-gonvex-project-id':r.headerProject,'x-gonvex-sync-request-id':r.requestId},body:JSON.stringify(bodies.get(r.requestId))}),env,state as unknown as ExecutionContext);}
    finally{fetch?.mockRestore();}
   },
  };
@@ -337,4 +337,16 @@ it('writes one indexed attempt row before grant and removes it at a successful t
  expect(counts.grant.written).toBe(2);expect(counts.settle.written).toBe(1);
  expect(f.instance.sql.value('SELECT COUNT(*) FROM gonvex_cf_target_attempts')).toBe(0);
  await f.publish(a);
+}));
+it('the maintenance router refuses new preparations while permitting ordinary same-ID recovery with its original key/hash checks',async()=>fixture(async f=>{
+ const a=await f.request('maintenance-a');const pending=staged(await f.sync(a));
+ const fresh=await f.request('maintenance-b'),before=f.events.length;
+ expect((await f.http(fresh,false,true))?.status).toBe(503);expect(f.events).toHaveLength(before);
+ expect((await f.http(a,false,true,'wrong-key'))?.status).toBe(401);
+ const original=f.bodies.get(a.requestId),different=await f.request('maintenance-a',2);
+ f.bodies.set(a.requestId,f.bodies.get(different.requestId)!);
+ expect((await f.http(a,false,true))?.status).toBe(409);f.bodies.set(a.requestId,original!);
+ const resumed=await f.http(a,false,true);expect(resumed?.status).toBe(200);
+ expect(f.coordinator.deployments.current()).toBeNull();
+ expect(await f.coordinator.publish(pending.publication)).toEqual({ready:true});
 }));

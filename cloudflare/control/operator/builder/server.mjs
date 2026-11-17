@@ -23,7 +23,6 @@
 //   GONVEX_DEPLOY_DEFER_MS         local: delay before the swap that reloads workerd (default 1500)
 //   GONVEX_KERNEL_SCRIPT           stable kernel name; only its Actions/runtime companions are app targets
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +30,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { PRELUDE_SPECIFIER, ReleaseBuilderCore, RELEASES_ENTRY } from './core.ts';
 import { PublicationExecutor } from './publication.ts';
 import {LocalTarget,WranglerTarget} from './targets.mjs';
+import {cloudflareCredentials,accountApi,deployConfig} from '../../../kernel/assembly/deploy.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -95,7 +95,10 @@ const target =
   targetKind === 'wrangler'
     ? new WranglerTarget(generatedDir, process.env.GONVEX_KERNEL_SCRIPT ?? '', async(path,name)=>{
         if(!['runtime','actions'].some(k=>name===`${process.env.GONVEX_KERNEL_SCRIPT}-${k}`))throw new Error('stable Worker deployment refused');
-        await new Promise((ok,fail)=>{const child=spawn(resolve(here,'../../../node_modules/.bin/wrangler'),['deploy','--config',path,'--keep-vars'],{stdio:['ignore','pipe','pipe'],env:{...process.env,WRANGLER_SEND_METRICS:'false'}});child.stdout.resume();child.stderr.resume();child.once('error',fail);child.once('exit',code=>code===0?ok():fail(new Error(`wrangler deploy exited ${code}`)));});
+        const credentials=await cloudflareCredentials(),api=accountApi(credentials);
+        if((await api('')).id!==credentials.accountId)throw new Error('deployment account identity differs');
+        for(const kind of ['actions','runtime'])if(!await api(`/workers/scripts/${process.env.GONVEX_KERNEL_SCRIPT}-${kind}/settings`,{missing:true}))throw new Error('application companion is missing; framework setup required');
+        await deployConfig(['deploy','--config',path,'--keep-vars'],credentials,generatedDir);
       })
     : new LocalTarget(generatedDir, Number(process.env.GONVEX_DEPLOY_DEFER_MS ?? '1500'), stagingDir);
 

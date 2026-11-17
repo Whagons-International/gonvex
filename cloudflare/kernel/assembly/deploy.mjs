@@ -69,13 +69,15 @@ export async function deployConfig(args, credentials, directory) {
   await mkdir(env.TMPDIR, { recursive: true });
   return new Promise((ok, fail) => {
     const child = spawn(join(root, 'node_modules/.bin/wrangler'), args, { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-    child.stdout.on('data', (part) => { output += part; }); child.stderr.on('data', (part) => { output += part; });
+    let output = '',truncated=false;
+    const capture=part=>{output+=part;if(output.length>2*1024*1024){output=output.slice(-2*1024*1024);truncated=true;}};
+    child.stdout.on('data', capture); child.stderr.on('data', capture);
     child.on('error', fail);
     child.on('exit', async (code) => {
       // Keep raw deployment diagnostics private. API/credential failure text can include context.
-      await writeFile(join(directory, `wrangler-${Date.now()}.log`), output, { mode: 0o600 });
-      code === 0 ? ok(output) : fail(new Error(`wrangler ${args[0]} exited ${code}; private diagnostics in ${directory}`));
+      await writeFile(join(directory, `wrangler-${Date.now()}.log`), (truncated?'[earlier output truncated]\n':'')+output, { mode: 0o600 });
+      const codes=[...new Set([...output.matchAll(/\[code:\s*(\d{1,8})\]/g)].map(match=>match[1]))].slice(0,8);
+      code === 0 ? ok(output) : fail(new Error(`wrangler ${args[0]} exited ${code}${codes.length?`; provider codes ${codes.join(',')}`:''}; private diagnostics in ${directory}`));
     });
   });
 }

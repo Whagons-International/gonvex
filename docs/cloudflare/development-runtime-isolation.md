@@ -67,7 +67,8 @@ edit its SQL to obtain a freeze; complete it through its ordinary same-ID protoc
 The helper uses the documented [declarative namespace transfer](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/#transfer-a-durable-object-class-between-workers):
 
 - The source bridge still exports AssemblyTenant and carries the captured complete catalog. Its
-  router refuses new syncs. Control's durable freeze must report no deployment owner, and its actual
+  router refuses new preparations while allowing staged same-ID sync recovery through the normal
+  hash/key checks. Control's durable freeze must report no deployment owner, and its actual
   active catalog must match the capture. An interrupted preparation may expire normally; a staged
   publication cannot expire. Framework code adoption can take the platform's default interval;
   the helper's separate maintenance retry does not change SDK or conformance publication deadlines.

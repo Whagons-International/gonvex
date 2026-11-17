@@ -36,6 +36,11 @@ it('completed publication activates an existing tenant and notifies tenant/contr
   await control.devCreateProject({id:project,name:'Publication fixture'});await control.devSaveManifest(project,first.manifest);
   await control.fixtureTenant(project,tenant);
   await control.devE2eMember({projectId:project,tenantId:tenant,email:'publication@fixture.invalid',password:'synthetic-test-password'});
+  expect(await bindings.PUB_TENANT.getByName(tenant).operatorInsertRow('board',{id:'preserved-row',title:'retained across adoption',position:0,bumps:0})).toMatchObject({ok:true});
+  const retained=async()=>expect(await bindings.PUB_TENANT.getByName(tenant).operatorReadRows('board',{
+   limit:10,offset:0,search:'',sort:'id',direction:'asc',filters:'',columns:'',count:'true',
+  })).toMatchObject({ok:true,value:{total:1,rows:[{id:'preserved-row',title:'retained across adoption',position:0,bumps:0}]}});
+  await retained();
   const data=await open();
   await data.call({type:'auth',id:'login-scope',project,controlOnly:true});
   const login=await data.call({type:'action.call',id:'login',idempotencyKey:crypto.randomUUID(),scope:'control',path:'control.auth.passwordLogin',args:{email:'publication@fixture.invalid',password:'synthetic-test-password'}});
@@ -87,6 +92,7 @@ it('completed publication activates an existing tenant and notifies tenant/contr
     expect(await control.publishRelease(id)).toEqual({ready:true});
    }else expect(await control.publishRelease(id)).toEqual({ready:true});
    expect(await control.publishRelease(id)).toEqual({ready:true});
+   await retained();
    return release;
   };
   const second=await publish(2);
@@ -103,12 +109,12 @@ it('completed publication activates an existing tenant and notifies tenant/contr
   expect(data.ws.readyState).toBe(WebSocket.OPEN);expect(onlyControl.ws.readyState).toBe(WebSocket.OPEN);
   expect(await bindings.RUNTIME_CATALOG.tenantId('namespace-probe')).toBe(bindings.PUB_TENANT.idFromName('namespace-probe').toString());
   expect((await control.runtimeTopology('freeze')).frozen).toBe(true);
-  await expect((async()=>await control.runtimeTopology('thaw','wrong-version'))()).rejects.toThrow('runtime catalog version not ready');
+  expect(await control.runtimeTopology('thaw','wrong-version')).toMatchObject({frozen:true,status:503,error:'runtime catalog version not ready'});
   await bindings.RUNTIME_CATALOG.fixtureNamespace(true);
-  await expect((async()=>await control.runtimeTopology('thaw','catalog-3'))()).rejects.toThrow('namespace or active catalog differs');
+  expect(await control.runtimeTopology('thaw','catalog-3')).toMatchObject({frozen:true,status:409,error:'runtime tenant namespace or active catalog differs'});
   await bindings.RUNTIME_CATALOG.fixtureNamespace(false);
   await bindings.RUNTIME_CATALOG.install('extra-project',third.manifest,3,'catalog-3');
-  await expect((async()=>await control.runtimeTopology('thaw','catalog-3'))()).rejects.toThrow('namespace or active catalog differs');
+  expect(await control.runtimeTopology('thaw','catalog-3')).toMatchObject({frozen:true,status:409,error:'runtime tenant namespace or active catalog differs'});
   await bindings.RUNTIME_CATALOG.clear('extra-project');await bindings.RUNTIME_CATALOG.install(project,third.manifest,3,'catalog-3');
   await control.fixtureRestart().catch(()=>undefined);control=bindings.PUB_CONTROL.getByName('control');
   expect((await control.runtimeTopology('status')).frozen).toBe(true);
