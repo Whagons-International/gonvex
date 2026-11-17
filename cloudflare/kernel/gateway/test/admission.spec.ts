@@ -1,5 +1,5 @@
 import { env, evictDurableObject, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ASSIGNMENT_HEADER, controllerCell, type GatewayAssignment } from "../placement";
 import { ADMISSION_REASON_HEADER, UPGRADE_HEADERS } from "../../session/placement/gateway";
 import { GatewayRoutingIdentity, ROUTING_IDENTITY_KEY } from "../../session/placement/routing-identity";
@@ -110,11 +110,23 @@ describe("authenticated gateway routing identity and content-free admission fail
 
   it("rejects a cross-holder stored identity on wake without replacing it or consuming a valid lease", async () => {
     const c = control(21), a = await c.acquire(connection(21)), h = holder(a.gateway);
-    await runInDurableObject(h, (_object, state) => state.storage.kv.put(ROUTING_IDENTITY_KEY, { v: 1, name: "wrong-holder" }));
-    await evictDurableObject(h);
-    await failure(await h.fetch(request(a)), "holder-identity");
-    expect((await identity(a.gateway)).stored).toEqual({ v: 1, name: "wrong-holder" });
-    expect((await c.status()).pending).toBe(1);
+    const previous = await runInDurableObject(h, (_object, state) => state.storage.kv.get(ROUTING_IDENTITY_KEY));
+    try {
+      await runInDurableObject(h, (_object, state) => state.storage.kv.put(ROUTING_IDENTITY_KEY, { v: 1, name: "wrong-holder" }));
+      await evictDurableObject(h);
+      await failure(await h.fetch(request(a)), "holder-identity");
+      expect((await identity(a.gateway)).stored).toEqual({ v: 1, name: "wrong-holder" });
+      expect((await c.status()).pending).toBe(1);
+    } finally {
+      // Router upgrades can hash to this cell in later tests. Restore the
+      // deliberate corruption, including the cached invalid constructor state.
+      await runInDurableObject(h, (_object, state) => {
+        if (previous === undefined) state.storage.kv.delete(ROUTING_IDENTITY_KEY);
+        else state.storage.kv.put(ROUTING_IDENTITY_KEY, previous);
+      });
+      await evictDurableObject(h);
+      await c.release(a);
+    }
   });
 
   it("rejects an assignment for the other real holder without poisoning a fresh ID-only destination", async () => {
@@ -193,10 +205,16 @@ describe("authenticated gateway routing identity and content-free admission fail
         } };
       } },
     } as unknown as typeof bindings;
-    accepted(await handleWebSocketUpgrade(new Request("https://x/ws", { headers: { upgrade: "websocket", "cf-connecting-ip": "192.0.2.44",
-      [ASSIGNMENT_HEADER]: "client-forgery", ...Object.fromEntries(Object.values(UPGRADE_HEADERS).map(h => [h, "client-forgery"])),
-    } }), wrapped));
-    expect(seen).toEqual([authoritative.gateway]);
+    // Make a leaked corrupt identity above fail every run, rather than only
+    // when a random router connection happens to select cell21 in CI.
+    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue(connection(21));
+    try {
+      accepted(await handleWebSocketUpgrade(new Request("https://x/ws", { headers: { upgrade: "websocket", "cf-connecting-ip": "192.0.2.44",
+        [ASSIGNMENT_HEADER]: "client-forgery", ...Object.fromEntries(Object.values(UPGRADE_HEADERS).map(h => [h, "client-forgery"])),
+      } }), wrapped));
+      expect(authoritative.cell).toBe(21);
+      expect(seen).toEqual([authoritative.gateway]);
+    } finally { uuid.mockRestore(); }
   });
 
   it("preserves a holder refusal reason through the router and independently releases placement and address slots", async () => {
