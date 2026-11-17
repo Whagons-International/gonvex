@@ -53,9 +53,12 @@ import { writeAdmissionError } from "../reducer/admission";
 import { DeliveryAdmissionError } from "../delivery/authority";
 import { retryable } from "../reducer/errors";
 
+
+import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } from "./tenant-transfer";
+
 const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
 const PROJECT_KEY = "assembly/project";
-export interface AssemblyTenantEnv extends AssemblyGatewayEnv {
+export interface AssemblyTenantEnv extends AssemblyGatewayEnv, TransferEnv {
   RELEASES: R2Bucket;
   FILES: R2Bucket;
   ACTIONS: { call(input: DirectCall): Promise<ActionReport | { pending: true; id: string }> };
@@ -121,7 +124,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       },
     });
     this.files = new TenantFiles({ sql: ctx.storage.sql, transactionSync: (f) => ctx.storage.transactionSync(f), bucket: env.FILES, config: filesConfigFromEnv(env) });
-    this.files.ensureSchema();
+    if (!transferAllowed(env, ctx.id.name ?? "") || ctx.storage.kv.get<{phase:string}>(IMPORT_KEY)?.phase === "ready") this.files.ensureSchema();
     this.filePort = filesRpc(this.files);
     this.presence = new TenantPresence({
       tenantId: ctx.id.name ?? "", config: presenceConfig(env), gateway: (name) => rpc<GatewayRpc>(env.GATEWAY, name),
@@ -358,13 +361,28 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   writeMembership(write: Parameters<TenantMemberships["writeMembership"]>[0]) { return this.memberships.writeMembership(write); }
 
   async provision(projectId: string, _tenantId: string): Promise<void> {
+    if (this.ctx.storage.kv.get<{ phase: string }>(IMPORT_KEY)?.phase === "copying") throw new Error("P03 tenant import is incomplete");
     this.ctx.storage.kv.put(PROJECT_KEY, projectId);
     const release = releases[projectId];
     if (!release) throw new Error(`project ${JSON.stringify(projectId)} has no active TypeScript module`);
     const planId = ((release.manifest.module as Record<string, unknown>).release as { planId: string }).planId;
     await this.activate(projectId, release.manifest, planId);
   }
+  /** Authenticated development router only; it uses this object's real SQLite and serial queue. */
+  async assemblyTransfer(request: Request): Promise<Response> {
+    if (!transferAllowed(this.env, this.ctx.id.name ?? "")) return new Response(null, { status: 404 });
+    return this.kernel.reducers.serial(async () => {
+      const response = await transferIntoTenant(this.ctx, request, !!this.kernel.module || this.ctx.storage.kv.get(PROJECT_KEY) !== undefined);
+      // Import may have cleared the lazily created file tables on this same instance.
+      // The serial queue is not a Reducer transaction; initialize before reducers resume.
+      if (response.ok && this.ctx.storage.kv.get<{ phase: string }>(IMPORT_KEY)?.phase === "ready") this.files.ensureSchema();
+      this.kernel.storage.invalidateSchema();
+      return response;
+    });
+  }
   async operatorApplyRelease(planId: string, projectId?: string) {
+    const importing = this.ctx.storage.kv.get<{ phase: string }>(IMPORT_KEY);
+    if (importing?.phase === "copying") throw new Error("P03 tenant import is incomplete");
     if (projectId) this.ctx.storage.kv.put(PROJECT_KEY, projectId);
     const status = await this.kernel.reducers.serial(() => this.operator.applyRelease(planId));
     await this.activateProvisioned(status);

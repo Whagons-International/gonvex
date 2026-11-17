@@ -100,3 +100,31 @@ Every run verifies:
 pnpm test            # codec, statement builder, plans, keyset paging (node:sqlite)
 pnpm test:workerd    # generated fixture through a real object in local workerd, plus the limit probes
 ```
+
+## Import into the assembled development runtime
+
+The assembled kernel exposes the same P03 transport at
+`/__tenant-transfer/t/<fresh-object>/<operation>`. It targets `AssemblyTenant`
+itself, so no standalone transfer object is involved. It is disabled unless the
+Worker has all three private settings:
+
+- `GONVEX_DEV_TRANSFER_TARGET`: the owned `gonvex-cf-dev-*` Worker name.
+- `GONVEX_DEV_TRANSFER_TENANTS`: comma-separated exact fresh `devcopy-*` object names.
+- `GONVEX_DEV_TRANSFER_TOKEN`: a dedicated secret, supplied to P03 as `TRANSFER_TOKEN`.
+
+Run the ordinary round trip with `--url <worker>/__tenant-transfer`, a
+`--prefix devcopy-`, `--keep-object`, and `--complete-import`. Use private local
+work/report directories. `--complete-import` sends staged per-table checksums
+back to the serving object in pages only after all import and export comparisons
+pass. Completion requires matching checksums for every table, successful
+integrity checks, and zero schema refusals. Later writes invalidate prior checks.
+Refused DDL is retained unchanged and prevents completion.
+
+The bridge refuses an existing application tenant or nonempty storage. A partial
+import may be restarted, but a completed one cannot be overwritten. An incomplete
+import refuses ordinary tenant provisioning. After completion, install/register
+the real application through the normal operator/deploy APIs: the ordinary
+migration ledger, module activation, Control mapping and membership projection
+still run. The transfer endpoint supplies no authentication, project record or
+application module of its own. Disable its three settings after the planned copies
+are imported and verified.

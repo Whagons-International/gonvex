@@ -42,6 +42,7 @@ const { values: opts, positionals } = parseArgs({
     'stage-bin': { type: 'string', default: process.env.GONVEX_TENANT_STAGE ?? 'gonvex-tenant-stage' },
     'keep-epoch': { type: 'boolean', default: false },
     'keep-object': { type: 'boolean', default: false },
+    'complete-import': { type: 'boolean', default: false },
     'keep-files': { type: 'boolean', default: false },
     prefix: { type: 'string', default: 'p03-' },
     report: { type: 'string' },
@@ -174,6 +175,19 @@ async function runOne(source) {
     result.findings.push(`schema differs beyond refused statements: missing ${unexplained.join(', ')}; extra ${inCheck.schema.extraInObject.join(', ')}`);
   }
 
+  if (opts['complete-import']) {
+    if (result.findings.length || result.platformRefused.length) {
+      result.findings.push('assembly import completion refused: P03 findings or schema refusals');
+    } else {
+      try {
+        const entries = Object.entries(stagedSums);
+        for (let i = 0; i < entries.length; i += 60) await c.call('verify', { checksums: Object.fromEntries(entries.slice(i, i + 60)) });
+        result.assemblyImport = await c.call('complete');
+      } catch (error) {
+        result.findings.push(`assembly import completion: ${error.message}`);
+      }
+    }
+  }
   if (!opts['keep-object']) await c.call('wipe');
   if (!opts['keep-files']) Object.values(files).forEach(removeDb);
   result.requests = c.requests;
@@ -188,6 +202,7 @@ async function main() {
   const [command, ...rest] = positionals;
   switch (command) {
     case 'run': {
+      if (opts['complete-import'] && !opts['keep-object']) throw new Error('--complete-import requires --keep-object');
       if (!opts.migrations || !opts.work || !rest.length) throw new Error('run needs --migrations, --work and source files');
       const results = [];
       for (const source of rest) {
