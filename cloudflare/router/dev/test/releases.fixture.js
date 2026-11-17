@@ -13,4 +13,14 @@ export const releases = {
     },
     exports: app,
   },
+  "fixture-broken-project": {
+    project: "fixture-broken-project",
+    hash: "fixture-broken-hash",
+    generation: 1,
+    clientContract: null,
+    functions: {
+      "notes.ping": { kind: "query", internal: false, args: { kind: "unsupported-fixture-schema" }, result: { kind: "any" } },
+    },
+    exports: app,
+  },
 };

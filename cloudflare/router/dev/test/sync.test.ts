@@ -243,6 +243,22 @@ describe("/dev/sync", () => {
     expect(await tenantObject("served-tenant").operatorServedModule("unknown-project")).toBeNull();
   });
 
+  it("acknowledges only a matching release whose actual registry installation succeeded", async () => {
+    const good = tenantObject("activation-good");
+    const release = { projectId: "fixture-project", hash: "fixture-hash", generation: 1 };
+    expect(await good.operatorActivateRelease(release)).toBe(true);
+    expect(await good.operatorActivateRelease({ ...release, hash: "another-hash" })).toBe(false);
+    expect(await good.operatorActivateRelease({ ...release, generation: 2 })).toBe(false);
+    expect(await good.operatorActivateRelease({ ...release, projectId: "unknown-project" })).toBe(false);
+
+    const broken = tenantObject("activation-broken");
+    const served = await broken.operatorServedModule("fixture-broken-project");
+    expect(served).toMatchObject({ hash: "fixture-broken-hash", generation: 1 });
+    expect(served?.error).toEqual(expect.any(String));
+    expect(served?.error).not.toBe("");
+    expect(await broken.operatorActivateRelease({ projectId: "fixture-broken-project", hash: "fixture-broken-hash", generation: 1 })).toBe(false);
+  });
+
   it("costs the control object a bounded number of rows per sync (PR numbers)", async () => {
     await useBuilder();
     const project = await createProject("sync-cost");
