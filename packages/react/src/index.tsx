@@ -320,6 +320,10 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const [refreshRetryAt, setRefreshRetryAt] = useState(0);
   const [authRecoveryPaused, setAuthRecoveryPaused] = useState(false);
   const authRecoveryPausedRef = useRef(false);
+  // External identity whose credentials exhausted recovery. A different
+  // identity (an account switch or a fresh sign-in) lifts the pause.
+  const lastExternalUidRef = useRef<string | null>(null);
+  const pausedExternalUidRef = useRef<string | null>(null);
   const [canonicalRefreshRequested, setCanonicalRefreshRequested] = useState(false);
   const [developerMode, setDeveloperMode] = useState<GonvexDeveloperModeState>(
     () => initialAuth.developer ? publicDeveloperMode(initialAuth.developer) : { active: false },
@@ -481,6 +485,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   useEffect(() => props.client.onAuthError((message, details) => {
     if (details?.code === "auth_retry_exhausted") {
       authRecoveryPausedRef.current = true;
+      pausedExternalUidRef.current = lastExternalUidRef.current;
       setAuthRecoveryPaused(true);
       setIsLoading(false);
       setError(message);
@@ -569,7 +574,13 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     // A Firebase ID token is never persisted. The canonical Gonvex session is
     // installed only after the trusted host verifies it and resolves Account.
     const unsubscribe = adapter.onIdTokenChanged((identity) => {
-      if (authRecoveryPausedRef.current) return;
+      const uid = identity?.uid ?? null;
+      if (authRecoveryPausedRef.current) {
+        if (!uid || uid === pausedExternalUidRef.current) return;
+        authRecoveryPausedRef.current = false;
+        setAuthRecoveryPaused(false);
+      }
+      lastExternalUidRef.current = uid;
       const currentGeneration = ++generation;
       const authInvalidationVersion = authInvalidationVersionRef.current;
       if (!identity) {
