@@ -482,6 +482,96 @@ describe("alarms", () => {
 });
 
 describe("hibernation", () => {
+  it("persists a query-only module reset without a publication ID before reconstruction", async () => {
+    const w = await world({ a: ["ana"] }), c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const before = await inGateway(name!, (instance) => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any;
+      const dispatch = session.ports.tenants.dispatch.bind(session.ports.tenants);
+      session.ports.tenants.dispatch = (socket: any, frame: Frame) => frame.type === "query.subscribe" ? Promise.resolve([]) : dispatch(socket, frame);
+      return { id: session.record.connectionId, epoch: session.record.subscriptionEpoch };
+    }) as { id: string; epoch: number };
+    c.send({ type: "query.subscribe", id: "pending-query", path: "items.live", args: {} });
+    c.send({ type: "query.call", id: "barrier", path: "x", args: {} });
+    await c.next(f => f.id === "barrier");
+    await inGateway(name!, async instance => {
+      expect(Object.keys([...instance.host.sessions.values()][0].record.initialRequests)).toHaveLength(1);
+      await instance.host.moduleReloaded(w.projectId, null);
+    });
+    await c.next(f => f.type === "system.reload");
+    await evictDurableObject(gateway(name!));
+    await inGateway(name!, instance => {
+      const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === before.id) as any;
+      expect(session.record.subscriptionEpoch).toBe(before.epoch + 1);
+      expect(session.record.initialRequests).toEqual({});
+      expect(session.record.pendingLiveQueries).toEqual({});
+    });
+    expect(c.close).toBeUndefined();
+  });
+
+  for (const transition of ["reauth", "publication", "membership", "revocation", "drain"] as const) {
+    it(`publishes a consistent subscription reset during ${transition} with pending initials`, async () => {
+      const w = await world({ a: ["ana"] }), c = await signedIn(w, "ana", "a");
+      const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+      const before = await inGateway(name!, (instance) => {
+        const session = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any;
+        const dispatch = session.ports.tenants.dispatch.bind(session.ports.tenants);
+        // Initials normally arrive through the asynchronous tenant feed. Leave
+        // both semantic requests pending while ordinary subsequent calls run.
+        session.ports.tenants.dispatch = (socket: any, frame: Frame) =>
+          frame.type === "query.subscribe" || frame.type === "replica.open" ? Promise.resolve([]) : dispatch(socket, frame);
+        return { id: session.record.connectionId, epoch: session.record.subscriptionEpoch };
+      }) as { id: string; epoch: number };
+      c.send({ type: "query.subscribe", id: "pending-query", path: "items.live", args: {} });
+      c.send({ type: "replica.open", id: "pending-replica", path: "items", args: {} });
+      c.send({ type: "query.call", id: "barrier", path: "x", args: {} });
+      await c.next(f => f.id === "barrier");
+      await inGateway(name!, (instance) => {
+        const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === before.id) as any;
+        expect(Object.values(session.record.initialRequests).map((r: any) => r.kind).sort()).toEqual(["query", "replica"]);
+        expect(session.record.replicas).toEqual({ "pending-replica": "items" });
+      });
+      if (transition === "reauth") {
+        expect((await c.auth({ id: "again", project: w.projectId, tenant: w.tenants.a, token: w.tokens.ana })).type).toBe("auth.result");
+      } else {
+        await inGateway(name!, async (instance) => {
+          const host = instance.host as SocketHost;
+          const session = [...host.sessions.values()].find(s => s.record.connectionId === before.id)!;
+          if (transition === "publication") await host.moduleReloaded(w.projectId, { artifactHash: "artifact-2", clientContract: null, publicationId: "reset-publication" });
+          if (transition === "membership") await session.membershipChanged(4);
+          if (transition === "revocation") await session.revalidated(false, Date.now());
+          if (transition === "drain") expect(session.gatewayDrain()).toEqual({ closed: true });
+        });
+        if (transition === "drain") {
+          expect(await c.closed()).toEqual({ code: 1012, reason: "gateway capacity rebalance" });
+          return;
+        }
+        await c.next(f => f.type === (transition === "publication" ? "system.reload" : "auth.error"));
+      }
+      expect(c.close).toBeUndefined();
+      await evictDurableObject(gateway(name!));
+      await inGateway(name!, (instance) => {
+        const session = [...instance.host.sessions.values()].find((s: any) => s.record.connectionId === before.id) as any;
+        expect(session).toBeDefined();
+        expect(session.closed).toBe(false);
+        expect(session.record.subscriptionEpoch).toBe(before.epoch + 1);
+        for (const field of ["initialRequests", "pendingLiveQueries", "liveQueries", "replicas", "pendingActions", "actionGenerations"]) expect(session.record[field]).toEqual({});
+        if (transition === "membership" || transition === "revocation") expect(session.record.tenant).toBeNull();
+        if (transition === "revocation") expect(session.record.connection.authToken).toBe("");
+      });
+      // Old tenant work cannot cross the new epoch, even after reconstruction.
+      const stale = { v: 1, instance: "old-runtime", shared: [], sockets: { [before.id]: { subscriptionEpoch: before.epoch, ops: [["f", '{"type":"stale-private"}']] } } };
+      await gateway(name!).deliverReplica(w.tenants.a, stale);
+      c.send({ type: "ping" }); await c.next(f => f.type === "pong");
+      expect(c.frames.some(f => f.type === "stale-private")).toBe(false);
+      if (transition === "membership" || transition === "revocation") {
+        c.send({ type: "query.call", id: "after-scope-removal", path: "items.private", args: {} });
+        expect((await c.next(f => f.id === "after-scope-removal")).type).toBe("query.error");
+      }
+      expect(c.close).toBeUndefined();
+    });
+  }
+
   for (const publish of [false, true]) it(`recovers the ${publish ? "new" : "old"} semantic generation after eviction ${publish ? "after" : "before"} attachment publication`, async () => {
     const w = await world({ a: ["ana"] }), c = await signedIn(w, "ana", "a");
     const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
