@@ -118,7 +118,12 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       const stored = ctx.storage.kv.get<StoredModule>(MODULE_KEY);
       const release = stored && releases[stored.projectId];
       const module = stored?.manifest.module as { hash?: unknown; generation?: unknown } | undefined;
-      if (!stored || !release || release.project !== stored.projectId || release.hash !== module?.hash || release.generation !== module?.generation)
+      // Control's publication counter is not the artifact format generation.
+      // The retained artifact must match the captured artifact; Control checks
+      // the separate publication tuple when it freezes the complete catalog.
+      const captured = release?.manifest.module as { hash?: unknown; generation?: unknown } | undefined;
+      if (!stored || !release || release.project !== stored.projectId || release.hash !== module?.hash
+        || captured?.hash !== module?.hash || captured?.generation !== module?.generation)
         throw new Error("topology bridge does not contain the retained active Tenant release");
     }
     super(ctx, env);
@@ -431,8 +436,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async operatorActivateRelease(event: { projectId: string; hash: string; generation: number }): Promise<boolean> {
     const release = releases[event.projectId];
     if (!release || release.hash !== event.hash || release.generation !== event.generation) return false;
+    const artifact = release.manifest.module as { generation?: unknown } | undefined;
     if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") return this.kernel.module?.projectId === event.projectId
-      && this.kernel.module.artifactHash === event.hash && this.kernel.module.generation === event.generation;
+      && this.kernel.module.artifactHash === event.hash && this.kernel.module.generation === artifact?.generation;
     if (this.kernel.module?.projectId !== event.projectId || this.kernel.module.artifactHash !== event.hash) await super.activate(event.projectId, release.manifest, null);
     await this.setupScheduled();
     return this.kernel.module?.artifactHash === event.hash;

@@ -17,7 +17,7 @@ it('completed publication activates an existing tenant and notifies tenant/contr
  const project='publication-fixture',tenant='publication-'+crypto.randomUUID();let control=bindings.PUB_CONTROL.getByName('control');
  const catalog=(generation:number,contract:number|null=null)=>{
   const hash=`publication-fixture-${generation}`;
-  const manifest={...base,functions:{'probe.generation':{kind:'reducer',handler:'generation',args:{kind:'any'},result:{kind:'any'}}},module:{...base.module,hash,generation,
+  const manifest={...base,functions:{'probe.generation':{kind:'reducer',handler:'generation',args:{kind:'any'},result:{kind:'any'}}},module:{...base.module,hash,generation:8,
    files:{...base.module.files,...(contract===null?{}:{'client-contract.json':btoa(JSON.stringify({version:contract,offlineMaxAgeMs:null}))})}}};
   return {project,hash,generation,manifest,exports:{generation:async()=>({generation})}};
  };
@@ -58,10 +58,10 @@ it('completed publication activates an existing tenant and notifies tenant/contr
   const holderBefore=await gateway.fixtureLifecycle();
   const publish=async(n:number,contract:number|null=null)=>{
    const release=catalog(n,contract);
-   const summary:ReleaseSummary={project,hash:release.hash,artifactGeneration:n,functionCount:1,schemaDefinition:{},migrations:[],controlMigrations:[],planId:null,
+   const summary:ReleaseSummary={project,hash:release.hash,artifactGeneration:8,functionCount:1,schemaDefinition:{},migrations:[],controlMigrations:[],planId:null,
     clientContract:contract===null?null:{version:contract,offlineMaxAgeMs:null},crons:[],invitationAcceptanceReducer:'',storedManifest:release.manifest,bundleBytes:0};
    const id=crypto.randomUUID();
-   await control.fixturePublication(id,summary,`catalog-${n}`,[tenant]);
+   await control.fixturePublication(id,summary,`catalog-${n}`,[tenant],n);
    if(n===2){
     await control.fixtureRestart().catch(()=>undefined);control=bindings.PUB_CONTROL.getByName('control');
     expect((await control.currentDeployment())?.id).toBe(id);

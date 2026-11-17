@@ -69,7 +69,10 @@ The helper uses the documented [declarative namespace transfer](https://develope
 - The source bridge still exports AssemblyTenant and carries the captured complete catalog. Its
   router refuses new preparations while allowing staged same-ID sync recovery through the normal
   hash/key checks. Before any Tenant restore, the bridge requires the retained active hash and
-  generation to match its captured release. A stale capture or an uninstalled Tenant refuses
+  artifact format generation to match its captured manifest. Control's publication generation
+  is a separate counter: the frozen catalog and activation event must match the captured
+  publication tuple, never the format version (for example, publication2 can contain format8).
+  A stale artifact capture or an uninstalled Tenant refuses
   the wake before module code or metadata can change. A matching bridge restores the retained
   manifest without auto-activation; release plans, changed pins and provisioning wait for maintenance
   to finish. An already-active exact pin can still acknowledge a same-ID publication without mutation.

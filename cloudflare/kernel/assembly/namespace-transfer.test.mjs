@@ -76,8 +76,8 @@ for(const reverse of [false,true])for(const mismatch of ['hash','generation'])te
     const cfg=JSON.parse(await readFile(path));await update(current,cfg.vars.GONVEX_TOPOLOGY_TRANSITION==='1');
     const observed=await call('/inspect');assert.equal(observed.status,200,JSON.stringify(observed));assert.equal(observed.body.hash,'hash-2');
     const invoked=await call('/call');assert.equal(invoked.body.ok,true,JSON.stringify(invoked));assert.deepEqual(JSON.parse(invoked.body.result),{generation:2});
-    assert.equal((await call('/ack',{project,manifest:manifest(2)})).body.ack,true);
-    assert.equal((await call('/ack',{project,manifest:manifest(1)})).body.ack,false);
+    assert.equal((await call('/ack',{project,manifest:manifest(2),publicationGeneration:2})).body.ack,true);
+    assert.equal((await call('/ack',{project,manifest:manifest(1),publicationGeneration:1})).body.ack,false);
     for(const path of ['/activate','/plan','/provision'])assert.equal((await call(path,{project,manifest:manifest(1)})).status,409);
    }
    else throw Error('receive interrupted');

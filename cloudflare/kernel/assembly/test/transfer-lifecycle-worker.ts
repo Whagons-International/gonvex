@@ -22,13 +22,13 @@ export class AssemblyTenant extends ServingTenant {
     {kind:'query',id:'fixture-query',path:'probe.generation',args:{}}));
   }
   if(action==='/activate'||action==='/plan'||action==='/provision'||action==='/ack'){
-   const {project,manifest}=await request.json() as {project:string;manifest:Record<string,unknown>};
+   const {project,manifest,publicationGeneration}=await request.json() as {project:string;manifest:Record<string,unknown>;publicationGeneration?:number};
    const module=manifest.module as {hash:string;generation:number};
    try{
     if(action==='/activate')await this.activate(project,manifest,null);
     if(action==='/plan')await this.operatorApplyRelease('not-a-plan',project);
     if(action==='/provision')await this.provision(project,this.ctx.id.name!);
-    if(action==='/ack')return Response.json({ack:await this.operatorActivateRelease({projectId:project,...module})});
+    if(action==='/ack')return Response.json({ack:await this.operatorActivateRelease({projectId:project,hash:module.hash,generation:publicationGeneration!})});
    }catch{return new Response('maintenance refused release mutation',{status:409});}
   }
   return Response.json({stored:this.ctx.storage.kv.get(MODULE_KEY),hash:this.kernel.module?.artifactHash,generation:this.kernel.module?.generation,
