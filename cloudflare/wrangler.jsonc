@@ -16,7 +16,9 @@
     "gonvex:releases": "./kernel/assembly/releases.ts",
     "gonvex:module-globals": "./kernel/host/src/module-globals.ts"
   },
-  "durable_objects": { "bindings": [
+  // Publication must activate serving code before ACK; the platform's default
+  // 300s object update deferral exceeds the 180s publication budget.
+  "durable_objects": { "code_update_strategy": { "mode": "immediate" }, "bindings": [
     { "name": "GATEWAY", "class_name": "AssemblyGateway" },
     { "name": "GATEWAY_CONTROLLER", "class_name": "GatewayControllerObject" },
     { "name": "CONTROL", "class_name": "SessionControlObject" },

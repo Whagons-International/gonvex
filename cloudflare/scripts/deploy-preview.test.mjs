@@ -42,6 +42,7 @@ test("composes every development service, bucket, workflow and queue under one i
     for (const kind of ['kernel', 'bootstrap']) {
       assert.ok(configs[kind].config.compatibility_flags.includes('global_fetch_strictly_public'), `${kind} publication ingress must use public routing`);
       assert.ok(!configs[kind].config.compatibility_flags.includes('global_fetch_private_origin'));
+      assert.deepEqual(configs[kind].config.durable_objects.code_update_strategy, { mode: 'immediate' }, `${kind} must adopt code before publication ACK`);
     }
     assert.equal(configs.actions.config.limits.cpu_ms, 300000);
     assert.deepEqual(configs.kernel.config.services.map((s) => s.service), [`${name}-actions`, `${name}-builder`]);
