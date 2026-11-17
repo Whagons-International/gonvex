@@ -2,6 +2,8 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { expect, it } from 'vitest';
 import { handleTenantTransfer, transferIntoTenant, transferAllowed } from '../tenant-transfer';
 import { containerRequest } from '../builder';
+import { readTypedRows, RowHasher } from '../../../tools/tenant-transfer/src/codec.mjs';
+import { createHash } from 'node:crypto';
 import { manifest } from './catalog';
 import type { CompositionTenant } from './worker';
 const config = { GONVEX_DEV_TRANSFER_TARGET:'gonvex-cf-dev-test',GONVEX_DEV_TRANSFER_TOKEN:'test-only',GONVEX_DEV_TRANSFER_TENANTS:'devcopy-test,devcopy-refusal,devcopy-large' };
@@ -69,4 +71,38 @@ it('accepts a legal base64 BLOB row whose wire request exceeds 2 MiB and still b
   expect(state.storage.sql.exec('SELECT length(bytes) AS n FROM large WHERE id=?','legal').one().n).toBe(1_600_000);
  });
  expect((await call('insert','a'.repeat(4*1024*1024))).status).toBe(413);
+});
+
+
+it('checksums, pages and completes a 100-column serving import with exact values across column slices',async()=>{
+ const tenant='devcopy-wide', settings={...config,GONVEX_DEV_TRANSFER_TENANTS:tenant};
+ const call=async(op:string,body:unknown={})=>{
+  const response=(await handleTenantTransfer(request(tenant,op,body),{...settings,TENANT:env.TENANT}))!;
+  return new Response(await response.arrayBuffer(),{status:response.status});
+ };
+ expect((await call('wipe')).status).toBe(200);
+ const columns=['id',...Array.from({length:99},(_,i)=>`v${i}`)];
+ expect((await call('schema',{statements:[{name:'wide',sql:`CREATE TABLE wide (id INTEGER PRIMARY KEY,${columns.slice(1).join(',')})`}]})).status).toBe(200);
+ const rows=Array.from({length:7},(_,r)=>columns.map((_,i)=>i===0?r+1:i%5===0?{i:'9223372036854775807'}:i%5===1?{t:'/wD+'}:i%5===2?{b:'AP8='}:i%5===3?{r:3}:null));
+ expect((await call('insert',{parts:[{table:'wide',columns,rows}]})).status).toBe(200);
+ const checksumResponse=await call('checksum',{tables:['wide']});expect(checksumResponse.status).toBe(200);
+ const {checksums}=await checksumResponse.json() as {checksums:Record<string,{rows:number;sha256:string}>};expect(checksums.wide?.rows).toBe(7);
+ const read:unknown[]=[];let after:null|unknown[]=null;
+ do{
+  const response=await call('read',{tables:[{table:'wide',after}],maxBytes:2000});expect(response.status).toBe(200);
+  const {pages}=await response.json() as {pages:{rows:unknown[][];next:null|unknown[]}[]};
+  read.push(...pages[0]!.rows);after=pages[0]!.next;
+ }while(after);
+ expect(read).toEqual(rows);
+ await runInDurableObject(env.TENANT.getByName(tenant),async(_instance,state)=>{
+  // The same row order/hash as the unchanged two-field codec. The table is
+  // scanned twice, with no writes and no SELECT in the per-row loop.
+  const cursors:ReturnType<SqlStorage['exec']>[]=[];
+  const storage={exec:(sql:string,...params:SqlStorageValue[])=>{const cursor=state.storage.sql.exec(sql,...params);cursors.push(cursor);expect(cursor.columnNames.length).toBeLessThanOrEqual(100);return cursor;}};
+  const hasher=new RowHasher(createHash);
+  for(const row of readTypedRows(storage,{name:'wide',copyColumns:columns,key:['id']}))hasher.addTyped(row);
+  expect(hasher.digest()).toEqual(checksums.wide);expect(cursors).toHaveLength(2);
+  expect(cursors.reduce((n,c)=>n+c.rowsRead,0)).toBe(14);expect(cursors.reduce((n,c)=>n+c.rowsWritten,0)).toBe(0);
+ });
+ expect((await call('check')).status).toBe(200);expect((await call('verify',{checksums})).status).toBe(200);expect((await call('complete')).status).toBe(200);
 });

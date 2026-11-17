@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { RowHasher, fromWire, keyIndexes, selectSql, tablePlan, toWire } from '../src/codec.mjs';
+import { RowHasher, fromWire, keyIndexes, readTypedRows, selectSql, tablePlan, toWire } from '../src/codec.mjs';
 import { openFile } from '../src/file.mjs';
 import { MAX_PARAMS, MAX_STATEMENT_BYTES, buildInserts, readPlans, readSchema, readSequences, schemaPhases } from '../src/sql.mjs';
 
@@ -143,4 +143,25 @@ test('tablePlan ignores generated and hidden columns', () => {
     primaryKey: ['id'],
   });
   assert.deepEqual(plan.copyColumns, ['id', 'a']);
+});
+
+test('wide typed scans preserve exact values and composite-key paging without truncation', () => {
+  const file = openFile(':memory:');
+  try {
+    const columns = Array.from({ length: 98 }, (_, i) => `v${i}`);
+    file.db.exec(`CREATE TABLE wide (a TEXT,b INTEGER,${columns.join(',')},PRIMARY KEY(b,a)) WITHOUT ROWID`);
+    const insert = file.db.prepare(`INSERT INTO wide VALUES (${Array(100).fill('?').join(',')})`);
+    for (let i = 0; i < 31; i++) insert.run(`key-${i % 5}`, i, ...columns.map((_, j) => j % 3 === 0 ? 9223372036854775807n : j % 3 === 1 ? new Uint8Array([0,255,j]) : i / 7));
+    file.db.exec("UPDATE wide SET v48=CAST(X'FF00FE' AS TEXT),v49=3.0,v50=-9e999 WHERE b=0");
+    const [plan] = readPlans(file.sql);
+    const expected = [...file.sql.exec(selectSql(plan).sql).raw()];
+    assert.deepEqual([...readTypedRows(file.sql, plan)], expected);
+    const actual = []; let after = null;
+    do {
+      const page = [...readTypedRows(file.sql, plan, { after, limit: 7 })];
+      actual.push(...page);
+      after = page.length === 7 ? keyIndexes(plan).map(i => toWire(page.at(-1)[2*i],page.at(-1)[2*i+1])) : null;
+    } while (after);
+    assert.deepEqual(actual, expected);
+  } finally { file.close(); }
 });

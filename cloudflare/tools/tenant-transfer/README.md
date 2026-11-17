@@ -51,6 +51,7 @@ exactly.
 | Limit | How the transport stays inside it |
 |---|---|
 | 100 bound parameters | Multi-row `INSERT`s are split so each binds at most 100 values (`buildInserts`). Tables have at most 100 columns. |
+| 100 result columns | Exact-value reads need two result fields per source column. Wide tables use synchronous scans of at most 50 source columns in the same key order; the current row is assembled before hashing or encoding. No values or storage-class tags are omitted. |
 | 100 KB per statement | Values always travel as bound parameters. Only placeholders are inlined, so statement text stays a few KB. |
 | 2 MB per row | Rows are copied as they are. A row over the limit fails loudly. |
 | CPU / memory per request | About 1.5 MB of rows per insert request, about 4 MB per read response, 400 DDL statements per schema request, 60 tables per checksum request. One request is one transaction. |
