@@ -1,0 +1,159 @@
+name: Runtime image
+
+# Builds Dockerfile.runtime off the production server and pushes it to GHCR.
+# Coolify then deploys by digest (scripts/deploy-staging-runtime.sh): a pull and
+# a stop-first restart, no compile on the shared host.
+#
+# Tags: ghcr.io/whagons-international/gonvex-runtime:<full commit sha>
+#       ghcr.io/whagons-international/gonvex-runtime:<branch slug>   (moving)
+# Deploy by the digest printed in the job summary, never by a moving tag.
+
+on:
+  push:
+    branches:
+      - staging
+      - "deploy/**"
+      - "perf/release-*"
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or branch to build (default the dispatched ref)
+        required: false
+        default: ""
+      deploy_staging:
+        description: Deploy the pushed image to the staging runtime (needs COOLIFY_* secrets)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # One build per commit; pushes to the same branch queue rather than cancel,
+  # so every pushed commit gets an image a deploy can name.
+  group: runtime-image-${{ inputs.ref || github.sha }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/whagons-international/gonvex-runtime
+  CACHE_REF: ghcr.io/whagons-international/gonvex-runtime:buildcache
+
+jobs:
+  build:
+    name: Build and push runtime image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 1
+
+      - name: Resolve commit and tags
+        id: meta
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          if [ -n "$INPUT_REF" ] && git ls-remote --exit-code --heads origin "$INPUT_REF" >/dev/null 2>&1; then
+            branch="$INPUT_REF"
+          elif [ -n "$INPUT_REF" ]; then
+            branch=""
+          else
+            branch="${GITHUB_REF_NAME}"
+          fi
+          tags="${IMAGE}:${sha}"
+          if [ -n "$branch" ]; then
+            slug="$(printf '%s' "$branch" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-' | cut -c1-120)"
+            tags="${tags}"$'\n'"${IMAGE}:${slug}"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $sha (branch: ${branch:-none})"
+
+      - name: Free runner disk
+        # The Rust release target plus the BuildKit cache outgrow the default free space.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.runtime
+          platforms: linux/amd64
+          push: true
+          # Same as the Coolify build: no DuckDB. Older Dockerfiles without the
+          # ARG ignore it.
+          build-args: |
+            GONVEX_DUCKDB=false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.title=gonvex-runtime
+          # Single-platform manifest (no attestation index) so the digest is the
+          # image Coolify runs.
+          provenance: false
+          sbom: false
+          cache-from: type=registry,ref=${{ env.CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
+
+      - name: Summary
+        run: |
+          {
+            echo "### Runtime image"
+            echo ""
+            echo "- commit: \`${{ steps.meta.outputs.sha }}\`"
+            echo "- digest: \`${IMAGE}@${{ steps.build.outputs.digest }}\`"
+            echo ""
+            echo "Deploy to staging: \`scripts/deploy-staging-runtime.sh ${{ steps.meta.outputs.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-staging:
+    name: Deploy to staging runtime
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_staging }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    permissions:
+      contents: write # commits the deploy record to runtime-image/staging
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - name: Deploy by digest
+        env:
+          COOLIFY_API_KEY: ${{ secrets.COOLIFY_API_KEY }}
+          COOLIFY_BASE_URL: ${{ secrets.COOLIFY_BASE_URL }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$COOLIFY_API_KEY" ] || [ -z "$COOLIFY_BASE_URL" ]; then
+            echo "COOLIFY_API_KEY / COOLIFY_BASE_URL secrets are not configured for the staging environment." >&2
+            exit 1
+          fi
+          scripts/deploy-staging-runtime.sh "${{ needs.build.outputs.sha }}" \
+            --digest "${{ needs.build.outputs.digest }}"
