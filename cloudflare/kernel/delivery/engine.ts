@@ -324,7 +324,11 @@ export class ReplicaDeliveryEngine {
   queryUnsubscribe(socket: SocketView, id: string): boolean {
     if ((socket.subscriptionEpoch ?? 0) < (this.epochs.get(socket.connectionId) ?? 0)) return false;
     const pending = this.deferredQueries.get(socket.connectionId);
-    if (pending) this.deferredQueries.set(socket.connectionId, pending.filter((query) => query.id !== id));
+    if (pending) {
+      const rest = pending.filter((query) => query.id !== id);
+      if (rest.length) this.deferredQueries.set(socket.connectionId, rest);
+      else this.deferredQueries.delete(socket.connectionId);
+    }
     this.options.live?.unsubscribe(socket.connectionId, id);
     const connection = this.connections.get(socket.connectionId);
     for (const [generation,ref] of connection?.initials ?? []) if (ref.kind === "query" && ref.id === id) connection!.initials.delete(generation);
@@ -375,7 +379,7 @@ export class ReplicaDeliveryEngine {
 
   /** BUG-2: true while any socket has a subscription, a pending open or a live query here (state only memory holds). */
   holdsSubscriptions(): boolean {
-    if (this.deferredQueries.size) return true;
+    for (const queries of this.deferredQueries.values()) if (queries.length) return true;
     for (const connection of this.connections.values()) {
       if (connection.subscriptions.size || connection.pending.length || connection.initials.size) return true;
       if (this.options.live?.subscriptionIds(connection.id).length) return true;
