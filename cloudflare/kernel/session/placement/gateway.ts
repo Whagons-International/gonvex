@@ -32,6 +32,7 @@ import type { PublicGuard } from "../../public/guard";
 import { publicLimits } from "../../public/config";
 import { limiterFor } from "../../public/limiter";
 import type { SlotKind } from "../../public/limiter";
+import { GatewayRoutingIdentity } from "./routing-identity";
 
 /** S3: about 125 sockets per gateway carried 30 commits/s to 1,000 sockets. */
 export const SOCKETS_PER_GATEWAY = 125;
@@ -104,13 +105,22 @@ export const UPGRADE_HEADERS = {
   slots: "x-gonvex-limiter-slots",
 } as const;
 
+/** Content-free, finite diagnostics. Never echo the assignment or its identifiers. */
+export const ADMISSION_REASON_HEADER = "x-gonvex-admission-reason";
+type AdmissionReason = "parse-invalid" | "holder-identity" | "connection-mismatch" | "identity-unavailable"
+  | "admission-busy" | "capacity" | "claim-refused" | "epoch-busy";
+function refusedAdmission(reason: AdmissionReason, body = "gateway assignment required"): Response {
+  return new Response(body, { status: 503, headers: { [ADMISSION_REASON_HEADER]: reason } });
+}
+
 /**
  * Gateway object. Sockets of any tenant; the class is exported by the Worker
  * entry and bound as `GATEWAY`.
  */
 export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObject<E> {
   protected readonly host: SocketHost;
-  readonly gatewayName: string;
+  private readonly routingIdentity: GatewayRoutingIdentity | undefined;
+  get gatewayName(): string { return this.routingIdentity?.name ?? this.ctx.id.name ?? this.ctx.id.toString(); }
   /** tenantId -> sockets of that tenant here. */
   private readonly byTenant = new Map<string, Set<WebSocket>>();
   private readonly metrics = new GatewayMetrics();
@@ -130,9 +140,10 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
 
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
-    this.gatewayName = ctx.id.name ?? ctx.id.toString();
+    this.routingIdentity = env.GATEWAY_CONTROLLER ? new GatewayRoutingIdentity(ctx, env.GATEWAY) : undefined;
     const presence = presenceConfig(env);
     const publicGuard = this.bindings().publicGuard?.(env);
+    const gateway = this;
     this.host = new SocketHost({
       ...(publicGuard ? { publicGuard } : {}),
       presence,
@@ -141,7 +152,9 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       telemetry: telemetryHostFromEnv(env, presence.enabled),
       ctx,
       ports: this.bindings().ports(env),
-      name: this.gatewayName,
+      // A fresh ID-only holder learns its name only after the controller claim,
+      // before creating a Session. Restored sessions use the validated durable name.
+      get name() { return gateway.gatewayName; },
       ready: { runtimeVersion: env.GONVEX_RUNTIME_VERSION || "development", presence: presence.enabled },
       tenantChanged: (ws, previous, next) => this.tenantChanged(ws, previous, next),
       projectAuthenticated: (project) => this.bindings().projectAuthenticated?.(env, project, ctx.id.toString()) ?? Promise.resolve(),
@@ -158,23 +171,29 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     const headers = request.headers;
     if (this.env.GATEWAY_CONTROLLER) {
       const assignment = parseAssignment(headers.get(ASSIGNMENT_HEADER));
-      if (!assignment || assignment.gateway !== this.gatewayName || assignment.connectionId !== headers.get(UPGRADE_HEADERS.connectionId)) return new Response("gateway assignment required", { status: 503 });
+      if (!assignment) return refusedAdmission("parse-invalid");
+      if (!this.routingIdentity!.matches(assignment.gateway)) return refusedAdmission("holder-identity");
+      if (assignment.connectionId !== headers.get(UPGRADE_HEADERS.connectionId)) return refusedAdmission("connection-mismatch");
+      // A pre-upgrade legacy holder with neither a stored nor platform name
+      // cannot relabel already-restored sessions from an incoming assignment.
+      if (!this.routingIdentity!.known && this.host.sessions.size) return refusedAdmission("identity-unavailable");
       // No socket migration: an admitted socket owns this holder until normal disconnect.
       // Serialize claim + accept, so parallel upgrades cannot race the socket ceiling.
-      if (this.admissionWaiting >= 16) return new Response("gateway admission busy", { status: 503 });
+      if (this.admissionWaiting >= 16) return refusedAdmission("admission-busy", "gateway admission busy");
       this.admissionWaiting++;
       const accepted = this.admissionTail.then(async () => {
         await this.loadPlacement();
-        if (assignment.epoch < this.placementEpoch || this.host.sessions.size >= MAX_SOCKETS) return new Response("gateway full", { status: 503 });
-        if (!await withDeadline(controller(this.env, assignment.cell).claim(assignment))) return new Response("gateway assignment expired", { status: 503 });
+        if (assignment.epoch < this.placementEpoch || this.host.sessions.size >= MAX_SOCKETS) return refusedAdmission("capacity", "gateway full");
+        if (!await withDeadline(controller(this.env, assignment.cell).claim(assignment))) return refusedAdmission("claim-refused", "gateway assignment expired");
         if (assignment.epoch !== this.placementEpoch) {
-          if (this.host.sessions.size) return new Response("gateway epoch busy", { status: 503 });
+          if (this.host.sessions.size) return refusedAdmission("epoch-busy", "gateway epoch busy");
           this.draining = undefined;
           await this.ctx.storage.delete("autoscale-drain");
           this.placementEpoch = assignment.epoch;
           this.placementCell = assignment.cell;
           await this.ctx.storage.put("autoscale-placement", { epoch: this.placementEpoch, cell: this.placementCell });
         }
+        this.routingIdentity!.claimed(assignment.gateway);
         const response = this.accept(headers);
         this.reportCapacity();
         return response;
