@@ -31,6 +31,7 @@ DEPLOY_BRANCH="${STAGING_RUNTIME_BRANCH:-runtime-image/staging}"
 DEPLOY_FILE="Dockerfile.runtime" # the app's dockerfile_location, unchanged
 HEALTH_URL="${STAGING_RUNTIME_HEALTH_URL:-https://gonvex-stg.whagons.com/healthz}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT_SECONDS:-1200}"
+API_TIMEOUT="${COOLIFY_API_TIMEOUT_SECONDS:-30}" # per Coolify request
 
 usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
 
@@ -57,10 +58,10 @@ done
 coolify() { # method path [json]
   local method="$1" path="$2" body="${3:-}"
   if [ -n "$body" ]; then
-    curl -fsS -X "$method" -H "Authorization: Bearer $COOLIFY_API_KEY" -H 'content-type: application/json' \
+    curl --max-time "$API_TIMEOUT" -fsS -X "$method" -H "Authorization: Bearer $COOLIFY_API_KEY" -H 'content-type: application/json' \
       --data "$body" "$COOLIFY_BASE_URL$path"
   else
-    curl -fsS -X "$method" -H "Authorization: Bearer $COOLIFY_API_KEY" "$COOLIFY_BASE_URL$path"
+    curl --max-time "$API_TIMEOUT" -fsS -X "$method" -H "Authorization: Bearer $COOLIFY_API_KEY" "$COOLIFY_BASE_URL$path"
   fi
 }
 
@@ -104,7 +105,7 @@ if [ "$app_branch" = "$DEPLOY_BRANCH" ] && [ -n "$app_commit" ]; then
   live_image="$(file_at "$app_commit" | image_in)"
 fi
 
-deployments() { coolify GET "/deployments/applications/$APP_UUID?take=20" | jq -c '(.deployments // .)[]'; }
+deployments() { coolify GET "/deployments/applications/$APP_UUID?take=${1:-20}" | jq -c '(.deployments // .)[]'; }
 
 if [ "$mode" = status ]; then
   echo "app:    $APP_UUID ($(jq -r .status <<<"$app_json"))"
@@ -126,8 +127,12 @@ parent="$(branch_head)"
 if [ "$mode" = rollback ]; then
   [ -n "$live_image" ] || { echo "staging is not deploying from $DEPLOY_BRANCH; nothing to roll back to" >&2; exit 1; }
   # Walk the deploy branch from the live commit back to the first different image.
+  # Only commits Coolify finished deploying count: the branch gets its commit
+  # before the deploy runs, so a failed deploy also leaves one behind.
+  finished="$(deployments 100 | jq -r 'select(.status=="finished") | .commit' | sort -u)"
   target_ref=""
   for c in $(gh api "repos/$GH_REPO/commits?sha=$app_commit&per_page=30" --jq '.[].sha'); do
+    grep -qx "$c" <<<"$finished" || continue
     img="$(file_at "$c" | image_in)"
     if [ -n "$img" ] && [ "$img" != "$live_image" ]; then target_ref="$img"; break; fi
   done
