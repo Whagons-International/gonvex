@@ -1,4 +1,5 @@
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vitest/config";
 import { wrapBundle } from "./src/bundle.ts";
@@ -25,9 +26,35 @@ function modulePrelude(): Plugin {
   };
 }
 
+/**
+ * `gonvex-test:namespaced-app` is the BUG-1 fixture app built the way the
+ * release builder ships an Action bundle: one ES module bundled from the app
+ * entry (`export * as ns from "./file"`, as Whagons does), with the prelude
+ * from src/bundle.ts. The test then runs its Actions through the real exports.
+ */
+function namespacedAppBundle(): Plugin {
+  const id = "gonvex-test:namespaced-app";
+  const resolved = `\0${id}.js`;
+  return {
+    name: "gonvex-namespaced-app-bundle",
+    enforce: "pre",
+    resolveId: (source) => (source === id ? resolved : null),
+    async load(source) {
+      if (source !== resolved) return null;
+      const { build } = createRequire(import.meta.resolve("@cloudflare/vitest-plugin"))("esbuild") as typeof import("esbuild");
+      const result = await build({
+        entryPoints: [fileURLToPath(new URL("./test/fixtures/namespaced-app/index.ts", import.meta.url))],
+        bundle: true, write: false, format: "esm", platform: "neutral", target: "esnext",
+        alias: { "@gonvex/module-sdk": moduleSdk },
+      });
+      return { code: wrapBundle(result.outputFiles[0]!.text, moduleGlobals), map: null };
+    },
+  };
+}
+
 // Kernel module host (K04) tests: inside workerd, with SQLite-backed objects.
 export default defineConfig({
-  plugins: [modulePrelude(), cloudflareTest({ wrangler: { configPath: "./test/wrangler.jsonc" } })],
+  plugins: [modulePrelude(), namespacedAppBundle(), cloudflareTest({ wrangler: { configPath: "./test/wrangler.jsonc" } })],
   // The fixture app imports the SDK by name; CI installs only this workspace, so use its source.
   resolve: {
     alias: {

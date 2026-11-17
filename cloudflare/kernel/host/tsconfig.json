@@ -7,5 +7,6 @@
   },
   "include": ["src", "test"],
   // The root config excludes kernel/host (it is checked here) and K01's SDK ports.
-  "exclude": ["../storage/test/sdk"]
+  // The BUG-1 fixture app imports the SDK by name and is built by vitest.config.ts, not tsc.
+  "exclude": ["../storage/test/sdk", "test/fixtures/namespaced-app"]
 }
