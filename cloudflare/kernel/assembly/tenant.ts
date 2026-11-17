@@ -449,7 +449,14 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     const info = { artifactHash: event.hash, clientContract: event.clientContract };
     await Promise.all((await this.registeredGateways()).map((name) => rpc<GatewayRpc>(this.env.GATEWAY, name).moduleReloaded(event.projectId, info)));
   }
-  async operatorDeleteAll() { await this.ctx.storage.deleteAlarm(); await this.ctx.storage.deleteAll(); this.ctx.abort(TENANT_DELETED_REASON); }
+  async operatorDeleteAll() {
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    // The wipe must be durable before the reset: abort() discards writes the output gate has not
+    // yet confirmed, and on the platform that silently restored every row of the "deleted" tenant.
+    await this.ctx.storage.sync();
+    this.ctx.abort(TENANT_DELETED_REASON);
+  }
   async operatorListTables() { return this.operator.listTables(); }
   async operatorReadRows(table: string, query: RowsQuery) { return this.operator.readRows(table, query); }
   operatorInsertRow(table: string, payload: Record<string, unknown>) { return this.kernel.reducers.serial(() => this.operator.insertRow(table, payload)); }

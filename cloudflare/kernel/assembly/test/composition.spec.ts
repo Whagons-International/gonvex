@@ -216,3 +216,18 @@ it('X03 DELETE /dev/tenants: the tenant reset after a completed wipe is success,
  // Any other failure still propagates.
  await expect(deleteTenantStorage({operatorDeleteAll:async()=>{throw new Error('storage unavailable');}})).rejects.toThrow('storage unavailable');
 });
+it('X03 the tenant wipe is made durable (storage.sync) before the reset that ends operatorDeleteAll',async()=>{
+ const {TENANT_DELETED_REASON}=await import('../../../control/operator/tenant/port');
+ const stub=bindings.TENANT.getByName(`assembly-wipe-${crypto.randomUUID()}`);
+ await runInDurableObject(stub,async(object,state)=>{
+  const release=await buildReleasePlan(await migrationsFromFiles(files));plans.add(release);
+  await (object as CompositionTenant).activate('p',manifest,release.id);
+  const order:string[]=[],storage=state.storage as unknown as Record<string,(...a:unknown[])=>unknown>,ctx=state as unknown as Record<string,(...a:unknown[])=>unknown>;
+  for(const name of ['deleteAlarm','deleteAll','sync']){const real=storage[name]!.bind(state.storage);storage[name]=async(...a:unknown[])=>{order.push(name);return real(...a);};}
+  // Record instead of resetting: the real reset is covered by the DELETE /dev/tenants test above.
+  ctx.abort=(reason:unknown)=>{order.push('abort');throw new Error(String(reason));};
+  await expect((object as unknown as {operatorDeleteAll():Promise<void>}).operatorDeleteAll()).rejects.toThrow(TENANT_DELETED_REASON);
+  expect(order).toEqual(['deleteAlarm','deleteAll','sync','abort']);
+  expect(state.storage.sql.exec("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name IN ('board','gonvex_migrations')").one().n).toBe(0);
+ });
+});
