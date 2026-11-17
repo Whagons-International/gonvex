@@ -1,0 +1,109 @@
+{
+  "name": "gonvex-cf-dev-k22-runtime",
+  "main": "runtime.ts",
+  "version_metadata": {
+    "binding": "WORKER_VERSION"
+  },
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true
+  },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.sql"
+      ],
+      "fallthrough": true
+    }
+  ],
+  "alias": {
+    "gonvex:releases": "./releases.ts",
+    "gonvex:module-globals": "../host/src/module-globals.ts"
+  },
+  "durable_objects": {
+    "code_update_strategy": {
+      "mode": "immediate"
+    },
+    "bindings": [
+      {
+        "name": "TENANT",
+        "class_name": "AssemblyTenant"
+      },
+      {
+        "name": "GATEWAY",
+        "class_name": "AssemblyGateway",
+        "script_name": "gonvex-cf-dev-k22"
+      },
+      {
+        "name": "GATEWAY_CONTROLLER",
+        "class_name": "GatewayControllerObject",
+        "script_name": "gonvex-cf-dev-k22"
+      },
+      {
+        "name": "CONTROL",
+        "class_name": "SessionControlObject",
+        "script_name": "gonvex-cf-dev-k22"
+      },
+      {
+        "name": "PUBLIC_LIMITER",
+        "class_name": "PublicLimiterObject",
+        "script_name": "gonvex-cf-dev-k22"
+      },
+      {
+        "name": "INGRESS",
+        "class_name": "IngressObject",
+        "script_name": "gonvex-cf-dev-k22"
+      }
+    ]
+  },
+  "exports": {
+    "AssemblyTenant": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "r2_buckets": [
+    {
+      "binding": "RELEASES",
+      "bucket_name": "gonvex-cf-dev-k22-releases"
+    },
+    {
+      "binding": "FILES",
+      "bucket_name": "gonvex-cf-dev-k22-files"
+    }
+  ],
+  "services": [
+    {
+      "binding": "ACTIONS",
+      "service": "gonvex-cf-dev-k22-actions",
+      "entrypoint": "ActionWorker"
+    },
+    {
+      "binding": "ACTIONS_CATALOG",
+      "service": "gonvex-cf-dev-k22-actions",
+      "entrypoint": "ActionCatalog"
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "ACTION_WORKFLOW",
+      "name": "gonvex-cf-dev-k22-actions",
+      "class_name": "ActionWorkflow",
+      "script_name": "gonvex-cf-dev-k22-actions"
+    }
+  ],
+  "limits": {
+    "cpu_ms": 30000
+  },
+  "vars": {
+    "GONVEX_RUNTIME_VERSION": "development",
+    "GONVEX_PRESENCE": "1",
+    "GONVEX_TOPOLOGY_TRANSITION": "0"
+  }
+}

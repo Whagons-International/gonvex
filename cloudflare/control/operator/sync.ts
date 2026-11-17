@@ -61,7 +61,7 @@ export interface SyncPorts {
   /** Sends one rollout step to the queue. */
   enqueue(message: RolloutMessage): Promise<void>;
   /** Only the serving composition can acknowledge its baked Worker version. */
-  versionReady(version: string): boolean;
+  versionReady(version: string): boolean | Promise<boolean>;
   activateTenants(project: string, tenants: string[], hash: string, generation: number): Promise<boolean>;
   moduleReloaded(project: string, tenants: string[], hash: string, generation: number, clientContract: number | null, publicationId: string): Promise<void>;
   /** K11: re-plan the project's crons for the new module. A no-op until K11 provides it. */
@@ -169,7 +169,7 @@ export class SyncCoordinator {
       const ref=this.deployments.reference(syncId);
       if (!num(publication.completed)) this.deployments.assertCurrent(syncId,ref.fence);
       const summary = JSON.parse(str(publication.summary)) as ReleaseSummary;
-      return {ok:true,deploy:num(publication.completed) || this.ports.versionReady(str(publication.version)) ? null : str(publication.version),publication:syncId,fence:ref.fence,body:this.response(project,summary)};
+      return {ok:true,deploy:num(publication.completed) || await this.ports.versionReady(str(publication.version)) ? null : str(publication.version),publication:syncId,fence:ref.fence,body:this.response(project,summary)};
     }
     const prior = this.sql.get("SELECT project_id,hash,state FROM gonvex_cf_syncs WHERE sync_id=$1",syncId);
     if (prior && (prior.project_id !== project || (prior.hash && prior.hash !== inspection.hash) || ["finished","failed"].includes(str(prior.state)))) return {ok:false,status:409,error:"sync request id already used"};
@@ -257,7 +257,7 @@ export class SyncCoordinator {
     if (num(row.completed)) return { ready: true };
     if (row.state !== "publishing") throw new HttpError(409, "release publication is no longer current");
     const ref={id:syncId,fence:num(row.fence),version:str(row.version)};
-    if (!this.ports.versionReady(str(row.version))) return { ready: false };
+    if (!await this.ports.versionReady(str(row.version))) return { ready: false };
     const project = str(row.project_id), hash = str(row.hash), generation = num(row.generation);
     const tenants = JSON.parse(str(row.tenants)) as string[], summary = JSON.parse(str(row.summary)) as ReleaseSummary;
     if (!await this.ports.activateTenants(project, tenants, hash, generation)) return { ready: false };

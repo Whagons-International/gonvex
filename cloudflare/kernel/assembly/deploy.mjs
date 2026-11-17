@@ -36,13 +36,13 @@ export function accountApi(credentials) {
 export async function servingConfigs(name, directory, { kernelUrl, images = {} } = {}) {
   developmentName(name); await mkdir(directory, { recursive: true, mode: 0o700 });
   const configs = {};
-  for (const [kind, file] of [['kernel', join(root, 'wrangler.jsonc')], ...['actions', 'sandbox', 'builder'].map((kind) => [kind, join(here, `${kind}.wrangler.jsonc`)])]) {
+  for (const [kind, file] of [['kernel', join(root, 'wrangler.jsonc')], ...['runtime', 'actions', 'sandbox', 'builder'].map((kind) => [kind, join(here, `${kind}.wrangler.jsonc`)])]) {
     const config = await load(file), dir = dirname(file);
     config.name = kind === 'kernel' ? name : `${name}-${kind}`;
     config.main = resolve(dir, config.main);
     config.alias = Object.fromEntries(Object.entries(config.alias ?? {}).map(([key, value]) => [key, resolve(dir, value)]));
-    for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) binding.script_name = name;
-    for (const service of config.services ?? []) service.service = `${name}-${service.binding === 'RELEASE_BUILDER' ? 'builder' : service.binding.toLowerCase()}`;
+    for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) binding.script_name = binding.class_name === 'AssemblyTenant' ? `${name}-runtime` : name;
+    for (const service of config.services ?? []) service.service = `${name}-${service.binding === 'RELEASE_BUILDER' ? 'builder' : service.binding === 'RUNTIME_CATALOG' ? 'runtime' : service.binding === 'ACTIONS_CATALOG' ? 'actions' : service.binding.toLowerCase()}`;
     for (const workflow of config.workflows ?? []) { workflow.name = `${name}-actions`; if (workflow.script_name) workflow.script_name = `${name}-actions`; }
     for (const bucket of config.r2_buckets ?? []) bucket.bucket_name = `${name}-${bucket.binding.toLowerCase()}`;
     for (const queue of [...(config.queues?.producers ?? []), ...(config.queues?.consumers ?? [])]) queue.queue = `${name}-rollout`;
@@ -56,26 +56,28 @@ export async function servingConfigs(name, directory, { kernelUrl, images = {} }
     configs[kind] = { config, path: join(directory, `${kind}.json`) };
   }
   for (const { config, path } of Object.values(configs)) await writeFile(path, JSON.stringify(config), { mode: 0o600 });
-  const bootstrap = { ...configs.kernel.config, services: [], workflows: [] };
+  const bootstrap = { ...configs.kernel.config, services: [], workflows: [], durable_objects: {...configs.kernel.config.durable_objects,bindings:configs.kernel.config.durable_objects.bindings.filter(b=>b.name!=='TENANT')} };
   configs.bootstrap = { config: bootstrap, path: join(directory, 'bootstrap.json') };
   await writeFile(configs.bootstrap.path, JSON.stringify(bootstrap), { mode: 0o600 });
   return configs;
 }
 
-async function wrangler(args, credentials, directory) {
+export async function deployConfig(args, credentials, directory) {
   const env = { ...process.env, CLOUDFLARE_ACCOUNT_ID: credentials.accountId, CLOUDFLARE_API_TOKEN: credentials.apiToken,
     WRANGLER_SEND_METRICS: 'false', CI: '1', TMPDIR: join(directory, 'tmp') };
   delete env.WHAGONS_CREDENTIAL_FILE;
   await mkdir(env.TMPDIR, { recursive: true });
   return new Promise((ok, fail) => {
     const child = spawn(join(root, 'node_modules/.bin/wrangler'), args, { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-    child.stdout.on('data', (part) => { output += part; }); child.stderr.on('data', (part) => { output += part; });
+    let output = '',truncated=false;
+    const capture=part=>{output+=part;if(output.length>2*1024*1024){output=output.slice(-2*1024*1024);truncated=true;}};
+    child.stdout.on('data', capture); child.stderr.on('data', capture);
     child.on('error', fail);
     child.on('exit', async (code) => {
       // Keep raw deployment diagnostics private. API/credential failure text can include context.
-      await writeFile(join(directory, `wrangler-${Date.now()}.log`), output, { mode: 0o600 });
-      code === 0 ? ok(output) : fail(new Error(`wrangler ${args[0]} exited ${code}; private diagnostics in ${directory}`));
+      await writeFile(join(directory, `wrangler-${Date.now()}.log`), (truncated?'[earlier output truncated]\n':'')+output, { mode: 0o600 });
+      const codes=[...new Set([...output.matchAll(/\[code:\s*(\d{1,8})\]/g)].map(match=>match[1]))].slice(0,8);
+      code === 0 ? ok(output) : fail(new Error(`wrangler ${args[0]} exited ${code}${codes.length?`; provider codes ${codes.join(',')}`:''}; private diagnostics in ${directory}`));
     });
   });
 }
@@ -84,7 +86,10 @@ export async function deployAssembly({ name, directory, images, secrets = {} }) 
   developmentName(name); directory = resolve(directory);
   const credentials = await cloudflareCredentials(), api = accountApi(credentials);
   // Require explicit immutable Container identities. Build is a separate admitted phase.
-  for (const kind of ['sandbox', 'builder']) if (!images?.[kind]?.includes('@sha256:')) throw new Error(`immutable ${kind} Container image digest required before deployment`);
+  for (const kind of ['sandbox', 'builder']) if (!/@sha256:[a-f0-9]{64}$/.test(images?.[kind]??'')) throw new Error(`immutable ${kind} Container image digest required before deployment`);
+  const prior = await api(`/workers/scripts/${name}/settings`, {missing:true});
+  if(prior && prior.bindings?.find(b=>b.name==='TENANT')?.script_name!==`${name}-runtime`)throw new Error('existing monolith requires the reviewed topology transfer; refuse new tenant namespace');
+  if(prior&&(!secrets.GONVEX_STORAGE_SECRET||!secrets.GONVEX_RELEASE_BUILDER_TOKEN))throw new Error('existing composition requires retained storage and builder secrets; implicit rotation refused');
   const subdomain = await api('/workers/subdomain');
   const url = `https://${name}.${subdomain.subdomain}.workers.dev`;
   const configs = await servingConfigs(name, directory, { images, kernelUrl: url });
@@ -99,18 +104,20 @@ export async function deployAssembly({ name, directory, images, secrets = {} }) 
   const queue = queues.find((q) => q.queue_name === queueName) ?? await api('/queues', { method: 'POST', body: { queue_name: queueName } });
   resources.push({ kind: 'queue', name: queueName, id: queue.queue_id });
   const existing = await api(`/workers/scripts/${name}/settings`, { missing: true });
-  if (!existing) await wrangler(['deploy', '--config', configs.bootstrap.path], credentials, directory);
-  const token = randomBytes(32).toString('hex');
-  const storageSecret = randomBytes(32).toString('hex');
+  if (!existing) await deployConfig(['deploy', '--config', configs.bootstrap.path], credentials, directory);
+  const token = secrets.GONVEX_RELEASE_BUILDER_TOKEN??randomBytes(32).toString('hex');
+  const storageSecret = secrets.GONVEX_STORAGE_SECRET??randomBytes(32).toString('hex');
   const rootSecrets = { GONVEX_STORAGE_SECRET: storageSecret, ...secrets, GONVEX_RELEASE_BUILDER_TOKEN: token };
   for (const [key, value] of Object.entries(rootSecrets)) await api(`/workers/scripts/${name}/secrets`, { method: 'PUT', body: { name: key, text: value, type: 'secret_text' } });
-  for (const kind of ['sandbox', 'actions', 'builder']) await wrangler(['deploy', '--config', configs[kind].path, '--keep-vars'], credentials, directory);
-  for (const kind of ['actions', 'sandbox']) await api(`/workers/scripts/${name}-${kind}/secrets`, { method: 'PUT', body: { name: 'GONVEX_STORAGE_SECRET', text: rootSecrets.GONVEX_STORAGE_SECRET, type: 'secret_text' } });
+  if(!existing){const runtimeBootstrap={...configs.runtime.config,services:[],workflows:[]};const path=join(directory,'runtime-bootstrap.json');await writeFile(path,JSON.stringify(runtimeBootstrap),{mode:0o600});await deployConfig(['deploy','--config',path],credentials,directory);}
+  for (const kind of ['sandbox', 'actions', 'runtime', 'builder']) await deployConfig(['deploy', '--config', configs[kind].path, '--keep-vars'], credentials, directory);
+  for (const kind of ['runtime', 'actions', 'sandbox']) await api(`/workers/scripts/${name}-${kind}/secrets`, { method: 'PUT', body: { name: 'GONVEX_STORAGE_SECRET', text: rootSecrets.GONVEX_STORAGE_SECRET, type: 'secret_text' } });
+  for(const [key,value]of Object.entries(rootSecrets))if(key.startsWith('GONVEX_DEV_TRANSFER_'))await api(`/workers/scripts/${name}-runtime/secrets`,{method:'PUT',body:{name:key,text:value,type:'secret_text'}});
   const builderSecrets = { GONVEX_RELEASE_BUILDER_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: credentials.accountId, CLOUDFLARE_API_TOKEN: credentials.apiToken };
   for (const [key, value] of Object.entries(builderSecrets)) await api(`/workers/scripts/${name}-builder/secrets`, { method: 'PUT', body: { name: key, text: value, type: 'secret_text' } });
-  await wrangler(['deploy', '--config', configs.kernel.path, '--keep-vars'], credentials, directory);
+  await deployConfig(['deploy', '--config', configs.kernel.path, '--keep-vars'], credentials, directory);
   const workers = [];
-  for (const kind of ['kernel', 'actions', 'sandbox', 'builder']) {
+  for (const kind of ['kernel', 'runtime', 'actions', 'sandbox', 'builder']) {
     const script = configs[kind].config.name;
     const deployments = await api(`/workers/scripts/${script}/deployments`);
     const settings = await api(`/workers/scripts/${script}/settings`);
@@ -127,10 +134,10 @@ export async function deleteAssembly({ name, directory }) {
   developmentName(name); directory = resolve(directory);
   const credentials = await cloudflareCredentials(), api = accountApi(credentials);
   const removed = [];
-  for (const kind of ['', '-actions', '-sandbox', '-builder']) {
+  for (const kind of ['-sandbox', '-actions', '-runtime', '-builder', '']) {
     const script = `${name}${kind}`;
     if (!await api(`/workers/scripts/${script}/settings`, { missing: true })) continue;
-    await wrangler(['delete', '--name', script, '--force'], credentials, directory);
+    await deployConfig(['delete', '--name', script, '--force'], credentials, directory);
     removed.push({ kind: 'worker', name: script });
   }
   const queues = await api(`/queues?name=${encodeURIComponent(`${name}-rollout`)}`);

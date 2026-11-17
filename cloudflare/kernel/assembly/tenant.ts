@@ -56,6 +56,8 @@ import { retryable } from "../reducer/errors";
 
 import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } from "./tenant-transfer";
 
+// Match projectModuleFromManifest: an omitted/null artifact format becomes 0.
+const artifactFormat = (generation: unknown): number => typeof generation === "number" ? generation : 0;
 const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
 const PROJECT_KEY = "assembly/project";
 export interface AssemblyTenantEnv extends AssemblyGatewayEnv, TransferEnv {
@@ -101,6 +103,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       afterInvoke: (call: TenantCall) => { if (call.kind === "reducer") this.ctx.storage.kv.delete(overrunMarkerKey(this.kernel.module?.artifactHash, call.invocation.commandId, call.function)); },
       files: () => reducerFiles({ bucket: this.env.FILES, configured: this.files.configured }),
       restoreManifest: (stored: StoredModule): StoredModule => {
+        // Maintenance must not adopt the capture before Control can freeze and
+        // validate it. The constructor has verified this exact retained pin.
+        if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") return stored;
         const release = releases[stored.projectId];
         return release ? { projectId: stored.projectId, manifest: release.manifest } : stored;
       },
@@ -108,6 +113,21 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   }
 
   constructor(ctx: DurableObjectState, env: AssemblyTenantEnv) {
+    if (env.GONVEX_TOPOLOGY_TRANSITION === "1") {
+      // The legacy Control freeze API itself needs a framework bridge deploy.
+      // Refuse stale captures BEFORE KernelTenant.restore can install code or
+      // replace MODULE_KEY. New/uninstalled tenants also wait for maintenance.
+      const stored = ctx.storage.kv.get<StoredModule>(MODULE_KEY);
+      const release = stored && releases[stored.projectId];
+      const module = stored?.manifest.module as { hash?: unknown; generation?: unknown } | undefined;
+      // Control's publication counter is not the artifact format generation.
+      // The retained artifact must match the captured artifact; Control checks
+      // the separate publication tuple when it freezes the complete catalog.
+      const captured = release?.manifest.module as { hash?: unknown; generation?: unknown } | undefined;
+      if (!stored || !release || release.project !== stored.projectId || release.hash !== module?.hash
+        || captured?.hash !== module?.hash || artifactFormat(captured?.generation) !== artifactFormat(module?.generation))
+        throw new Error("topology bridge does not contain the retained active Tenant release");
+    }
     super(ctx, env);
     this.queries = new QueryEngine({
       module: () => this.activeQueryModule(),
@@ -141,7 +161,10 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     ctx.blockConcurrencyWhile(async () => {
       const project = ctx.storage.kv.get<string>(PROJECT_KEY);
       const release = project && releases[project];
-      if (release) { await super.activate(project, release.manifest, null); await this.setupScheduled(); }
+      if (release) {
+        if (env.GONVEX_TOPOLOGY_TRANSITION !== "1") await super.activate(project, release.manifest, null);
+        await this.setupScheduled();
+      }
     });
   }
 
@@ -360,7 +383,18 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   activeMemberCount() { return this.memberships.activeMemberCount(); }
   writeMembership(write: Parameters<TenantMemberships["writeMembership"]>[0]) { return this.memberships.writeMembership(write); }
 
+  override async activate(projectId: string, manifest: Record<string, unknown>, planId: string | null): Promise<{ ok: true }> {
+    if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") {
+      const module = manifest.module as { hash?: unknown; generation?: unknown } | undefined;
+      const active = this.kernel.module;
+      if (planId || active?.projectId !== projectId || active.artifactHash !== module?.hash || active.generation !== artifactFormat(module?.generation))
+        throw new Error("topology bridge cannot change the active Tenant release");
+      return { ok: true }; // An already-active pin needs no manifest rewrite.
+    }
+    return super.activate(projectId, manifest, planId);
+  }
   async provision(projectId: string, _tenantId: string): Promise<void> {
+    if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") throw new Error("tenant provisioning waits for topology maintenance");
     if (this.ctx.storage.kv.get<{ phase: string }>(IMPORT_KEY)?.phase === "copying") throw new Error("P03 tenant import is incomplete");
     this.ctx.storage.kv.put(PROJECT_KEY, projectId);
     const release = releases[projectId];
@@ -381,6 +415,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     });
   }
   async operatorApplyRelease(planId: string, projectId?: string) {
+    if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") throw new Error("release plans wait for topology maintenance");
     const importing = this.ctx.storage.kv.get<{ phase: string }>(IMPORT_KEY);
     if (importing?.phase === "copying") throw new Error("P03 tenant import is incomplete");
     if (projectId) this.ctx.storage.kv.put(PROJECT_KEY, projectId);
@@ -403,6 +438,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async operatorActivateRelease(event: { projectId: string; hash: string; generation: number }): Promise<boolean> {
     const release = releases[event.projectId];
     if (!release || release.hash !== event.hash || release.generation !== event.generation) return false;
+    const artifact = release.manifest.module as { generation?: unknown } | undefined;
+    if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") return this.kernel.module?.projectId === event.projectId
+      && this.kernel.module.artifactHash === event.hash && this.kernel.module.generation === artifactFormat(artifact?.generation);
     if (this.kernel.module?.projectId !== event.projectId || this.kernel.module.artifactHash !== event.hash) await super.activate(event.projectId, release.manifest, null);
     await this.setupScheduled();
     return this.kernel.module?.artifactHash === event.hash;

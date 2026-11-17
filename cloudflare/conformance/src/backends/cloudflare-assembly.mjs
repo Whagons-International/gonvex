@@ -31,7 +31,7 @@ export class CloudflareAssemblyBackend extends RustBackend {
   async captureEvidence({ scenario, project }) {
     const holders = await this.inspectHolders(project), identity = await this.request('GET', '/__assembly/version');
     const configs = [];
-    if (this.runtime) for (const kind of ['kernel', 'actions', 'sandbox']) {
+    if (this.runtime) for (const kind of ['kernel', 'runtime', 'actions', 'sandbox']) {
       const bytes = await readFile(join(this.workDir, `${kind}.json`)), config = JSON.parse(bytes);
       configs.push({kind, sha256:createHash('sha256').update(bytes).digest('hex'), name:config.name, compatibilityDate:config.compatibility_date,
         bindings:config.durable_objects?.bindings, services:config.services, limits:config.limits, shards:config.vars.GONVEX_GATEWAY_SHARDS ?? null});
