@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error virtual module
 import * as bundle from "gonvex-test:namespaced-app";
 import { moduleArtifact, projectModuleFromManifest } from "../../reducer/module";
-import { findExport, handlerCandidates, ModuleEngine, ModuleRegistry, resolveHandler, type FunctionContract } from "../src/index.js";
+import { findExport, ModuleEngine, ModuleRegistry, resolveHandler, type FunctionContract } from "../src/index.js";
 
 const any = { kind: "any" };
 // The manifest entries the Gonvex CLI writes for these exports (whagons5-client
@@ -49,42 +49,84 @@ describe("BUG-1: Actions exported through namespace re-exports", () => {
   });
 });
 
-describe("export lookup matches Rust's handler_candidates", () => {
-  const contract = (path: string, metadata?: Record<string, unknown>, exportName?: string): FunctionContract =>
-    ({ path, kind: "action", argsSchema: any, resultSchema: any, ...(metadata ? { metadata } : {}), ...(exportName ? { export: exportName } : {}) });
+describe("export lookup never resolves to another function", () => {
+  const contract = (path: string, kind: FunctionContract["kind"], metadata?: Record<string, unknown>, exportName?: string): FunctionContract =>
+    ({ path, kind, argsSchema: any, resultSchema: any, ...(metadata ? { metadata } : {}), ...(exportName ? { export: exportName } : {}) });
+  const definition = (kind: string, tag: string) => ({ kind, handler: async () => tag });
+  const run = async (engine: ModuleEngine, path: string, kind: FunctionContract["kind"]) =>
+    JSON.parse((await engine.invoke({ call: () => null }, { function: path, kind, args: {}, context })).value);
 
-  it("orders export, handler, path, leaf, default", () => {
-    expect(handlerCandidates(contract("a.b.c", { export: "x", handler: "y" }))).toEqual(["x", "y", "a.b.c", "c", "default"]);
-    expect(handlerCandidates(contract("a.run", { handler: "run" }))).toEqual(["run", "a.run", "run", "default"]);
-    expect(handlerCandidates(contract("solo"))).toEqual(["solo", "default"]);
+  it("runs tasks.list, not a top-level `list` reducer, when both exist", async () => {
+    const contracts = [contract("tasks.list", "query", { handler: "list", export: "list" }), contract("notes.list", "reducer", { handler: "list", export: "list" })];
+    const exports = { list: definition("reducer", "notes.list (top-level list)"), tasks: { list: definition("query", "tasks.list") }, notes: { list: definition("reducer", "notes.list") } };
+    const engine = new ModuleEngine(contracts, exports);
+    expect(engine.unresolved()).toEqual([]);
+    expect(await run(engine, "tasks.list", "query")).toBe("tasks.list");
+    expect(await run(engine, "notes.list", "reducer")).toBe("notes.list");
   });
 
-  it("prefers the named export, then the full path, then nested namespaces, then the leaf", () => {
+  it("refuses a shared bare name instead of guessing", () => {
+    // tasks.list has no namespace export; `list` belongs to notes.list too, so it is ambiguous.
+    const contracts = [
+      contract("tasks.list", "query", { handler: "list", file: "gonvex/tasks.ts" }),
+      contract("projects.list", "query", { handler: "list", file: "gonvex/projects.ts" }),
+    ];
+    const engine = new ModuleEngine(contracts, { list: definition("query", "wrong") });
+    expect(engine.unresolved()).toEqual(["tasks.list", "projects.list"]);
+  });
+
+  it("refuses a bare-name match of the wrong kind", () => {
+    const engine = new ModuleEngine([contract("tasks.list", "query", { handler: "list" })], { list: definition("reducer", "wrong") });
+    expect(engine.unresolved()).toEqual(["tasks.list"]);
+  });
+
+  it("runs the right `create` when two modules export one, also with a flat `create`", async () => {
+    const contracts = [contract("apiKeys.create", "action", { handler: "create" }), contract("tags.create", "reducer", { handler: "create" })];
+    const exports = {
+      create: definition("reducer", "flat create"),
+      apiKeys: { create: definition("action", "apiKeys.create") },
+      tags: { create: definition("reducer", "tags.create") },
+    };
+    const engine = new ModuleEngine(contracts, exports);
+    expect(await run(engine, "apiKeys.create", "action")).toBe("apiKeys.create");
+    expect(await run(engine, "tags.create", "reducer")).toBe("tags.create");
+  });
+
+  it("resolves the split Query/Reducer bundle by its full-path exports, even beside bare names", async () => {
+    const contracts = [contract("tasks.list", "query", { handler: "list", export: "list" }), contract("notes.list", "reducer", { handler: "list", export: "list" })];
+    const exports = { "tasks.list": definition("query", "tasks.list"), "notes.list": definition("reducer", "notes.list"), list: definition("reducer", "bare list") };
+    const engine = new ModuleEngine(contracts, exports);
+    expect(await run(engine, "tasks.list", "query")).toBe("tasks.list");
+    expect(await run(engine, "notes.list", "reducer")).toBe("notes.list");
+  });
+
+  it("shares one declared export between paths of the same file (dispatcher exports)", () => {
+    const dispatch = () => "dispatch";
+    const contracts = [contract("a", "action", { export: "contract" }), contract("b", "action", { export: "contract" })];
+    expect(new ModuleEngine(contracts, { contract: dispatch }).unresolved()).toEqual([]);
+  });
+
+  it("uses a unique bare export name in flat single-module bundles", () => {
     const named = () => "named";
-    const flat = () => "flat";
-    const nested = () => "nested";
-    const leaf = () => "leaf";
-    expect(findExport({ run: named, "ns.fn": flat }, contract("ns.fn", { export: "run" }))).toBe(named);
-    expect(findExport({ "ns.fn": flat, ns: { fn: nested } }, contract("ns.fn"))).toBe(flat);
-    expect(findExport({ ns: { fn: nested }, fn: leaf }, contract("ns.fn"))).toBe(nested);
-    expect(findExport({ fn: leaf }, contract("ns.fn"))).toBe(leaf);
-    expect(findExport({}, contract("ns.fn"))).toBeUndefined();
+    const contracts = [contract("ns.fn", "action", { export: "run" }), contract("ns.other", "action", { export: "other" })];
+    expect(findExport({ run: named }, contracts[0]!, contracts)).toBe(named);
+    expect(findExport({}, contracts[0]!, contracts)).toBeUndefined();
   });
 
-  it("falls back to createModule()'s default registrations", () => {
+  it("uses `default` only for its own createModule() registration or a single-function module", () => {
     const handler = () => "registered";
-    const exports = { default: { runtimeRegistrations: () => [{ path: "ns.fn", handler }] } };
-    expect(resolveHandler(findExport(exports, contract("ns.fn")), "ns.fn")).toBe(handler);
+    const contracts = [contract("ns.fn", "action"), contract("ns.other", "action")];
+    const registered = { default: { runtimeRegistrations: () => [{ path: "ns.fn", handler }] } };
+    expect(resolveHandler(findExport(registered, contracts[0]!, contracts), "ns.fn")).toBe(handler);
+    expect(findExport(registered, contracts[1]!, contracts)).toBeUndefined();
+    const plain = { default: () => "only" };
+    expect(findExport(plain, contracts[0]!, contracts)).toBeUndefined();
+    expect(findExport(plain, contracts[0]!)).toBe(plain.default);
   });
 
-  it("skips a candidate whose lookup throws", () => {
+  it("skips a lookup that throws", () => {
     const fn = () => "ok";
     const exports = Object.defineProperty({ fn }, "ns", { get() { throw new ReferenceError("Cannot access 'ns' before initialization"); } });
-    expect(findExport(exports, contract("ns.fn"))).toBe(fn);
-  });
-
-  it("keeps resolving the split Query/Reducer bundle by path", () => {
-    const fn = () => "ok";
-    expect(new ModuleEngine([contract("tasks.list", { handler: "list" })], { "tasks.list": fn }).unresolved()).toEqual([]);
+    expect(findExport(exports, contract("ns.fn", "action"))).toBe(fn);
   });
 });

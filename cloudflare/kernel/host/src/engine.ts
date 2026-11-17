@@ -116,6 +116,7 @@ export class ModuleEngine {
   readonly functions: ReadonlyMap<string, FunctionContract>;
   readonly config: EngineConfig;
   private readonly exports: ModuleExports;
+  private readonly resolver: ExportResolver;
 
   /**
    * Builds an engine for one generation. Every function needs valid args and
@@ -138,6 +139,7 @@ export class ModuleEngine {
       functions.set(contract.path, contract);
     }
     this.functions = functions;
+    this.resolver = new ExportResolver(contracts);
   }
 
   /** Functions whose export does not resolve to a handler (load must refuse them). */
@@ -146,7 +148,7 @@ export class ModuleEngine {
   }
 
   private binding(contract: FunctionContract): unknown {
-    return findExport(this.exports, contract);
+    return this.resolver.find(this.exports, contract);
   }
 
   private budget(contract: FunctionContract, context: InvocationContext, started: number): { deadline: number | undefined; timeoutMs: number | undefined; sliced: boolean } {
@@ -290,45 +292,111 @@ export class ModuleEngine {
   }
 }
 
-/**
- * The export names a contract may live under, in Rust's order
- * (V8/isolate.rs `handler_candidates`): the manifest's `export`, then
- * `handler`, the public path, its last segment, and `default` (where
- * `createModule()` projects its registrations).
- */
-export function handlerCandidates(contract: FunctionContract): string[] {
-  const candidates: string[] = [];
+/** The bare names a contract declares: manifest `export`, then `handler`. */
+function declaredNames(contract: FunctionContract): string[] {
   const metadata = contract.metadata ?? {};
-  const named = [metadata["export"] ?? contract.export, metadata["handler"]];
-  for (const name of named) if (typeof name === "string" && name.trim() !== "") candidates.push(name.trim());
-  candidates.push(contract.path);
-  const dot = contract.path.lastIndexOf(".");
-  if (dot >= 0) candidates.push(contract.path.slice(dot + 1));
-  candidates.push("default");
-  // Rust's `Vec::dedup` drops consecutive duplicates only.
-  return candidates.filter((name, index) => index === 0 || candidates[index - 1] !== name);
+  return [...new Set([metadata["export"] ?? contract.export, metadata["handler"]]
+    .filter((name): name is string => typeof name === "string" && name.trim() !== "")
+    .map((name) => name.trim()))];
 }
 
+/** The bare names a contract may also live under: its declared names, then its path's last segment. */
+export function fallbackNames(contract: FunctionContract): string[] {
+  const names = declaredNames(contract);
+  const dot = contract.path.lastIndexOf(".");
+  if (dot >= 0) names.push(contract.path.slice(dot + 1));
+  return [...new Set(names)];
+}
+
+interface Claim { contract: FunctionContract; declared: boolean; file: unknown }
+
 /**
- * Finds the export a contract names (V8/isolate.rs `resolve_handler`). The
- * complete bundle re-exports per-file namespaces (`export * as apiKeys`), so a
- * dotted candidate falls back to walking the namespaces (`apiKeys.create`);
- * the split Query/Reducer bundle exports each function under its full path.
- * The first defined value wins; a candidate whose lookup throws (a module in
- * its temporal dead zone) is not a match.
+ * Finds a contract's export without ever resolving it to another function.
+ *
+ * The exact public path wins: a top-level export of that name (the split
+ * Query/Reducer bundle), then the namespace walk (`export * as apiKeys` in the
+ * complete bundle gives `apiKeys.create`). Rust's resolver
+ * (V8/isolate.rs `handler_candidates`) tries the bare `export`/`handler` name
+ * and the last segment first; a bundle with a top-level `list` could then run
+ * `list` for `tasks.list`. Here a bare name is used only when no other
+ * contract of the module claims it (as its path or one of its bare names), and
+ * an SDK definition found under it must be of this contract's kind (see `owns`). `default`
+ * is used only through a `createModule()` registration of this exact path, or
+ * when the module has a single function. A lookup that throws (a module in its
+ * temporal dead zone) is not a match.
  */
-export function findExport(exports: ModuleExports, contract: FunctionContract): unknown {
-  for (const candidate of handlerCandidates(contract)) {
-    let found: unknown;
-    try {
-      found = exports[candidate];
-      if (found === undefined && candidate.includes(".")) found = lookupPath(exports, candidate);
-    } catch {
-      continue;
+export class ExportResolver {
+  private readonly paths = new Set<string>();
+  private readonly claims = new Map<string, Claim[]>();
+  private readonly single: boolean;
+
+  constructor(contracts: readonly FunctionContract[]) {
+    for (const contract of contracts) {
+      this.paths.add(contract.path);
+      const declared = declaredNames(contract);
+      for (const name of fallbackNames(contract)) {
+        const list = this.claims.get(name) ?? [];
+        list.push({ contract, declared: declared.includes(name), file: contract.metadata?.["file"] });
+        this.claims.set(name, list);
+      }
     }
-    if (found !== undefined) return found;
+    this.single = contracts.length === 1;
   }
-  return undefined;
+
+  /**
+   * A bare name is this contract's alone when no other function has it as its
+   * path, and either only this contract claims it, or every claimant declares
+   * it as its export from the same source file (one shared binding, as in a
+   * dispatcher export that serves several paths).
+   */
+  private owns(name: string, contract: FunctionContract): boolean {
+    if (name === contract.path || this.paths.has(name)) return false;
+    const claims = this.claims.get(name) ?? [];
+    if (claims.length === 1) return claims[0]!.contract === contract;
+    const own = claims.find((claim) => claim.contract === contract);
+    return !!own?.declared && claims.every((claim) => claim.declared && claim.file === own.file);
+  }
+
+  find(exports: ModuleExports, contract: FunctionContract): unknown {
+    const exact = attempt(() => exports[contract.path] ?? (contract.path.includes(".") ? lookupPath(exports, contract.path) : undefined));
+    if (exact !== undefined) return kindMatches(exact, contract) ? exact : undefined;
+    for (const name of fallbackNames(contract)) {
+      if (!this.owns(name, contract)) continue;
+      const found = attempt(() => exports[name]);
+      if (found !== undefined && kindMatches(found, contract)) return found;
+    }
+    const fallback = attempt(() => exports["default"]);
+    if (fallback === undefined) return undefined;
+    if (registers(fallback, contract.path)) return fallback;
+    return this.single && kindMatches(fallback, contract) ? fallback : undefined;
+  }
+}
+
+/** One contract against its own export table (tests, single-function modules). */
+export function findExport(exports: ModuleExports, contract: FunctionContract, contracts: readonly FunctionContract[] = [contract]): unknown {
+  return new ExportResolver(contracts).find(exports, contract);
+}
+
+function attempt(read: () => unknown): unknown {
+  try { return read(); } catch { return undefined; }
+}
+
+/** An SDK definition (`query()`, `reducer()`, `action()`) carries its kind; a plain function does not. */
+function kindMatches(value: unknown, contract: FunctionContract): boolean {
+  if (value === null || typeof value !== "object") return true;
+  const kind = (value as Record<string, unknown>)["kind"];
+  return typeof kind !== "string" || !["query", "reducer", "action"].includes(kind) || kind === contract.kind;
+}
+
+/** `createModule()` default: true only when it registers a handler for exactly this path. */
+function registers(value: unknown, path: string): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const list = (value as Record<string, unknown>)["runtimeRegistrations"];
+  if (typeof list !== "function") return false;
+  try {
+    const registrations = (list as () => { path?: string; handler?: unknown }[]).call(value);
+    return registrations.some((registration) => registration?.path === path && typeof registration.handler === "function");
+  } catch { return false; }
 }
 
 function lookupPath(root: unknown, path: string): unknown {
