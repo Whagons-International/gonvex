@@ -467,6 +467,11 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const activeTenantId = current?.tenants.some((tenant) => tenant.id === developer.originalTenantId)
       ? developer.originalTenantId
       : current?.activeTenantId;
+    // A pause raised while the developer credential was active must not keep
+    // the restored account's refreshes disabled; installSession only clears
+    // it when the account token changes, and here it does not.
+    authRecoveryPausedRef.current = false;
+    setAuthRecoveryPaused(false);
     installSession(current ? { ...current, activeTenantId } : null);
   }, [installSession, storageKey]);
 

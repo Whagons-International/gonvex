@@ -2080,8 +2080,9 @@ export class GonvexClient {
   }
 
   private applyAuth(auth: GonvexClientAuth) {
-    if (this.authRetryExhausted && ((hasOwn(auth, "token") && auth.token !== this.auth.token)
-      || (hasOwn(auth, "tenant") && auth.tenant !== this.auth.tenant))) {
+    const liftsRetryExhaustion = this.authRetryExhausted && ((hasOwn(auth, "token") && auth.token !== this.auth.token)
+      || (hasOwn(auth, "tenant") && auth.tenant !== this.auth.tenant));
+    if (liftsRetryExhaustion) {
       this.authRetryExhausted = false;
       this.authRetryCount = 0;
       this.reconnectAttempt = 0;
@@ -2137,6 +2138,12 @@ export class GonvexClient {
     if (auth.project !== undefined) this.errorReporter?.setProject(auth.project);
     if (auth.telemetry !== undefined) {
       this.telemetryEnabled = auth.telemetry === true;
+    }
+    // Exhaustion stopped reconnecting. New credentials resume a socket that
+    // closed meanwhile; connect() is a no-op while it is still open.
+    if (liftsRetryExhaustion && this.socket && !this.manuallyClosed) {
+      this.connect();
+      this.notifyConnectionState();
     }
   }
 
