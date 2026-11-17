@@ -88,10 +88,10 @@ async function devRequest(request: Request, env: DevRouterEnv, ctx: ExecutionCon
     if (!match || !Number.isSafeInteger(Number(match[2]))) return new Response(null,{status:400});
     const text=await request.text();
     if (text.length>4096) return new Response(null,{status:413});
-    const body=JSON.parse(text) as {version?:unknown;ok?:unknown;error?:unknown};
+    const body=JSON.parse(text) as {version?:unknown;ok?:unknown;error?:unknown;retain?:unknown};
     if (typeof body.version !== "string" || !body.version || body.version.length>128 || (body.error!==undefined&&typeof body.error!=="string")) return new Response(null,{status:400});
     const result=await env.CONTROL.getByName(CONTROL_NAME).deploymentRequest(match[3] as "authorize"|"settle"|"abort",{id:match[1]!,fence:Number(match[2]),version:body.version},
-      {ok:body.ok===true,...(typeof body.error==="string"?{error:body.error.slice(0,1500)}:{})});
+      {ok:body.ok===true,retain:body.retain===true,...(typeof body.error==="string"?{error:body.error.slice(0,1500)}:{})});
     return result.ok ? Response.json(result) : jsonError(result.status,result.error);
   }
   if (url.pathname.startsWith("/_gonvex/k19/publications/")) {
@@ -203,7 +203,7 @@ async function completePublication(env:DevRouterEnv,ref:DeploymentRef,deploy:boo
     if (deploy) {
       if (!builder) throw new Error("no release builder is configured");
       const deployed=await builder.deploy(ref.version,ref);
-      if (!deployed.ok) return jsonError(500,deployed.error); // builder recorded its terminal result
+      if (!deployed.ok) return deployed.retain?Response.json({error:deployed.error,retryable:true},{status:503}):jsonError(500,deployed.error);
     }
     const deadline=Date.now()+180_000;
     let lastError="serving Worker version not ready";

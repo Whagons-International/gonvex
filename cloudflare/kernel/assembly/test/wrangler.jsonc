@@ -25,15 +25,18 @@
    },
    {
     "name": "PUB_CONTROL",
-    "class_name": "PublicationControl"
+    "class_name": "TestControl",
+    "script_name": "gonvex-cf-dev-k22-test-stable"
    },
    {
     "name": "PUB_TENANT",
-    "class_name": "PublicationTenant"
+    "class_name": "AssemblyTenant",
+    "script_name": "gonvex-cf-dev-k22-test-runtime"
    },
    {
     "name": "PUB_GATEWAY",
-    "class_name": "PublicationGateway"
+    "class_name": "TestGateway",
+    "script_name": "gonvex-cf-dev-k22-test-stable"
    }
   ]
  },
@@ -54,6 +57,10 @@
   {
    "binding": "FILES",
    "bucket_name": "gonvex-cf-dev-k22-composition-files"
+  },
+  {
+   "binding": "RELEASES",
+   "bucket_name": "gonvex-cf-dev-k22-composition-releases"
   }
  ],
  "services": [
@@ -64,8 +71,13 @@
   },
   {
    "binding": "RUNTIME_CATALOG",
-   "service": "gonvex-cf-dev-k22-composition-test",
-   "entrypoint": "PublicationCatalog"
+   "service": "gonvex-cf-dev-k22-test-runtime",
+   "entrypoint": "TestRuntimeCatalog"
+  },
+  {
+   "binding": "ACTIONS_CATALOG",
+   "service": "gonvex-cf-dev-k22-test-actions",
+   "entrypoint": "TestActionCatalog"
   }
  ],
  "vars": {

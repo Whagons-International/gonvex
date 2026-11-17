@@ -5,7 +5,7 @@
 #   docker build -f cloudflare/control/operator/builder/Dockerfile -t gonvex-cf-dev-k19-builder .
 #
 # Runtime configuration (Container env / secrets): GONVEX_RELEASE_BUILDER_TOKEN,
-# GONVEX_KERNEL_URL, GONVEX_BUILDER_TARGET=wrangler, GONVEX_KERNEL_WRANGLER_CONFIG,
+# GONVEX_KERNEL_URL, GONVEX_BUILDER_TARGET=wrangler,
 # GONVEX_KERNEL_SCRIPT, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN.
 # Wiring it as a Container binding needs K20's infrastructure and the account
 # (follow-up in 0036).

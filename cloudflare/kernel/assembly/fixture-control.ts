@@ -23,7 +23,9 @@ export async function fixtureControl(request: Request, env: Env): Promise<Respon
   if (!env.GONVEX_ASSEMBLY_FIXTURE_KEY || request.headers.get("authorization") !== `Bearer ${env.GONVEX_ASSEMBLY_FIXTURE_KEY}`) return new Response(null, { status: 404 });
   if (url.pathname === "/__assembly/version") {
     if(!env.RUNTIME_CATALOG)return Response.json({error:"runtime catalog service is not bound"},{status:503});
-    return Response.json(await (env.RUNTIME_CATALOG as unknown as CatalogPort).identity());
+    const catalog=env.RUNTIME_CATALOG as unknown as CatalogPort,identity=await catalog.identity();
+    return Response.json({...identity,worker:env.WORKER_VERSION??null,runtimeWorker:identity.worker,
+      ready:identity.version!==null&&await catalog.ready(identity.version)});
   }
   if(request.method==="GET"&&url.pathname==="/__assembly/bootstrap-gate"){
     const holder=url.searchParams.get("holder");

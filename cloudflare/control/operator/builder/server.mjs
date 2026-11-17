@@ -21,14 +21,14 @@
 //   GONVEX_KERNEL_STAGING_DIR      local: where release modules are staged (default: the generated dir). Keep it
 //                                  outside the tree `wrangler dev` watches, or staging reloads workerd mid-sync.
 //   GONVEX_DEPLOY_DEFER_MS         local: delay before the swap that reloads workerd (default 1500)
-//   GONVEX_KERNEL_WRANGLER_CONFIG  wrangler: the kernel's wrangler config; GONVEX_KERNEL_SCRIPT its name
+//   GONVEX_KERNEL_SCRIPT           stable kernel name; only its Actions/runtime companions are app targets
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
-import { PRELUDE_SPECIFIER, ReleaseBuilderCore, RELEASES_ENTRY, ACTION_RELEASES_ENTRY } from './core.ts';
+import { PRELUDE_SPECIFIER, ReleaseBuilderCore, RELEASES_ENTRY } from './core.ts';
 import { PublicationExecutor } from './publication.ts';
 import {LocalTarget,WranglerTarget} from './targets.mjs';
 

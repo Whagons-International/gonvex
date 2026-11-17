@@ -83,6 +83,11 @@
       "binding": "ACTIONS",
       "service": "gonvex-cf-dev-k22-actions",
       "entrypoint": "ActionWorker"
+    },
+    {
+      "binding": "ACTIONS_CATALOG",
+      "service": "gonvex-cf-dev-k22-actions",
+      "entrypoint": "ActionCatalog"
     }
   ],
   "workflows": [

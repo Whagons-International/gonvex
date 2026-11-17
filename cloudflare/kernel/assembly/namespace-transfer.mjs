@@ -2,6 +2,7 @@
 // https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/#transfer-a-durable-object-class-between-workers
 import {join,resolve,isAbsolute} from 'node:path';
 import {readFile,writeFile,rename} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
 import {servingConfigs,developmentName} from './deploy.mjs';
 const live={type:'durable-object',storage:'sqlite'};
 /** One-time framework maintenance. Subsequent app publication never uses this path.
@@ -11,12 +12,23 @@ const live={type:'durable-object',storage:'sqlite'};
 export async function transferConfigs(name,directory,{catalogEntry,actionCatalogEntry,kernelUrl,images,catalog,reverse=false}={}) {
  developmentName(name);if(!catalogEntry||!isAbsolute(catalogEntry))throw new Error('captured whole catalog required');
  if(!Array.isArray(catalog))throw new Error('captured active catalog tuples required');
+ if(catalog.some(r=>typeof r.project!=='string'||!r.project||typeof r.hash!=='string'||!r.hash||!Number.isSafeInteger(r.generation)||r.generation<1)
+   ||new Set(catalog.map(r=>r.project)).size!==catalog.length)throw new Error('invalid captured active catalog');
  if(!actionCatalogEntry||!isAbsolute(actionCatalogEntry))throw new Error('captured Actions catalog required');
- await readFile(actionCatalogEntry);await readFile(catalogEntry);const configs=await servingConfigs(name,directory,{kernelUrl,images});
+ const captured=await readFile(catalogEntry,'utf8'),capturedActions=await readFile(actionCatalogEntry,'utf8');
+ const versionOf=text=>{const match=/\bexport\s+const\s+version\s*=\s*("(?:[^"\\]|\\.)*")\s*;/.exec(text);return match?JSON.parse(match[1]):null;};
+ const version=versionOf(captured);
+ if(!version||versionOf(capturedActions)!==version)throw new Error('matching source-generated Runtime and Actions catalog versions required');
+ const configs=await servingConfigs(name,directory,{kernelUrl,images});
  const sourceName=reverse?`${name}-runtime`:name,targetName=reverse?name:`${name}-runtime`;
  configs.runtime.config.alias['gonvex:releases']=resolve(catalogEntry);
  configs.actions.config.alias['gonvex:action-releases']=resolve(actionCatalogEntry);
  await writeFile(configs.actions.path,JSON.stringify(configs.actions.config),{mode:0o600});
+ // Register ActionCatalog before the receiving runtime binds that entrypoint.
+ // Until handoff its tenant callbacks still address the current namespace owner.
+ const actionBridge={path:join(directory,'transfer-actions-bridge.json'),config:structuredClone(configs.actions.config)};
+ actionBridge.config.durable_objects.bindings.find(b=>b.name==='TENANT').script_name=sourceName;
+ await writeFile(actionBridge.path,JSON.stringify(actionBridge.config),{mode:0o600});
  const kernel=structuredClone(configs.kernel.config),runtime=structuredClone(configs.runtime.config);
  kernel.vars.GONVEX_TOPOLOGY_TRANSITION='1';
  kernel.main=resolve(new URL('../../src/transition.ts',import.meta.url).pathname);
@@ -40,19 +52,27 @@ export async function transferConfigs(name,directory,{catalogEntry,actionCatalog
  // Retain the source tombstone until Actions, Sandbox and the opposite Worker
  // have been repointed and fully rolled out. No automatic namespace cleanup.
  for(const phase of phases)await writeFile(phase.path,JSON.stringify(phase.config),{mode:0o600});
- return {sourceName,targetName,phases,companions:configs,reverse,catalog,directory};
+ const fingerprint=createHash('sha256').update(JSON.stringify({sourceName,targetName,catalog,phases,images,actionBridge,
+   catalogEntry:captured,actions:capturedActions})).digest('hex');
+ return {sourceName,targetName,phases,companions:configs,reverse,catalog,directory,fingerprint,version,actionBridge};
 }
 /** The caller's deploy function is the normal Wrangler operation; responses are
  * not simulated completion ACKs. Namespace equality is read from the provider.
  * Freeze/thaw are real Control RPC via the authenticated stable HTTP router. */
-export async function transferTenantNamespace(plan,{deploy,topology,namespace,configureRuntime}) {
+export async function transferTenantNamespace(plan,{deploy,topology,namespace,configureRuntime,refreshFrozenPlan=false}) {
  const journalPath=join(plan.directory,`transfer${plan.reverse?'-reverse':''}-state.json`);
  let journal;try{journal=JSON.parse(await readFile(journalPath,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
  const sourceId=await namespace(plan.sourceName),targetId=await namespace(plan.targetName);
  const original=journal?.namespaceId??sourceId;if(!original)throw new Error('source tenant namespace missing');
  if(journal&&(journal.source!==plan.sourceName||journal.target!==plan.targetName))throw new Error('transfer journal names differ');
+ if(journal&&journal.fingerprint!==plan.fingerprint){
+  // Capturing a newer active catalog is safe only before handoff, after an
+  // actual durable freeze. Never reinterpret a committed namespace's plan.
+  const state=refreshFrozenPlan&&sourceId===original&&targetId!==original?await topology('status'):null;
+  if(!state?.frozen||state.deployment)throw new Error('transfer inputs changed; retain freeze and inspect the retained plan');
+ }
  if(sourceId!==original&&targetId!==original)throw new Error('provider namespace differs from retained transfer');
- const save=async phase=>{journal={source:plan.sourceName,target:plan.targetName,namespaceId:original,phase};await writeFile(journalPath+'.tmp',JSON.stringify(journal),{mode:0o600});await rename(journalPath+'.tmp',journalPath);};
+ const save=async phase=>{journal={source:plan.sourceName,target:plan.targetName,namespaceId:original,phase,fingerprint:plan.fingerprint};await writeFile(journalPath+'.tmp',JSON.stringify(journal),{mode:0o600});await rename(journalPath+'.tmp',journalPath);};
  const [bridge,receive,commit,bind]=plan.phases;
  if(targetId!==original){
   if(targetId)throw new Error('target already owns a tenant namespace');
@@ -63,6 +83,7 @@ export async function transferTenantNamespace(plan,{deploy,topology,namespace,co
  if(targetId!==original){
 
  // Target must not already own a tenant namespace: expecting-transfer, never create.
+ await deploy(plan.actionBridge.path);
  await deploy(receive.path);await configureRuntime?.();await save('received');await deploy(commit.path);
  if(await namespace(plan.targetName)!==original)throw new Error('tenant namespace changed during transfer; retain freeze');
  }
@@ -79,12 +100,13 @@ export async function transferTenantNamespace(plan,{deploy,topology,namespace,co
 
 /** Production transport for the reviewed transfer procedure. Invoke only from
  * the approved Vault child during coordinated framework maintenance. */
-export async function migrateExistingAssembly({name,directory,kernelUrl,images,catalogEntry,actionCatalogEntry,catalog,version,adminKey,storageSecret,accountId,accountName,reverse=false}) {
+export async function migrateExistingAssembly({name,directory,kernelUrl,images,catalogEntry,actionCatalogEntry,catalog,version,adminKey,storageSecret,accountId,accountName,reverse=false,refreshFrozenPlan=false}) {
  const {cloudflareCredentials,accountApi,deployConfig}=await import('./deploy.mjs');
  const credentials=await cloudflareCredentials();
  if(credentials.accountId!==accountId||!accountName||!adminKey||!version||(!reverse&&!storageSecret))throw new Error('exact account, retained auth/storage secret and catalog version required');
- for(const kind of ['builder','sandbox'])if(!images?.[kind]?.includes('@sha256:'))throw new Error('matching immutable source images required');
+ for(const kind of ['builder','sandbox'])if(!/@sha256:[a-f0-9]{64}$/.test(images?.[kind]??''))throw new Error('matching immutable source images required');
  const api=accountApi(credentials),plan=await transferConfigs(name,directory,{kernelUrl,images,catalogEntry,actionCatalogEntry,catalog,reverse});
+ if(plan.version!==version)throw new Error('captured catalog version differs from requested maintenance version');
  const verify=async()=>{const a=await api('');if(a.id!==accountId||a.name!==accountName)throw new Error('account identity changed');};
  const deploy=async path=>{await verify();const cfg=JSON.parse(await readFile(path,'utf8'));if(![name,...['runtime','actions','sandbox','builder'].map(k=>`${name}-${k}`)].includes(cfg.name))throw new Error('foreign Worker refused');await api(`/workers/scripts/${cfg.name}/settings`,{missing:true});await deployConfig(['deploy','--config',path,'--keep-vars'],credentials,directory);};
  const topology=async(action,extra='')=>{const deadline=Date.now()+360000;for(;;){
@@ -102,13 +124,19 @@ export async function migrateExistingAssembly({name,directory,kernelUrl,images,c
   }throw new Error('namespace inventory exceeds bounded page budget');
  };
  await verify();
+ const configureRuntime=reverse?undefined:async()=>{
+  await verify();
+  await api(`/workers/scripts/${name}-runtime/secrets`,{method:'PUT',body:{name:'GONVEX_STORAGE_SECRET',text:storageSecret,type:'secret_text'}});
+ };
  // The transfer remains frozen on any error; no automatic SQL rollback or deletes.
- const result=await transferTenantNamespace(plan,{deploy,topology,namespace,configureRuntime});
+ const result=await transferTenantNamespace(plan,{deploy,topology,namespace,configureRuntime,refreshFrozenPlan});
  if(!reverse){
   await deploy(plan.companions.builder.path);
   await deploy(plan.companions.kernel.path);
   if(await namespace(plan.targetName)!==result.namespaceId)throw new Error('target namespace changed; retain freeze');
-  await topology('thaw',`&version=${encodeURIComponent(version)}`);
+  const thawed=await topology('thaw',`&version=${encodeURIComponent(version)}`);
+  if(thawed.frozen)throw new Error('Control retained its topology freeze');
+  return {...result,frozen:false};
  }
  // Reverse transfer deliberately retains the freeze: an isolated runtime
  // builder must never publish while its namespace is back on the monolith.

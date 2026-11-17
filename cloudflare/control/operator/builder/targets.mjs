@@ -1,4 +1,4 @@
-import {mkdir,readFile,writeFile,rename} from 'node:fs/promises';
+import {mkdir,writeFile,rename} from 'node:fs/promises';
 import {join,dirname,relative} from 'node:path';
 import {RELEASES_ENTRY,ACTION_RELEASES_ENTRY} from './core.ts';
 import {servingConfigs} from '../../../kernel/assembly/deploy.mjs';
@@ -51,10 +51,16 @@ export class WranglerTarget extends LocalTarget {
   await writeFile(join(this.dir,RELEASES_ENTRY),entry.kernel);
   if(entry.actions)await writeFile(join(this.dir,ACTION_RELEASES_ENTRY),entry.actions);
   const configs=await servingConfigs(this.script,this.dir);
+  if(configs.runtime.config.durable_objects.code_update_strategy?.mode!=='immediate'||Object.keys(configs.runtime.config.exports).join(',')!=='AssemblyTenant')throw new Error('runtime isolation configuration differs');
+  const targets=[];
   for(const[kind,alias,file]of[['actions','gonvex:action-releases',ACTION_RELEASES_ENTRY],['runtime','gonvex:releases',RELEASES_ENTRY]]){
    const {config,path}=configs[kind];config.alias[alias]=join(this.dir,file);
-   if(kind==='runtime'&&(config.durable_objects.code_update_strategy?.mode!=='immediate'||Object.keys(config.exports).join(',')!=='AssemblyTenant'))throw new Error('runtime isolation configuration differs');
-   await writeFile(path,JSON.stringify(config),{mode:0o600});await this.execute(path,config.name);
+   await writeFile(path,JSON.stringify(config),{mode:0o600});
+   targets.push({path,name:config.name});
+  }
+  for(const {path,name} of targets){
+   try{await this.execute(path,name);}
+   catch(cause){throw Object.assign(new Error(`component deployment failed: ${cause.message}`),{retainPublication:true});}
   }
  }
 }

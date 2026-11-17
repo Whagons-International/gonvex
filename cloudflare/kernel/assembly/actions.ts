@@ -39,4 +39,5 @@ configureActions<Env>({
   sandbox: (env) => env.SANDBOX,
 });
 export { ActionWorker, ActionWorkflow } from "../../actions/src/worker";
+export {ActionCatalog} from './action-catalog';
 export default { fetch: () => Response.json({ ok: true, service: "gonvex-actions" }) };

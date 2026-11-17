@@ -51,8 +51,11 @@ export class SessionControlObject extends OperatorControlObject {
     if(!catalog)throw new Error("runtime catalog service is not bound");
     return catalog;
   }
-  protected override async runtimeNamespaceReady():Promise<boolean>{
+  protected override async runtimeNamespaceReady(version:string):Promise<boolean>{
     const probe="gonvex-topology-namespace";
+    const identity=await this.catalog().identity(),active=this.syncs.activeReleases();
+    if(identity.version!==version||Object.keys(identity.releases).length!==active.length
+      ||active.some(release=>identity.releases[release.project]!==release.hash))return false;
     return await this.catalog().tenantId(probe)===this.env.TENANT.idFromName(probe).toString();
   }
   private readonly assemblyInstance = crypto.randomUUID();
