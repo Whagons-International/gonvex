@@ -72,6 +72,9 @@ The helper uses the documented [declarative namespace transfer](https://develope
   artifact format generation to match its captured manifest. Control's publication generation
   is a separate counter: the frozen catalog and activation event must match the captured
   publication tuple, never the format version (for example, publication2 can contain format8).
+  Optional artifact format uses the Tenant’s numeric-or-zero normalization: builder-prepared null
+  and omitted formats retain format0 semantics for exact ACK/no-op activation, without rewriting
+  the stored manifest or weakening hash, publication-counter, plan or provisioning checks.
   A stale artifact capture or an uninstalled Tenant refuses
   the wake before module code or metadata can change. A matching bridge restores the retained
   manifest without auto-activation; release plans, changed pins and provisioning wait for maintenance

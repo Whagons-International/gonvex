@@ -56,6 +56,8 @@ import { retryable } from "../reducer/errors";
 
 import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } from "./tenant-transfer";
 
+// Match projectModuleFromManifest: an omitted/null artifact format becomes 0.
+const artifactFormat = (generation: unknown): number => typeof generation === "number" ? generation : 0;
 const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
 const PROJECT_KEY = "assembly/project";
 export interface AssemblyTenantEnv extends AssemblyGatewayEnv, TransferEnv {
@@ -123,7 +125,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       // the separate publication tuple when it freezes the complete catalog.
       const captured = release?.manifest.module as { hash?: unknown; generation?: unknown } | undefined;
       if (!stored || !release || release.project !== stored.projectId || release.hash !== module?.hash
-        || captured?.hash !== module?.hash || captured?.generation !== module?.generation)
+        || captured?.hash !== module?.hash || artifactFormat(captured?.generation) !== artifactFormat(module?.generation))
         throw new Error("topology bridge does not contain the retained active Tenant release");
     }
     super(ctx, env);
@@ -385,7 +387,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") {
       const module = manifest.module as { hash?: unknown; generation?: unknown } | undefined;
       const active = this.kernel.module;
-      if (planId || active?.projectId !== projectId || active.artifactHash !== module?.hash || active.generation !== module?.generation)
+      if (planId || active?.projectId !== projectId || active.artifactHash !== module?.hash || active.generation !== artifactFormat(module?.generation))
         throw new Error("topology bridge cannot change the active Tenant release");
       return { ok: true }; // An already-active pin needs no manifest rewrite.
     }
@@ -438,7 +440,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     if (!release || release.hash !== event.hash || release.generation !== event.generation) return false;
     const artifact = release.manifest.module as { generation?: unknown } | undefined;
     if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") return this.kernel.module?.projectId === event.projectId
-      && this.kernel.module.artifactHash === event.hash && this.kernel.module.generation === artifact?.generation;
+      && this.kernel.module.artifactHash === event.hash && this.kernel.module.generation === artifactFormat(artifact?.generation);
     if (this.kernel.module?.projectId !== event.projectId || this.kernel.module.artifactHash !== event.hash) await super.activate(event.projectId, release.manifest, null);
     await this.setupScheduled();
     return this.kernel.module?.artifactHash === event.hash;
