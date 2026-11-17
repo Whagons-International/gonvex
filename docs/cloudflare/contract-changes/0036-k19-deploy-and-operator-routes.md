@@ -52,6 +52,10 @@ functions) installs with no error.
   the existing release-builder token. A successful sync therefore acknowledges tenant activation and reload
   delivery, rather than only the Worker's upload. Project holder watches survive Control resets and include
   control-only sockets registered before their auth acknowledgement.
+  The kernel configuration enables `global_fetch_strictly_public`: Cloudflare's default private-origin
+  routing does not guarantee that a global `fetch()` to its own zone reaches Workers. This setting must
+  remain in the source configuration packaged into the builder image as well as the initial deployment.
+  See [Cloudflare's fetch routing contract](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public).
 - **Whole catalog ownership.** A unique active-owner index serializes different projects from preparation
   through publication. The durable sync row's identity fences every builder deployment at execution time.
   A later project recovers a staged predecessor before capturing its own catalog. The pinned catalog in
