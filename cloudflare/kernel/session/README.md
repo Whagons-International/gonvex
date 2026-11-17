@@ -63,6 +63,35 @@ client ──/ws──▶ router Worker ──▶ gateway object (gw-N) ──RP
 | Per-address 429 limits, the 30 s public admission recheck, public rate limits | K16 | `kernel/public/` (address limiter object, `PublicGuard`; hooks in `router.ts`, `session.ts`, `host.ts`) |
 | `gvx_svc_` service principals | K17 | `kernel/principals`: `Session.serviceAuth` / `serviceFrame`, `SessionRecord.service`; refused when the control port has no `authenticateService` (the stand-in) |
 
+## Automatic-placement admission identity
+
+With `GATEWAY_CONTROLLER` bound, a holder verifies that the assignment's logical name derives to its
+actual Durable Object ID through `GATEWAY.idFromName(name).equals(ctx.id)`. It also checks the router's
+connection ID, the stored routing name when present, and the controller's authoritative single-use
+claim. A successful claim persists one versioned routing-name key before accepting a socket. On wake,
+the holder validates that key against its actual namespace/ID before restoring Session host addresses.
+An unclaimed assignment cannot establish or replace this durable identity. Epoch, lease, replay and
+socket-capacity checks retain their existing ordering and limits.
+
+Cloudflare's [ID API](https://developers.cloudflare.com/durable-objects/api/id/) permits `ctx.id.name`
+to be absent for ID-based access. The installed local workerd retained names in the observed ordinary
+eviction test. The separate ID-only fixture reconstructs a native ID using `idFromString` to cover the
+documented absent-name case; it does not reproduce or explain the remote failure. A legacy holder
+with existing sockets and neither a stored nor platform name refuses new admission rather than
+relabeling restored Sessions from an incoming header. Existing sockets are not forcibly closed.
+
+Assignment refusals retain HTTP 503 and their existing body. `x-gonvex-admission-reason` carries only
+a finite enum: `parse-invalid`, `holder-identity`, `connection-mismatch`, `identity-unavailable`,
+`admission-busy`, `capacity`, `claim-refused`, or `epoch-busy`. The router forwards that response and
+releases unused placement/address reservations. There are no assignment values, tokens, connection
+IDs, tenant labels or per-request logs in these diagnostics. The original observed 27-byte
+`gateway assignment required` response alone does not identify which guard branch failed.
+
+Storage work added here is one synchronous KV-key read per holder construction and one KV-key write
+on the first successful claim, including backfill for an existing named holder. Later admissions and
+frames add no identity writes. The value contains one version and a name of at most 100 UTF-16 code
+units. No tenant schema, row data, controller API, holder limit or security deadline changes.
+
 ## Run
 
 ```sh
