@@ -29,11 +29,11 @@ export async function startLocalAssembly({ state, port, vars = {}, deferMs = 150
   const adminKey = vars.GONVEX_ADMIN_KEY ?? randomBytes(24).toString('hex');
   const common = { GONVEX_RUNTIME_VERSION: 'development', GONVEX_ADMIN_KEY: adminKey, GONVEX_PUBLIC_URL: url, GONVEX_ASSEMBLY_FIXTURE_KEY: adminKey, ...vars };
   const paths = [];
-  for (const [name, file, entry] of [['kernel', join(root, 'wrangler.jsonc'), 'releases.js'], ['actions', join(here, 'actions.wrangler.jsonc'), 'action-releases.js'], ['sandbox', join(here, 'sandbox.wrangler.jsonc'), null]]) {
+  for (const [name, file, entry] of [['kernel', join(root, 'wrangler.jsonc'), null], ['runtime', join(here, 'runtime.wrangler.jsonc'), 'releases.js'], ['actions', join(here, 'actions.wrangler.jsonc'), 'action-releases.js'], ['sandbox', join(here, 'sandbox.wrangler.jsonc'), null]]) {
     const config = await load(file), dir = dirname(file);
     config.main = resolve(dir, config.main);
     config.alias = Object.fromEntries(Object.entries(config.alias ?? {}).map(([key, value]) => [key, resolve(dir, value)]));
-    if (entry) config.alias[name === 'kernel' ? 'gonvex:releases' : 'gonvex:action-releases'] = join(generated, entry);
+    if (entry) config.alias[name === 'runtime' ? 'gonvex:releases' : 'gonvex:action-releases'] = join(generated, entry);
     config.vars = { ...config.vars, ...common };
     if (name === 'kernel') {
       if (placement === 'static-one-holder') {

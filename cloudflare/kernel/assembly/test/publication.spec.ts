@@ -4,6 +4,7 @@
 import {env,runInDurableObject,evictDurableObject} from 'cloudflare:test';
 import {expect,it} from 'vitest';
 import {releases} from '../releases';
+import {servingVersionForTest} from './baked';
 import {manifest as base,files} from './catalog';
 import {plans,type PublicationControl,type PublicationTenant} from './worker';
 import {buildReleasePlan,migrationsFromFiles} from '../../migrate';
@@ -45,6 +46,7 @@ it('completed publication activates an existing tenant and notifies tenant/contr
   expect(await generation('v1')).toMatchObject({type:'reducer.result',result:{generation:1}});
   // The real holder registrations must survive the code-update boundary.
   await evictDurableObject(control);
+  const holderBefore=await (bindings.PUB_GATEWAY.getByName('publication-holder') as any).fixtureLifecycle();
   const publish=async(n:number,contract:number|null=null)=>{
    const release=catalog(n,contract);releases[project]=release;
    const summary:ReleaseSummary={project,hash:release.hash,artifactGeneration:n,functionCount:1,schemaDefinition:{},migrations:[],controlMigrations:[],planId:null,
@@ -54,21 +56,35 @@ it('completed publication activates an existing tenant and notifies tenant/contr
     const owner=instance.syncs.deployments.acquire(project,id);
     if(!owner.acquired)throw new Error('publication fixture could not acquire deployment');
     instance.syncs.deployments.catalog(id,owner.fence,[{project,hash:release.hash,generation:n}]);
-    instance.syncs.deployments.staged(id,owner.fence,'bootstrap');
+    instance.syncs.deployments.staged(id,owner.fence,`catalog-${n}`);
     instance.sql.run("INSERT INTO gonvex_cf_releases(project_id,hash,summary) VALUES($1,$2,$3)",project,release.hash,JSON.stringify(summary));
-    instance.sql.run("INSERT INTO gonvex_cf_publications(sync_id,project_id,hash,generation,version,tenants) VALUES($1,$2,$3,$4,'bootstrap',$5)",id,project,release.hash,n,JSON.stringify([tenant]));
+    instance.sql.run("INSERT INTO gonvex_cf_publications(sync_id,project_id,hash,generation,version,tenants) VALUES($1,$2,$3,$4,$5,$6)",id,project,release.hash,n,`catalog-${n}`,JSON.stringify([tenant]));
    });
+   expect(await control.publishRelease(id)).toEqual({ready:false});
+   servingVersionForTest(`catalog-${n}`);
+   // Only tenant application state is restarted. Both actual gateway WebSockets
+   // retain their original holder and connection IDs throughout publication.
+   await evictDurableObject(bindings.PUB_TENANT.getByName(tenant));
+   expect(await control.publishRelease(id)).toEqual({ready:true});
    expect(await control.publishRelease(id)).toEqual({ready:true});
    return release;
   };
   const second=await publish(2);
   for(const socket of [data,onlyControl])expect(await socket.next(frame=>frame.type==='system.reload')).toMatchObject({artifactHash:second.hash});
   expect(await generation('v2')).toMatchObject({type:'reducer.result',result:{generation:2}});
+  expect(await data.call({type:'reducer.call',id:'old-pin',path:'probe.generation',args:{},artifactHash:first.hash})).toMatchObject({type:'reducer.error',class:'update_required'});
+  expect(await data.call({type:'reducer.call',id:'new-pin',path:'probe.generation',args:{},artifactHash:second.hash})).toMatchObject({type:'reducer.result',result:{generation:2}});
+  expect(await bindings.PUB_TENANT.getByName(tenant).operatorActivateRelease({projectId:project,hash:'wrong',generation:2})).toBe(false);
+  expect(await bindings.PUB_TENANT.getByName(tenant).operatorActivateRelease({projectId:project,hash:second.hash,generation:1})).toBe(false);
+  expect(await bindings.PUB_TENANT.getByName(tenant).operatorActivateRelease({projectId:'unknown-project',hash:second.hash,generation:2})).toBe(false);
+  const holderAfter=await (bindings.PUB_GATEWAY.getByName('publication-holder') as any).fixtureLifecycle();
+  expect(holderAfter.holder).toBe(holderBefore.holder);expect(holderAfter.nativeCount).toBe(2);
+  expect(holderAfter.sessions.map((s:any)=>s.connectionId).sort()).toEqual(holderBefore.sessions.map((s:any)=>s.connectionId).sort());
   const third=await publish(3,2);
   expect(await data.next(frame=>frame.type==='client.updateRequired')).toMatchObject({contract:2});
   expect(await onlyControl.next(frame=>frame.type==='system.reload')).toMatchObject({artifactHash:third.hash});
  }finally{
   for(const socket of sockets)if(socket.readyState<2)socket.close(1000);
-  delete releases[project];
+  delete releases[project];servingVersionForTest('bootstrap');
  }
 });

@@ -1,3 +1,4 @@
+import {RuntimeCatalog} from '../runtime';
 import { ControlObject } from '../../../control/src/control-object';
 import { AssemblyGateway } from '../gateway';
 import { AssemblyTenant } from '../tenant';
@@ -13,7 +14,7 @@ export class CompositionTenant extends AssemblyTenant {
  protected override plans() { return plans; }
 }
 export class CompositionControl extends ControlObject {}
-function publicationEnv(env:any){return {...env,GONVEX_DASHBOARD_SESSION_SECRET:'synthetic-publication-secret',CONTROL:env.PUB_CONTROL,TENANT:env.PUB_TENANT,GATEWAY:env.PUB_GATEWAY};}
+function publicationEnv(env:any){return {...env,GONVEX_DASHBOARD_SESSION_SECRET:'synthetic-publication-secret',GONVEX_ASSEMBLY_FIXTURE_KEY:'synthetic-inspection',CONTROL:env.PUB_CONTROL,TENANT:env.PUB_TENANT,GATEWAY:env.PUB_GATEWAY};}
 export class PublicationControl extends SessionControlObject { constructor(ctx:DurableObjectState,env:any){super(ctx,publicationEnv(env));} }
 export class PublicationTenant extends AssemblyTenant {
  constructor(ctx:DurableObjectState,env:any){super(ctx,publicationEnv(env));}
@@ -24,3 +25,5 @@ export class CompositionGateway extends AssemblyGateway {
  async operatorDataChanged() {}
 }
 export default {fetch:()=>new Response('K22 synthetic composition fixture; actual tenant/Action handlers')};
+
+export class PublicationCatalog extends RuntimeCatalog {override async tenantId(name:string){return (this.env as any).PUB_TENANT.idFromName(name).toString();}}

@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { PRELUDE_SPECIFIER, ReleaseBuilderCore, RELEASES_ENTRY, ACTION_RELEASES_ENTRY } from './core.ts';
 import { PublicationExecutor } from './publication.ts';
+import {LocalTarget,WranglerTarget} from './targets.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -78,89 +79,6 @@ class HttpBlobStore {
  * reload); deploy rewrites `releases.js`, the module the kernel imports, which
  * makes `wrangler dev` rebuild and restart workerd with the new version.
  */
-class LocalTarget {
-  constructor(dir, deferMs, stagingDir = dir) {
-    this.dir = dir;
-    this.stagingDir = stagingDir;
-    this.deferMs = deferMs;
-    this.staged = new Map();
-  }
-  async stage(files, version) {
-    for (const [path, content] of files) {
-      if (path === RELEASES_ENTRY || path === ACTION_RELEASES_ENTRY) continue;
-      const file = join(this.stagingDir, path);
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, content);
-    }
-    // The entry imports `./releases/...`; point it at the staging directory.
-    const base = relative(this.dir, this.stagingDir).split('\\').join('/') || '.';
-    const entry = files.get(RELEASES_ENTRY).replaceAll('from "./releases/', `from "${base.startsWith('.') ? base : `./${base}`}/releases/`);
-    const actions = files.get(ACTION_RELEASES_ENTRY)?.replaceAll('from "./releases/', `from "${base.startsWith('.') ? base : `./${base}`}/releases/`);
-    this.staged.set(version, { kernel: entry, actions });
-  }
-  async deploy(version) {
-    const entry = this.staged.get(version);
-    if (entry === undefined) throw new Error(`version ${version} was not staged`);
-    // workerd restarts on the swap and cuts every request in flight, including
-    // the /dev/sync response; swap after it has gone out.
-    await new Promise(resolveSwap => setTimeout(resolveSwap,this.deferMs));
-    const file = join(this.dir, RELEASES_ENTRY);
-    if (entry.actions) {
-      const actions = join(this.dir, ACTION_RELEASES_ENTRY);
-      await writeFile(`${actions}.tmp`, entry.actions);
-      await rename(`${actions}.tmp`, actions);
-    }
-    await writeFile(`${file}.tmp`, entry.kernel);
-    await rename(`${file}.tmp`, file);
-    log(`version ${version} is live (workerd reloads)`);
-  }
-}
-
-/** Platform target: `wrangler deploy` of the kernel with the generated releases (Container image has the kernel source). */
-class WranglerTarget extends LocalTarget {
-  constructor(dir, config, script) {
-    super(dir, 0);
-    this.config = config;
-    this.script = script;
-  }
-  async deploy(version) {
-    const entry = this.staged.get(version);
-    if (entry === undefined) throw new Error(`version ${version} was not staged`);
-    if (!this.script.startsWith('gonvex-cf-dev-')) throw new Error('development script name required');
-    await writeFile(join(this.dir, RELEASES_ENTRY), entry.kernel);
-    if (entry.actions) await writeFile(join(this.dir, ACTION_RELEASES_ENTRY), entry.actions);
-    const load = async (path) => JSON.parse((await readFile(path, 'utf8')).replace(/^\s*\/\/.*$/gm, ''));
-    const kernel = await load(this.config);
-    const root = dirname(this.config);
-    const actionPath = join(root, 'kernel/assembly/actions.wrangler.jsonc');
-    const actions = await load(actionPath);
-    for (const [config, dir, name, alias, generatedEntry] of [
-      [actions, dirname(actionPath), `${this.script}-actions`, 'gonvex:action-releases', ACTION_RELEASES_ENTRY],
-      [kernel, root, this.script, 'gonvex:releases', RELEASES_ENTRY],
-    ]) {
-      config.name = name;
-      config.main = resolve(dir, config.main);
-      config.alias = Object.fromEntries(Object.entries(config.alias ?? {}).map(([key, value]) => [key, resolve(dir, value)]));
-      config.alias[alias] = join(this.dir, generatedEntry);
-      for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) binding.script_name = this.script;
-      for (const service of config.services ?? []) service.service = service.binding === 'SANDBOX' ? `${this.script}-sandbox` : service.binding === 'ACTIONS' ? `${this.script}-actions` : `${this.script}-builder`;
-      for (const workflow of config.workflows ?? []) { workflow.name = `${this.script}-actions`; if (workflow.script_name) workflow.script_name = `${this.script}-actions`; }
-      for (const bucket of config.r2_buckets ?? []) bucket.bucket_name = `${this.script}-${bucket.binding.toLowerCase()}`;
-      for (const q of [...(config.queues?.producers ?? []), ...(config.queues?.consumers ?? [])]) q.queue = `${this.script}-rollout`;
-      for (const dataset of config.analytics_engine_datasets ?? []) dataset.dataset = `${this.script}-telemetry`;
-      const path = join(this.dir, `${name}.json`);
-      await writeFile(path, JSON.stringify(config));
-      await new Promise((resolveDeploy, reject) => {
-        const child = spawn(resolve(here, '../../../node_modules/.bin/wrangler'), ['deploy', '--config', path, '--keep-vars'], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } });
-        // Raw Wrangler output can contain request data. Report only the exit status.
-        child.stdout.resume(); child.stderr.resume();
-        child.on('error', reject);
-        child.on('exit', (code) => code === 0 ? resolveDeploy() : reject(new Error(`wrangler deploy exited ${code}`)));
-      });
-    }
-    log(`version ${version} deployed`);
-  }
-}
 
 const generatedDir = resolve(process.env.GONVEX_KERNEL_GENERATED_DIR ?? resolve(here, '../../../router/dev/local/.generated'));
 const stagingDir = resolve(process.env.GONVEX_KERNEL_STAGING_DIR ?? generatedDir);
@@ -175,7 +93,10 @@ try {
 }
 const target =
   targetKind === 'wrangler'
-    ? new WranglerTarget(generatedDir, process.env.GONVEX_KERNEL_WRANGLER_CONFIG ?? '', process.env.GONVEX_KERNEL_SCRIPT ?? '')
+    ? new WranglerTarget(generatedDir, process.env.GONVEX_KERNEL_SCRIPT ?? '', async(path,name)=>{
+        if(!['runtime','actions'].some(k=>name===`${process.env.GONVEX_KERNEL_SCRIPT}-${k}`))throw new Error('stable Worker deployment refused');
+        await new Promise((ok,fail)=>{const child=spawn(resolve(here,'../../../node_modules/.bin/wrangler'),['deploy','--config',path,'--keep-vars'],{stdio:['ignore','pipe','pipe'],env:{...process.env,WRANGLER_SEND_METRICS:'false'}});child.stdout.resume();child.stderr.resume();child.once('error',fail);child.once('exit',code=>code===0?ok():fail(new Error(`wrangler deploy exited ${code}`)));});
+      })
     : new LocalTarget(generatedDir, Number(process.env.GONVEX_DEPLOY_DEFER_MS ?? '1500'), stagingDir);
 
 // app.js lives at <generated>/releases/<project>/<hash>/app.js: three levels below the generated dir.

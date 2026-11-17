@@ -30,13 +30,13 @@ test("composes every development service, bucket, workflow and queue under one i
     const name = previewName(`cf/K22-${"x".repeat(90)}`);
     assert.equal(developmentName(name), name);
     const configs = await servingConfigs(name, directory, { kernelUrl: `https://${name}.example.invalid`, images: { sandbox: 'registry.invalid/gonvex-cf-dev-sandbox@sha256:abc', builder: 'registry.invalid/gonvex-cf-dev-builder@sha256:def' } });
-    for (const kind of ['kernel', 'actions', 'sandbox', 'builder']) {
+    for (const kind of ['kernel', 'runtime', 'actions', 'sandbox', 'builder']) {
       const config = configs[kind].config;
       assert.ok(config.name.length <= 63);
-      for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) assert.equal(binding.script_name, name);
+      for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) assert.equal(binding.script_name, binding.class_name==='AssemblyTenant'?`${name}-runtime`:name);
       for (const bucket of config.r2_buckets ?? []) assert.equal(bucket.bucket_name, `${name}-${bucket.binding.toLowerCase()}`);
     }
-    assert.equal(configs.kernel.config.limits.cpu_ms, 5000);
+    assert.equal(configs.kernel.config.limits.cpu_ms, 30000);
     // Publication must reach the newly serving Worker through public ingress,
     // including after the builder deploys from this same source configuration.
     for (const kind of ['kernel', 'bootstrap']) {
@@ -44,7 +44,7 @@ test("composes every development service, bucket, workflow and queue under one i
       assert.ok(!configs[kind].config.compatibility_flags.includes('global_fetch_private_origin'));
     }
     assert.equal(configs.actions.config.limits.cpu_ms, 300000);
-    assert.deepEqual(configs.kernel.config.services.map((s) => s.service), [`${name}-actions`, `${name}-builder`]);
+    assert.deepEqual(configs.kernel.config.services.map((s) => s.service), [`${name}-actions`, `${name}-builder`, `${name}-runtime`]);
     assert.deepEqual(configs.bootstrap.config.services, []);
     assert.deepEqual(configs.bootstrap.config.workflows, []);
     assert.equal(configs.builder.config.vars.GONVEX_KERNEL_SCRIPT, name);

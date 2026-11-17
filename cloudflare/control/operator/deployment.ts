@@ -9,6 +9,7 @@ export const DEPLOYMENT_SCHEMA = `
 DROP INDEX IF EXISTS gonvex_cf_syncs_running;
 CREATE UNIQUE INDEX IF NOT EXISTS gonvex_cf_one_deployment
   ON gonvex_cf_syncs((1)) WHERE state IN ('running','publishing');
+CREATE TABLE IF NOT EXISTS gonvex_cf_topology (singleton INTEGER PRIMARY KEY CHECK(singleton=1), frozen INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS gonvex_cf_publication_catalogs (
   sync_id TEXT PRIMARY KEY, catalog JSON NOT NULL
 );
@@ -28,15 +29,19 @@ export function installDeploymentSchema(sql:Sql):void {
 }
 
 export class DeploymentCoordinator {
-  constructor(private sql: Sql, private versionReady: (version: string) => boolean, private preparationMs: number) {}
+  constructor(private sql: Sql, private versionReady: (version: string) => boolean | Promise<boolean>, private preparationMs: number) {}
 
   private owner():Row|undefined {
     return this.sql.get(`SELECT s.rowid AS fence,s.sync_id,s.project_id,s.state,s.expires_at,p.version
       FROM gonvex_cf_syncs s LEFT JOIN gonvex_cf_publications p ON p.sync_id=s.sync_id
       WHERE s.state IN ('running','publishing')`);
   }
+  topologyFrozen():boolean { return this.sql.value("SELECT frozen FROM gonvex_cf_topology WHERE singleton=1")===1; }
+  freezeTopology():void {this.sql.tx(()=>{if(this.owner())throw new HttpError(409,"complete the current publication before topology migration");this.sql.run("INSERT INTO gonvex_cf_topology VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET frozen=1");});}
+  thawTopology():void {this.sql.run("UPDATE gonvex_cf_topology SET frozen=0 WHERE singleton=1");}
   /** Called in the same transaction as the per-project refusal. */
   acquire(project:string,id:string):{acquired:true;fence:number}|{acquired:false;sameProject:boolean;recovery?:DeploymentRef} {
+    if(this.topologyFrozen())throw new HttpError(503,"runtime topology migration in progress");
     let owner=this.owner();
     if(owner?.state==='running'&&num(owner.expires_at)<=Date.now()){
       this.sql.run(`UPDATE gonvex_cf_syncs SET state='abandoned',finished_at=${NOW_MS} WHERE sync_id=$1`,owner.sync_id);
@@ -86,21 +91,26 @@ export class DeploymentCoordinator {
     return row;
   }
   /** Checked inside the builder queue immediately before a target write. */
-  authorize(ref:DeploymentRef):DeploymentGrant {
+  async authorize(ref:DeploymentRef):Promise<DeploymentGrant> {
+    const initial=this.publication(ref);
+    if(num(initial.completed))return {allowed:false,completed:true};
+    if(initial.state!=="publishing")throw new HttpError(409,"deployment fence is no longer current");
+    const serving=await this.versionReady(ref.version);
     const row=this.publication(ref);
     if(num(row.completed))return {allowed:false,completed:true};
     if(row.state!=='publishing')throw new HttpError(409,"deployment fence is no longer current");
-    if(this.versionReady(ref.version))return {allowed:false,serving:true};
+    if(serving)return {allowed:false,serving:true};
     const catalog=this.sql.value<string>("SELECT catalog FROM gonvex_cf_publication_catalogs WHERE sync_id=$1",ref.id);
     if(catalog===undefined)throw new HttpError(409,"publication catalog is missing");
     return {allowed:true,catalog:JSON.parse(catalog) as ActiveRelease[]};
   }
   /** Caller/RPC failure alone never unlocks a target operation still running. */
-  settle(ref:DeploymentRef,result:{ok:boolean;error?:string}):void {
+  async settle(ref:DeploymentRef,result:{ok:boolean;error?:string}):Promise<void> {
+    const serving=result.ok?false:await this.versionReady(ref.version);
     const row=this.publication(ref);
     if(num(row.completed)||row.state==='failed')return;
     if(row.state!=='publishing')throw new HttpError(409,"deployment fence is no longer current");
-    if(!result.ok&&!this.versionReady(ref.version))this.abort(ref,result.error??'deployment failed');
+    if(!result.ok&&!serving)this.abort(ref,result.error??'deployment failed');
   }
   /** Only invoked from the real builder's serialized target barrier. */
   abort(ref:DeploymentRef,error:string):void {

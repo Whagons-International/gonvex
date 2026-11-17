@@ -21,6 +21,7 @@ async function fixture(run:(f:Awaited<ReturnType<typeof setup>>)=>Promise<void>)
  await runInDurableObject(object,async(instance:OperatorControlObject,state)=>{await run(await setup(instance,state));});
 }
 async function setup(instance:OperatorControlObject,state:DurableObjectState){
+ let versionGate:ReturnType<typeof gate>|undefined;
  let live='',prepareGate:ReturnType<typeof gate>|undefined,stageGate:ReturnType<typeof gate>|undefined,stageEntered:ReturnType<typeof gate>|undefined,deployGate:ReturnType<typeof gate>|undefined,failDeploy=false,failPrepare=false,failNotify=false,notifyStatus:number|undefined,notifyGate:ReturnType<typeof gate>|undefined;
  const events:string[]=[],target=new MemoryVersionTarget();
  const baseDeploy=target.deploy.bind(target);
@@ -28,10 +29,10 @@ async function setup(instance:OperatorControlObject,state:DurableObjectState){
  const core=()=>new ReleaseBuilderCore({blobs:testEnv.RELEASES as unknown as BlobStore,target,preludeSpecifier:PRELUDE_SPECIFIER});
  let builder=core();
  const wrapped:ReleaseBuilder={inspect:(...a)=>builder.inspect(...a),prepare:async(...a)=>{events.push('prepare:'+a[1]);await prepareGate?.promise;if(failPrepare)throw Error('prepare failed');return builder.prepare(...a);},activate:async(...a)=>{const held=stageGate,entered=stageEntered,result=await builder.activate(...a);entered?.release();await held?.promise;return result;},deploy:version=>builder.deploy(version)};
- const ports:SyncPorts={sql:instance.sql,builder:wrapped,enqueue:async()=>{throw Error('unexpected tenant rollout');},versionReady:version=>live===version,
+ const ports:SyncPorts={sql:instance.sql,builder:wrapped,enqueue:async()=>{throw Error('unexpected tenant rollout');},versionReady:async version=>{await versionGate?.promise;return live===version;},
   activateTenants:async()=>true,moduleReloaded:async()=>{await notifyGate?.promise;if(failNotify)throw notifyStatus?new HttpError(notifyStatus,'holder unavailable'):Error('holder unavailable');},syncCrons:async()=>{},deadlineMs:1000,devSyncKey:'synthetic',acceptsKey:(_p,key)=>key==='synthetic'};
  let coordinator=new SyncCoordinator(ports);
- const authority={authorize:async(r:DeploymentRef)=>coordinator.deployments.authorize(r),settle:async(r:DeploymentRef,outcome:{ok:boolean;error?:string})=>{coordinator.deployments.settle(r,outcome);},abort:async(r:DeploymentRef,error:string)=>{coordinator.deployments.abort(r,error);}};
+ const authority={authorize:async(r:DeploymentRef)=>coordinator.deployments.authorize(r),settle:async(r:DeploymentRef,outcome:{ok:boolean;error?:string})=>{await coordinator.deployments.settle(r,outcome);},abort:async(r:DeploymentRef,error:string)=>{coordinator.deployments.abort(r,error);}};
  const executor=()=>new PublicationExecutor(wrapped,authority,async(r,catalog)=>{
   if(target.staged.has(r.version))return;
   const result=await wrapped.activate(catalog);expect(result).toEqual({ok:true,version:r.version});
@@ -48,6 +49,7 @@ async function setup(instance:OperatorControlObject,state:DurableObjectState){
  return {instance,state,target,events,request,serving,publish,bodies,
   sync:(r:Parameters<SyncCoordinator['sync']>[0])=>coordinator.sync(r),
   get coordinator(){return coordinator;},get worker(){return worker;},get live(){return live;},
+  versionGate:(g:ReturnType<typeof gate>|undefined)=>{versionGate=g;},
   prepareGate:(g:ReturnType<typeof gate>|undefined)=>{prepareGate=g;},deployGate:(g:ReturnType<typeof gate>|undefined)=>{deployGate=g;},notifyGate:(g:ReturnType<typeof gate>|undefined)=>{notifyGate=g;},
   stageGate:(g:ReturnType<typeof gate>|undefined,entered?:ReturnType<typeof gate>)=>{stageGate=g;stageEntered=entered;},
   failDeploy:(v:boolean)=>{failDeploy=v;},failPrepare:(v:boolean)=>{failPrepare=v;},failNotify:(v:boolean)=>{failNotify=v;},
@@ -254,4 +256,24 @@ it('migrates pre-fence interrupted preparations once, while preserving modern pu
  expect(f.coordinator.deployments.current()).toEqual(ref(first));
  expect(await f.sync(await f.request('modern-b'))).toMatchObject({ok:false,recovery:ref(first)});
  await f.publish(first);
+}));
+
+it('durable topology freeze refuses new publication across coordinator reset, without expiring or replacing an owner',async()=>fixture(async f=>{
+ const request=await f.request('topology-a');
+ f.coordinator.deployments.freezeTopology();f.reset();
+ expect(f.coordinator.deployments.topologyFrozen()).toBe(true);
+ await expect(f.sync(request)).rejects.toThrow('topology migration');
+ const mark=f.instance.sql.mark();f.coordinator.deployments.thawTopology();const cost=f.instance.sql.mark();
+ console.log('topology thaw SQL rows',cost.read-mark.read,cost.written-mark.written);
+ expect(cost.written-mark.written).toBe(1);
+ const pending=staged(await f.sync(request));expect(()=>f.coordinator.deployments.freezeTopology()).toThrow('complete the current publication');
+ f.reset();expect(f.coordinator.deployments.current()).toEqual(ref(pending));await f.publish(pending);
+ f.coordinator.deployments.freezeTopology();expect(f.coordinator.deployments.topologyFrozen()).toBe(true);
+}));
+it('asynchronous serving-version observation cannot authorize a fence that ended while its RPC was in flight',async()=>fixture(async f=>{
+ const pending=staged(await f.sync(await f.request('catalog-a'))),held=gate();f.versionGate(held);
+ const grant=f.coordinator.deployments.authorize(ref(pending));
+ f.coordinator.deployments.abort(ref(pending),'target failed before read returned');
+ const newer=staged(await f.sync(await f.request('catalog-b')));held.release();f.versionGate(undefined);
+ await expect(grant).rejects.toThrow('fence is no longer current');await f.publish(newer);
 }));

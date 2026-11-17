@@ -100,9 +100,19 @@ export class OperatorControlObject extends ControlObject {
   }
 
   /** Generic K19 fixtures have no baked catalog; the serving assembly overrides this. */
-  protected publicationVersionReady(_version: string): boolean { return true; }
+  protected publicationVersionReady(_version: string): boolean | Promise<boolean> { return true; }
   protected activatePublicationTenant(tenant: string, release: {projectId:string;hash:string;generation:number}): Promise<boolean> {
     return this.tenantPort(tenant).operatorActivateRelease(release);
+  }
+  protected async runtimeNamespaceReady():Promise<boolean>{return false;}
+  async runtimeTopology(action:"status"|"freeze"|"thaw",version?:string) {
+    if(action==="freeze")this.syncs.deployments.freezeTopology();
+    if(action==="thaw"){
+      if(!version||!await this.publicationVersionReady(version))throw new Error("runtime catalog version not ready");
+      if(!await this.runtimeNamespaceReady())throw new Error("runtime tenant namespace binding differs");
+      this.syncs.deployments.thawTopology();
+    }
+    return {frozen:this.syncs.deployments.topologyFrozen(),deployment:this.syncs.deployments.current(),releases:this.syncs.activeReleases()};
   }
   async publishRelease(syncId: string): Promise<{ready:boolean;error?:string;status?:number}> {
     try { return await this.syncs.publish(syncId); }
@@ -115,8 +125,8 @@ export class OperatorControlObject extends ControlObject {
   async currentDeployment():Promise<DeploymentRef|null> {return this.syncs.deployments.current();}
   async deploymentRequest(action:"authorize"|"settle"|"abort", ref:DeploymentRef, result:{ok?:boolean;error?:string}):Promise<{ok:true;grant?:DeploymentGrant}|{ok:false;status:number;error:string}> {
     try {
-      if (action === "authorize") return {ok:true,grant:this.syncs.deployments.authorize(ref)};
-      if (action === "settle") this.syncs.deployments.settle(ref,{ok:result.ok===true,...(result.error?{error:result.error}:{})});
+      if (action === "authorize") return {ok:true,grant:await this.syncs.deployments.authorize(ref)};
+      if (action === "settle") await this.syncs.deployments.settle(ref,{ok:result.ok===true,...(result.error?{error:result.error}:{})});
       else this.syncs.deployments.abort(ref,result.error ?? "publication aborted");
       return {ok:true};
     } catch (cause) {
