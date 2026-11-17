@@ -1,0 +1,263 @@
+{
+  "days": 30,
+  "rows": [
+    {
+      "check": "dns",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "tls",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "http",
+      "region": "us-east-1",
+      "kind": "api",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "bootstrap",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "browser-bootstrap",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "auth",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "api",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "sqlite-read",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "realtime",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "sdk-task",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 8640,
+      "maxWithRetries": 17280
+    },
+    {
+      "check": "browser-task",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 8640,
+      "maxWithRetries": 17280
+    },
+    {
+      "check": "files",
+      "region": "us-east-1",
+      "kind": "browser",
+      "scheduled": 2880,
+      "maxWithRetries": 5760
+    },
+    {
+      "check": "dns",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "tls",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "http",
+      "region": "us-west-1",
+      "kind": "api",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "bootstrap",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "browser-bootstrap",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "auth",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "api",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "sqlite-read",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "realtime",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "sdk-task",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 8640,
+      "maxWithRetries": 17280
+    },
+    {
+      "check": "browser-task",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 8640,
+      "maxWithRetries": 17280
+    },
+    {
+      "check": "files",
+      "region": "us-west-1",
+      "kind": "browser",
+      "scheduled": 2880,
+      "maxWithRetries": 5760
+    },
+    {
+      "check": "dns",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "tls",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "http",
+      "region": "eu-west-1",
+      "kind": "api",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "bootstrap",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "browser-bootstrap",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "auth",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "api",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "sqlite-read",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "realtime",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 43200,
+      "maxWithRetries": 86400
+    },
+    {
+      "check": "sdk-task",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 8640,
+      "maxWithRetries": 17280
+    },
+    {
+      "check": "browser-task",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 8640,
+      "maxWithRetries": 17280
+    },
+    {
+      "check": "files",
+      "region": "eu-west-1",
+      "kind": "browser",
+      "scheduled": 2880,
+      "maxWithRetries": 5760
+    }
+  ],
+  "counts": {
+    "api": 259200,
+    "browser": 2194560
+  },
+  "cost": null,
+  "state": "blocked-unverified-plan-rates-cloudflare-billing"
+}

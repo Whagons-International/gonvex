@@ -1,5 +1,5 @@
 import { runInDurableObject } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControlDirectory, type ControlAuthenticator } from "../directory.ts";
 import { resetIngressDirectory } from "../routes.ts";
 import { GITHUB_DOC_VECTOR, GITHUB_PING, GITHUB_PULL_REQUEST, TELNYX_CALL_HANGUP, TELNYX_CALL_INITIATED } from "./fixtures/payloads.ts";
@@ -115,18 +115,28 @@ describe("Telnyx (calling.ingestWebhook)", () => {
   });
 
   it("refuses unsigned, stale and future-dated deliveries before any tenant is touched", async () => {
-    const unsigned = await send(`/webhooks/telnyx?tenant=${ALPHA}`, telnyxRequest(INITIATED, { "telnyx-timestamp": nowSeconds() }));
-    expect(unsigned.status).toBe(401);
-    const noTimestamp = await send(`/webhooks/telnyx?tenant=${ALPHA}`, telnyxRequest(INITIATED, { "telnyx-signature-ed25519": "c2ln" }));
-    expect(noTimestamp.status).toBe(401);
-    const now = Math.floor(Date.now() / 1000);
-    for (const timestamp of [String(now - 301), String(now + 301), "17e8", "-1", ""]) {
-      const { reply } = await signedTelnyx("/webhooks/telnyx", INITIATED, { timestamp });
-      expect(reply.status, timestamp).toBe(401);
+    // A +301s header can become valid while signing/RPC crosses a second.
+    // Freeze only Date.now; timers and actual workerd requests still run.
+    const at = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(at);
+    try {
+      const unsigned = await send(`/webhooks/telnyx?tenant=${ALPHA}`, telnyxRequest(INITIATED, { "telnyx-timestamp": nowSeconds() }));
+      expect(unsigned.status).toBe(401);
+      const noTimestamp = await send(`/webhooks/telnyx?tenant=${ALPHA}`, telnyxRequest(INITIATED, { "telnyx-signature-ed25519": "c2ln" }));
+      expect(noTimestamp.status).toBe(401);
+      const now = Math.floor(Date.now() / 1000);
+      // Real IO advances the runtime clock; the signed boundary must stay fixed.
+      await new Promise<void>(resolve => setTimeout(resolve, 1_100));
+      for (const timestamp of [String(now - 301), String(now + 301), "17e8", "-1", ""]) {
+        const { reply } = await signedTelnyx("/webhooks/telnyx", INITIATED, { timestamp });
+        expect(reply.status, timestamp).toBe(401);
+      }
+      const { reply } = await signedTelnyx("/webhooks/telnyx", INITIATED, { timestamp: String(now - 290) });
+      expect(reply.status).toBe(200);
+      expect((await calls()).length).toBe(1);
+    } finally {
+      clock.mockRestore();
     }
-    const { reply } = await signedTelnyx("/webhooks/telnyx", INITIATED, { timestamp: String(now - 290) });
-    expect(reply.status).toBe(200);
-    expect((await calls()).length).toBe(1);
   });
 
   it("refuses an unknown, disabled or missing tenant and an unknown project", async () => {

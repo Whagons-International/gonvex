@@ -127,6 +127,68 @@ unresolved review findings.
 0068 keeps Action reply generations and legacy deployment-skew gaps explicit; no lost history is fabricated.
 0069 permits bounded owner-authority prototyping; terminal release, cleanup and availability remain open.
 0070 permits recovery-only exact-subset correlation cleanup, never progress or normal-completion fallback.
+0071 permits one owner refresh only after an exact, typed zero-invocation rejection; ambiguous calls are
+never automatically replayed. The original first-writer restart test and owner-lifecycle gates remain.
+0072 records the both-backend invitation receipt collision quirk; preserve outside-gate behavior in K22.
+Generic receipt path validation and the separate migration-gate read-only exception remain unchanged.
+0073 permits explicit confirmed owner admission inside genuine ordered holder rebuilds so quiet readers
+can recover; no client retry credit, ambiguous-call replay or owner-lifetime acceptance follows.
+0074 binds those rebuilds to a bounded producer/sequence, strict control-only challenge and pre-application
+support/ACK. Actual owner confirmation, durable attempt/UNKNOWN rules and original gates remain mandatory.
+0075 separates reserve-charged owner control from fence-clearing whole recovery, with upfront bounded
+reply credit and retained-response ownership. No fake recovery ACK, extra channel or fit claim is allowed.
+0076 permits terminal-only reconciliation of a durably bound lost-admission reply using fresh actual-holder
+terminal proof and tenant quiescence. Unbound/legacy/old-instance uncertainty remains UNKNOWN; no token is
+recovered or minted, and no owner-lifetime acceptance follows.
+0077 records completed startup forensics with cause UNKNOWN and permits K22 to prepare one bounded,
+observable builder-only diagnostic. Lead reviews its exact artifact/manifest before releasing a live dev
+attempt; no causal fix, CPU proof or original gate is inferred from this plan.
+0078 clarifies versioned exact-echo owner-intent callback replies before activation; leaf/model tests do
+not establish durable Host/Registry/SDK lifecycle proof. The4731 diagnostic review requires fixes for CI
+scratch/preparation portability and captured-ID cleanup; see verification/builder-startup-review-4731.md.
+0079 permits an awaited LOCAL exact holder publication primitive, with no owner/terminal authority.
+The19b diagnostic recheck clears the original fixes only within its plain-record boundary; the external
+execution lane remains unarmed (verification/0077-execution-core.md). M05's493 recheck requests foundation
+changes for accounting/timing/privacy; the author publishes1b corrections pending a NEW independent
+recheck (verification/M05-recheck-493.md). No foundation or full M05 acceptance is implied.
+0080 adapts only real owner callback RPC roots for standard disposal metadata, preserving strict pure
+validators, all string/nested fields, disposal in finally and no authority/terminal inference.
+0081 adds ONLY the matched tokenless closed-receipt consumer under the same strict transport policy;
+processing-only cleanup still needs the exact local witness and durable denial of future old confirmations.
+The fresh1b M05 recheck clears the493 cases but reports two further P2 sanitizer/timing defects; see
+verification/M05-recheck-1b.md. Foundation merge and full M05 acceptance remain held.
+0082 separates unknown drain authorization from a lost final cleanup-sync ACK after matched authorized
+atomic GC; no witness resurrection, fresh terminal proof or success inference follows from absence.
+The fresha59 M05 recheck clears the exact1b cases but finds two failed-offset/expiry P2 defects; see
+verification/M05-recheck-a59.md. New bounded correction evidence still requires NEW independent review.
+0083 conditionally permits only the native ownerAdmissionIntent authority-result consumer after descriptor
+proof, with exact own data keys, unchanged primitive checks, disposal and current stored-binding/physical
+scope checks. It does not cover dispatchOwned/drainOwner or activate serving ownership. Local319 terminal
+review requires a bounded proof-domain correction under0084: tokenless closed cannot become HMAC-only
+retired evidence. Its qualified synthetic Proxy observation is separate from native exploitability.
+M05's finite disabled34b6 foundation passed fresh independent review and merged as c11b7740; full M05,
+original five-drill source definitions and all hosted/application/duration gates remain UNMET. Historical
+0077 preparation and review findings remain retained; the current outcome is recorded below.
+The freshLOCAL5e review now clears scoped R1/R2/0083 source fixes, without serving activation or acceptance.
+Separate79b helper and corrected outsideee977385 require refreshed joint pins and NEW independent review;
+0077 clarifies exact durable-byte verification before arm/ACK. See verification/K22-owner-review-5e.md.
+That preparation alone released no live diagnostic or original acceptance gate.
+0085 conditionally permits only the actual owned-dispatch and T-retirement result consumers after native
+proof. The same K22 owner advances those boundaries and an actual Engine/Session/rebuild/quiescence plan
+before candidate wiring; legacy admission fallback, blanket serving activation and progress inference
+remain forbidden. The independent0077 joint review does not block that separate eligible source work.
+0086 permits bounded private authority/status publication before invocation and an EXPLICIT durable old
+private-issuer revocation transition. Wake/absence is never terminal or quiescent evidence; fresh exact
+witness, tenant fencing/settlement and matched cleanup remain mandatory. Concrete Engine/rebuild ports
+still require lead review before wiring; public auth/subscriptions and all original gates are preserved.
+The historical47aa/ee0077 review required two P2 corrections. Fresh d420/6d review supports those
+corrections; one lead-released default-lane attempt then FAILED before identified/prepared/start, with
+removal by ten minutes unproved. Post-deadline exact-name reads found Worker404/app list empty; they do
+not prove historical zero mutation or on-time removal. No retry is released. See verification/K22-4e-and-startup-attempt.md.
+Fresh4e/source728d review is source-clear only for its UNACTIVATED foundation. The same owner continues
+actual local Engine/Assembly/SDK integration.0087 permits private rebuild books/one-use refresh and exact
+retained semantic obligations; no CLOSED-as-initial/progress or absence-based quiescence. Subsequent
+source needs a new exact review; all original platform/application/capacity/duration gates remain OPEN.
 
 ## Uptime and tracing planning (0055, 2026-11-12)
 

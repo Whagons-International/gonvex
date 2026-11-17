@@ -92,12 +92,18 @@ export class PresenceFeed {
 
   /** The socket closed or the session ended; the server drops our state. */
   disconnected(): void {
+    this.prepareDisconnect()?.();
+  }
+
+  /** Invalidate before other disconnect observers can replace the session. */
+  prepareDisconnect(): (() => void) | undefined {
     this.subscriptionId = undefined;
     if (!this.ready) return;
     // Keep the last known Members until the next snapshot replaces them,
     // but report that the view is no longer live.
     this.ready = false;
-    this.publish();
+    this.publish(false);
+    return () => this.notify();
   }
 
   /** Returns true when the frame was a presence frame. */
@@ -146,7 +152,10 @@ export class PresenceFeed {
 
   private publish(notify = true) {
     this.snapshotValue = { supported: this.transport.supported(), ready: this.ready, members: this.members };
-    if (!notify) return;
+    if (notify) this.notify();
+  }
+
+  private notify(): void {
     for (const listener of Array.from(this.listeners)) listener();
   }
 }

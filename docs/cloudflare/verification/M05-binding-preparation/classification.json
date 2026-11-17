@@ -1,0 +1,61 @@
+{
+  "version": "whagons-ui-diff-v1",
+  "classification": "non-ui",
+  "isUi": false,
+  "complete": true,
+  "uiFiles": [],
+  "reason": "no rendered UI source changed",
+  "base": "8851a125dbd7316e6de30717bbcaf807ee2f5eb7",
+  "method": "complete unpaginated git diff --cached --name-status -z -M; rename originals included",
+  "changedFiles": [
+    {
+      "filename": "cloudflare/observability/README.md",
+      "status": "M"
+    },
+    {
+      "filename": "cloudflare/observability/bindings/whagons-task.json",
+      "status": "A"
+    },
+    {
+      "filename": "cloudflare/observability/bindings/whagons-task.mjs",
+      "status": "A"
+    },
+    {
+      "filename": "cloudflare/observability/checks/sdk.mjs",
+      "status": "M"
+    },
+    {
+      "filename": "cloudflare/observability/cli.mjs",
+      "status": "M"
+    },
+    {
+      "filename": "cloudflare/observability/test/whagons-binding.test.mjs",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-binding-preparation/binding-audit.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-binding-preparation/classification.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-binding-preparation/port-proposal.md",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-binding-preparation/receipt.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-binding-preparation/report.md",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-binding-preparation/source-audit.json",
+      "status": "A"
+    }
+  ],
+  "expectedCount": 12
+}

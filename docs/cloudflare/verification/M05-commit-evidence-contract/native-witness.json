@@ -1,0 +1,40 @@
+{
+  "domain": "controlled-auth-synthetic-native-workerd-sqlite-do-socket",
+  "frameworkCommit": "5c5fa3795d821d5995179e19b712c89bfa0eb8d8",
+  "command": {
+    "result": {
+      "bumps": 1
+    },
+    "revision": 4,
+    "hasEpoch": false,
+    "hasCursor": false
+  },
+  "receiptBefore": {
+    "found": true,
+    "revision": 4
+  },
+  "unrelated": {
+    "revision": 5
+  },
+  "receiptAfter": {
+    "found": true,
+    "revision": 5,
+    "hasEpoch": true
+  },
+  "sameObservedEpoch": true,
+  "otherSubjectFound": false,
+  "wrongPathRejected": true,
+  "receiptColumns": [
+    "created_at",
+    "idempotency_key",
+    "path",
+    "result",
+    "subject"
+  ],
+  "replayOriginalResult": true,
+  "counterBumps": 1,
+  "plannerStatus": "BLOCKED",
+  "executionAllowed": false,
+  "supportReason": "command-bound-commit-cursor-unavailable",
+  "epochTransitionObserved": false
+}

@@ -1,0 +1,339 @@
+{
+  "version": 1,
+  "mode": "offline-source-preparation",
+  "enabled": false,
+  "application": {
+    "repository": "Whagons-International/whagons5-client",
+    "commit": "73276b5589d363c1190a6d028413a21559226631",
+    "deployment": "unverified-cached-source"
+  },
+  "framework": {
+    "repository": "Whagons-International/gonvex",
+    "commit": "8851a125dbd7316e6de30717bbcaf807ee2f5eb7"
+  },
+  "functions": {
+    "tasks.create": {
+      "kind": "reducer",
+      "delivery": null,
+      "source": "gonvex/tasks/createCommands.ts",
+      "requiredArguments": [
+        "name",
+        "workspaceId"
+      ],
+      "resultKind": "any",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc"
+    },
+    "tasks.rename": {
+      "kind": "reducer",
+      "delivery": null,
+      "source": "gonvex/tasks/createCommands.ts",
+      "requiredArguments": [
+        "taskId",
+        "name"
+      ],
+      "resultKind": "any",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc"
+    },
+    "tasks.update": {
+      "kind": "reducer",
+      "delivery": null,
+      "source": "gonvex/tasks/bulkCommands.ts",
+      "requiredArguments": [],
+      "resultKind": "any",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc"
+    },
+    "tasks.remove": {
+      "kind": "reducer",
+      "delivery": null,
+      "source": "gonvex/tasks/bulkCommands.ts",
+      "requiredArguments": [],
+      "resultKind": "any",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc"
+    },
+    "tasks.get": {
+      "kind": "query",
+      "delivery": "replica",
+      "source": "gonvex/tasks/replicaQueries.ts",
+      "requiredArguments": [
+        "id"
+      ],
+      "resultKind": "array",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc",
+      "bounds": {
+        "table": "tasks",
+        "key": "_id",
+        "equalFilters": {
+          "_id": "id"
+        },
+        "maxRows": 1,
+        "maxBytes": 4194304
+      }
+    },
+    "tasks.getByNumericId": {
+      "kind": "query",
+      "delivery": "replica",
+      "source": "gonvex/tasks/replicaQueries.ts",
+      "requiredArguments": [
+        "id"
+      ],
+      "resultKind": "array",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc"
+    },
+    "tasks.list": {
+      "kind": "query",
+      "delivery": "replica",
+      "source": "gonvex/tasks/replicaQueries.ts",
+      "requiredArguments": [],
+      "resultKind": "array",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc"
+    },
+    "tasks.grid": {
+      "kind": "query",
+      "delivery": "live",
+      "source": "gonvex/tasks/gridQueries.ts",
+      "requiredArguments": [
+        "workspaceId",
+        "offset",
+        "limit"
+      ],
+      "resultKind": "object",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc"
+    },
+    "tasks.listWindow": {
+      "kind": "query",
+      "delivery": "live",
+      "source": "gonvex/tasks/windowQueries.ts",
+      "requiredArguments": [
+        "offset",
+        "limit"
+      ],
+      "resultKind": "any",
+      "catalogArtifactHash": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc"
+    }
+  },
+  "selection": {
+    "create": "tasks.create",
+    "update": "tasks.rename",
+    "remove": "tasks.remove",
+    "read": "tasks.get",
+    "collection": "tasks.get"
+  },
+  "argumentFields": {
+    "create": [
+      "entityId",
+      "name",
+      "workspaceId"
+    ],
+    "update": [
+      "taskId",
+      "name"
+    ],
+    "remove": [
+      "_id"
+    ],
+    "read": [
+      "id"
+    ],
+    "collection": [
+      "id"
+    ]
+  },
+  "constraints": {
+    "create": [
+      "Nonblank name/workspaceId; entityId is optional in schema but required fresh by this proposed synthetic contract.",
+      "No materials, attachments, assignees, tags, reminders, provenance overrides, category/template defaults or extra optional fields in this preparation.",
+      "A real workspace/category/template may impose additional requirements; defaults and authorization must be audited before execution."
+    ],
+    "update": [
+      "Use tasks.rename rather than legacy tasks.update arbitrary updates.",
+      "Match exact _id, workspaceId and synthetic name locally; never export row contents."
+    ],
+    "remove": [
+      "tasks.remove calls archiveTask: deletedAt/deletedBy soft archive, not physical deletion.",
+      "Use _id explicitly: taskId/id numeric-looking strings can select human numeric id.",
+      "Archive completion cannot prove fixture, taskLogs, scheduler or derived-row retention cleanup."
+    ],
+    "read": [
+      "tasks.get returns an array, bounded to exact _id; tasks.getByNumericId targets human numeric id.",
+      "Replica metadata is retained. query() serializes path/args; app tests exercise it but no assembled execution was performed here.",
+      "No returned app row establishes a durable commit cursor or actual tenant SQLite deployment.",
+      "Existing sdkApplication deliberately refuses this replica ref before connection; do not strip delivery metadata to bypass it."
+    ],
+    "collection": [
+      "watchReplica(tasks.get,{id}) is the proposed exact-row second-client observation.",
+      "Require separate authorized identity, authenticated fresh client, complete/up-to-date server state, same epoch and computed revision >= actual commit, exact matching fields.",
+      "A query result, collection path, snapshot, cache, sink send or correlation id cannot prove second-client apply."
+    ]
+  },
+  "missingPrerequisites": [
+    "deployment",
+    "writerAuth",
+    "readerAuthAndVisibility",
+    "unauthorizedFileReader",
+    "syntheticTenantAndWorkspace",
+    "scopeAndArgumentBuilder",
+    "sideEffectIsolation",
+    "durableCommitPort",
+    "freshSqliteReadProof",
+    "secondClientApplyAndEpoch",
+    "boundedRetentionCleanup",
+    "budgetAndStopWrites",
+    "oneShotReadCompatibility",
+    "browserSelectors",
+    "fileBinding",
+    "jobBinding"
+  ],
+  "effects": [
+    "create: taskLogs, assignments/defaults, lifecycle/approval/audience, SLA, gamification, workflow, guest-report and auto-tagging paths",
+    "createTaskIntent: unassigned task notification scheduled after 3000ms when no assignees",
+    "rename/updateTask: permission/visibility checks, logs, follower/reporter notifications, status/custom-field workflow and guest-report paths",
+    "remove/archiveTask: supply release, finding archive and cleaning-task synchronization; archived rows retained",
+    "No synthetic suppression argument or audited tenant-wide suppression contract proven. Do not forge createdVia/workflow IDs to suppress effects."
+  ],
+  "sourceFiles": [
+    {
+      "path": "AGENTS.md",
+      "bytes": 22636,
+      "sha256": "f8379c2a5c70e37c264d1a0c5bd9671d3d5276e682e98f3cc782fa49538e3f0f",
+      "blob": "9ee1f6553dcfa4761257c1f7b855f31b9bf230b8"
+    },
+    {
+      "path": "agent-api.ndjson",
+      "bytes": 817074,
+      "sha256": "eb5c2a6d182995717c4d08f5ca6dc9a28dce4a82ab242f02ed3bbf522fca0a57",
+      "blob": "dcb5ca79e8c4cb3ae13a5d3e75013d86cd273abd"
+    },
+    {
+      "path": "gonvex/_generated/api.ts",
+      "bytes": 1537613,
+      "sha256": "dea80544a66cd8a9fb54819fb1d26ae07cbd1b71c97fcded7d94c3c474d6e0c6",
+      "blob": "314876734daf826344ebe9425a115e3d0ab78084"
+    },
+    {
+      "path": "gonvex/taskAudience.ts",
+      "bytes": 8536,
+      "sha256": "a3d64a1fd5d8d6c944794866146446883c9adc3055160648cd31c022a4d530f2",
+      "blob": "37687573cf0c95e6cc61ae6024d37e5f686765e7"
+    },
+    {
+      "path": "gonvex/taskAutoTagging.ts",
+      "bytes": 12364,
+      "sha256": "f83ee8a94ef626084593cdac20255d42913bf5efe15216b2961a0717d6e25620",
+      "blob": "e00e7b4bc9045b6e3d33560e72338bad5d1ce94c"
+    },
+    {
+      "path": "gonvex/taskChangeNotifications.ts",
+      "bytes": 11734,
+      "sha256": "9e294a51b310dcb8cf4d931bbc40d5cfd77b4e6cd4789b56ff978cc43fdb82fd",
+      "blob": "c56258aa78ead27dcfbda286aeeb83746fc6b2e3"
+    },
+    {
+      "path": "gonvex/taskCreateAuthorization.ts",
+      "bytes": 4610,
+      "sha256": "bcb8d37e060c75a5b3964c0d3fc4ff69fbac9c0c3261c41c021523dd8a8a8924",
+      "blob": "059aed4a30b49ebce2905d6acc201cd02c3d6edb"
+    },
+    {
+      "path": "gonvex/taskCreatePermissionPolicy.ts",
+      "bytes": 126,
+      "sha256": "08d9f63208f9aea0557238d7f93fe743f992eb06ef75d670a04dd75433df8f3e",
+      "blob": "61a2352b785216994a9d7f7caa7e494d18819220"
+    },
+    {
+      "path": "gonvex/taskUpdateValues.ts",
+      "bytes": 3188,
+      "sha256": "bf1fe68b6dedccb8e1805849d2752af9964518d77d81c3356bb1290a0fd92c1d",
+      "blob": "34ac9bf8fd8b6291796a9b7be4d46ac643ce0857"
+    },
+    {
+      "path": "gonvex/taskWriteHelpers.ts",
+      "bytes": 68701,
+      "sha256": "1eaf9cfd4bc0736f3e208f369e61c201b4f697e28fcd2c199a973b8232db4588",
+      "blob": "b269cead7d80bd7aa64441b17c8fa498cb18db1d"
+    },
+    {
+      "path": "gonvex/tasks/bulkCommands.ts",
+      "bytes": 24771,
+      "sha256": "6e28278cff096a2281aa730c41f928f0d7f1d6d4dd24d19df480a2f864058fc6",
+      "blob": "fd9ef1d1ad958bcafd671b2bb9312cc232f340ef"
+    },
+    {
+      "path": "gonvex/tasks/createCommands.ts",
+      "bytes": 16575,
+      "sha256": "2e505fc644f08a90e09f987bcaad93efa9f00a5b07117b6bb7d9c204a74b2b0a",
+      "blob": "0483f5abd7b0c2a833f84e14db88f88e1f98c635"
+    },
+    {
+      "path": "gonvex/tasks/createPolicy.ts",
+      "bytes": 22732,
+      "sha256": "f800c0e7f7989004fc06a6f09b96f1f720f3219e39792f14b2f38784453dfaf1",
+      "blob": "0144d6cedc9ddf964abcdb0842bc2af2ddb1364f"
+    },
+    {
+      "path": "gonvex/tasks/gridQueries.ts",
+      "bytes": 10885,
+      "sha256": "27bbd5d9942237df4b83e973bdaf7de7d2627773231288f564965e8835ecec88",
+      "blob": "6b9df901ed612620e448d83b0ff04941dc0dd1d0"
+    },
+    {
+      "path": "gonvex/tasks/lifecycleWrites.ts",
+      "bytes": 13117,
+      "sha256": "389f2121ffb7889d07d2c43b77b4cbde3a3ea71c0d1fd545f6aa286af0ad0ee1",
+      "blob": "d8d23b0faf2d6a2e51022878aeb38f142f9eccdd"
+    },
+    {
+      "path": "gonvex/tasks/replicaQueries.ts",
+      "bytes": 30946,
+      "sha256": "77461d35c0d24f88a51bd53a4f93c5d4e68a475e901cb0d464c37598e6c42120",
+      "blob": "74a6ed89d08eef3595e94787d7243c8fd05c4bd8"
+    },
+    {
+      "path": "gonvex/tasks/updatePolicy.ts",
+      "bytes": 21219,
+      "sha256": "2fd0bb893c1b6b9cc146a0466ac0e75d88b045800e6d7c0fdf0ed8a7a00f1a38",
+      "blob": "54898ad3605649da7fbd5a715713e2aa5be1ba25"
+    },
+    {
+      "path": "gonvex/tasks/windowQueries.ts",
+      "bytes": 17960,
+      "sha256": "ef484d2393fcab5e3c6d81a651b66eaea28518b16a64782c2f59e61c32b9dd27",
+      "blob": "67375c1d7e54089d7002474a18cc47eccda9792f"
+    },
+    {
+      "path": "gonvex/tasks/workflowEvents.ts",
+      "bytes": 4380,
+      "sha256": "cb11b6d493fccb15d39ebe6b36ca49f01cffbe3130952591351ede8b916dc6ff",
+      "blob": "a76c58ddbaf97343dd74de6faef210755fad82bf"
+    },
+    {
+      "path": "gonvex/tasks.ts",
+      "bytes": 26569,
+      "sha256": "6eeb3f7d226ebe3573a9164f4ec594bf8f0e0f8ede3b2428700ebecd6b6dae0f",
+      "blob": "b7aee47a703cdbca26c0aa8cc86bcfd1b5c943cb"
+    },
+    {
+      "path": "package.json",
+      "bytes": 15223,
+      "sha256": "86de9e7c4186e758406b3dc3f65d933a62810798cb253f51b1f09dff31cc7d1c",
+      "blob": "5524e8134c16918201e517e970ee4b7eb30e8038"
+    },
+    {
+      "path": "src/features/permissions/useTaskPermissions.ts",
+      "bytes": 5881,
+      "sha256": "b8ce7bfb3fd1edbe050d8e2d64187411724c40ca2e989a903a53c40371d61eb2",
+      "blob": "39946ccd25b5cc9700b21c0e89f6b5f7e97b6c8f"
+    },
+    {
+      "path": "src/features/tasks/components/TaskHistoryDialog.tsx",
+      "bytes": 8032,
+      "sha256": "d48fc66601bb348004148a19a823331a937640698547bce4fd8dc283e8bb9e35",
+      "blob": "48a88e7c83b836c5304a17a08f2b65a05c50b26d"
+    },
+    {
+      "path": "tests/e2e/gonvex-runtime-contracts.spec.ts",
+      "bytes": 6608,
+      "sha256": "d4760f84505be8ca3ac9a2aed660b5f3508c663e3530f0d6d83523b4159615b2",
+      "blob": "d7633f6536c1bdc0baf3e629ab3b258a7b930c73"
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "domain": "immutable-source-only-not-deployment",
+  "applicationCommit": "73276b5589d363c1190a6d028413a21559226631",
+  "applicationFiles": 24,
+  "catalogAndGeneratedRefsCompared": 9,
+  "frameworkCommit": "8851a125dbd7316e6de30717bbcaf807ee2f5eb7",
+  "frameworkFiles": [
+    {
+      "path": "packages/client/src/index.ts",
+      "bytes": 307878,
+      "sha256": "c3eec92e964522f18dbf2e8a5e7249261207a91c9eccff5ad409b9c2a96b76d5",
+      "blob": "d910fb4c01fb00e797fbd6d82b8cbf089b48aa73"
+    },
+    {
+      "path": "packages/client/src/local-replica.ts",
+      "bytes": 122672,
+      "sha256": "f1e533e4134e7a3357737237312cace14bc17a99f9b0be34f9cb890e8981647e",
+      "blob": "71d791f368651252b3b14922d21cbdecc3478e95"
+    },
+    {
+      "path": "packages/client/package.json",
+      "bytes": 1659,
+      "sha256": "3d014aa59271611f800df200fa4bdeb78732c3936255fac6024dd68518d4f2f4",
+      "blob": "fd48983d4bae474bbff6ff0952b69142f2a4f381"
+    },
+    {
+      "path": "packages/protocol/src/index.ts",
+      "bytes": 23753,
+      "sha256": "1aa211b8367cd6e7a066576bef501b15cfea54548976f0405fbe480b29aa9bae",
+      "blob": "4775cb60387d81c99799091f45074b0b1bc0308b"
+    }
+  ],
+  "preservedPriorFiles": 34,
+  "actualAppOperations": 0,
+  "appWorkingTreeOrDependencyReads": false,
+  "result": "pass"
+}

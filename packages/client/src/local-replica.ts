@@ -1037,6 +1037,17 @@ export class LocalReplica implements LocalReplicaView {
     return application;
   }
 
+  /** @internal Exact application outcome for the SDK's conditional evidence call.
+   * The ordinary void-returning method above keeps its existing settlement path. */
+  applyTransactionWithOutcome(transaction: ReplicaTransaction, scope?: ReplicaScope): Promise<boolean> {
+    const requestedScope = scope === undefined ? undefined : normalizeReplicaScope(scope);
+    return this.enqueueApplication(async () => {
+      let applied = false;
+      await this.applyTransactionNow(transaction, requestedScope, () => { applied = true; });
+      return applied;
+    });
+  }
+
   materializeWindow(input: {
     signature: string;
     kind?: "live" | "replica";
@@ -1426,7 +1437,7 @@ export class LocalReplica implements LocalReplicaView {
     this.notify(true);
   }
 
-  private async applyTransactionNow(transaction: ReplicaTransaction, scope?: ReplicaScope) {
+  private async applyTransactionNow(transaction: ReplicaTransaction, scope?: ReplicaScope, onApplied?: () => void) {
     if (scope !== undefined && scope !== this.scopeValue) return;
     validateTransaction(transaction);
     if (this.cursorValue?.epoch === transaction.cursor.epoch && transaction.cursor.revision <= this.cursorValue.revision) {
@@ -1512,6 +1523,7 @@ export class LocalReplica implements LocalReplicaView {
     // the transaction and its membership delta.
     this.reconcileCommands(false);
     this.notify(true);
+    onApplied?.();
   }
 
   /** Returned rows, including nested JSON, are immutable shared values. */

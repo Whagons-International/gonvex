@@ -1,0 +1,56 @@
+{
+  "version": "whagons-ui-diff-v1",
+  "classification": "non-ui",
+  "isUi": false,
+  "complete": true,
+  "uiFiles": [],
+  "reason": "no rendered UI source changed",
+  "base": "5c5fa3795d821d5995179e19b712c89bfa0eb8d8",
+  "method": "complete unpaginated git diff --cached -z -M with rename originals",
+  "files": [
+    {
+      "filename": "cloudflare/observability/README.md",
+      "status": "M"
+    },
+    {
+      "filename": "cloudflare/observability/bindings/commit-evidence.mjs",
+      "status": "A"
+    },
+    {
+      "filename": "cloudflare/observability/bindings/whagons-task.mjs",
+      "status": "M"
+    },
+    {
+      "filename": "cloudflare/observability/test/commit-evidence.test.mjs",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-commit-evidence-contract/classification.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-commit-evidence-contract/decision.md",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-commit-evidence-contract/native-witness.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-commit-evidence-contract/native-witness.spec.ts.txt",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-commit-evidence-contract/receipt.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-commit-evidence-contract/report.md",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-commit-evidence-contract/source-manifest.json",
+      "status": "A"
+    }
+  ]
+}

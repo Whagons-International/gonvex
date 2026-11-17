@@ -69,7 +69,9 @@ jobs:
       # Normalizer, differ and digest self-check; no backend or install needed.
       # Rust against Rust (node src/cli.mjs) stays a manual run (see README).
       - name: Unit tests
-        run: node --test test/*.test.mjs
+        run: |
+          node --test test/*.test.mjs
+          node --test ../observability/test/*.test.mjs
 
   preview:
     name: Deploy preview Worker

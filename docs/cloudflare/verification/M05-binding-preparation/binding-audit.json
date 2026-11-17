@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "status": "BLOCKED",
+  "domain": "offline-source-audit",
+  "executionAllowed": false,
+  "applicationCommit": "73276b5589d363c1190a6d028413a21559226631",
+  "frameworkCommit": "8851a125dbd7316e6de30717bbcaf807ee2f5eb7",
+  "integrity": "valid",
+  "sourceAudit": "consistent",
+  "issues": [],
+  "blockers": [
+    "offline-only",
+    "sdk-read-delivery",
+    "unverified:deployment",
+    "unverified:writerAuth",
+    "unverified:readerAuthAndVisibility",
+    "unverified:unauthorizedFileReader",
+    "unverified:syntheticTenantAndWorkspace",
+    "unverified:scopeAndArgumentBuilder",
+    "unverified:sideEffectIsolation",
+    "unverified:durableCommitPort",
+    "unverified:freshSqliteReadProof",
+    "unverified:secondClientApplyAndEpoch",
+    "unverified:boundedRetentionCleanup",
+    "unverified:budgetAndStopWrites",
+    "unverified:oneShotReadCompatibility",
+    "unverified:browserSelectors",
+    "unverified:fileBinding",
+    "unverified:jobBinding"
+  ]
+}

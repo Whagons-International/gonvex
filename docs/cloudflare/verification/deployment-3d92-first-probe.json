@@ -1,0 +1,338 @@
+{
+  "source": "3d92e1339b2d65dbc47ac2f5713f56bd9e57d738",
+  "runtime": "18afb02a5cccde933c571f7448a930ebafe574a0",
+  "name": "gonvex-cf-dev-k22-3d92-platform",
+  "deploymentRecordedAt": "2026-11-12T16:37:07.558Z",
+  "status": "composition-deployed; module-deploy-blocked",
+  "workers": [
+    {
+      "kind": "kernel",
+      "name": "gonvex-cf-dev-k22-3d92-platform",
+      "deploymentId": "b57c6faa-f4d3-4147-a3da-20de1a955bfc",
+      "versions": [
+        {
+          "version_id": "7fa97c23-6c03-4714-8385-5319c2d561c6",
+          "percentage": 100
+        }
+      ],
+      "createdOn": "2026-11-12T16:37:02.132172Z",
+      "configSha256": "8269d99c7406f9d2ff46bc5d0bb7933753d9d2dda7a287cb35b9a5db05ea8268",
+      "apiLimits": {
+        "cpu_ms": 5000
+      }
+    },
+    {
+      "kind": "actions",
+      "name": "gonvex-cf-dev-k22-3d92-platform-actions",
+      "deploymentId": "63be5601-31c8-4bb8-b66c-81f572265743",
+      "versions": [
+        {
+          "version_id": "0e4e634f-8f5b-4973-a3bf-23b09be64503",
+          "percentage": 100
+        }
+      ],
+      "createdOn": "2026-11-12T16:36:56.691803Z",
+      "configSha256": "3d7d150285a130240e2b254131cfffcd4820e937948d076bf1b7a3a3da09622b",
+      "apiLimits": {
+        "cpu_ms": 300000
+      }
+    },
+    {
+      "kind": "sandbox",
+      "name": "gonvex-cf-dev-k22-3d92-platform-sandbox",
+      "deploymentId": "e48d765c-c18c-49a4-93c6-999c568cdcdb",
+      "versions": [
+        {
+          "version_id": "2d137db9-f7cb-4b47-85d9-17c8b4fd0e89",
+          "percentage": 100
+        }
+      ],
+      "createdOn": "2026-11-12T16:36:57.10516Z",
+      "configSha256": "59348a09c8d2f27e559a84d2c31ad23772a6f5c750d56f91007b190936e6dde9",
+      "apiLimits": {
+        "cpu_ms": 300000
+      }
+    },
+    {
+      "kind": "builder",
+      "name": "gonvex-cf-dev-k22-3d92-platform-builder",
+      "deploymentId": "8d370c69-d23b-48d9-9720-46d617b3fb21",
+      "versions": [
+        {
+          "version_id": "949a0d72-a354-4030-b843-4dd5b09ecf13",
+          "percentage": 100
+        }
+      ],
+      "createdOn": "2026-11-12T16:36:58.315891Z",
+      "configSha256": "872b2541d4af084fc46de176514a053c96eb821b7ee465cb14554bb0863ee9fb"
+    }
+  ],
+  "images": [
+    {
+      "kind": "sandbox",
+      "developmentImageName": "gonvex-cf-dev-artifact-pr400-sandbox",
+      "publishedImportManifest": "sha256:304864ae1880b67a696c8ac5edcfc6d2db11dec0656b7ce5901f9bdd8b24f903",
+      "configDigest": "sha256:9cfb3c63612b99c974a76cf4d805d4a6b96116e690390cfa4afdc6263db5fcb3"
+    },
+    {
+      "kind": "builder",
+      "developmentImageName": "gonvex-cf-dev-artifact-pr400-builder",
+      "publishedImportManifest": "sha256:dcf301c14329e3de0f6e177e01cdd937f47c5c3dbfaf55fa2e187c2d32da892f",
+      "configDigest": "sha256:2fcbfaa071ebfaf4cf05c062603d951bcb6252bbb99a42bde49212b863eb4a19"
+    }
+  ],
+  "cpuCampaign": {
+    "reportedStatus": "FAILED",
+    "classification": "FAILED_SETUP",
+    "stage": "backend-start",
+    "startedAt": "2026-11-12T16:39:27.077Z",
+    "finishedAt": "2026-11-12T16:40:29.269Z",
+    "errorsSpinExecuted": false,
+    "samples": 0,
+    "configuredCpuMs": 5000,
+    "enforcementProven": false,
+    "causeFromPrivateRootTail": "release builder /inspect failed (503): release builder did not start",
+    "httpStatus": 500,
+    "fixture": {
+      "hash": "c2a7094a25867e5d0882fe204f943443b23657799be38bbc54cb26dbd59c366a",
+      "sourceSha256": "9d7c0cca221f073d2e363eeacf54a53677ecbbb5a554e97b94b7fa070fbf29d9"
+    },
+    "project": "d50d7886-fadd-4051-904b-e7571c7d4887"
+  },
+  "evidenceHashes": {
+    "deployment/deployment.json": "94cdfefd002b09f2c67496e9c4ebf7cba79f133faf91f48e7bb59ee1e81c8875",
+    "cpu-proof/report.json": "01f5631596303a156a90c1baebd95b2ca28b7804a821ae27c65e4aff00c2ee1c",
+    "cpu-tail-private.jsonl": "8b23bf3ba065d357062a237218940f03572a36d6651559f8966597be88e9a823",
+    "remote-content.json": "a2dd23b561a293a10000003ec1a76517570ac3c9a3011f11c1e99a6542a1bf38",
+    "source-map-comparison.json": "2af8911103270023e1947f49cca8d7dbeef93fbafd05ae39a5cf1c99910245fa",
+    "image-startup/result.json": "de5c75e96422580b8f1ae70e78deb51b3622f73b0be7d399ae6bf3b548a52e5f",
+    "builder-diagnostic.json": "b1ce84f313d90e60e74ecc8a96dde3fac7dc056c3ee31769779aa85741da2936",
+    "cleanup-final.json": "47f075d711157c8e5c51afff51c5c5cb53881f36a82e37ecccc84481558175fe",
+    "cleanup-confirmed-owned-references.json": "cf17fc673a17a4df84f8fa27139bcb7721a674527395341f57262e1fd21d4d44"
+  },
+  "limitations": [
+    "No CPU enforcement/quarantine/rollback/quiet-neighbor/SDK pass",
+    "No K22/X01 or lifecycle acceptance",
+    "Builder/Container startup diagnosis remains with implementation owner",
+    "Final owner-lifecycle changes require a new full-context build"
+  ],
+  "subsequentDiagnostics": {
+    "nativeImageNodeVersion": "v22.18.0",
+    "nativeStartup": {
+      "startedAt": "2026-11-12T16:45:32.903Z",
+      "classification": "exact published image Node binary + archived3d92 sources, native Linux startup only; NOT platform startup/CPU acceptance",
+      "health": {
+        "status": 200,
+        "body": {
+          "ok": true,
+          "target": "local"
+        }
+      },
+      "finishedAt": "2026-11-12T16:45:33.152Z"
+    },
+    "nativeOnlyNotContainer": true,
+    "remoteExecutableParts": [
+      {
+        "kind": "kernel",
+        "parts": [
+          {
+            "name": "index.js",
+            "bytes": 1683682,
+            "sha256": "bf40f55f26ce9de0993064f2aa69ab8df919d5c5ab14602abfdfab8d8588a7e1",
+            "matchesLocal": true
+          },
+          {
+            "name": "039f7f76ef7f922d7d5493b075962c52647b760b-control_schema.sql",
+            "bytes": 23024,
+            "sha256": "66c51d8168d9ab52bfd93a938a936599144781239228299de653de2829c3d15c",
+            "matchesLocal": true
+          },
+          {
+            "name": "aace5a285f82b91f86bbe1a019d0acb6c6b58093-pbkdf2.wasm",
+            "bytes": 12768,
+            "sha256": "94756f97d5e9513f6822f63e93dfa6359205d553cd0ecb06759848a63254b135",
+            "matchesLocal": true
+          }
+        ]
+      },
+      {
+        "kind": "actions",
+        "parts": [
+          {
+            "name": "actions.js",
+            "bytes": 121534,
+            "sha256": "e1c35d0c6cb6f08e35c45ca44de0c2eb7a4b2d8eb33559076b1bd6c278f82826",
+            "matchesLocal": true
+          }
+        ]
+      },
+      {
+        "kind": "sandbox",
+        "parts": [
+          {
+            "name": "sandbox.js",
+            "bytes": 28125,
+            "sha256": "a7e1bfd9e6d5262f8613a67add4d7d24ad3935756bebab5f8a5c54b8c0deba9d",
+            "matchesLocal": true
+          }
+        ]
+      },
+      {
+        "kind": "builder",
+        "parts": [
+          {
+            "name": "builder.js",
+            "bytes": 1998,
+            "sha256": "76ba2566efb35cfbd80fe5af38389db3e0ab9275b18cbecd667c59ccd4502c48",
+            "matchesLocal": true
+          }
+        ]
+      }
+    ],
+    "sourceMapComparison": [
+      {
+        "kind": "kernel",
+        "differingKeys": [
+          "sources",
+          "sourceRoot",
+          "file"
+        ],
+        "sourceContentsEqual": true,
+        "mappingsEqual": true
+      },
+      {
+        "kind": "actions",
+        "differingKeys": [
+          "sources",
+          "sourceRoot",
+          "file"
+        ],
+        "sourceContentsEqual": true,
+        "mappingsEqual": true
+      },
+      {
+        "kind": "sandbox",
+        "differingKeys": [
+          "sources",
+          "sourceRoot",
+          "file"
+        ],
+        "sourceContentsEqual": true,
+        "mappingsEqual": true
+      },
+      {
+        "kind": "builder",
+        "differingKeys": [
+          "sources",
+          "sourceRoot",
+          "file"
+        ],
+        "sourceContentsEqual": true,
+        "mappingsEqual": true
+      }
+    ],
+    "containerHealthDiagnostic": {
+      "status": 503,
+      "ms": 60613,
+      "bodyBytes": 29
+    },
+    "builderLogsRestoredEnabled": false,
+    "containerStartupCause": "UNKNOWN"
+  },
+  "cleanup": {
+    "at": "2026-11-12T16:55:09.030Z",
+    "status": "PASS",
+    "manifest": {
+      "name": "gonvex-cf-dev-k22-3d92-platform",
+      "workers": [
+        "gonvex-cf-dev-k22-3d92-platform",
+        "gonvex-cf-dev-k22-3d92-platform-actions",
+        "gonvex-cf-dev-k22-3d92-platform-sandbox",
+        "gonvex-cf-dev-k22-3d92-platform-builder"
+      ],
+      "containers": [
+        {
+          "id": "a03f8620-bd1c-4aa7-b96d-59aaac760c2e",
+          "name": "gonvex-cf-dev-k22-3d92-platform-builder-releasebuildercontainer"
+        },
+        {
+          "id": "a03258a9-cb8d-4a27-bf95-71202626794b",
+          "name": "gonvex-cf-dev-k22-3d92-platform-sandbox-sandboxcontainer"
+        }
+      ],
+      "workflow": "gonvex-cf-dev-k22-3d92-platform-actions",
+      "resources": [
+        {
+          "kind": "r2",
+          "name": "gonvex-cf-dev-k22-3d92-platform-releases"
+        },
+        {
+          "kind": "r2",
+          "name": "gonvex-cf-dev-k22-3d92-platform-files"
+        },
+        {
+          "kind": "queue",
+          "name": "gonvex-cf-dev-k22-3d92-platform-rollout",
+          "id": "eee172e2d5d2468ca3f72d0926553ead"
+        }
+      ],
+      "registryImagesExcluded": true,
+      "rawEvidenceExcluded": true
+    },
+    "removed": [
+      {
+        "kind": "container-application",
+        "id": "a03f8620-bd1c-4aa7-b96d-59aaac760c2e",
+        "name": "gonvex-cf-dev-k22-3d92-platform-builder-releasebuildercontainer"
+      },
+      {
+        "kind": "container-application",
+        "id": "a03258a9-cb8d-4a27-bf95-71202626794b",
+        "name": "gonvex-cf-dev-k22-3d92-platform-sandbox-sandboxcontainer"
+      },
+      {
+        "kind": "workflow",
+        "name": "gonvex-cf-dev-k22-3d92-platform-actions"
+      },
+      {
+        "kind": "queue-consumer",
+        "queue": "gonvex-cf-dev-k22-3d92-platform-rollout",
+        "id": "25c377c49f154c3983c7ab8252643dfc",
+        "script": "gonvex-cf-dev-k22-3d92-platform"
+      },
+      {
+        "kind": "worker",
+        "name": "gonvex-cf-dev-k22-3d92-platform"
+      },
+      {
+        "kind": "worker",
+        "name": "gonvex-cf-dev-k22-3d92-platform-actions"
+      },
+      {
+        "kind": "worker",
+        "name": "gonvex-cf-dev-k22-3d92-platform-sandbox"
+      },
+      {
+        "kind": "worker",
+        "name": "gonvex-cf-dev-k22-3d92-platform-builder"
+      },
+      {
+        "kind": "queue",
+        "name": "gonvex-cf-dev-k22-3d92-platform-rollout"
+      },
+      {
+        "kind": "r2",
+        "name": "gonvex-cf-dev-k22-3d92-platform-releases"
+      },
+      {
+        "kind": "r2",
+        "name": "gonvex-cf-dev-k22-3d92-platform-files"
+      }
+    ],
+    "remaining": [],
+    "registryImagesAndRawEvidencePreserved": true,
+    "firstFailure": "Cloudflare10064: remove Queue consumer before Worker deletion",
+    "secondRefusal": "consumer API field is script, not script_name; no deletion on unknown ownership shape",
+    "scope": "explicit owned manifest only; no claim about other account resources"
+  }
+}

@@ -1,0 +1,2 @@
+-- gonvex:scope tenant
+CREATE TABLE board(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0);

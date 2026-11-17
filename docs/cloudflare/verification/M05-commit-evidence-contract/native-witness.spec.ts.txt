@@ -1,0 +1,63 @@
+import { expect, it, vi } from 'vitest';
+import { Client, member, seed, stub } from './client.ts';
+import { fixtureManifest } from './fixture.ts';
+import { auditTaskBinding, proposedTaskBinding } from '../../../../m05-instrumentation/whagons-task.mjs';
+
+it('actual K12 receipt lookup is a later read fence, not the original command commit cursor', async () => {
+  const {projectId,tenant,accounts}=await seed('m05-receipt-fence',fixtureManifest(),['alice','bob']);
+  let alice:Client|undefined,bob:Client|undefined;
+  try {
+    alice=(await member(projectId,tenant,accounts.alice!.email)).client;
+    bob=(await member(projectId,tenant,accounts.bob!.email)).client;
+    await alice.call('seed','board.add',{id:'m05-counter',title:'synthetic native counter',position:1});
+    const key='m05-command-bound-cursor-witness-0001',path='board.bump';
+    const command=await alice.call('original','board.bump',{id:'m05-counter'},{idempotencyKey:key,receiptPath:path});
+    expect(command).toMatchObject({type:'reducer.result',originCommandId:'original',result:{bumps:1}});
+    expect(Number.isSafeInteger(command.committedRevision)).toBe(true);
+    expect(command).not.toHaveProperty('epoch');expect(command).not.toHaveProperty('cursor');
+    const before=await alice.query('before','__gonvex.reducerReceipt',{idempotencyKey:key,receiptPath:path});
+    expect(before.result).toEqual({found:true,cursor:{epoch:expect.any(String),revision:command.committedRevision}});
+    const unrelated=await alice.call('unrelated','board.add',{id:'m05-unrelated',title:'unrelated actual write',position:2});
+    expect(unrelated.type).toBe('reducer.result');expect(unrelated.committedRevision).toBeGreaterThan(command.committedRevision);
+    const lookup=await alice.query('after','__gonvex.reducerReceipt',{idempotencyKey:key,receiptPath:path});
+    expect(lookup.result.found).toBe(true);
+    expect(lookup.result.cursor.revision).toBe(unrelated.committedRevision);
+    expect(lookup.result.cursor.revision).toBeGreaterThan(command.committedRevision);
+    expect(lookup.result.cursor.epoch).toBe(before.result.cursor.epoch);
+    const otherSubject=await bob.query('owner','__gonvex.reducerReceipt',{idempotencyKey:key,receiptPath:path});
+    expect(otherSubject.result).toEqual({found:false});
+    const wrongPath=await alice.query('path','__gonvex.reducerReceipt',{idempotencyKey:key,receiptPath:'board.rename'});
+    expect(wrongPath.type).toBe('query.error');
+    const receipts=(await stub('GET',`tables/_gonvex_reducer_idempotency?project=${projectId}&tenant=${tenant}`)).rows;
+    const receipt=receipts.find((r:any)=>r.idempotency_key===key && r.subject===accounts.alice!.accountId);
+    expect(receipt.path).toBe(path);expect(JSON.parse(receipt.result)).toEqual({bumps:1});
+    expect(Object.keys(receipt).sort()).toEqual(['created_at','idempotency_key','path','result','subject']);
+    // Preserve existing atomic completion/recovery: same key still replays original result.
+    const replay=await alice.call('replay',path,{id:'m05-counter'},{idempotencyKey:key,receiptPath:path});
+    expect(replay.result).toEqual(command.result);
+    const rows=(await stub('GET',`tables/board?project=${projectId}&tenant=${tenant}`)).rows;
+    expect(rows.find((r:any)=>r.id==='m05-counter').bumps).toBe(1);
+    const candidate=proposedTaskBinding();
+    for(const k of Object.keys(candidate.prerequisites))candidate.prerequisites[k]='configured-unverified';
+    const baseline=auditTaskBinding(candidate);
+    const misleading=auditTaskBinding({...candidate,durableEvidence:{command,lookup}});
+    expect(baseline.executionAllowed).toBe(false);expect(misleading.executionAllowed).toBe(false);
+    expect(misleading.commitEvidenceSupport).toEqual(baseline.commitEvidenceSupport);
+    expect(misleading.commitEvidenceSupport.status).toBe('unsupported');
+    expect(misleading.commitEvidenceSupport.reason).toBe('command-bound-commit-cursor-unavailable');
+    // Export ONLY allowlisted synthetic observations: no tokens, subjects, raw frames/errors or keys.
+    console.log('M05_NATIVE_RECEIPT_WITNESS '+JSON.stringify({
+      domain:'controlled-auth-synthetic-native-workerd-sqlite-do-socket',frameworkCommit:'5c5fa3795d821d5995179e19b712c89bfa0eb8d8',
+      command:{result:{bumps:command.result.bumps},revision:command.committedRevision,hasEpoch:false,hasCursor:false},
+      receiptBefore:{found:before.result.found,revision:before.result.cursor.revision},
+      unrelated:{revision:unrelated.committedRevision},receiptAfter:{found:lookup.result.found,revision:lookup.result.cursor.revision,hasEpoch:typeof lookup.result.cursor.epoch==='string'},
+      sameObservedEpoch:true,otherSubjectFound:false,wrongPathRejected:true,receiptColumns:Object.keys(receipt).sort(),
+      replayOriginalResult:true,counterBumps:1,plannerStatus:misleading.status,executionAllowed:misleading.executionAllowed,
+      supportReason:misleading.commitEvidenceSupport.reason,epochTransitionObserved:false,
+    }));
+  } finally {
+    alice?.close();bob?.close();
+    // Own both sockets until their real close events finish; no background client at teardown.
+    await vi.waitFor(()=>{if(alice)expect(alice.closed).toBe(true);if(bob)expect(bob.closed).toBe(true);});
+  }
+});

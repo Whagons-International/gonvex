@@ -1,0 +1,17 @@
+{
+  "schema": "gonvex.attachment-plan.v1",
+  "state": "planned-uninstrumented",
+  "servingImports": false,
+  "protocolChanges": false,
+  "attachments": [
+    {"stage":"browser-intent","owner":"V02/client","boundary":"actual UI event; separate operation/idempotency/trace ids"},
+    {"stage":"edge/admission","owner":"K05/K22","boundary":"routing/authenticated admission, no authority token logging"},
+    {"stage":"gateway-queue/tenant-queue","owner":"K22/X01","boundary":"same ordered channel; queue monotonic start/end"},
+    {"stage":"auth/reducer/sqlite-transaction/durable-commit/receipt","owner":"K06/K07/K22","boundary":"real durable transaction and receipt; no queryargs or contents"},
+    {"stage":"ordered-delivery","owner":"K10/K22/X01","boundary":"actual ordered delivery and processing facts; enqueue is not application"},
+    {"stage":"second-client-applied","owner":"V02/client","boundary":"authorized SDK collection applied matching committed revision/fields"},
+    {"stage":"action-claim/workflow-step/scheduler/outbox","owner":"K11/K12/K22","boundary":"async links across claim/attempt/step; preserve durable provenance"},
+    {"stage":"export","owner":"K15/M05/lead","boundary":"separate sink, no changes to existing K15 limits/retention"}
+  ],
+  "requiredEvidence": ["lead coordination before shared edits", "exact serving source/deploy", "observed span gaps", "autoscale/drain/reconnect/deploy continuity", "V04 overhead", "no raw ids/credentials/PII", "0064/0069-0076 processing facts never treated as receiver application"]
+}

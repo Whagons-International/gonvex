@@ -1,0 +1,237 @@
+{
+  "schema": "m05.immutable-local-receipt.v1",
+  "capturedAt": "2026-11-12T18:50:19.677Z",
+  "base": "6273dddf6af1890f039fc14f210753593add5be6",
+  "sourceCommit": "f58d75f9850acce5ac854fa34f1052d8a005c0fa",
+  "checkout": "/home/gabriel/.t3/worktrees/gonvex/t3-9ef46623-057033777841386e",
+  "branch": "cf/M05-monitoring-foundation",
+  "origin": "git@github.com:Whagons-International/gonvex.git",
+  "runtime": {
+    "node": "24.13.1",
+    "acorn": "8.15.0",
+    "ada": "3.4.2",
+    "amaro": "1.1.5",
+    "ares": "1.34.6",
+    "brotli": "1.2.0",
+    "cjs_module_lexer": "2.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.3.0",
+    "modules": "137",
+    "napi": "10",
+    "nbytes": "0.1.1",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.68.0",
+    "openssl": "3.5.5",
+    "simdjson": "4.2.4",
+    "simdutf": "6.4.0",
+    "sqlite": "3.51.2",
+    "tz": "2025c",
+    "undici": "7.18.2",
+    "unicode": "17.0",
+    "uv": "1.51.0",
+    "uvwasi": "0.0.23",
+    "v8": "13.6.233.17-node.40",
+    "zlib": "1.3.1-e00f703",
+    "zstd": "1.5.7"
+  },
+  "platform": "linux",
+  "arch": "x64",
+  "files": [
+    {
+      "path": ".github/workflows/cloudflare.yml",
+      "bytes": 10582,
+      "sha256": "50cca3cf204c43c0f4cedec1256b0c48be721d08938617fa40a2f942f2dda62b"
+    },
+    {
+      "path": "cloudflare/observability/README.md",
+      "bytes": 13044,
+      "sha256": "733d0ea1598734cf2be1893c26905d77003e482d84bdeb511a060d6fbd00f11a"
+    },
+    {
+      "path": "cloudflare/observability/checks/browser.mjs",
+      "bytes": 2411,
+      "sha256": "2db1bd1490e7842dccd3734b852efbc63c5b9e2e0d4af6cbfb51ae70c24042e5"
+    },
+    {
+      "path": "cloudflare/observability/checks/contract.mjs",
+      "bytes": 4713,
+      "sha256": "c641890a63a47e7a42655a718c1373dd4aa1358b6398db2c981fd57d39afb858"
+    },
+    {
+      "path": "cloudflare/observability/checks/network.mjs",
+      "bytes": 2291,
+      "sha256": "48a5a7c3862ea2f3ad125ea8da87e042a8c3952c201fd9abd4827c34d69d716d"
+    },
+    {
+      "path": "cloudflare/observability/checks/scenarios.mjs",
+      "bytes": 5304,
+      "sha256": "cc3767cc69dbee37e4f5cb514654f99fd028e165a1983f07ddef94f54ae7bef9"
+    },
+    {
+      "path": "cloudflare/observability/checks/sdk.mjs",
+      "bytes": 4272,
+      "sha256": "81b68e25997c3d679d609dc38deeeb8ad8100e6c2afd650be7426ee1cb9bed76"
+    },
+    {
+      "path": "cloudflare/observability/cli.mjs",
+      "bytes": 908,
+      "sha256": "21940fa32905bba5393f630d9bfa38105e5bf039cb176ba29f156e2c3ba9f1c9"
+    },
+    {
+      "path": "cloudflare/observability/correlation/attachments.json",
+      "bytes": 1549,
+      "sha256": "f4a9b45f2d1e77acfc04f820b1a97aa49deb13bf7fb07bb7f782a50c1891ccd6"
+    },
+    {
+      "path": "cloudflare/observability/correlation/envelope.mjs",
+      "bytes": 6180,
+      "sha256": "9c2b3d6248bbfb35d5b95258f85a62fe77bd394862b78bcff5947e51fa95d133"
+    },
+    {
+      "path": "cloudflare/observability/fixtures/replay.json",
+      "bytes": 5227,
+      "sha256": "8511e4046a0b63c4b36d1b49b5a692abf404a326660ee5349c14bf6e72eb8e3c"
+    },
+    {
+      "path": "cloudflare/observability/fixtures/sqlite-application.mjs",
+      "bytes": 3237,
+      "sha256": "7b41033108d84ec79b4806ee00a866fb3d395942e26d81e4911f7c3ebe022b0f"
+    },
+    {
+      "path": "cloudflare/observability/providers/checkly.mjs",
+      "bytes": 2372,
+      "sha256": "64d18e461f1ac0bca3c85393ad6cbc4ad1b1c89fc8fd5e600e4f413f755724b9"
+    },
+    {
+      "path": "cloudflare/observability/providers/config.mjs",
+      "bytes": 3044,
+      "sha256": "8f2967a3f97adf227b3724c23b5027ed06d2dd65a0ce5515c97340d22d182775"
+    },
+    {
+      "path": "cloudflare/observability/providers/dispatch.mjs",
+      "bytes": 1605,
+      "sha256": "9b5c00b73924ceb598d98896a3c276dace14e657bc1a9d6d4c52ebea031a8d43"
+    },
+    {
+      "path": "cloudflare/observability/providers/operations.mjs",
+      "bytes": 4468,
+      "sha256": "ee034b136cfe683fe74987ee78169aa8933f9dec8ed28aba963e57a286c39b39"
+    },
+    {
+      "path": "cloudflare/observability/reports/replay.mjs",
+      "bytes": 7600,
+      "sha256": "86603508b59b4ca177adfeffd4add285eaabb13320a87a0bfd7a19c82b7fc4ce"
+    },
+    {
+      "path": "cloudflare/observability/runbooks/operations.md",
+      "bytes": 4774,
+      "sha256": "a451263ea6fb686f669eeaf5dff9ba6c6ae5e706f95274a7576ec3fe255fe275"
+    },
+    {
+      "path": "cloudflare/observability/test/foundation.test.mjs",
+      "bytes": 16957,
+      "sha256": "6f3f7a970d2140bcac08bad6adfb75f288d2c8d538ca7925448bcc893e0d6869"
+    }
+  ],
+  "tools": {
+    "/home/gabriel/.config/nvm/versions/node/v24.13.1/bin/node": "d95de52ccb76fb2c5775bf176f29f3025e4b19352c092aad51ce5d930717359f",
+    "/home/gabriel/.config/nvm/versions/node/v22.23.4/bin/node": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90",
+    "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/node_modules/fumadocs-mdx/bin.js": "f4522525a19d395c93d13e632ed6a4b535af99f709bee75c2146f920cdb87f81",
+    "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/node_modules/next/dist/bin/next": "db32609884270b06aaceae7df284f683af5e0ec715d9debaf0f9d444230ca74f",
+    "/mnt/data/work/gonvex-m05-foundation/relocated/apps/docs/node_modules/typescript/bin/tsc": "2219f428a7e55aaf1f7ad85b9b0f0cf5078aeb76ccc9a7c6036c92d48f492ffd",
+    "/mnt/data/work/gonvex-m05-foundation/tools/node_modules/madge/bin/cli.js": "8d58bbb04977e5c68f85d9496ada8d7129fa751dd3d314129ef9d0a79ecd3bea",
+    "/mnt/data/work/gonvex-m05-foundation/cycles.cjs": "5257c33d58586bce8c010abb164493af0952eb622ffe3484f74fa342df907827",
+    "/mnt/data/work/gonvex-m05-foundation/final-checks.sh": "df342443b3ac16b2815e826509d135ccb5a811fef1d6175823e863588ee06328",
+    "/mnt/data/work/gonvex-m05-foundation/post-relocation.sh": "eec2d43f24ba00994de3861e1bfbe8a2ba398fcdbb8c29030a45239a8a3b35f9",
+    "/mnt/data/work/gonvex-m05-foundation/record-local.mjs": "f6b1abc031ad357720c98243394331be941028d7f600286f134e40de507fc17e",
+    "/mnt/data/work/gonvex-m05-foundation/relocate.py": "a25b5316fac113e0535f204d97d0bb9c02d5ffdd1b9b0205f12eaf3d9570b313",
+    "/mnt/data/work/gonvex-m05-foundation/relocation-receipt.py": "2c8799979c350dac14b829cdf8bdf2a37df7f13d813f8da300f173a1d3f91de7"
+  },
+  "artifacts": {
+    "foundation-final.tap": {
+      "bytes": 3546,
+      "sha256": "efe835e853c81a57c9dbc86d42b7dc9f707d7f8c95ce84b3bd47f546432b5d5d"
+    },
+    "ci-unit-commands.tap": {
+      "bytes": 6204,
+      "sha256": "02f8b6912477a044474c2b7884308869bb76c75a570b9c66bd05bec987121084"
+    },
+    "cycles.json": {
+      "bytes": 2656,
+      "sha256": "b7e26b140ec05062dbf0236b552602f126f0866aa761566da3fbdbe981269a19"
+    },
+    "generator-final.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "disabled-config.json": {
+      "bytes": 24733,
+      "sha256": "f17c0a2fadde51072f01889a54e55fe99186857c0c94a71c1faade0c000aad91"
+    },
+    "cost-counts.json": {
+      "bytes": 5522,
+      "sha256": "02ea570fe24c4bd791e835b4b7a81e089afdb379dbbff3231a42880927bc90b4"
+    },
+    "replay-report.json": {
+      "bytes": 2987,
+      "sha256": "f139df8c259a370fe3b3d54d3cc20bb94112e14ab680479e08994bacf709413e"
+    },
+    "docs-typecheck.log": {
+      "bytes": 1923,
+      "sha256": "8d17951f3a639d83ce3028f82450c7d3d09468cc2c88a24fc092b007b9f10f06"
+    },
+    "docs-post-relocation.log": {
+      "bytes": 149,
+      "sha256": "ecaafa44d0136164605389b8895eabbc30ed1e9b8463bd479b4406f6f686a04e"
+    },
+    "dependency-relocation.json": {
+      "bytes": 24625032,
+      "sha256": "5db3eb2b98a8237707b6438afadcf800b5bcac64ee42c3f0f1e1449ef63a56cc"
+    },
+    "post-relocation-exits.json": {
+      "bytes": 49,
+      "sha256": "b314d914697199d278352f91ad3b62d7f9fa29a043a7782399747be8ca187c24"
+    },
+    "final-check-exits.json": {
+      "bytes": 98,
+      "sha256": "55296f94d4f0bf410c702e903b9291fd54421b0aa761efae4d6e029983c6d290"
+    },
+    "local-handler-raw.json": {
+      "bytes": 7940,
+      "sha256": "49a52c41d756dcc03a82233e7e0d9f84b8d490833097a9b736cbb8393689771c"
+    },
+    "resource-final.log": {
+      "bytes": 2432,
+      "sha256": "bcf8709b8a6e88581817b39e90db7a26eb1f795738e86a4578c29c845b992239"
+    },
+    "resource-node24.log": {
+      "bytes": 2426,
+      "sha256": "6fc1af9f2f298afe44ceed3c218b4a18e5f2b195f7cf7da1e15026de8df96df4"
+    },
+    "headroom-final.log": {
+      "bytes": 112,
+      "sha256": "49ad5741eae8a06e4534a6b6a5d7f1a89fcde73f1a0d60e98c75088295a9f977"
+    },
+    "headroom-node24.log": {
+      "bytes": 112,
+      "sha256": "43af8cdab3b1d06dd6392a16be19e7a0399d66b90646564fd71bf5d2a9ce8350"
+    },
+    "relocation-summary.json": {
+      "bytes": 108,
+      "sha256": "0c43fdd521463bde339ef58b924e2224cab78cf58614f36181d6463565627ffa"
+    }
+  },
+  "totalSourceBytes": 100538,
+  "testDomain": "local Node SQLite application-handler; no SDK/workerd/Whagons/hosted proof",
+  "notExecuted": [
+    "Cloudflare typecheck/workerd full package tests/bundle measurements locally",
+    "browser/actual SDK/Whagons login and mutations",
+    "3 hosted regions/independent heartbeat",
+    "original P1-P5 drills",
+    "real test notification delivery",
+    "serving spans/trace continuity",
+    "production metrics/SQL rows/CPU/memory/overhead/billing",
+    "14d/30d observation"
+  ]
+}

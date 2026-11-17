@@ -1,0 +1,9 @@
+diff --git a/.github/workflows/cloudflare.yml b/.github/workflows/cloudflare.yml
+index 76ad33a1..59d50e68 100644
+--- a/.github/workflows/cloudflare.yml
++++ b/.github/workflows/cloudflare.yml
+@@ -72 +72,3 @@ jobs:
+-        run: node --test test/*.test.mjs
++        run: |
++          node --test test/*.test.mjs
++          node --test ../observability/test/*.test.mjs

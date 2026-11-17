@@ -1,0 +1,259 @@
+{
+  "domain": "author-local-input-and-privacy-fixtures-NOT-hosted-proof",
+  "sourceCommit": "6ac203fbb45f8828dd26ca4cb447ba4252679b83",
+  "reviewedHead": "49399492911e2655d7295f7e9668d2fb911d0475",
+  "results": {
+    "actualAttemptRetained": {
+      "schema": "gonvex.availability.v1",
+      "component": "Sync",
+      "region": "local",
+      "deploy": "review-local",
+      "check": "sdk-task",
+      "objective": "99.9% monthly owner proposal; not achieved/SLA",
+      "estimator": "scheduled-slot-hold; samples do not prove continuous health",
+      "inclusive": {
+        "eligibleMs": 100,
+        "healthyMs": 0,
+        "unknownMs": 100,
+        "failedMs": 0,
+        "lower": 0,
+        "upper": 1,
+        "expectedSamples": 1,
+        "firstPass": 1,
+        "firstFail": 0,
+        "exportFailed": 0,
+        "missing": 0,
+        "late": 0,
+        "retries": 0
+      },
+      "maintenanceAdjusted": {
+        "eligibleMs": 100,
+        "healthyMs": 0,
+        "unknownMs": 100,
+        "failedMs": 0,
+        "lower": 0,
+        "upper": 1,
+        "expectedSamples": 1,
+        "firstPass": 1,
+        "firstFail": 0,
+        "exportFailed": 0,
+        "missing": 0,
+        "late": 0,
+        "retries": 0
+      },
+      "recordAccounting": {
+        "scoped": 2,
+        "eligible": 2,
+        "outsideWindow": 0,
+        "offGrid": 1,
+        "late": 0,
+        "unobservedAtAsOf": 0,
+        "unsettled": 0,
+        "firstFail": 1,
+        "firstPass": 1,
+        "retries": 0,
+        "operationTimeFallback": 0,
+        "operationWindowUncertain": 1,
+        "operationsOutsideWindow": 0,
+        "operationsUnconfirmedAtAsOf": 0,
+        "operationsPending": 0,
+        "operationsUnknown": 0
+      },
+      "observations": [
+        {
+          "operationId": "961d18bf-2a65-4dc8-85bc-f37e3f06a7d2",
+          "scheduledAt": 0,
+          "startedAt": 0,
+          "finishedAt": 5,
+          "attempt": 0,
+          "status": "pass",
+          "onGrid": true,
+          "late": false,
+          "observedAtAsOf": true,
+          "settlement": "unrecorded"
+        },
+        {
+          "operationId": "914c9212-06ca-43e0-b344-d7643f1f237a",
+          "scheduledAt": 100,
+          "startedAt": 100,
+          "finishedAt": 105,
+          "attempt": 0,
+          "status": "fail",
+          "onGrid": false,
+          "late": false,
+          "observedAtAsOf": true,
+          "settlement": "unrecorded"
+        }
+      ],
+      "operations": {
+        "attempted": 1,
+        "success": 0,
+        "failed": 1
+      },
+      "bounds": {
+        "maxDetectionMs": 110,
+        "maxConfirmationMs": 5120,
+        "recoveryHealthySamples": 2,
+        "notificationReceipt": "unobserved"
+      },
+      "incidents": [],
+      "slots": [
+        {
+          "at": 0,
+          "ms": 100,
+          "maintenanceMs": 0,
+          "state": "unknown",
+          "coverageIssues": [
+            "operation-window-uncertain",
+            "failed-operation"
+          ],
+          "maintenance": false,
+          "observedAt": 5,
+          "retryObservedAt": null,
+          "firstStatus": "pass",
+          "exportFailed": false,
+          "retryStatus": null,
+          "late": false,
+          "heartbeatOk": true
+        }
+      ]
+    },
+    "windowClockStatusCases": 16,
+    "futureApplication": "rejected-operation-observation",
+    "cutoffUnknown": {
+      "schema": "gonvex.availability.v1",
+      "component": "Sync",
+      "region": "local",
+      "deploy": "review-local",
+      "check": "sdk-task",
+      "objective": "99.9% monthly owner proposal; not achieved/SLA",
+      "estimator": "scheduled-slot-hold; samples do not prove continuous health",
+      "inclusive": {
+        "eligibleMs": 100,
+        "healthyMs": 0,
+        "unknownMs": 100,
+        "failedMs": 0,
+        "lower": 0,
+        "upper": 1,
+        "expectedSamples": 1,
+        "firstPass": 1,
+        "firstFail": 0,
+        "exportFailed": 0,
+        "missing": 0,
+        "late": 1,
+        "retries": 0
+      },
+      "maintenanceAdjusted": {
+        "eligibleMs": 100,
+        "healthyMs": 0,
+        "unknownMs": 100,
+        "failedMs": 0,
+        "lower": 0,
+        "upper": 1,
+        "expectedSamples": 1,
+        "firstPass": 1,
+        "firstFail": 0,
+        "exportFailed": 0,
+        "missing": 0,
+        "late": 1,
+        "retries": 0
+      },
+      "recordAccounting": {
+        "scoped": 1,
+        "eligible": 1,
+        "outsideWindow": 0,
+        "offGrid": 0,
+        "late": 1,
+        "unobservedAtAsOf": 0,
+        "unsettled": 0,
+        "firstFail": 0,
+        "firstPass": 1,
+        "retries": 0,
+        "operationTimeFallback": 0,
+        "operationWindowUncertain": 0,
+        "operationsOutsideWindow": 0,
+        "operationsUnconfirmedAtAsOf": 0,
+        "operationsPending": 0,
+        "operationsUnknown": 1
+      },
+      "observations": [
+        {
+          "operationId": "3eae0e60-56c8-4c97-a279-bea9c6593464",
+          "scheduledAt": 0,
+          "startedAt": 0,
+          "finishedAt": 100,
+          "attempt": 0,
+          "status": "pass",
+          "onGrid": true,
+          "late": true,
+          "observedAtAsOf": true,
+          "settlement": "unrecorded"
+        }
+      ],
+      "operations": {
+        "attempted": 1,
+        "success": 0,
+        "failed": 0
+      },
+      "bounds": {
+        "maxDetectionMs": 110,
+        "maxConfirmationMs": 5120,
+        "recoveryHealthySamples": 2,
+        "notificationReceipt": "unobserved"
+      },
+      "incidents": [],
+      "slots": [
+        {
+          "at": 0,
+          "ms": 100,
+          "maintenanceMs": 0,
+          "state": "unknown",
+          "coverageIssues": [
+            "late",
+            "unconfirmed-operation"
+          ],
+          "maintenance": false,
+          "observedAt": 100,
+          "retryObservedAt": null,
+          "firstStatus": "pass",
+          "exportFailed": false,
+          "retryStatus": null,
+          "late": true,
+          "heartbeatOk": true
+        }
+      ]
+    },
+    "safeFailedSnapshot": {
+      "schema": "gonvex.monitor.v1",
+      "sourceSha": "source",
+      "deploy": "review-local",
+      "region": "local",
+      "executor": "node-local",
+      "configSha": "cfg",
+      "domain": "local-handler-fixture",
+      "environment": "local-synthetic",
+      "check": "sdk-task",
+      "scheduledAt": 0,
+      "startedAt": 0,
+      "finishedAt": 5,
+      "deadlineMs": 10,
+      "clockUncertaintyMs": 0,
+      "attempt": 0,
+      "operationId": "c002b8fe-6b89-4704-b49a-b81bbd796576",
+      "traceId": "d9f99a5571a840c7913e8622dce7f42d",
+      "idempotencyKey": "e6598945-3cd7-466d-a559-96197daae7fa",
+      "status": "fail",
+      "code": "fixture",
+      "durationMs": 5,
+      "operations": [
+        {
+          "operationId": "c11fcf75-615d-4843-b003-0a0121516a22",
+          "kind": "create",
+          "attempted": true,
+          "deadlineMs": 10,
+          "status": "fail"
+        }
+      ]
+    }
+  }
+}

@@ -24,6 +24,10 @@ interface OwnerTenantRpc {
 }
 ```
 
+The `dispatchOwned` return above is the original prototype shape. Decision 0071 requires a tagged
+frames/zero-invocation outcome bound to the offered authority and fresh external event before any owner
+refresh is allowed. It permits at most one first-invocation continuation, never an ambiguous-call retry.
+
 An actual-holder `confirmOwner` callback verifies the current Session, physical tag, issuer, epoch and
 auth scope. The tenant binds opaque random authority to that owner, tenant instance and confirmed server
 view. These are private server fields, never decoded client authority, public wire changes, idempotency
@@ -68,6 +72,17 @@ still use N4's exact correlation and honest enqueued/obsolete/UNKNOWN settlement
 Keep 0065's finite active/UNKNOWN authority admission and honest refusal. A missing native socket with a
 retained durable owner remains UNKNOWN. Token fencing may address historical epoch-map retention; it does
 not by itself solve 0058's stranded durable OWNER cleanup or prove indefinite churn availability.
+
+A current-instance HMAC-valid token alone is not drain evidence. A token absent from the registry can
+acknowledge duplicate retirement only if the complete registry/key/instance are inseparable, every exposed
+issued token was first published active, tokens are never reused, and completed serialized drain is the
+sole deletion path. Active/UNKNOWN records never expire, evict or partially restore. Lost same-instance
+registry state, invalid/foreign/old-instance tokens or uncertainty remain UNKNOWN/rejected, never retired.
+Test issuance/signing failure, lost admission/drain replies, delayed old work against a newer owner and
+registry/key continuity. This conditional model is not proof of quiescence or durable OWNER cleanup.
+
+0073 clarifies explicit admission for genuine ordered holder rebuilds. It does not turn those internal
+operations into 0071 fresh-client retries or allow an ambiguous call to replay.
 
 ## Required evidence
 

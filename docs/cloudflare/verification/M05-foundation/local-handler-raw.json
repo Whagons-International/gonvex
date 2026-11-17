@@ -1,0 +1,233 @@
+{
+  "schema": "m05.local-handler-evidence.v1",
+  "domain": "real-node-sqlite-handler-only-NOT-SDK-or-Whagons",
+  "config": {
+    "environment": "local-synthetic",
+    "syntheticOnly": true,
+    "sideEffectsAudited": true,
+    "coldFixture": false,
+    "tenantAlias": "synthetic-monitor",
+    "identities": {
+      "writer": "synthetic-writer",
+      "reader": "synthetic-reader",
+      "unauthorized": "synthetic-outsider"
+    },
+    "operatorCredentials": false,
+    "sourceSha": "f58d75f9850acce5ac854fa34f1052d8a005c0fa",
+    "deploy": "isolated-node-sqlite-handler",
+    "region": "local",
+    "executor": "node-24.13.1",
+    "domain": "local-handler-fixture",
+    "deadlineMs": 1000
+  },
+  "configSha": "263317621a2acceed5d9e7a29faf2bf119fa09cedc4d06c1ca48d628de330313",
+  "records": [
+    {
+      "fixtureFault": null,
+      "result": {
+        "schema": "gonvex.monitor.v1",
+        "sourceSha": "f58d75f9850acce5ac854fa34f1052d8a005c0fa",
+        "deploy": "isolated-node-sqlite-handler",
+        "region": "local",
+        "executor": "node-24.13.1",
+        "configSha": "263317621a2acceed5d9e7a29faf2bf119fa09cedc4d06c1ca48d628de330313",
+        "domain": "local-handler-fixture",
+        "environment": "local-synthetic",
+        "check": "portable-task",
+        "scheduledAt": 1794509371772,
+        "startedAt": 1794509371773,
+        "deadlineMs": 1000,
+        "clockUncertaintyMs": 0,
+        "attempt": 0,
+        "operationId": "597d0429-b76d-42d2-8d7e-699f6d385c68",
+        "traceId": "dd9251770d364f5392332bed97c3d58a",
+        "idempotencyKey": "ca2b18bd-a693-4cb3-8e3b-11d2e53a4d6b",
+        "status": "pass",
+        "code": "ok",
+        "operations": [
+          {
+            "operationId": "b6706631-ef77-4efc-b2ad-06807fae4114",
+            "kind": "create",
+            "attempted": true,
+            "deadlineMs": 1000,
+            "status": "pass",
+            "durableMs": 64.19453099999998,
+            "appliedMs": 64.30740400000002
+          },
+          {
+            "operationId": "fa4b4b3c-2e92-404d-8684-f2e1e22d4b68",
+            "kind": "update",
+            "attempted": true,
+            "deadlineMs": 1000,
+            "status": "pass",
+            "durableMs": 71.43053700000007,
+            "appliedMs": 71.46041300000002
+          }
+        ],
+        "durationMs": 146.27900799999998,
+        "finishedAt": 1794509371920
+      },
+      "rowsAfter": 0,
+      "guardPaused": false
+    },
+    {
+      "fixtureFault": "write",
+      "result": {
+        "schema": "gonvex.monitor.v1",
+        "sourceSha": "f58d75f9850acce5ac854fa34f1052d8a005c0fa",
+        "deploy": "isolated-node-sqlite-handler",
+        "region": "local",
+        "executor": "node-24.13.1",
+        "configSha": "263317621a2acceed5d9e7a29faf2bf119fa09cedc4d06c1ca48d628de330313",
+        "domain": "local-handler-fixture",
+        "environment": "local-synthetic",
+        "check": "portable-task",
+        "scheduledAt": 1794509371990,
+        "startedAt": 1794509371990,
+        "deadlineMs": 1000,
+        "clockUncertaintyMs": 0,
+        "attempt": 0,
+        "operationId": "3fdcd3c7-c794-4e9c-9552-b75709bafb79",
+        "traceId": "83783deaba6b48a0adc7ea70f40d1a9e",
+        "idempotencyKey": "92af1df5-9422-4bfb-846f-eb6b9caca3fd",
+        "status": "fail",
+        "code": "adapter-error",
+        "operations": [
+          {
+            "operationId": "5e49c190-9742-44b6-a1bf-6b55b3957e10",
+            "kind": "create",
+            "attempted": true,
+            "deadlineMs": 1000,
+            "status": "fail"
+          }
+        ],
+        "durationMs": 0.7725989999999001,
+        "finishedAt": 1794509371990
+      },
+      "rowsAfter": 0,
+      "guardPaused": false
+    },
+    {
+      "fixtureFault": "lost-reply",
+      "result": {
+        "schema": "gonvex.monitor.v1",
+        "sourceSha": "f58d75f9850acce5ac854fa34f1052d8a005c0fa",
+        "deploy": "isolated-node-sqlite-handler",
+        "region": "local",
+        "executor": "node-24.13.1",
+        "configSha": "263317621a2acceed5d9e7a29faf2bf119fa09cedc4d06c1ca48d628de330313",
+        "domain": "local-handler-fixture",
+        "environment": "local-synthetic",
+        "check": "portable-task",
+        "scheduledAt": 1794509372250,
+        "startedAt": 1794509372250,
+        "deadlineMs": 1000,
+        "clockUncertaintyMs": 0,
+        "attempt": 0,
+        "operationId": "5fd3a690-bf0d-4aee-8006-bc628fc9d1ca",
+        "traceId": "2c5815db69d8496ba8b1a86c53c22e19",
+        "idempotencyKey": "49d518c6-a287-447c-a996-cfff29abd28f",
+        "status": "fail",
+        "code": "adapter-error",
+        "operations": [
+          {
+            "operationId": "e62a1eba-b164-48bf-a0b2-7d4aeab67b10",
+            "kind": "create",
+            "attempted": true,
+            "deadlineMs": 1000,
+            "status": "fail"
+          }
+        ],
+        "durationMs": 85.00507100000004,
+        "finishedAt": 1794509372335
+      },
+      "rowsAfter": 0,
+      "guardPaused": false
+    },
+    {
+      "fixtureFault": "stalled-sync",
+      "result": {
+        "schema": "gonvex.monitor.v1",
+        "sourceSha": "f58d75f9850acce5ac854fa34f1052d8a005c0fa",
+        "deploy": "isolated-node-sqlite-handler",
+        "region": "local",
+        "executor": "node-24.13.1",
+        "configSha": "263317621a2acceed5d9e7a29faf2bf119fa09cedc4d06c1ca48d628de330313",
+        "domain": "local-handler-fixture",
+        "environment": "local-synthetic",
+        "check": "portable-task",
+        "scheduledAt": 1794509372442,
+        "startedAt": 1794509372442,
+        "deadlineMs": 1000,
+        "clockUncertaintyMs": 0,
+        "attempt": 0,
+        "operationId": "ccc5266b-d56c-4bf9-a460-b2317f382cf9",
+        "traceId": "2ef84a081f814f4ea7230cced4a1f128",
+        "idempotencyKey": "6376d974-3131-4f13-af53-5b2f20e7dc1c",
+        "status": "fail",
+        "code": "second-client-applied",
+        "operations": [
+          {
+            "operationId": "4a4704c9-37cf-47ef-bd6b-a59a2cff21c5",
+            "kind": "create",
+            "attempted": true,
+            "deadlineMs": 1000,
+            "status": "fail"
+          }
+        ],
+        "durationMs": 21.373694000000114,
+        "finishedAt": 1794509372464
+      },
+      "rowsAfter": 0,
+      "guardPaused": false
+    },
+    {
+      "fixtureFault": "cleanup",
+      "result": {
+        "schema": "gonvex.monitor.v1",
+        "sourceSha": "f58d75f9850acce5ac854fa34f1052d8a005c0fa",
+        "deploy": "isolated-node-sqlite-handler",
+        "region": "local",
+        "executor": "node-24.13.1",
+        "configSha": "263317621a2acceed5d9e7a29faf2bf119fa09cedc4d06c1ca48d628de330313",
+        "domain": "local-handler-fixture",
+        "environment": "local-synthetic",
+        "check": "portable-task",
+        "scheduledAt": 1794509372486,
+        "startedAt": 1794509372486,
+        "deadlineMs": 1000,
+        "clockUncertaintyMs": 0,
+        "attempt": 0,
+        "operationId": "3b433aab-3ec0-4a7a-aeaf-73e1a32e60f7",
+        "traceId": "f361c7c24f3743b5bbeb551a2bf7ac4c",
+        "idempotencyKey": "3c6ed516-4e79-4c3a-be4e-dd066cd50f7d",
+        "status": "unknown",
+        "code": "cleanup-failed",
+        "operations": [
+          {
+            "operationId": "37e71921-06b0-466e-bf23-a597b383d240",
+            "kind": "create",
+            "attempted": true,
+            "deadlineMs": 1000,
+            "status": "pass",
+            "durableMs": 4.58470699999998,
+            "appliedMs": 4.594396000000188
+          },
+          {
+            "operationId": "5d5798ad-105b-4999-8fe7-c4212dbf834c",
+            "kind": "update",
+            "attempted": true,
+            "deadlineMs": 1000,
+            "status": "pass",
+            "durableMs": 3.470393999999942,
+            "appliedMs": 3.4784689999999046
+          }
+        ],
+        "durationMs": 9.950742000000218,
+        "finishedAt": 1794509372496
+      },
+      "rowsAfter": 1,
+      "guardPaused": true
+    }
+  ]
+}

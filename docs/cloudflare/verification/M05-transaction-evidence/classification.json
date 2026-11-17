@@ -1,0 +1,64 @@
+{
+  "version": "whagons-ui-diff-v1",
+  "classification": "non-ui",
+  "isUi": false,
+  "complete": true,
+  "uiFiles": [],
+  "reason": "no rendered UI source changed",
+  "base": "ceb10028c090fc38ad1d361376885adb8117f79e",
+  "files": [
+    {
+      "filename": "docs/cloudflare/verification/M05-transaction-evidence/classification.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-transaction-evidence/decision.md",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-transaction-evidence/measurements.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-transaction-evidence/native-witness.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-transaction-evidence/receipt.json",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-transaction-evidence/report.md",
+      "status": "A"
+    },
+    {
+      "filename": "docs/cloudflare/verification/M05-transaction-evidence/source-manifest.json",
+      "status": "A"
+    },
+    {
+      "filename": "packages/client/src/index.ts",
+      "status": "M"
+    },
+    {
+      "filename": "packages/client/src/transaction-evidence.test.ts",
+      "status": "A"
+    },
+    {
+      "filename": "packages/client/src/transaction-evidence.ts",
+      "status": "A"
+    },
+    {
+      "filename": "packages/client/test/transaction-evidence.fixture.module.js",
+      "status": "A"
+    },
+    {
+      "filename": "packages/client/test/transaction-evidence.native-proof.ts",
+      "status": "A"
+    },
+    {
+      "filename": "packages/client/test/transaction-evidence.native-worker.ts",
+      "status": "A"
+    }
+  ],
+  "method": "complete local unpaginated Git -z -M diff, including rename originals"
+}

@@ -1,0 +1,390 @@
+{
+  "schema": "m05.cli-read-bound.r1",
+  "reviewedParent": "24968803ca9e1bd0608a62bd6d41532338cd1eb0",
+  "review": "https://github.com/Whagons-International/gonvex/pull/421#pullrequestreview-5887072404",
+  "base": "8851a125dbd7316e6de30717bbcaf807ee2f5eb7",
+  "changedRuntime": "cloudflare/observability/cli.mjs",
+  "scope": "opened regular descriptor, byte cap+1 overflow sentinel, nonblocking FIFO refusal; same existing binding/replay limits and sanitized errors",
+  "tests": {
+    "monitoring": {
+      "passed": 135,
+      "failed": 0,
+      "skipped": 0
+    },
+    "conformance": {
+      "passed": 29,
+      "failed": 0
+    },
+    "newRegressions": [
+      "actual UTF8 byte boundary",
+      "regular file grows after metadata observation (owned fault injection)",
+      "idle owned FIFO rejected without writer"
+    ]
+  },
+  "generators": {
+    "schemaAndFreshness": "PASS",
+    "dashboardAndTemplateCodegen": "PASS",
+    "templateCatalogNdjsonAndTypesAndCheck": "PASS",
+    "rootAndControlWranglerTypes": "PASS",
+    "docsMetadataNextTypegenTypes": "PASS",
+    "trackedOutputDrift": []
+  },
+  "runtimeCycles": {
+    "base": 1,
+    "candidate": 1,
+    "added": []
+  },
+  "source": {
+    "cloudflare/observability/cli.mjs": {
+      "bytes": 2401,
+      "sha256": "4533e9381a8980e3f8302f68c2dc9ddb3ca633013c0cd4b344be3fcf4d571280"
+    },
+    "cloudflare/observability/test/whagons-binding.test.mjs": {
+      "bytes": 11373,
+      "sha256": "54697a15897e52014922eb26df9f68d45f3013138bda794dabb94f96f81cd2ef"
+    }
+  },
+  "rawRoot": "/mnt/data/work/gonvex-cloudflare-lead/m05-cli-bound-24968803",
+  "rawArtifacts": {
+    "base.tar": {
+      "bytes": 37724160,
+      "sha256": "ffa121a96e4f35bf758eb9557cd928a2274d46fe3f5ffa848aea67e18f242114"
+    },
+    "cgroup.txt": {
+      "bytes": 145,
+      "sha256": "14201e2c1d0db3e119aee56cd165ac334a6e0790a94ddb30730bce3469429fcc"
+    },
+    "cli-build-headroom.log": {
+      "bytes": 112,
+      "sha256": "2287b434cd54a4dc0fa55013392a65b4b94a2cf79e41b450470297aa481499ea"
+    },
+    "cli-build.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "conformance-headroom.log": {
+      "bytes": 112,
+      "sha256": "9e4390cab3f5019690138742b53f0cf4b2b665241d4c376f8a3c1ff8a08dfc9b"
+    },
+    "conformance.log": {
+      "bytes": 2652,
+      "sha256": "fb6fed4cbbfd77a3ab0a1f756b360a629b9abeee47b99bd6953f224e3acf5c7a"
+    },
+    "context.tar": {
+      "bytes": 37795840,
+      "sha256": "38e7f9a4f006337a5e21a06aac749aed09cba0d68a3a92b3c0e4c956950d4baa"
+    },
+    "cycles.cjs": {
+      "bytes": 1081,
+      "sha256": "d122a846b27f3a1fff7fb1815f9e1caab6b0129528e98b1e4d6407cfecb3fafa"
+    },
+    "cycles.json": {
+      "bytes": 4794,
+      "sha256": "af4d71533fe39dcc2c2de5f2f35a0988b3d97a16b63f2e7b9cf569a969777154"
+    },
+    "dashboard-codegen-headroom.log": {
+      "bytes": 112,
+      "sha256": "1538fc9069ff7ecf60c9867ec14215ad004fec4c93ba22083108b5a2d8b23a32"
+    },
+    "dashboard-codegen-resume2-failed.log": {
+      "bytes": 5357,
+      "sha256": "470bbfe79d4bb77615438950f731232ebd154653e0040d2c183c10ed0797c620"
+    },
+    "dashboard-codegen.log": {
+      "bytes": 5357,
+      "sha256": "470bbfe79d4bb77615438950f731232ebd154653e0040d2c183c10ed0797c620"
+    },
+    "final-audit-headroom.log": {
+      "bytes": 112,
+      "sha256": "95e14972d97191d916e55319fe8556b9a648943363393cf0a5c149c9b9e64f13"
+    },
+    "generator-drift.json": {
+      "bytes": 73,
+      "sha256": "dc8060b3ca5034103c9dd0d5c007a9d12da96dbf495b5b3ee58b5b10e9f4047f"
+    },
+    "generators3-cgroup.txt": {
+      "bytes": 157,
+      "sha256": "c04328aeba011938619567d587627535f645c42c98267adfe442e091b39d6330"
+    },
+    "generators3-control-types-headroom.log": {
+      "bytes": 112,
+      "sha256": "0f92e9ea0b1340c51f5d7cc05b91277cceb7327cc3057d2021ad7c76f2c777e3"
+    },
+    "generators3-control-types.log": {
+      "bytes": 1318,
+      "sha256": "a65ec3cc1a6cf814651ff0e3843c9220cc5478f82e600beee36ee1fb79d061de"
+    },
+    "generators3-cycles-headroom.log": {
+      "bytes": 112,
+      "sha256": "8cbba1bb2cd5351931de0000ca74a3d78c907667f91d5da581e97685ae2e1204"
+    },
+    "generators3-cycles.log": {
+      "bytes": 36,
+      "sha256": "d94464a2c4d89b2481b9f0f098daae2e14a80969e978ab2a39e171d0612e6f44"
+    },
+    "generators3-dashboard-codegen-headroom.log": {
+      "bytes": 112,
+      "sha256": "625133bdb5f05df8b65df5af7aeb6cbeb8993db03a53f5a05d61b1658e446477"
+    },
+    "generators3-dashboard-codegen.log": {
+      "bytes": 293,
+      "sha256": "4ed66b7f723a95dde079f034a8c3176412e7586344d204c9a73e735351f2c0da"
+    },
+    "generators3-docs-mdx-headroom.log": {
+      "bytes": 112,
+      "sha256": "6fcd7cc17b9479aa17c1ebe17539139768d8b6bb696820126085fafa2bb8fac3"
+    },
+    "generators3-docs-mdx.log": {
+      "bytes": 44,
+      "sha256": "e468104986af64de2dbcd532c9528dca358e090331d389fb77b9d4f7e7467ede"
+    },
+    "generators3-docs-next-headroom.log": {
+      "bytes": 112,
+      "sha256": "695cf6ee8f7118280f3ab840bb566f243d700fa5a79bbc99ed669de73a056bbe"
+    },
+    "generators3-docs-next.log": {
+      "bytes": 104,
+      "sha256": "7a512a7c9e0fe2c0920c6bf5628ff62f788daffe7d33d476e62b5ddc7c091ccc"
+    },
+    "generators3-docs-types-headroom.log": {
+      "bytes": 112,
+      "sha256": "5a07d4d74065f9b38b482106ae8490ba429994adb9e2ca68d665a6279d5f3671"
+    },
+    "generators3-docs-types.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "generators3-module-sdk-build-headroom.log": {
+      "bytes": 112,
+      "sha256": "a11e002892bfbcc6eaf1245da4008b18f77c7f54035cfcb5f994190ea9fc8791"
+    },
+    "generators3-module-sdk-build.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "generators3-root-types-headroom.log": {
+      "bytes": 112,
+      "sha256": "e8fd6988bbd28a343c840ff5e24ea481200bf16ef0f846800f95acf50f6b27dc"
+    },
+    "generators3-root-types.log": {
+      "bytes": 1386,
+      "sha256": "002fe6423e201ca17f012ec0390e5b8914a4db1bccb64ba3c52974e31e759dc0"
+    },
+    "generators3-template-catalog-check-headroom.log": {
+      "bytes": 112,
+      "sha256": "1e17f26c6546f8ce32bfaee1446d06b7fb511f31d90300e2de41fa150dd75df0"
+    },
+    "generators3-template-catalog-check.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "generators3-template-catalog-headroom.log": {
+      "bytes": 112,
+      "sha256": "e65878f7b80abd4de15fcb991743a9a253a61b38b11795e8b8a75a67dbbf79bb"
+    },
+    "generators3-template-catalog-types-headroom.log": {
+      "bytes": 112,
+      "sha256": "7edff2a073835d7a21816ec080b4191b399142544788cb0868aee6771c47e69b"
+    },
+    "generators3-template-catalog-types.log": {
+      "bytes": 108,
+      "sha256": "92ed508e810da7dc67ffa7b3f5b85b19444c8cdb086e4872ed2610bce3331eae"
+    },
+    "generators3-template-catalog.log": {
+      "bytes": 110,
+      "sha256": "e1300333525e3d661e2623217c4fe791a466e018dad81af016482e541e4252ff"
+    },
+    "generators3-template-codegen-headroom.log": {
+      "bytes": 112,
+      "sha256": "17d963e55f7da701802f2da3931f17a8aa47ab759c326610ddd63fc45b298f2f"
+    },
+    "generators3-template-codegen.log": {
+      "bytes": 293,
+      "sha256": "ec53c040b49f4954ece1ff66f9aafcceebcfaea6013d03d90ae83d5f5dfb6d83"
+    },
+    "generators3.sh": {
+      "bytes": 3086,
+      "sha256": "feb733ed7abd402acb396d21b71eeea2c3c40ffa14a46577c80239e153b7d571"
+    },
+    "input-diff.patch": {
+      "bytes": 7224,
+      "sha256": "8252769773b7484d3c633105a150372983d00a45cf83574dc0f36eab2dce5b90"
+    },
+    "module-sdk-build-headroom.log": {
+      "bytes": 112,
+      "sha256": "7e5c0b8020bffd486cc432c9ffafb0b641e52d5ddec96a6399f8e8dd0bfe5e7e"
+    },
+    "module-sdk-build.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "monitoring-headroom.log": {
+      "bytes": 112,
+      "sha256": "14fb49da79e9da01f631a58dc077516d2017603329b553306c9ebfb75f9742c9"
+    },
+    "monitoring.log": {
+      "bytes": 13415,
+      "sha256": "e45df797d5bb993491a4234c28c679d03fefbf5f4ecb2b304b3adb4bd1f00450"
+    },
+    "outer-generators-2-headroom.log": {
+      "bytes": 112,
+      "sha256": "c034ec11e06ca77372fee26dec968eded4a4492e5ffac6e1960f660c46d014e1"
+    },
+    "outer-generators-3-headroom.log": {
+      "bytes": 112,
+      "sha256": "5d8cd2993400e46f3a894624f456a47a3f58f55178c3261320affdb0f8a51b1d"
+    },
+    "outer-headroom-2.log": {
+      "bytes": 112,
+      "sha256": "5dc160d8b0d258951bb69fd668a3093cf62d2750038ea66911efb05d82277785"
+    },
+    "outer-headroom.log": {
+      "bytes": 112,
+      "sha256": "b71e32515dabbad9b5be4ccd24913bf4a136a1c364ab24e797011965ca905029"
+    },
+    "resources-generators2.log": {
+      "bytes": 2533,
+      "sha256": "cbf9ba76de2da61e71978d8df77fed008d50a6f325cb5e38329009562d5af627"
+    },
+    "resources-generators3.log": {
+      "bytes": 2556,
+      "sha256": "f3321838b9666fb082e283432f483f4aeb9b69e4c052295f7582ae6b848cd2b2"
+    },
+    "resources-usage-failed.log": {
+      "bytes": 669,
+      "sha256": "4b9fb8caffb94bfaa89fce5d30b3bf3171f1d34725660c4581dad7bffb4a9bde"
+    },
+    "resources.log": {
+      "bytes": 2486,
+      "sha256": "7f9b4c2aef1280e6bada4baa0e9579e052671cf2929db1f86040804019545f42"
+    },
+    "result-first.json": {
+      "bytes": 77,
+      "sha256": "7fa611b39116613e7d0104a7f143c14b63185a646b0b149de3682bf0e5b0a5e4"
+    },
+    "result-generators3.json": {
+      "bytes": 71,
+      "sha256": "4c13cc12a9cda6d66422fbdff4c8834b84774265df0f308f137e6f7d8964d219"
+    },
+    "result-resume.json": {
+      "bytes": 77,
+      "sha256": "7fa611b39116613e7d0104a7f143c14b63185a646b0b149de3682bf0e5b0a5e4"
+    },
+    "result-resume2.json": {
+      "bytes": 77,
+      "sha256": "7fa611b39116613e7d0104a7f143c14b63185a646b0b149de3682bf0e5b0a5e4"
+    },
+    "result.json": {
+      "bytes": 77,
+      "sha256": "7fa611b39116613e7d0104a7f143c14b63185a646b0b149de3682bf0e5b0a5e4"
+    },
+    "resume-cgroup.txt": {
+      "bytes": 157,
+      "sha256": "2f07a2fbc0c35aa4f6b718b0580b1a1f7e7c5480bc146779e1c81bff64c3d71c"
+    },
+    "resume-generators.sh": {
+      "bytes": 3052,
+      "sha256": "f15b694e76cfa3d56cb8b4eb81c56ee8f0ab0312bf0ac42c828d82b7131aecbd"
+    },
+    "run.sh": {
+      "bytes": 5419,
+      "sha256": "17a31dcab40b257f122130eff050c23b8aaffa9d8b3a2eac6438fd87159585db"
+    },
+    "schema-check-headroom.log": {
+      "bytes": 112,
+      "sha256": "987eb0b16a4e86491760daaabb370ba9e4cb96711283b619efec7707dd043f12"
+    },
+    "schema-check.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "schema-headroom.log": {
+      "bytes": 112,
+      "sha256": "30ad8b9aa8ecc4654ba604cc306302efe527e73fd93c687030473d1c406b17a7"
+    },
+    "schema.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "scratch-grant.json": {
+      "bytes": 537,
+      "sha256": "c03e7de731ef6f7780443e1a1b45c1fb6d816720cc66e11cccb577cefbdd10d5"
+    },
+    "setup-failures.md": {
+      "bytes": 1074,
+      "sha256": "37468048161fd3dad5b5b744d03244195dd6932ae050e31cd567ae26aed97605"
+    },
+    "setup-inner-headroom.log": {
+      "bytes": 112,
+      "sha256": "747c2ef0c5a04b8e7eade3f4c2a3759d505dde6388c39eb4f56f6e01a8a483a6"
+    },
+    "skipped-link-inventory.json": {
+      "bytes": 3,
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    }
+  },
+  "limitations": [
+    "Offline disabled preparation, not application/hosted/runtime-serving success.",
+    "Original independent review remains pinned24968803; new fix needs a NEW independent recheck.",
+    "First resource call omitted unit; no payload ran.",
+    "First two generator attempts failed owned dependency resolution; corrected own module-sdk compilation/project links passed.",
+    "Second generator attempt overwrote first full dashboard-codegen log; original first result and captured thread output remain, not full first-log retention.",
+    "No installation/shared dependency mutation, application call, credentials, activation or fullM05 acceptance."
+  ],
+  "resources": {
+    "resources.log": [
+      {
+        "arbitration": "kernel-v1",
+        "unit": "gonvex-lead-m05-cli-bound-20261113-phase-babdea32c8d9.service",
+        "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-lead-m05-cli-bound-20261113-phase-babdea32c8d9.service",
+        "event": "lease-release",
+        "exit_code": 1,
+        "actual": {
+          "arbitration": "kernel-v1",
+          "contained_oom_kills": 0,
+          "cpu_usec": 3932829,
+          "exit_code": 1,
+          "io_source": "unavailable",
+          "memory_peak": 384323584,
+          "wall_seconds": 2.43
+        }
+      }
+    ],
+    "resources-generators2.log": [
+      {
+        "arbitration": "kernel-v1",
+        "unit": "gonvex-lead-m05-cli-bound-generators2-20261113-phase-006b75ca8f24.service",
+        "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-lead-m05-cli-bound-generators2-20261113-phase-006b75ca8f24.service",
+        "event": "lease-release",
+        "exit_code": 1,
+        "actual": {
+          "arbitration": "kernel-v1",
+          "contained_oom_kills": 0,
+          "cpu_usec": 479290,
+          "exit_code": 1,
+          "io_source": "unavailable",
+          "memory_peak": 70672384,
+          "wall_seconds": 0.338
+        }
+      }
+    ],
+    "resources-generators3.log": [
+      {
+        "arbitration": "kernel-v1",
+        "unit": "gonvex-lead-m05-cli-bound-generators3-20261113-phase-b3f9b935635f.service",
+        "cgroup": "/user.slice/user-1000.slice/user@1000.service/heavy.slice/heavy-workloads.slice/gonvex-lead-m05-cli-bound-generators3-20261113-phase-b3f9b935635f.service",
+        "event": "lease-release",
+        "exit_code": 0,
+        "actual": {
+          "arbitration": "kernel-v1",
+          "contained_oom_kills": 0,
+          "cpu_usec": 13078485,
+          "exit_code": 0,
+          "io_source": "unavailable",
+          "memory_peak": 685256704,
+          "wall_seconds": 8.926
+        }
+      }
+    ]
+  }
+}

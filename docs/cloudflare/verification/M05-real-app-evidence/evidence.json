@@ -1,0 +1,1081 @@
+{
+  "schema": "m05.real-app-evidence.v1",
+  "frameworkSource": "b9c4b2483a5629421caf8a29c2ee867f0d8f21d5",
+  "applicationSource": "73276b5589d363c1190a6d028413a21559226631",
+  "domain": "historical-app-offline-build-and-private-controlled-native",
+  "environment": "local-synthetic",
+  "region": "local-arch3",
+  "executor": "pinned-node24-and-workerd-private-fixture",
+  "deployment": "none",
+  "monitoring": "DISABLED",
+  "fullM05": "UNMET",
+  "status": "BLOCKED",
+  "executionAllowed": false,
+  "tests": {
+    "monitoring": 156,
+    "originalMonitoring": 140,
+    "newAdapterTests": 16,
+    "baselineIntendedFailure": {
+      "pass": 1,
+      "fail": 15
+    },
+    "conformanceUnit": 29,
+    "sdkTransactionRegressions": 29,
+    "nativeControlledArtifact": 1,
+    "originalNativeReceipt": 8
+  },
+  "actualApp": {
+    "fullModuleCompiled": false,
+    "readModuleOnlyCompiled": true,
+    "activation": "SQLITE_TOOBIG-before-tenant-creation",
+    "freshReadEstablished": false,
+    "secondAppliedClientEstablished": false,
+    "taskWrites": 0,
+    "commandEvidence": false,
+    "originalEffectsExecuted": false
+  },
+  "proposal": "server-execution-proposal.md; NOT SDK implementation",
+  "sourceManifests": [
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-source-manifest.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-source-manifest.json",
+      "bytes": 260053,
+      "sha256": "44d70a009d31af35ad75d73928775c8745669f0ae830ca647d47c78dddc519b8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/source-manifest.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/source-manifest.json",
+      "bytes": 19759,
+      "sha256": "c95b693c912b3c32a841348174959bbf6ddc217bac86d7a3c3371d0f8b920381"
+    }
+  ],
+  "measurements": {
+    "scope": "source sizes / local runner, NOT serving performance",
+    "adapterSource": {
+      "baseBytes": 4671,
+      "candidateBytes": 5262,
+      "baseGzipBytes": 1743,
+      "candidateGzipBytes": 1925
+    },
+    "readModuleOnly": {
+      "artifactHash": "639e0e8b75a7f3c2913cce984342ef902fa294c5ea8fd7a1bc1f3f9d189edf97",
+      "javascriptBytes": 44060,
+      "javascriptGzipBytes": 7121,
+      "functions": 6,
+      "visibilityPlans": 2,
+      "migrationCount": 15,
+      "nativeManifestBytes": 19641222
+    },
+    "nativeArtifactTestWholePhase": {
+      "memoryPeakBytes": 907030528,
+      "cpuUsec": 11040349,
+      "wallSeconds": 9.59
+    },
+    "guardBeforeAuth": {
+      "tripwireCallbacks": 0,
+      "tenantSQLCalls": 0
+    },
+    "servingBundleRowsLatencyMemoryOverhead": "NOT EXECUTED; no serving imports/source changed",
+    "globalCacheUnchanged": "not asserted for unrelated concurrent writers; our admitted tools see host read-only through bwrap"
+  },
+  "resourceRule": "normal kernel-v1 heavy.slice/heavy-workloads.slice; <=1 command worker; unchanged FOUR-slot coach-compile; estimates8GiB/2CPU/10GiB/60min; not a cap reservation",
+  "tools": [
+    {
+      "path": "/home/gabriel/.config/nvm/versions/node/v24.13.1/bin/node",
+      "realpath": "/home/gabriel/.config/nvm/versions/node/v24.13.1/bin/node",
+      "bytes": 122523096,
+      "sha256": "d95de52ccb76fb2c5775bf176f29f3025e4b19352c092aad51ce5d930717359f"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/coach-compile",
+      "realpath": "/home/gabriel/.local/bin/coach-compile",
+      "bytes": 3184,
+      "sha256": "dacea7997d490a715410d8fccf9f965d83de3e9138cd2ca4b6b3748cf48cb00f"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/build-headroom",
+      "realpath": "/home/gabriel/.local/bin/build-headroom",
+      "bytes": 93,
+      "sha256": "7264efbfd1da6982967642226c02744b9ace740026e3e620dcb110716eabe922"
+    },
+    {
+      "path": "/home/gabriel/.local/bin/coach-resources",
+      "realpath": "/home/gabriel/.local/bin/coach-resources",
+      "bytes": 88,
+      "sha256": "9ab4b91d9f73965fa38f62a366fd68e8de1a182e5791509e4e416130b46c6acd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/source/framework/packages/gonvex/node_modules/typescript/bin/tsc",
+      "realpath": "/mnt/data/work/gonvex-merge-continuation/node_modules/typescript@7.0.2/node_modules/typescript/bin/tsc",
+      "bytes": 44,
+      "sha256": "2219f428a7e55aaf1f7ad85b9b0f0cf5078aeb76ccc9a7c6036c92d48f492ffd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/source/framework/packages/gonvex/node_modules/typescript-api/lib/typescript.js",
+      "realpath": "/mnt/data/work/gonvex-merge-continuation/node_modules/typescript@6.0.3/node_modules/typescript/lib/typescript.js",
+      "bytes": 9144216,
+      "sha256": "569177652966bd528c319171c7dd22860dbf72bde116cbc4f644f1d02bb12e39"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/source/framework/cloudflare/node_modules/vitest/vitest.mjs",
+      "realpath": "/mnt/data/work/gonvex-merge-continuation/node_modules/vitest@4.1.12_@types+node@24.12.4_jsdom@29.1.1_vite@8.2.1_@types+node@24.12.4_esbuild@0.28.2_jiti@2.7.0_yaml@2.9.1_/node_modules/vitest/vitest.mjs",
+      "bytes": 43,
+      "sha256": "39db22f579acf5639bbb17a261408debbde03f4692c0c439e77e7f13aeba74d6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/source/framework/cloudflare/node_modules/wrangler/bin/wrangler.js",
+      "realpath": "/mnt/data/work/gonvex-merge-continuation/node_modules/wrangler@4.155.0_@cloudflare+workers-types@5.20261028.1_@types+node@24.12.4/node_modules/wrangler/bin/wrangler.js",
+      "bytes": 3088,
+      "sha256": "780661a508810f3b65786895b1ca9aacbc4f55d329ae6b8c1e49ec8433569f77"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-merge-continuation/node_modules/@cloudflare+workerd-linux-64@1.20261023.1/node_modules/@cloudflare/workerd-linux-64/bin/workerd",
+      "realpath": "/mnt/data/work/gonvex-merge-continuation/node_modules/@cloudflare+workerd-linux-64@1.20261023.1/node_modules/@cloudflare/workerd-linux-64/bin/workerd",
+      "bytes": 144038248,
+      "sha256": "b6aff93fcc97091fa38b4ba78c172276349c4940000694c5baf382c218b8e6ee"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-merge-continuation/cycle-tool/node_modules/madge/bin/cli.js",
+      "realpath": "/mnt/data/work/gonvex-merge-continuation/cycle-tool/node_modules/madge/bin/cli.js",
+      "bytes": 6239,
+      "sha256": "8d58bbb04977e5c68f85d9496ada8d7129fa751dd3d314129ef9d0a79ecd3bea"
+    }
+  ],
+  "receipts": [
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-compile-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-compile-headroom.log",
+      "bytes": 112,
+      "sha256": "491965bab10abf6e91bd293d0c6eb4f5374d505b8fb71fa3584634f68976da09"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-compile.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-compile.log",
+      "bytes": 56336,
+      "sha256": "0af904969ddcc15375462e3da5e5da89ac976959ff23e1212ca85a86aba64ff1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-extra-config-source.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-extra-config-source.json",
+      "bytes": 397,
+      "sha256": "92bc7f44647e92906608506635acebb11a6eb6c44be88bfc3a104bd2ca0a11b5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-extra-lock-source.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-extra-lock-source.json",
+      "bytes": 401,
+      "sha256": "15910c646559e204c8da7a1bbcd13a25e3216ac23bac9fb5342243998dd6a043"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-source-manifest.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/app-source-manifest.json",
+      "bytes": 260053,
+      "sha256": "44d70a009d31af35ad75d73928775c8745669f0ae830ca647d47c78dddc519b8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/binding-audit-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/binding-audit-headroom.log",
+      "bytes": 112,
+      "sha256": "a4a78d2629cba0f7bc8269a3ac291ed1cfe88cff5a9982f9ef7d95b0ce34471f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/binding-audit.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/binding-audit.json",
+      "bytes": 4311,
+      "sha256": "0b132d52f22c889cd0072368a1e3061f6b820e337a6cf85e5a87c50f819a9900"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-client-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-client-headroom.log",
+      "bytes": 112,
+      "sha256": "5a951115dcdf6d3a5a0a17edc576317acc548a63f4362fad173d4c6e49730bdd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-client.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-client.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-gonvex-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-gonvex-headroom.log",
+      "bytes": 112,
+      "sha256": "89fc2aeb6a67383e2f64d1ffe52723b04fde17eddf92e2bd403c289ad6f91660"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-gonvex.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-gonvex.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-local-runtime-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-local-runtime-headroom.log",
+      "bytes": 112,
+      "sha256": "55fc2c0a9f1a6000cfe9ac6ba75c1a630c8ff63e2bf9e6f7ce0c6fd890c4db9b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-local-runtime.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-local-runtime.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-module-sdk-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-module-sdk-headroom.log",
+      "bytes": 112,
+      "sha256": "6c10964bd428510a607a087a6d336f1dc27e1bfbf1776caac1679eb6262404ea"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-module-sdk.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-module-sdk.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-outer-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-outer-headroom.log",
+      "bytes": 112,
+      "sha256": "86e15c27955c94494d788bfa54df4e4660b2f2e1e549bcd526f7476929883d2d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-protocol-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-protocol-headroom.log",
+      "bytes": 112,
+      "sha256": "b73fab29c90f1e35f8eb9edc38e799129a8d4053057deea9a3495a960ede2193"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-protocol.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-protocol.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-react-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-react-headroom.log",
+      "bytes": 112,
+      "sha256": "ea8d4c9c1754f65ed182f6bb6a375e367566f5c17e80b3dbcb2976cc1ce7c6a1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-react.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-react.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/build-resources.log",
+      "bytes": 2401,
+      "sha256": "b1a1217c6e2c49d7c37dc0eaa42c7823183158646d6d44df5debba038c0980d3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/changed-files.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/changed-files.json",
+      "bytes": 836,
+      "sha256": "87595ee4d7495a5420031ba43756e518b061b50757d311471370f75a9bea24da"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/checks-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/checks-outer.log",
+      "bytes": 112,
+      "sha256": "b9bf839a4e4196dc246fd99884cee833f2d43c016616faf1c100b37bf3bb6b19"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/checks-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/checks-resources.log",
+      "bytes": 2408,
+      "sha256": "c8eaf9b85359f04ffaa8ca94d9cf50204823caae7686fc10a2516f9d9247f979"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/classification.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/classification.json",
+      "bytes": 142,
+      "sha256": "7faf26a5b809fd49dca2e8eaa4348055f2633745223ab3a3066412cbb0b288f1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-typecheck-02-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-typecheck-02-headroom.log",
+      "bytes": 112,
+      "sha256": "cd6aaf42eac4380626d3149f363d683170da441fec679d86289d7297dc3f37a3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-typecheck-02.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-typecheck-02.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-typecheck-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-typecheck-headroom.log",
+      "bytes": 112,
+      "sha256": "217bc4e81e0ce7837767fdb2a04c530437be0e4c7a3964c2bc94f872a16bc850"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-typecheck.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-typecheck.log",
+      "bytes": 1279,
+      "sha256": "31dfd00888dcbbe561b7a72afbef39b87d7214faf0a6b2733cad7cba2904931a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-types-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-types-headroom.log",
+      "bytes": 112,
+      "sha256": "27a897617a0a462f7c86d765cc8c209ef7de7fefad7b8cc8230c84a0982364ce"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-types.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cloudflare-types.log",
+      "bytes": 1386,
+      "sha256": "002fe6423e201ca17f012ec0390e5b8914a4db1bccb64ba3c52974e31e759dc0"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/conformance-unit-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/conformance-unit-headroom.log",
+      "bytes": 112,
+      "sha256": "08edcd809eaf2e168ef72c94c9934720d01a7a33d21ca55242fb3c44fc75f58f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/conformance-unit.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/conformance-unit.log",
+      "bytes": 2653,
+      "sha256": "2aa69babf461823364482f4f9122be375cd3d5183448145d3ba4de81dbd2341f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/control-typecheck-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/control-typecheck-headroom.log",
+      "bytes": 112,
+      "sha256": "a526c55f276998057cb8d23ec5e09f239b4c56a198451dfd2bd83f508e42fe4b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/control-typecheck.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/control-typecheck.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/control-types-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/control-types-headroom.log",
+      "bytes": 112,
+      "sha256": "3853ce433a8ec2688e9aeefab9cd00553b7cc711c0ebd4b6fe2578a2e4580929"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/control-types.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/control-types.log",
+      "bytes": 1210,
+      "sha256": "70e2c3781819a10565146f46862ab1b48bd647ba56b4ed42c047782963dc7c14"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-02-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-02-headroom.log",
+      "bytes": 112,
+      "sha256": "c40b4a7765732783fed723b2b09397ec985785f662e27bc03f7f34470fa70b3e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-02.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-02.json",
+      "bytes": 5230,
+      "sha256": "fc8991092d13acc1a8861bafa9e085fbf39dac22a9cd22315c8cc5818c7a338e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-02.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-02.log",
+      "bytes": 33,
+      "sha256": "221b3a254bb516b932096c3908dd16c0ae87de27baeae64fc36cb5985466d6d5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-headroom.log",
+      "bytes": 112,
+      "sha256": "5a888596cc97716321eaa222f3671b3fd3d275da2379f2badc012ba402ad0a7f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-setup-failure.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles-setup-failure.json",
+      "bytes": 5673,
+      "sha256": "71beba6f0b380c1799ac942b98ebe12daefbee4e882b60c0d0d2234c003bc0b7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/cycles.log",
+      "bytes": 134,
+      "sha256": "0ac0f066cf874ae874111c0a6898e3883857be432e680150b0b57d6e0cb1e019"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/dashboard-codegen-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/dashboard-codegen-headroom.log",
+      "bytes": 112,
+      "sha256": "fa6ed197f062ae60dfb04a6f2f1e8f78c38cfaf1ddf0c28af2577c669a0ebbed"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/dashboard-codegen.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/dashboard-codegen.log",
+      "bytes": 293,
+      "sha256": "6e4edba4e2e01592889080fccec7b32933db21bec9a47c0bd554a470892446ad"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-mdx-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-mdx-headroom.log",
+      "bytes": 112,
+      "sha256": "7777ed9aa4cf0db27be48bc2c9879dce8a476ce575ae1564950d3e171994169f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-mdx.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-mdx.log",
+      "bytes": 46,
+      "sha256": "0320e927a45bffd1c6976effb3328f82b6fb26b001bc4eed3ed9825f42637ae9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-next-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-next-headroom.log",
+      "bytes": 112,
+      "sha256": "693ae9fe1192a252cd46778129032916763c9ab9ebc94e93e0daaf9ec57703f6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-next.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-next.log",
+      "bytes": 104,
+      "sha256": "b709fedd7b10805d4f62bdbe86d242ea322947b4eca65cd6ef2bc5e87caee3bd"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-types-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-types-headroom.log",
+      "bytes": 112,
+      "sha256": "746688784363ecdddfdedcbb3082470fb703aa2b0baf1f95a250be06aecdbf9a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-types.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/docs-types.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/final-monitoring-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/final-monitoring-headroom.log",
+      "bytes": 112,
+      "sha256": "0b5f3de8685b3402193ba7956967acf3790bc1d969dc0f696167814e84929987"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/final-monitoring-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/final-monitoring-outer.log",
+      "bytes": 112,
+      "sha256": "4624aa441a639a2ca3fc59478a2e860ebe754991da1ac80c04ba8057cafc160e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/final-monitoring-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/final-monitoring-resources.log",
+      "bytes": 17873,
+      "sha256": "ad882fe7bcee7592fc9b3005a94a8b50c08b4dc5398b56ba5bf83fa0fa4a7556"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/generated-drift.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/generated-drift.json",
+      "bytes": 237,
+      "sha256": "4613b1886e4ccc8cbca02d158a7cdd5c86dd1e2be1f01c3acfb0aae5d74abcb9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/guard-baseline-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/guard-baseline-headroom.log",
+      "bytes": 112,
+      "sha256": "cca0f8da0669b62302b97e83beaf140c7dedb5d694cb243e2333f61a3916f795"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/guard-baseline.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/guard-baseline.log",
+      "bytes": 17325,
+      "sha256": "0dd5c62d77800a93e61df1e36d31de775d05f33508471362df78e6b5185cd605"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/input-verification.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/input-verification.json",
+      "bytes": 302,
+      "sha256": "19427f1e83419e20580b1962d906e7e31e399b7d5a749803051412fff6fad6df"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/measurements.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/measurements.json",
+      "bytes": 918,
+      "sha256": "130eaaa6fd25182ccc08be7c22766e4049ef92029a8e9a1cad8dd63efd66d6b3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-02-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-02-headroom.log",
+      "bytes": 112,
+      "sha256": "6af8b8a1017749e8c8bccdbacf9d596393d43c3eb300680b56262259a1646618"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-02-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-02-outer.log",
+      "bytes": 112,
+      "sha256": "21d01b43df76c26aabffe73ff90fc9f1ea766377d1866fbf13dca8a4df2c40ec"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-02-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-02-resources.log",
+      "bytes": 16333,
+      "sha256": "aa11ef9fa5c0c1053325f155bce77980972e609f164ab63de2eb3f8cf3bc2d14"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-unit-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-unit-headroom.log",
+      "bytes": 112,
+      "sha256": "6d3b3ff7317519cdd92d0bc2ece922793343f04a89ac7e25264a9339c23af809"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-unit.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/monitoring-unit.log",
+      "bytes": 26462,
+      "sha256": "253d70afb938196979345693e9947cec1fe792c739b3abf836f89b728b52f5b3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-02-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-02-headroom.log",
+      "bytes": 112,
+      "sha256": "8dd053f643c3a4e1ae766bbb330fe6445c933b8e9c6a8c137f42bd22c2bc452b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-02-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-02-outer.log",
+      "bytes": 112,
+      "sha256": "c03e3770d58b8d0f795949ed32f07b67a44cc9c159d45e60f9a7b61d4467aa49"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-02-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-02-resources.log",
+      "bytes": 4225,
+      "sha256": "75de18191c9885ec8d2967a2b6de870b1e7d8812d7d930e0cb31892f090fe89e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-03-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-03-headroom.log",
+      "bytes": 112,
+      "sha256": "a05cbd0f1d206dd97af7f7d741a65b67020a02629724be8f14b74c6156ef51ec"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-03-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-03-outer.log",
+      "bytes": 112,
+      "sha256": "0d480b4803eece109f40f2c20b8bc0ee936578e997726de02f3b3a6f8bb4b7e1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-03-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-03-resources.log",
+      "bytes": 8290,
+      "sha256": "ef2382c1c8e715fd65067bb4688d64aeb7b80488a7e361494fde9270fa360326"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-04-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-04-headroom.log",
+      "bytes": 112,
+      "sha256": "f229ee8880673adc699858404a1708b089775d48b1b5b244532cb0e1dd37922d"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-04-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-04-outer.log",
+      "bytes": 112,
+      "sha256": "155528ac607142062f40a8a06dc9dd833cd9492faabf0313e18cf090bc11da50"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-04-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-04-resources.log",
+      "bytes": 8283,
+      "sha256": "5c406e4f46c086e628fc2f207f4d3bd24bc96efbec741a509923fef74bb1e039"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-04-test-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-04-test-headroom.log",
+      "bytes": 112,
+      "sha256": "e6e0e7bacab2c1f4e88621a19a6d02280e8ad095b40e7652286aa6ca8c01b7ac"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-05-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-05-headroom.log",
+      "bytes": 112,
+      "sha256": "684158402f16a227abc9b3f879a731789f413a7db4e392754bceda7516aa7afa"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-05-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-05-outer.log",
+      "bytes": 112,
+      "sha256": "d3de774f40d028b8836e94dda91b9d266b7088c50871c16541703ff2828595b1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-05-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-05-resources.log",
+      "bytes": 5503,
+      "sha256": "df5e3239ef543f99b456ca486cd038480032356bd12012e85fcf7c46f8ca7a04"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-02-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-02-headroom.log",
+      "bytes": 112,
+      "sha256": "26ce4a67808f3f6257669002aa9fb10fe6b1c9837317835a3544dedf1a7878a1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-02-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-02-outer.log",
+      "bytes": 112,
+      "sha256": "acbd3cdd878e9c042ebae850f7951b3991de457ac27af9bd74f629bbdf04c35e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-02-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-02-resources.log",
+      "bytes": 4666,
+      "sha256": "2235d4256f4315ac453c6956e927728ae99924235f8519baab163a1d245a035b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-03-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-03-headroom.log",
+      "bytes": 112,
+      "sha256": "c8fd89ac4078c306243e200f98dfed629326bb7c3fdfa8d538d2a2c2d2e5d107"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-03-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-03-outer.log",
+      "bytes": 112,
+      "sha256": "f439c9a92632b71e29641aadbb1e05bb1d8df503180386230eb1ab5f989247ad"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-03-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-03-resources.log",
+      "bytes": 4152,
+      "sha256": "115e78349fc048326172192ba26af085bbc27e40e979d86ee2bded20a4dd33f9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-headroom.log",
+      "bytes": 112,
+      "sha256": "9a487ee0652079d0823ee4bef0494101e11f1eecfc6414637fd314c12eed88b6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-outer.log",
+      "bytes": 112,
+      "sha256": "e57e24960bcfecc37715fd8a640119437f49c697e459339a8372cda77a331d44"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-artifact-resources.log",
+      "bytes": 4557,
+      "sha256": "561af3d494cbcfc1e480dbd5db60c339527b3a1a89cc0a0c607b0ea1498c6ec4"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-headroom.log",
+      "bytes": 112,
+      "sha256": "89b4c4cf0f4e642369ee1266f600df35fdc46ea94916d0caa9cbd6c063ce783f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-outer.log",
+      "bytes": 112,
+      "sha256": "265b78434804ff7798ee5ec73cb35736395ff6e639deddac16e4be9c395e7e45"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/native-resources.log",
+      "bytes": 3709,
+      "sha256": "a676e078dcca642f5218239217648937c905cfbe023f3dc926a92a05369c3eb7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/os-settlement.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/os-settlement.json",
+      "bytes": 2485,
+      "sha256": "ea18fbc5a46db603a8e8a86d2dcdd381219b642dc637e55c2163c723aa99640b"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/prep-inner-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/prep-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "473631fae7fa380011a22e8c46cd7736f66f4cee12815a208bccef7726d3892e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/private-fixtures.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/private-fixtures.json",
+      "bytes": 4358,
+      "sha256": "c684f5e53a307d98029cbc4111d6c6673c53d0b2af765a7b8423453cf5f0c3e7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/read-artifact.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/read-artifact.json",
+      "bytes": 19607930,
+      "sha256": "58e3a398be5dcebbe5eddb9fc28ba527421b5cdb0b1eb55b15203f267c80a138"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/read-closure.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/read-closure.json",
+      "bytes": 280,
+      "sha256": "b351ac6ff8808c2cbf6b07ca4dcc3f026094ee2003dc9a4b2d4ce1dbee6a03d6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/read-compile.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/read-compile.log",
+      "bytes": 207,
+      "sha256": "90945a7c2a24b175be52402dfd3086d6c0522ea9b278f5ed379bfa391045035e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/read-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/read-headroom.log",
+      "bytes": 112,
+      "sha256": "95d9556a90e0790a395516f3892d3dc93db9bf3be302028c69d5abbc90797398"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/registration.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/registration.json",
+      "bytes": 272,
+      "sha256": "108dbca28f0b4c88483b2f4cdc996b1b68c411375e9f5a8db5921be891ab81bb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/schema-check-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/schema-check-headroom.log",
+      "bytes": 112,
+      "sha256": "270ef047de1843ab5cda43adb8815f64e6b88a15cdb8cc8b99f20a17bc1bb56e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/schema-check.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/schema-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/schema-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/schema-headroom.log",
+      "bytes": 112,
+      "sha256": "d760fb8589e1d47c8e89a9ad8d35aadd108bb6613e91d597f5f01409e4d27dbf"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/schema.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/schema.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/scoped-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/scoped-outer.log",
+      "bytes": 112,
+      "sha256": "3d1e07a456079f2903772fdd6cbc383b891649e8e7a6bbab7510fd0c77985f3a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/scoped-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/scoped-resources.log",
+      "bytes": 2416,
+      "sha256": "669c716541f24f13d5c7005a6f83f35175728e81f5ada15f0b2459b01ca2c285"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/sdk-transaction-regressions-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/sdk-transaction-regressions-headroom.log",
+      "bytes": 112,
+      "sha256": "73793993d5d18cc4790dac8b06462dd99ff7681b26bdb5d0e0488eb69bc60ae7"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/sdk-transaction-regressions.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/sdk-transaction-regressions.log",
+      "bytes": 665,
+      "sha256": "1ea914c2618b0efa8707b0d3f2d62d945140962fdee2cfe0022f8bd269390155"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/source-manifest.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/source-manifest.json",
+      "bytes": 19759,
+      "sha256": "c95b693c912b3c32a841348174959bbf6ddc217bac86d7a3c3371d0f8b920381"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tasks-closure.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tasks-closure.json",
+      "bytes": 3333,
+      "sha256": "c4f378747ee5d6643308172aefd0cf8b47c2853b4c77acaf9445ffe929d1b8d1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tasks-compile.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tasks-compile.log",
+      "bytes": 860,
+      "sha256": "739a56ae7407ad60e0bf652ee80686341468c8eb0615e93a1e537fb6e34613ba"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tasks-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tasks-headroom.log",
+      "bytes": 112,
+      "sha256": "a7b560fb46fb6be55ede088eac9d2269dec4a73cb48f248710aa1e8c0eaed4f9"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-catalog-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-catalog-headroom.log",
+      "bytes": 112,
+      "sha256": "0c92a0da75552ccfb7f3dc2e9091c8c340d90e69506a240490de943255027955"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-catalog.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-catalog.log",
+      "bytes": 110,
+      "sha256": "e1300333525e3d661e2623217c4fe791a466e018dad81af016482e541e4252ff"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-check-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-check-headroom.log",
+      "bytes": 112,
+      "sha256": "68a0099e4ffc5cf76ea27c1ea3710358b55cafc65bf2776f73bc562cb22eca82"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-check.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-codegen-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-codegen-headroom.log",
+      "bytes": 112,
+      "sha256": "843b458daa32690f29c4f024a8b38eaf4cca8dc1a5c494c347e818cc4137e0e2"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-codegen.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-codegen.log",
+      "bytes": 293,
+      "sha256": "2e0b6eb822c6d3b4e290817356f2e41f5201c783223354db9a65d184aa2967a8"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-types-02-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-types-02-headroom.log",
+      "bytes": 112,
+      "sha256": "4449a6ba6c870e385288a722fc778f7ffd1261669da02eb03d5dcfe870eab4ce"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-types-02.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-types-02.log",
+      "bytes": 108,
+      "sha256": "92ed508e810da7dc67ffa7b3f5b85b19444c8cdb086e4872ed2610bce3331eae"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-types-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-types-headroom.log",
+      "bytes": 112,
+      "sha256": "0f9a55f29b319123552344729c83940eca3ac53f9bcc0fca2eec4ed99f35c6f1"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-types.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/template-types.log",
+      "bytes": 38,
+      "sha256": "bd24314c7f750982b46d6540baf0e8112e1fee3ea1b896856e0fb98669696367"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tool-links.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tool-links.json",
+      "bytes": 30811,
+      "sha256": "d9dd57234217b9a4e8435923004512f219fa5c9eaddd89ed56d41b445b983769"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tools.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/tools.json",
+      "bytes": 3352,
+      "sha256": "114df985f47fbf5dc0f691bc9e12ff770337c447ce46aad375e018c31a0751c6"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-actions-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-actions-headroom.log",
+      "bytes": 112,
+      "sha256": "1eede20e237ea2fdd9750fce2b4d321d3c4106635eee34a46cb2e86039adda99"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-actions.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-actions.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-files-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-files-headroom.log",
+      "bytes": 112,
+      "sha256": "b04ecbf15d605483978f44df3d7a2d00a055b5f32760b06fd7adb541b77bd8ee"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-files.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-files.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-host-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-host-headroom.log",
+      "bytes": 112,
+      "sha256": "d5f0bfb18465332b379438bd1ee4ccde6939a7146fa31210f6a0b3ce339a6257"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-host.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-host.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-principals-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-principals-headroom.log",
+      "bytes": 112,
+      "sha256": "e4c87d6a1215b5253d08a4b3df5cabead54e7804499ecc977cae3a61419c5b7e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-principals.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-principals.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-telemetry-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-telemetry-headroom.log",
+      "bytes": 112,
+      "sha256": "1ee0e22d9123c4ddae67f4a6fd6fdaf7386191d106b4666a083ff2a6fd8f9d66"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-telemetry.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-kernel-telemetry.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-link-context.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-link-context.json",
+      "bytes": 4235,
+      "sha256": "e4da3d7399078b7e9ce816149f3ba88a3ae4d2dc0f954a7e5f1d36eed1078776"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-router-dev-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-router-dev-headroom.log",
+      "bytes": 112,
+      "sha256": "33810acf323a50128ec25d519d395888f352d4ae5e9dc6448bc8dce7e5fb83fe"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-router-dev.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-router-dev.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-router-ingress-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-router-ingress-headroom.log",
+      "bytes": 112,
+      "sha256": "4bed67169a154170944ee1fc89ad4a42eff291d2ab45670e2a8e37eea029e291"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-router-ingress.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-router-ingress.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-sandbox-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-sandbox-headroom.log",
+      "bytes": 112,
+      "sha256": "e7e43fe9c9191f34b2bf08ff9390b83d416287df7ae7d9066214ceb40ddb2de5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-sandbox.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/types-sandbox.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-final-inner-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-final-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "b26e8027bbeafbcc39fd6c39b4affc8d12d4da08b2d664ccb89970d32d035e53"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-final-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-final-outer.log",
+      "bytes": 112,
+      "sha256": "b4e46bdddca58a095dbe27503f0d9d6c4ccc81bc49cd87bccd375f6bea899117"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-final-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-final-resources.log",
+      "bytes": 2477,
+      "sha256": "724a274413a7757cd321b188a8a3b9be0f41045784b195d6ca0d1199ed27ef80"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-final-steps.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-final-steps.json",
+      "bytes": 2397,
+      "sha256": "3e7d3a3c6ce53a98b7ee480c17e40bf71a6d2db25084467a3955be90f481088c"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-inner-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "e9a3545ff863a2d138c57ef22610023d3200e5a5ecee70424d744c0cf49a6dfb"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-outer.log",
+      "bytes": 112,
+      "sha256": "a0291c4b00635f602171af56317287ff299074e80b81b1e5f0b7c5a0d028e288"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resources.log",
+      "bytes": 2492,
+      "sha256": "631317b206087b12b51da3768bafadeab871aef32c436aa0a456a6131a163333"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resume-inner-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resume-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "db108a19437ec48c3d5240bae1ab357cb89936ec595d36b7f146adec5b42679f"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resume-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resume-outer.log",
+      "bytes": 112,
+      "sha256": "1463ed90ae9770c9757c91bb9cdd2a0fb2880539a35b7325fd38b4ae5bfb65e4"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resume-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resume-resources.log",
+      "bytes": 2465,
+      "sha256": "d083f542c9984a4d12cf5c1f4233aa6f09d4cbc6c219866441f5dc301a3aabb4"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resume-steps.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-resume-steps.json",
+      "bytes": 2336,
+      "sha256": "74b8f2603557e6875fe94026e8bd6e12e56dffd715c098e8a1fd4a61b4a8c48e"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-steps.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-steps.json",
+      "bytes": 3035,
+      "sha256": "6cfab1aa049d547eaca28d9cf510a7a891a91307c98fdfa92e617324d1c8a7d5"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-tail-inner-headroom.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-tail-inner-headroom.log",
+      "bytes": 112,
+      "sha256": "44a3c58046752efcbe86c60e73f05bec5effd7928519a994bff2ef71451a199a"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-tail-outer.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-tail-outer.log",
+      "bytes": 112,
+      "sha256": "aacd3c1152100f91ad293ed8da4bfe0dc4d929df04cb0036b8273c4408302807"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-tail-resources.log",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-tail-resources.log",
+      "bytes": 2571,
+      "sha256": "d8a41741b8e85b7981afc06b71a820fafa73a28ef25e4d1fa709365d167984e3"
+    },
+    {
+      "path": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-tail-steps.json",
+      "realpath": "/mnt/data/work/gonvex-m05-foundation/real-app-evidence-b9c4/artifacts/validation-tail-steps.json",
+      "bytes": 4882,
+      "sha256": "62066a90b82f5f0fd007a093fccd0a2ba361604935a77253baacf9d46c4a36d8"
+    }
+  ],
+  "unexecuted": [
+    "full1178SDKsuite",
+    "Rustbuild/tests",
+    "actualWhagonswrite/read/apply/cleanup/effects",
+    "browser",
+    "hostedregions",
+    "drills",
+    "continuousobservations",
+    "servingbundle/performance",
+    "Cloudflare/provider/accountactivation"
+  ]
+}
