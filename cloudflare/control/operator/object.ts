@@ -26,7 +26,7 @@ import { HttpReleaseBuilder, type DeploymentRef, type DeploymentGrant, type Rele
 import { handleOperatorRoute, type Op } from "./routes";
 import { OPERATOR_SCHEMA, SyncCoordinator, type SyncOutcome, type SyncRequest } from "./sync";
 import { installDeploymentSchema } from "./deployment";
-import { rustTenantError, waitForRelease, type OperatorTenantPort } from "./tenant/port";
+import { deleteTenantStorage, rustTenantError, waitForRelease, type OperatorTenantPort } from "./tenant/port";
 
 export interface OperatorObjectEnv extends ControlEnv, OperatorEnv {
   /** Releases, plans and incoming bodies (release.ts). */
@@ -198,7 +198,7 @@ export class OperatorControlObject extends ControlObject {
       controlChanged: (projectId) => this.controlChanged(projectId),
       tenantCounts: (projectId) => this.tenantCounts(projectId),
       provisionTenant: (projectId, tenantId, planId) => this.provisionTenant(projectId, tenantId, planId),
-      deleteTenantStorage: (tenantId) => this.tenantPort(tenantId).operatorDeleteAll(),
+      deleteTenantStorage: (tenantId) => deleteTenantStorage(this.tenantPort(tenantId)),
     };
   }
 

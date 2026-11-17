@@ -22,7 +22,7 @@ import { filesRpc, type FilesTenantRpc } from "../files/rpc";
 import { filesConfigFromEnv } from "../files/config";
 import { reducerFiles } from "../files/reducer";
 import { TenantOperator } from "../../control/operator/tenant/operator";
-import type { OperatorDataSink, RowsQuery, ServedModule } from "../../control/operator/tenant/port";
+import { TENANT_DELETED_REASON, type OperatorDataSink, type RowsQuery, type ServedModule } from "../../control/operator/tenant/port";
 import { TenantMemberships } from "./memberships";
 import type { AssemblyGatewayEnv } from "./gateway";
 import type { BakedRelease } from "./releases";
@@ -449,7 +449,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     const info = { artifactHash: event.hash, clientContract: event.clientContract };
     await Promise.all((await this.registeredGateways()).map((name) => rpc<GatewayRpc>(this.env.GATEWAY, name).moduleReloaded(event.projectId, info)));
   }
-  async operatorDeleteAll() { await this.ctx.storage.deleteAlarm(); await this.ctx.storage.deleteAll(); this.ctx.abort("tenant deleted"); }
+  async operatorDeleteAll() { await this.ctx.storage.deleteAlarm(); await this.ctx.storage.deleteAll(); this.ctx.abort(TENANT_DELETED_REASON); }
   async operatorListTables() { return this.operator.listTables(); }
   async operatorReadRows(table: string, query: RowsQuery) { return this.operator.readRows(table, query); }
   operatorInsertRow(table: string, payload: Record<string, unknown>) { return this.kernel.reducers.serial(() => this.operator.insertRow(table, payload)); }

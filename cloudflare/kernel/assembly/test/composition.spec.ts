@@ -197,3 +197,22 @@ it('R1 real Control-to-Tenant RPC retains the invitation claim without acceptanc
   });
  }
 });
+it('X03 DELETE /dev/tenants: the tenant reset after a completed wipe is success, not a 500 that strands the row in deleting',async()=>{
+ const {deleteTenantStorage}=await import('../../../control/operator/tenant/port');
+ const seed=async()=>{
+  const name=`assembly-delete-${crypto.randomUUID()}`,stub=bindings.TENANT.getByName(name);
+  await runInDurableObject(stub,async(object)=>{
+   const release=await buildReleasePlan(await migrationsFromFiles(files));plans.add(release);
+   await (object as CompositionTenant).activate('p',manifest,release.id);
+  });
+  return name;
+ };
+ const userTables=(name:string)=>runInDurableObject(bindings.TENANT.getByName(name),(_o,state)=>state.storage.sql.exec("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name IN ('board','gonvex_migrations')").one().n as number);
+ // The object's own ctx.abort(TENANT_DELETED_REASON) rejects the raw RPC after deleteAll succeeded (previously a 500 that left the row 'deleting').
+ // Control's deleteTenantStorage resolves for that exact reset and the storage is gone.
+ const wrapped=await seed();expect(await userTables(wrapped)).toBeGreaterThan(0);
+ await expect(deleteTenantStorage(bindings.TENANT.getByName(wrapped) as never)).resolves.toBeUndefined();
+ expect(await userTables(wrapped)).toBe(0);
+ // Any other failure still propagates.
+ await expect(deleteTenantStorage({operatorDeleteAll:async()=>{throw new Error('storage unavailable');}})).rejects.toThrow('storage unavailable');
+});
