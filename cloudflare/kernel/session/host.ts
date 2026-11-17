@@ -222,6 +222,12 @@ export class SocketHost {
     void this.options.ctx.storage.setAlarm(Date.now());
   }
 
+  /** X02: the platform consumed an alarm without host work; arm the earliest host need again. */
+  rearm(): void {
+    this.scheduled = null;
+    this.reschedule();
+  }
+
   /** True when this alarm fired only for a wake: the host's own alarm is re-armed and none of its work is due. */
   wakeOnly(): boolean {
     if (!this.wakePending) return false;

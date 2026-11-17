@@ -206,7 +206,13 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     const entry = this.origin.enter("fresh");
     const stall = this.origin.stalled();
     try {
-      if (this.host.wakeOnly() || this.alarmBody) return;
+      if (this.host.wakeOnly()) return;
+      if (this.alarmBody) {
+        // The platform consumed this alarm, possibly with a deadline the host still has cached:
+        // once the running body ends, forget the cache and arm the next host need again.
+        this.ctx.waitUntil(this.alarmBody.then(() => this.host.rearm(), () => this.host.rearm()));
+        return;
+      }
       const body = original.call(this);
       this.alarmBody = body;
       const settled = body.finally(() => { if (this.alarmBody === body) this.alarmBody = undefined; });

@@ -135,14 +135,18 @@ export function gatedStub<T extends object>(stub: T, origin: CallOrigin): T {
   });
 }
 
-function isNamespace(value: unknown): value is DurableObjectNamespace {
-  return typeof value === "object" && value !== null
-    && typeof (value as DurableObjectNamespace).idFromName === "function" && typeof (value as DurableObjectNamespace).get === "function";
+/**
+ * A Worker binding (service binding, RPC-enabled or not) has `fetch`; a Durable Object namespace
+ * never does. Check it first: an RPC service binding answers ANY member name with a callable
+ * (`idFromName`, `get` included), so namespace duck-typing alone would misclassify it.
+ */
+function isFetcher(value: unknown): value is Fetcher {
+  return typeof value === "object" && value !== null && typeof (value as Fetcher).fetch === "function";
 }
 
-function isFetcher(value: unknown): value is Fetcher {
-  return typeof value === "object" && value !== null && !isNamespace(value) && typeof (value as Fetcher).fetch === "function"
-    && typeof (value as Fetcher).connect === "function";
+function isNamespace(value: unknown): value is DurableObjectNamespace {
+  return typeof value === "object" && value !== null && !isFetcher(value)
+    && typeof (value as DurableObjectNamespace).idFromName === "function" && typeof (value as DurableObjectNamespace).get === "function";
 }
 
 /** Namespace whose stubs are gated. Id helpers stay synchronous and local. */
@@ -166,8 +170,8 @@ export function gatedNamespace<N extends DurableObjectNamespace<any>>(namespace:
 export function gatedEnv<E extends object>(env: E, origin: CallOrigin): E {
   const out: Record<string, unknown> = { ...(env as Record<string, unknown>) };
   for (const [key, value] of Object.entries(out)) {
-    if (isNamespace(value)) out[key] = gatedNamespace(value, origin);
-    else if (isFetcher(value)) out[key] = gatedStub(value, origin);
+    if (isFetcher(value)) out[key] = gatedStub(value, origin);
+    else if (isNamespace(value)) out[key] = gatedNamespace(value, origin);
   }
   return out as E;
 }

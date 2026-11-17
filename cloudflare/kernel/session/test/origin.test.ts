@@ -9,7 +9,7 @@
  * gate the depth ratchets with every frame until the platform refuses the call.
  */
 import { describe, expect, it } from "vitest";
-import { CallOrigin, gatedStub } from "../placement/origin";
+import { CallOrigin, gatedEnv, gatedStub } from "../placement/origin";
 
 const LIMIT = 16;
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -176,5 +176,28 @@ describe("X02 CallOrigin front model", () => {
     origin.enter("fresh");
     await expect(origin.run(() => { throw new Error("refused"); })).rejects.toThrow("refused");
     await expect(origin.run(() => Promise.reject(new Error("remote")))).rejects.toThrow("remote");
+  });
+});
+
+describe("X02 gatedEnv", () => {
+  it("gates an RPC-enabled service binding, which answers every member name with a callable", async () => {
+    const calls: string[] = [];
+    // Like a workerd RPC Fetcher: any property, `fetch`, `idFromName` and `get` included, is a remote method.
+    const service = new Proxy({}, { get: (_t, prop) => typeof prop === "symbol" || prop === "then" ? undefined : (...args: unknown[]) => { calls.push(String(prop)); return Promise.resolve(args.length); } });
+    const namespace = { idFromName: (name: string) => ({ name }), get: () => ({ ping: () => { calls.push("ns.ping"); return Promise.resolve(0); } }) };
+    const origin = new CallOrigin(() => {});
+    const env = gatedEnv({ SERVICE: service, TENANT: namespace, NAME: "plain" }, origin);
+    origin.enter("peer");
+    const rpc = (env.SERVICE as unknown as { report(n: number): Promise<number> }).report(1);
+    const viaNamespace = (env.TENANT.get() as { ping(): Promise<number> }).ping();
+    expect(env.TENANT.idFromName("t")).toEqual({ name: "t" }); // id helpers stay local and synchronous
+    await tick();
+    expect(calls).toEqual([]);
+    expect(origin.stats().waiting).toBe(2);
+    origin.enter("fresh");
+    expect(calls).toEqual(["report", "ns.ping"]);
+    expect(await rpc).toBe(1);
+    expect(await viaNamespace).toBe(0);
+    expect(env.NAME).toBe("plain");
   });
 });
