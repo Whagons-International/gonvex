@@ -223,4 +223,3 @@ export class TenantTransfer {
     return { wiped: true };
   }
 }
-
