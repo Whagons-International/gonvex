@@ -5,6 +5,7 @@
 // integers as INTEGER, booleans as 0/1, arrays as JSON text read with
 // `json_each`.
 
+import { booleanSql } from "../storage/boolean-sql.ts";
 import { debugString, sortedText, type JsonValue } from "./json.ts";
 import { matchExpression } from "./mask.ts";
 import { contextKey, quote, roleOnlyValue, visibilityLiteral, VisibilityError, type VisibilitySet, type VisibilityExpression, type VisibilityPlan } from "./plan.ts";
@@ -141,8 +142,8 @@ function compileExpression(expression: VisibilityExpression, plan: VisibilityPla
     }
     case "and":
     case "or": {
-      const children = expression.children.map((child) => `(${recurse(child)})`);
-      return `(${children.join(expression.operator === "and" ? " AND " : " OR ")})`;
+      const children = expression.children.map((child) => recurse(child));
+      return booleanSql(expression.operator === "and" ? "AND" : "OR", children);
     }
     case "not": {
       const child = expression.children[0]!;
