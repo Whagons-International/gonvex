@@ -23,7 +23,26 @@ export interface GatewayPlacement {
   acquire(connectionId: string): Promise<GatewayAssignment>;
   release(assignment: GatewayAssignment): Promise<void>;
 }
-export interface CapacitySample {
+/** Numeric-only additive wire fields: bc247 controllers accept every value as numeric telemetry. */
+export interface CapacityWindow {
+  windowInstance: number;
+  windowSequence: number;
+  windowStart: number;
+  windowEnd: number;
+  /** Minimum explicitly sampled gauge in the bucket; zero samples means unknown, not empty. */
+  windowSockets: number;
+  windowSocketSamples: number;
+  windowFramesPerSecond: number;
+  windowBytesPerSecond: number;
+  windowDeliveryMs: number;
+  windowQueueAgeMs: number;
+  windowRpcMs: number;
+}
+export const WINDOW_FIELDS = ["windowInstance", "windowSequence", "windowStart", "windowEnd", "windowSockets", "windowSocketSamples",
+  "windowFramesPerSecond", "windowBytesPerSecond", "windowDeliveryMs", "windowQueueAgeMs", "windowRpcMs"] as const;
+export interface CapacitySample extends Partial<CapacityWindow> {
+  /** Current gauge/latency and one reporting interval of throughput, not admission maxima. */
+  currentPressure?: 0 | 1;
   v: 1;
   epoch: number;
   at: number;
@@ -78,6 +97,40 @@ export function parseAssignment(text: string | null): GatewayAssignment | undefi
     return a;
   } catch { return undefined; }
 }
+
+/** Validate/copy bounded internal telemetry. Unknown numeric additions remain skew-compatible but are not stored. */
+export function checkedCapacitySample(input: CapacitySample, now: number): CapacitySample | undefined {
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= Number.MAX_SAFE_INTEGER;
+  if (!input || Object.keys(input).length > 32 || !Object.values(input).every(finite)) return undefined;
+  const base = [input.v, input.epoch, input.at, input.sockets, input.framesPerSecond, input.bytesPerSecond, input.deliveryMs, input.queueAgeMs, input.rpcMs];
+  if (!base.every(finite) || input.v !== 1 || !Number.isSafeInteger(input.epoch) || input.epoch < 1
+    || !Number.isSafeInteger(input.at) || !Number.isSafeInteger(input.sockets)
+    || input.at > now + 1_000 || input.at < now - 30_000) return undefined;
+  if (input.currentPressure !== undefined && input.currentPressure !== 0 && input.currentPressure !== 1) return undefined;
+  const count = WINDOW_FIELDS.filter(key => input[key] !== undefined).length;
+  if (count !== 0 && count !== WINDOW_FIELDS.length) return undefined;
+  const sample: CapacitySample = { v: 1, epoch: input.epoch, at: input.at, sockets: input.sockets,
+    framesPerSecond: input.framesPerSecond, bytesPerSecond: input.bytesPerSecond,
+    deliveryMs: input.deliveryMs, queueAgeMs: input.queueAgeMs, rpcMs: input.rpcMs };
+  if (input.currentPressure === 1 && !pressured(sample)) return undefined;
+  if (input.currentPressure !== undefined) sample.currentPressure = input.currentPressure;
+  if (count) {
+    const w = input as CapacitySample & CapacityWindow;
+    if (w.currentPressure === undefined || ![w.windowInstance, w.windowSequence, w.windowStart, w.windowEnd, w.windowSockets, w.windowSocketSamples].every(Number.isSafeInteger)
+      || w.windowInstance < 1 || w.windowEnd - w.windowStart !== SAMPLE_MS || w.windowEnd > w.at) return undefined;
+    for (const key of WINDOW_FIELDS) sample[key] = w[key];
+  }
+  return Object.freeze(sample);
+}
+export function completedWindow(sample: CapacitySample | null): CapacityWindow | undefined {
+  return sample?.windowInstance === undefined ? undefined : sample as CapacitySample & CapacityWindow;
+}
+export function windowPressured(w: CapacityWindow): boolean {
+  return pressured({ v: 1, epoch: 1, at: w.windowEnd, sockets: w.windowSocketSamples ? w.windowSockets : 0,
+    framesPerSecond: w.windowFramesPerSecond, bytesPerSecond: w.windowBytesPerSecond,
+    deliveryMs: w.windowDeliveryMs, queueAgeMs: w.windowQueueAgeMs, rpcMs: w.windowRpcMs });
+}
+export function freshWindow(w: CapacityWindow, now: number): boolean { return w.windowEnd <= now && now - w.windowEnd <= 2 * SAMPLE_MS; }
 
 /** Provisional protective thresholds; V03 must calibrate them with receiver-applied delay. */
 export function pressured(s: CapacitySample): boolean {
