@@ -15,7 +15,8 @@ export function projectionDigest(rows, keyPath, checks) {
   return hash(JSON.stringify(checks.map(e => ({ key: e.key, values: rows.filter(r => at(r, keyPath) === e.key).map(r => at(r, e.valuePath)) }))));
 }
 export async function loadFixture(file) {
-  const { value: f } = await jsonFile(file.path);
+  const { value: f, hash: digest } = await jsonFile(file.path);
+  if(digest!==file.sha256)refuse('fixture.hash-changed');
   shape(f, ['ownedIds', 'replica', 'liveQueries', 'operations', 'cleanup', 'finalChecks'], 'fixture');
   list(f.ownedIds, 100000, 'ownedIds'); unique(f.ownedIds, 'ownedIds'); f.ownedIds.forEach(id => text(id, 'ownedId'));
   shape(f.replica, ['ref', 'args', 'keyPath'], 'replica'); path(f.replica.ref); path(f.replica.keyPath);

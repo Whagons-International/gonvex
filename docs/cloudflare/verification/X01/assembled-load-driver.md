@@ -39,7 +39,7 @@ Top-level required keys:
 | `tenants` | at most 26 explicit `{alias,tenantId,project,projectId,principals,fixture,dataProvenance}`; `project` is the SDK routing input, `projectId` the authoritative catalog/admission identity; hashed actual copy/schema/data provenance required at execution, never invented memberships |
 | `phases` | at most 32 `{name,stage:'warmup'|'measure'|'cooldown',durationMs,tenants}`; each tenant is `{alias,connections,active,reconnect,rates:[{operation,perSecond}]}` |
 | `mix` | `{kind:'synthetic-stress'|'source-derived',evidence:hashed-file|null}`; source-derived requires sanitized source evidence, never labelled typical merely because it is declared |
-| `telemetry` | `{url,adapter,contractSha256,providerFile}`; nulls keep execution DORMANT. The hashed adapter translates K22's actual typed serving contract into the driver's normalized measurement profile. Contract digest hashes `telemetry.mjs`, **not** a shared serving API proposal |
+| `telemetry` | `{url,adapter,contractSha256,providerFile,providerWindowId,cells,fresh,maxPages,judgment}`; nulls keep execution DORMANT. The hashed adapter translates K22's actual typed serving contract into the driver's normalized measurement profile. Contract digest hashes `telemetry.mjs`, **not** a shared serving API proposal |
 | `budget` | all numeric fields below, with finite enforced ranges |
 | `resourceAdmission` | hashed normal resource-helper receipt or null/DORMANT; not a new approval mechanism or proof that compatibility memory flags enforce caps |
 
@@ -131,34 +131,47 @@ remote quiescence and FIN/OWNER remain UNKNOWN unless independently observed.
 
 Existing authenticated `/__assembly/holders`, `/__assembly/version` and project-auth `/dev/metrics` are partial.
 Holders scans 32 controllers and exposes per-socket labels; metrics has placeholder zeros/empty objects/logs.
-They are not promoted to the new content-free capacity contract. K22 owns the proposed serving adapter after
-its current release; this driver leaves it unbound pending the exact reviewed contract/installed version.
+They are not promoted to the new content-free capacity contract. K22 owns the serving port. Its typed source handoff is now implemented by the driver adapter, while
+independent review/installation/execution binding remain separate ROOT closures.
 
 The actual 471 `/__assembly/version` shape is checked through its existing authenticated fixture gate before
 SDK construction: stable Worker ID, Runtime Worker ID, catalog version, ready and project release mapping.
 This does not substitute for five-component provider/deployment evidence. Old four-component/monolith
 bindings refuse; the current live 864 release is not represented as a Runtime-aware target.
 
-The driver profile validates exact deployment/app/config/resource identities; bounded per-service samples
-(writer, Control, auth, limiter, routing, gateway, builder, Workflow, sandbox); holder/controller identity,
-epochs, original source `at`/windows/mode and drain-blocked count; sample loss and observation mode. Unknown
-service facts are null. Gateway socket/frame/byte/lag/queue/RPC facts must be measured, not placeholders.
-Unknown/lost history refuses eligibility instead of calling it a complete scaling timeline. Cached observations
-retain original timestamps. Fresh probes must be explicitly `bounded-fresh` with induced RPC/wakeup/snapshot
-counts: `Gateway.capacity()` mutates lazy measurement buckets and is not passive/neutral. The missing
-K22-typed transport translation is an explicit external binding, never a guessed HTTP response schema.
-Its reviewed module exports `readCapacity({url,bearer,signal,fetch,readJSON,binding})`; imports and requests
-run inside the same effect boundary. `readJSON` bounds response bytes. No serving stub or fake metric
-implementation is provided. A bound adapter must preserve unavailable statuses as null/UNKNOWN and must
-not map `/dev/metrics` placeholder zeros to measured facts.
+The serving wire remains K22-owned. `capacity-v1.mjs` translates it into the driver-owned normalized
+profile without requiring the server to implement that profile. Cached reads report one catalog and one
+controller RPC attempt: two known attempts, zero holder/snapshot calls, a possible controller wake and
+UNKNOWN actual wakeups. Fresh reads preserve capacity/drain attempt counts and possible snapshot effects;
+failed HTTP responses leave additional RPC effects UNKNOWN. No attempt count is execution attribution.
 
-Cost is a **separate** private `providerFile`, refreshed by an actual reviewed collector. Its closed schema is
-`{v:1,resourceVersions,costAsOfUnixMs,measuredUsd,facts:hashed-file,attribution:hashed-file}`. Driver checks
-resource identities, evidence-file hashes, monotonicity, freshness and the observed budget. Client `runId`
-is only correlation, not cost ownership authority. Invoice/CPU/memory/SQL/bandwidth unavailable from actual
-sources remain UNKNOWN. This code does not invent a provider billing API or a cost estimate from a socket
-count. Stale/missing cost stops; delayed unmetered tail is UNKNOWN, so this is an observed-cost stop, not a
-guarantee on final invoices. Real attribution/provider collection remains an execution dependency.
+Sampler requests/responses/errors/request-loss are separate from the source's last64 event history, whose
+loss is always UNKNOWN. Page COMPLETE is never fleet COMPLETE. Per-cell snapshot digests are compared;
+changed snapshots reset pagination instead of being joined. Original source at/epoch/window values and
+service-clock-skew labels are retained. Latest-bucket duplicates/gaps/restarts are not integrated into exact
+traffic totals. `framesPerSecond` and `bytesPerSecond` retain their rate units; cumulative frames/bytes,
+TLS/billed bytes, service CPU/memory/SQL and inner DO versions remain null/UNAVAILABLE. Drain results keep
+UNKNOWN age and never establish emptiness or OWNER.
+
+Five-component versions, source labels and full config digests are **not** echoed from expected bindings
+as observed facts. Kernel/Runtime/catalog facts come from the actual ports; other physical identities and
+full config/source facts must come from a separate actual provider observation. Missing provider config/
+source labels stay null. `judgment:'bounded-execution'` can collect bounded diagnostic workload evidence
+when actual monitor reads and cost budgeting are usable, while `full-capacity` refuses the still-missing
+history/service/adoption facts. The v1 adapter always reports full capacity NOT_ELIGIBLE; no callbacks,
+partial page coverage or successful bounded execution turn that into PASS.
+
+Cost is a separate private `providerFile`, refreshed by an actual reviewed collector. Its closed schema is
+`{v:1,resourceVersions,identityAsOfUnixMs,sourceSha,configurationSha256,window,facts,attribution}`; `facts`
+and `attribution` are hashed evidence files. The observed window is
+`{id,startUnixMs,asOfUnixMs,baselineCostUsd,totalCostUsd,coverage}`. Its id must match the explicit provider
+window binding; caller runId is correlation only, never ownership authority. Baseline id/start/value are
+immutable through updates. For DATA arithmetic, a lifetime cost of900USD with baseline900USD has run delta0 (not a measured bill): no
+completed future-run cost is required. The budget uses only `totalCostUsd-baselineCostUsd`, emits update
+deltas once, rejects regressions/stale data and requires COMPLETE_TO_ASOF coverage. Incomplete/missing
+collector facts refuse eligibility. Full identity/source or invoice facts unavailable from actual evidence
+remain UNKNOWN. Delayed unmetered tail remains UNKNOWN: this is an observed run-delta stop, not a final
+invoice ceiling or a cost estimate from sockets.
 
 Generator CPU, RSS/heap, event-loop lag, FDs and application-frame bytes are sampled from actual local ports;
 application bytes exclude TLS/billed network overhead. They are never serving-isolate memory measurements.
@@ -173,6 +186,7 @@ Run under the normal resource helper/headroom gate, with existing dependencies a
 
 ```sh
 cd cloudflare
+pnpm exec vitest run --config conformance/capacity/vitest.native.config.mjs
 COREPACK_ENABLE_NETWORK=0 pnpm exec vitest run --config conformance/capacity/vitest.config.mjs
 pnpm exec tsc -p conformance/capacity/tsconfig.json
 node --test conformance/test/*.test.mjs
@@ -183,3 +197,10 @@ tests use a frozen selected-descriptor fixture. `source-audit.json` records actu
 cached compiled SDK's missing receipt method despite its identical version string. Current SDK public calls
 are typechecked directly against source. The Node tests use inert transports/DATA only, not an assembled
 target. Earlier author alias/auth-fixture corrections remain in local logs, not rewritten as runtime evidence.
+
+The native capture/Node-adapter sequencing and final generators/types/cycle/bundle commands are in
+`/mnt/data/work/gonvex-x01/assembled-load-driver-20261117/check-v1.sh` and `qualify471.sh`. They use the
+normal resource/headroom gates. One author launch incorrectly continued after a PSI headroom refusal;
+the unit had exited before the stop request. That attempt is retained and not credited as qualification;
+the helper now exits on gate failure and subsequent qualification is separately gated. No other jobs/caps
+were changed. Parity and the clean30-minute transport gate take priority over later capacity execution.

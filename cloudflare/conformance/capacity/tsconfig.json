@@ -9,5 +9,5 @@
       "@gonvex/module-sdk": ["../../../packages/module-sdk/src/index.ts"]
     }
   },
-  "include": ["types.ts"]
+  "include": ["types.ts", "adapter-types.ts", "worker-types.d.ts"]
 }

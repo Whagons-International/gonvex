@@ -2,7 +2,7 @@ import { Refusal } from './binding.mjs';
 
 /** One owned worker realm. SDK direct socket.send, reconnect and fetch all cross this boundary.
  * Not a sandbox for untrusted modules; reviewed SDK/refs dependency closure is required. */
-export function installEffects({ WebSocket: NativeSocket, fetch: nativeFetch, socketUrl, httpUrls, deadline, budget, signal, now = () => performance.now() }) {
+export function installEffects({ WebSocket: NativeSocket, fetch: nativeFetch, socketUrl, httpUrls, httpUrlAllowed, deadline, budget, signal, now = () => performance.now() }) {
   let stopped = false, opened = 0, sent = 0, received = 0, frames = 0, receivedFrames = 0, nextOpen = 0;
   const sockets = new Set(), requests = new Set();
   const check = () => { if (now() >= deadline || signal?.aborted) stopped = true; if (stopped) throw new Refusal('STOPPED', 'effect-lifetime'); };
@@ -31,7 +31,7 @@ export function installEffects({ WebSocket: NativeSocket, fetch: nativeFetch, so
   }
   const fetch = async (url, options = {}) => {
     check(); const target = String(url instanceof Request ? url.url : url);
-    if (!httpUrls.includes(target)) throw new Refusal('STOPPED', 'fetch-origin');
+    if ((!httpUrls.includes(target)&&!httpUrlAllowed?.(target)) || (options.method!==undefined&&options.method!=='GET')) throw new Refusal('STOPPED', 'fetch-origin/method');
     const controller = new AbortController(); requests.add(controller);
     try { return await nativeFetch(url, { ...options, signal: AbortSignal.any([controller.signal, ...(options.signal ? [options.signal] : [])]) }); }
     finally { requests.delete(controller); }

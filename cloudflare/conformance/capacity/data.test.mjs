@@ -121,23 +121,18 @@ describe('command and receiver evidence DATA', () => {
   });
   it('reports empty latency distribution UNKNOWN and never counts censored timeouts as zeros', () => { expect(distribution([])).toEqual({ samples: 0, p50: null, p95: null, p99: null }); expect(distribution([10, 30]).p95).toBe(30); });
 });
-function sample(b) { return { v: 1, runId: b.runId, sourceSha: b.deployment.sourceSha, moduleSha256: b.deployment.moduleSha256, configSha256: b.deployment.configSha256,
-  resources: b.deployment.resources, sequence: 1, sampledAtUnixMs: 1000, sampleLoss: 0, observation: 'cached', induced: { rpc: 0, wakeups: 0, snapshots: 0 },
-  services: SCOPES.map(scope => ({ scope, id: 'DATA', ...Object.fromEntries(METRICS.map(k => [k, 0])) })), holders: [], events: [], correctness: { duplicateWrites: null, lostWrites: null } }; }
-describe('telemetry DATA', () => {
-  it('keeps unavailable correctness facts UNKNOWN', () => { const b = binding(); expect(validateTelemetry(sample(b), b, undefined, 1000).correctness.lostWrites).toBeNull(); });
-  for (const mutate of [s => s.sampleLoss = 1, s => s.sampleLoss = null, s => s.sourceSha = 'bad', s => s.services[5].rpcMs = null, s => s.correctness.lostWrites = 1, s => s.assembled = true])
-    it('refuses loss, missing/stale cost, wrong identity, missing pressure or correctness failure', () => { const b = binding(), s = sample(b); mutate(s); expect(() => validateTelemetry(s, b, undefined, 1000)).toThrow(); });
-  it('refuses metering lag and replayed observations', () => { const b = binding(), s = sample(b); expect(() => validateTelemetry(s, b, undefined, 2001)).toThrow(); expect(() => validateTelemetry(s, b, s, 1000)).toThrow(); });
-  it('requires separate provider evidence and refuses unknown/stale/threshold cost', () => {
-    const b = binding(), file = { path: '/DATA', sha256: '0'.repeat(64) };
-    const c = { v: 1, resourceVersions: b.deployment.resources, costAsOfUnixMs: 1000, measuredUsd: .1, facts: file, attribution: file };
-    expect(validateCost(c, b, undefined, 1000)).toBe(c);
-    for (const value of [null, 1, NaN]) expect(() => validateCost({ ...c, measuredUsd: value }, b, undefined, 1000)).toThrow();
-    expect(() => validateCost(c, b, undefined, 2001)).toThrow();
-  });
-  it('labels induced observation work and never restamps cached holder evidence', () => {
-    const b = binding(), s = sample(b); s.induced.rpc = 1; expect(() => validateTelemetry(s, b, undefined, 1000)).toThrow();
-    s.observation = 'bounded-fresh'; expect(validateTelemetry(s, b, undefined, 1000).induced.rpc).toBe(1);
-  });
+function sample(b) { return {v:1,runId:b.runId,sourceSha:null,moduleSha256:b.deployment.moduleSha256,configSha256:null,resources:b.deployment.resources,
+ sequence:1,sampledAtUnixMs:1000,sampler:{requests:1,responses:1,requestLoss:0,errors:0},sourceHistory:'UNKNOWN',observation:'cached',
+ induced:{rpcAttempts:2,catalogAttempts:1,controllerAttempts:1,capacityAttempts:0,drainStatusAttempts:0,actualControllerWakeups:null,actualHolderWakeups:null,snapshotMayAdvance:false,socketSampleMayRecord:false,requestsWithUnknownRpcEffects:0,controllerReadMayWake:true,holdersMayWake:false},
+ services:SCOPES.map(scope=>({scope,id:'DATA',...Object.fromEntries(METRICS.map(k=>[k,null]))})),holders:[],events:[],correctness:{duplicateWrites:null,lostWrites:null},port:{pages:[]},
+ eligibility:{boundedExecution:true,fullCapacity:'NOT_ELIGIBLE',reasons:['SOURCE_EVENT_HISTORY_UNKNOWN']}}; }
+export function provider(b,asOf=1000,total=900){return {v:1,resourceVersions:b.deployment.resources,identityAsOfUnixMs:asOf,sourceSha:null,configurationSha256:null,
+ window:{id:b.telemetry.providerWindowId,startUnixMs:1000,asOfUnixMs:asOf,baselineCostUsd:900,totalCostUsd:total,coverage:'COMPLETE_TO_ASOF'},facts:{path:'/DATA',sha256:'0'.repeat(64)},attribution:{path:'/DATA',sha256:'0'.repeat(64)}};}
+describe('measurement judgments DATA',()=>{
+ it('retains UNKNOWN source history while allowing explicitly bounded execution',()=>{const b=binding();expect(validateTelemetry(sample(b),b,undefined,1000).sourceHistory).toBe('UNKNOWN');b.telemetry.judgment='full-capacity';expect(()=>validateTelemetry(sample(b),b,undefined,1000)).toThrow();});
+ it('rejects a rate relabelled as a cumulative counter',()=>{const b=binding(),s=sample(b);s.services.find(v=>v.scope==='gateway').frames=4;expect(()=>validateTelemetry(s,b,undefined,1000)).toThrow();});
+ it('keeps actual wakeups UNKNOWN even though cached requests attempted two RPCs',()=>{const b=binding(),s=sample(b);expect(validateTelemetry(s,b,undefined,1000).induced.rpcAttempts).toBe(2);s.induced.actualControllerWakeups=1;expect(()=>validateTelemetry(s,b,undefined,1000)).toThrow();});
+ it('does not charge lifetime spend; accepts scoped initial baseline and budgets updates by run delta',()=>{const b=binding(),base=provider(b);expect(validateCost(base,b,undefined,1000)).toBe(0);const update=provider(b,1001,900.5);expect(validateCost(update,b,base,1001)).toBe(.5);expect(()=>validateCost(provider(b,1001,901),b,base,1001)).toThrow();});
+ it('rejects changing baselines, incomplete attribution, metering lag or missing measured spend',()=>{const b=binding(),base=provider(b);for(const mutate of [c=>c.window.baselineCostUsd=899,c=>c.window.coverage='UNKNOWN',c=>c.window.totalCostUsd=null,c=>c.window.id='other']){const c=provider(b,1001);mutate(c);expect(()=>validateCost(c,b,base,1001)).toThrow();}expect(()=>validateCost(base,b,undefined,2001)).toThrow();});
+ it('rejects wrong observed five-component identity and replayed telemetry',()=>{const b=binding(),s=sample(b);expect(()=>validateTelemetry(s,b,s,1000)).toThrow();const c=provider(b);c.resourceVersions=c.resourceVersions.slice(0,4);expect(()=>validateCost(c,b,undefined,1000)).toThrow();});
 });

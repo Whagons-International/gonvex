@@ -42,7 +42,7 @@ export function validateBinding(b) {
   if (d.accountId !== '30962192f9607a89eda812daa15e55fa') refuse('account');
   hex(d.sourceSha, 40, 'sourceSha'); hex(d.moduleSha256, 64, 'moduleSha256'); hex(d.configSha256, 64, 'configSha256'); endpoint(d.endpoint, true);
   list(d.resources, 5, 'resources', 5); unique(d.resources.map(r => r.role), 'resource.roles'); text(d.catalogVersion, 'catalogVersion');
-  list(d.catalogReleases, 128, 'catalogReleases'); unique(d.catalogReleases.map(r => r.projectId), 'catalogReleases');
+  list(d.catalogReleases, 2048, 'catalogReleases'); unique(d.catalogReleases.map(r => r.projectId), 'catalogReleases');
   for (const r of d.catalogReleases) { shape(r, ['projectId', 'moduleSha256'], 'catalogRelease'); text(r.projectId, 'projectId'); hex(r.moduleSha256, 64, 'release.module'); }
   for (const r of d.resources) { shape(r, ['role', 'name', 'version'], 'resource');
     if (!['kernel', 'runtime', 'actions', 'builder', 'sandbox'].includes(r.role) || !/^gonvex-cf-dev-[a-z0-9-]+$/.test(r.name)) refuse('resource.identity'); text(r.version, 'resource.version'); }
@@ -66,10 +66,13 @@ export function validateBinding(b) {
   shape(b.budget, [...Object.keys(limits), 'maxUsd'], 'budget');
   for (const [k, [low, high]] of Object.entries(limits)) integer(b.budget[k], low, high, k);
   if (!Number.isFinite(b.budget.maxUsd) || b.budget.maxUsd <= 0) refuse('maxUsd');
-  shape(b.telemetry, ['url', 'adapter', 'contractSha256', 'providerFile'], 'telemetry');
-  if (b.telemetry.url !== null && endpoint(b.telemetry.url).host !== endpoint(d.endpoint, true).host) refuse('telemetry.resource-scope');
+  shape(b.telemetry, ['url', 'adapter', 'contractSha256', 'providerFile', 'providerWindowId', 'cells', 'fresh', 'maxPages', 'judgment'], 'telemetry');
+  if (b.telemetry.url !== null && (endpoint(b.telemetry.url).host !== endpoint(d.endpoint, true).host || endpoint(b.telemetry.url).pathname!=='/__assembly/capacity/v1')) refuse('telemetry.resource-scope/path');
   if (b.telemetry.contractSha256 !== null) hex(b.telemetry.contractSha256, 64, 'telemetry.contractSha256');
   if (b.telemetry.providerFile !== null && !isAbsolute(b.telemetry.providerFile)) refuse('providerFile');
+  text(b.telemetry.providerWindowId, 'providerWindowId'); list(b.telemetry.cells,32,'telemetry.cells'); unique(b.telemetry.cells,'telemetry.cells');
+  b.telemetry.cells.forEach(n=>integer(n,0,31,'telemetry.cell')); integer(b.telemetry.maxPages,1,8,'telemetry.maxPages');
+  if(typeof b.telemetry.fresh!=='boolean'||!['bounded-execution','full-capacity'].includes(b.telemetry.judgment))refuse('telemetry.mode');
   list(b.phases, 32, 'phases'); let duration = 0, offered = 0;
   for (const p of b.phases) {
     shape(p, ['name', 'stage', 'durationMs', 'tenants'], 'phase'); text(p.name, 'phase.name');
@@ -111,5 +114,6 @@ export async function preflight(path) {
   if (b.telemetry.contractSha256 && b.telemetry.contractSha256 !== hash(await readFile(new URL('./telemetry.mjs', import.meta.url)))) missing.push('driver-input-profile-mismatch');
   if (!b.resourceAdmission) missing.push('normal-resource-admission-receipt');
   for (const t of b.tenants) if (!t.dataProvenance) missing.push('tenant-data-provenance');
-  return { state: missing.length ? 'DORMANT' : 'BOUND_NOT_RUNTIME_VERIFIED', missing, binding: b };
+  const freeze=v=>{if(v&&typeof v==='object'){for(const value of Object.values(v))freeze(value);Object.freeze(v);}return v;};
+  return { state: missing.length ? 'DORMANT' : 'BOUND_NOT_RUNTIME_VERIFIED', missing, binding: freeze(b) };
 }

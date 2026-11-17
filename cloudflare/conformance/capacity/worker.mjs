@@ -10,6 +10,7 @@ import { sampleTelemetry, readCost, CONTRACT_SHA256 } from './telemetry.mjs';
 import { sleep } from './schedule.mjs';
 import { distribution } from './statistics.mjs';
 import { versionUrl, readJSON, verifyIdentity } from './identity.mjs';
+import { capacityFetchAllowed } from './capacity-v1.mjs';
 
 const controller = new AbortController();
 parentPort.on('message', m => { if (m === 'stop') { controller.abort(); effects?.stop(); } if (m === 'ack') unacked = Math.max(0, unacked - 1); });
@@ -58,29 +59,29 @@ try {
   handle = await open(`${workerData.out}/receipts.jsonl`, 'wx', 0o600);
   const { writeSync } = await import('node:fs'); file = { writeSync: line => { const data = Buffer.from(line); let n = 0; while (n < data.length) n += writeSync(handle.fd, data, n, data.length - n); } };
   effects = installEffects({ WebSocket: globalThis.WebSocket, fetch: globalThis.fetch, socketUrl: b.deployment.endpoint,
-    httpUrls: [b.telemetry.url, versionUrl(b)], deadline, budget: b.budget, signal: controller.signal });
+    httpUrls: [versionUrl(b)], httpUrlAllowed:target=>capacityFetchAllowed(target,b), deadline, budget: b.budget, signal: controller.signal });
   globalThis.WebSocket = effects.WebSocket; globalThis.fetch = effects.fetch;
   const identity = await readJSON(await fetch(versionUrl(b), { redirect: 'error', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(b.budget.maxTelemetryAgeMs)]), headers: { authorization: `Bearer ${credentials.monitorToken}` } }));
-  verifyIdentity(identity, b); // Existing authenticated typed RUNTIME_CATALOG bridge, before any SDK client construction.
+  const runtimeIdentity=verifyIdentity(identity, b); // Observed partial identity, never echoed expected deployment facts.
   const fixtures = new Map(); for (const t of b.tenants) fixtures.set(t.alias, await loadFixture(t.fixture));
   // Install the realm boundary BEFORE importing the genuine SDK or generated app modules.
   const sdk = await import(pathToFileURL(b.sources.sdk.path).href);
   const { api } = await import(pathToFileURL(b.sources.refs.path).href);
   const { localRuntime } = await import(pathToFileURL(b.sources.localRuntime.path).href);
   loop = monitorEventLoopDelay({ resolution: 20 }); loop.enable();
-  telemetry = await sampleTelemetry(b, credentials.monitorToken, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(b.budget.maxTelemetryAgeMs)]));
   let cost = await readCost(b);
-  emit({ type: 'telemetry', sample: telemetry, measuredUsd: cost.measuredUsd });
+  telemetry = await sampleTelemetry(b, credentials.monitorToken, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(b.budget.maxTelemetryAgeMs)]),cost,runtimeIdentity);
+  emit({ type: 'telemetry', sample: telemetry, measuredUsd: cost.runDeltaUsd });
   const monitor = (async () => {
     while (!controller.signal.aborted) {
       await sleep(b.budget.telemetryIntervalMs, controller.signal); check();
       const before = performance.now(), cpu = process.cpuUsage(), memory = process.memoryUsage(), fds = (await readdir('/proc/self/fd')).length;
       if (memory.rss > b.budget.maxGeneratorRssBytes || fds > b.budget.maxGeneratorFds || loop.max / 1e6 > b.budget.maxLagMs) throw new Refusal('STOPPED', 'generator-resource-budget');
-      const next = await sampleTelemetry(b, credentials.monitorToken, telemetry, AbortSignal.any([controller.signal, AbortSignal.timeout(b.budget.maxTelemetryAgeMs)]));
-      const nextCost = await readCost(b, cost), deltaUsd = nextCost.measuredUsd - cost.measuredUsd; cost = nextCost;
+      const nextCost = await readCost(b, cost), deltaUsd = nextCost.runDeltaUsd - cost.runDeltaUsd; cost = nextCost;
+      const next = await sampleTelemetry(b, credentials.monitorToken, telemetry, AbortSignal.any([controller.signal, AbortSignal.timeout(b.budget.maxTelemetryAgeMs)]),cost,runtimeIdentity);
       telemetry = next;
       emit({ type: 'telemetry', sample: next, generatorCpuMs: (cpu.user + cpu.system) / 1000, generatorRssBytes: memory.rss,
-        generatorHeapBytes: memory.heapUsed, generatorFds: fds, generatorLagMs: loop.max / 1e6, telemetryRpcMs: performance.now() - before, wire: effects.snapshot(), measuredUsd: deltaUsd, costAsOfUnixMs: cost.costAsOfUnixMs });
+        generatorHeapBytes: memory.heapUsed, generatorFds: fds, generatorLagMs: loop.max / 1e6, telemetryRpcMs: performance.now() - before, wire: effects.snapshot(), measuredUsd: deltaUsd, costAsOfUnixMs: cost.window.asOfUnixMs, providerWindow:cost.window });
       loop.reset();
     }
   })().catch(e => { if (!controller.signal.aborted) { stopped = e; controller.abort(); } });
