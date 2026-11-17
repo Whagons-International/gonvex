@@ -56,6 +56,12 @@ pools; vary rates independently per tenant, grow/shrink tenant populations, reta
 rates and request bounded reconnect cohorts. Opening/reopening is paced independently. The current two genuine
 P03 copies and existing credential references do not constitute 26 tenants or 1000 principals. Provisioning is
 a separate future authorized fixture step; no IDs/users/permissions were invented or created here.
+Readiness requests may run concurrently up to `maxPending`, with paced starts. Planned reconnect cohorts
+replace closed clients with fresh SDK clients/subscriptions: public `close()` disposes replica ownership and
+must not be followed by reuse of that disposed client. Actual spontaneous SDK reconnect remains observable
+through connection-state events. These planned cohorts are labelled fresh-client/cold-store, not a claim of
+same-client resume. Measurement starts after readiness; X02's overlapping active-writer/snapshot-storm gate
+still needs its separate scenario and is not qualified by this driver preparation.
 
 ## Fixtures, app calls and observations
 

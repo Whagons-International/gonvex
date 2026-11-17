@@ -1,6 +1,7 @@
 import { Refusal, refuse, hash } from './binding.mjs';
 import { reference, matches, projectionDigest } from './fixture.mjs';
 import { schedule, sleep } from './schedule.mjs';
+import { cohort } from './cohort.mjs';
 
 export async function until(predicate, { check, signal, timeoutMs }) {
   const end = performance.now() + timeoutMs;
@@ -56,14 +57,19 @@ export async function invoke(session, observer, operation, c, context) {
   }
 }
 
-export async function execute({ b, sdk, api, localRuntime, credentials, fixtures, check, signal, emit, beginCleanup }) {
+export async function execute({ b, sdk, api, localRuntime, credentials, fixtures, check, signal, emit, beginCleanup, cancel, awaitClosed }) {
   if (!sdk.GonvexClient || !sdk.GonvexClient.prototype.reducerWithTransactionEvidence) throw new Refusal('UNSUPPORTED', 'SDK.reducerWithTransactionEvidence');
   if (!localRuntime || localRuntime.artifactHash !== b.deployment.moduleSha256) refuse('generated-localRuntime.artifact');
   const sessions = new Map(), cursors = new Map(), visited = new Set(); let sequence = 0, offered = 0, created = 0, closeCalls = 0;
+  let admission = Promise.resolve(), nextOpen = 0;
+  const pacedStart = () => {
+    const next = admission.then(async () => { check(); await sleep(Math.max(0, nextOpen - performance.now()), signal); check(); nextOpen = performance.now() + 1000 / b.budget.opensPerSecond; });
+    admission = next.catch(() => {}); return next;
+  };
   const all = () => [...sessions.values()].flat();
   const close = s => { for (const off of s.off) { try { off(); } catch {} } closeCalls++; s.client.close(); };
   const create = async (tenant, index) => {
-    check(); const principal = tenant.principals[index % tenant.principals.length];
+    await pacedStart(); check(); const principal = tenant.principals[index % tenant.principals.length];
     const credential = credentials.sessions.find(c => c.principal === principal && c.tenantId === tenant.tenantId);
     if (!credential) refuse('principal-pool');
     const fixture = fixtures.get(tenant.alias);
@@ -75,7 +81,7 @@ export async function execute({ b, sdk, api, localRuntime, credentials, fixtures
     const session = { client, fixture, alias: tenant.alias, busy: false, off: [], replica: null };
     created++;
     // Register ownership BEFORE any effectful subscription can fail.
-    sessions.get(tenant.alias).push(session);
+    sessions.get(tenant.alias)[index] = session;
     session.off.push(client.subscribeToConnectionState(state => emit({ type: 'connection', tenantAlias: tenant.alias, sessionAlias: `${tenant.alias}-${index}-${created}`,
       connected: state.isWebSocketConnected ? 1 : 0, connectionAttempts: state.connectionCount, reconnectAttempts: state.connectionRetries })));
     session.replica = client.watchReplica(reference(api, fixture.replica.ref, 'query'), fixture.replica.args);
@@ -97,11 +103,14 @@ export async function execute({ b, sdk, api, localRuntime, credentials, fixtures
         const tenant = b.tenants.find(v => v.alias === t.alias); let pool = sessions.get(t.alias);
         if (!pool) { pool = []; sessions.set(t.alias, pool); }
         while (pool.length > t.connections) close(pool.pop());
-        while (pool.length < t.connections) { await sleep(1000 / b.budget.opensPerSecond, signal); await create(tenant, pool.length); }
-        for (const s of pool.slice(0, t.reconnect)) {
-          check(); s.client.close(); await sleep(1000 / b.budget.opensPerSecond, signal); check(); s.client.connect();
-          await until(() => ready(s, b), { check, signal, timeoutMs: b.budget.setupTimeoutMs });
-        }
+        const limits = { limit: b.budget.maxPending, intervalMs: 1000 / b.budget.opensPerSecond, check, signal, cancel };
+        await cohort(Array.from({ length: t.connections - pool.length }, (_, i) => pool.length + i), index => create(tenant, index), limits);
+        // Public close() disposes the SDK's replica/outbox/watch ownership. A planned fresh-client reconnect
+        // must construct a new client and re-establish its real observations; never close()+connect() reuse.
+        await cohort(Array.from({ length: t.reconnect }, (_, i) => i), async index => {
+          check(); close(pool[index]); await awaitClosed(); check();
+          await create(tenant, index); emit({ type: 'planned-fresh-client-reconnect', tenantAlias: t.alias });
+        }, limits);
       }
       emit({ type: 'population', connected: all().filter(s => s.client.connectionState().isWebSocketConnected).length,
         active: phase.tenants.reduce((n, t) => n + t.active, 0),

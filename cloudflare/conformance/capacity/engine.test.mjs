@@ -13,7 +13,7 @@ function setup() {
   for (const t of b.tenants) credentials.sessions.push({ principal: 'DATA', tenantId: t.tenantId, accountId: 'a', memberId: 'm', token: 'DATA' });
   class Client {
     constructor(_url, options) { this.options = options; this.closed = false; instances.push(this); }
-    close() { this.closed = true; } connect() { this.closed = false; }
+    close() { this.closed = true; this.disposed = true; } connect() { if (this.disposed) throw Error('SDK close is terminal'); this.closed = false; }
     connectionState() { return { isWebSocketConnected: !this.closed, connectionCount: 1, connectionRetries: 0 }; }
     localSessionState() { return 'authenticated'; } activeArtifactHash() { return b.deployment.moduleSha256; }
     tenantAdmission() { return { project: 'DATA', tenantId: this.options.tenant, accountId: 'a', memberId: 'm' }; }
@@ -23,11 +23,12 @@ function setup() {
     reducerWithTransactionEvidence() { throw Error('no write in this DATA test'); }
   }
   return { b, sdk: { GonvexClient: Client }, api: { rows: { kind: 'query', path: 'DATA.rows' } }, localRuntime: { artifactHash: b.deployment.moduleSha256 }, credentials,
-    fixtures: new Map(b.tenants.map(t => [t.alias, f])), check() {}, signal: new AbortController().signal, emit: e => events.push(e), beginCleanup() {}, instances, events };
+    fixtures: new Map(b.tenants.map(t => [t.alias, f])), check() {}, signal: new AbortController().signal, emit: e => events.push(e), beginCleanup() {}, cancel() {}, awaitClosed: async () => {}, instances, events };
 }
 it('runs growing/shrinking tenant rates, active rotation, reconnect and owned cleanup without fabricated durability', async () => {
   const c = setup(); const result = await execute(c);
-  expect(result.execution).toBe('EXECUTED_NOT_VERIFIED'); expect(c.instances).toHaveLength(7); expect(c.instances.every(s => s.closed)).toBe(true);
+  expect(result.execution).toBe('EXECUTED_NOT_VERIFIED'); expect(c.instances).toHaveLength(8); expect(c.instances.every(s => s.closed)).toBe(true);
+  expect(c.events.filter(e => e.type === 'planned-fresh-client-reconnect')).toHaveLength(1);
   expect(c.events.filter(e => e.type === 'offered')).toHaveLength(3); expect(c.events.filter(e => e.type === 'query-response')).toHaveLength(3);
   expect(c.events.filter(e => e.completed)).toHaveLength(0); expect(c.events.at(-1).quiescence).toBe('UNKNOWN');
 });

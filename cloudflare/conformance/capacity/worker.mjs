@@ -86,7 +86,8 @@ try {
   })().catch(e => { if (!controller.signal.aborted) { stopped = e; controller.abort(); } });
   let outcome;
   try { outcome = await execute({ b, sdk, api, localRuntime, credentials, fixtures, check, signal: controller.signal, emit,
-    beginCleanup: () => effects.limitLifetime(b.budget.cleanupTimeoutMs) }); }
+    beginCleanup: () => effects.limitLifetime(b.budget.cleanupTimeoutMs),
+    cancel: () => { controller.abort(); effects.stop(); }, awaitClosed: () => effects.waitClosing(b.budget.cleanupTimeoutMs) }); }
   finally { controller.abort(); effects.stop(); await monitor; }
   await handle.sync(); await handle.close(); handle = undefined; file = undefined;
   parentPort.postMessage({ terminal: true, ...outcome, totals, byStage: stageSummary(), allStagesDurableConfirmation: distribution(confirmations), allStagesReceiverApplied: distribution(applications), futureEffects: 'FENCED_WORKER_TERMINATION_PENDING', admittedServerEffects: 'UNKNOWN' });

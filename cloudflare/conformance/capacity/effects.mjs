@@ -43,6 +43,13 @@ export function installEffects({ WebSocket: NativeSocket, fetch: nativeFetch, so
       while (sockets.size && performance.now() < end) await new Promise(resolve => setTimeout(resolve, Math.min(20, end - performance.now())));
       return { localTransportObjectsRemaining: sockets.size, remoteQuiescence: 'UNKNOWN' };
     },
+    async waitClosing(ms) {
+      const end = performance.now() + ms;
+      while ([...sockets].some(s => s.readyState >= 2)) {
+        check(); if (performance.now() >= end) throw new Refusal('UNKNOWN', 'native-close-timeout');
+        await new Promise(resolve => setTimeout(resolve, Math.min(20, end - performance.now())));
+      }
+    },
     snapshot: () => ({ opened, connectedTransports: sockets.size, sentBytes: sent, receivedBytes: received, sentFrames: frames, receivedFrames }),
     stop() { stopped = true; for (const c of requests) c.abort(); for (const s of sockets) { try { s.close(); } catch {} } },
   };
