@@ -29,11 +29,11 @@ export async function startLocalAssembly({ state, port, vars = {}, deferMs = 150
   const adminKey = vars.GONVEX_ADMIN_KEY ?? randomBytes(24).toString('hex');
   const common = { GONVEX_RUNTIME_VERSION: 'development', GONVEX_ADMIN_KEY: adminKey, GONVEX_PUBLIC_URL: url, GONVEX_ASSEMBLY_FIXTURE_KEY: adminKey, ...vars };
   const paths = [];
-  for (const [name, file, entry] of [['kernel', join(root, 'wrangler.jsonc'), 'releases.js'], ['actions', join(here, 'actions.wrangler.jsonc'), 'action-releases.js'], ['sandbox', join(here, 'sandbox.wrangler.jsonc'), null]]) {
+  for (const [name, file, entry] of [['kernel', join(root, 'wrangler.jsonc'), null], ['runtime', join(here, 'runtime.wrangler.jsonc'), 'releases.js'], ['actions', join(here, 'actions.wrangler.jsonc'), 'action-releases.js'], ['sandbox', join(here, 'sandbox.wrangler.jsonc'), null]]) {
     const config = await load(file), dir = dirname(file);
     config.main = resolve(dir, config.main);
     config.alias = Object.fromEntries(Object.entries(config.alias ?? {}).map(([key, value]) => [key, resolve(dir, value)]));
-    if (entry) config.alias[name === 'kernel' ? 'gonvex:releases' : 'gonvex:action-releases'] = join(generated, entry);
+    if (entry) config.alias[name === 'runtime' ? 'gonvex:releases' : 'gonvex:action-releases'] = join(generated, entry);
     config.vars = { ...config.vars, ...common };
     if (name === 'kernel') {
       if (placement === 'static-one-holder') {
@@ -49,16 +49,22 @@ export async function startLocalAssembly({ state, port, vars = {}, deferMs = 150
   }
   const children = [];
   const logs = [];
+  let childError;
   const launch = (name, command, args, env) => {
     const log = createWriteStream(join(state, `${name}.log`), { mode: 0o600 }); logs.push(log);
     const child = spawn(command, args, { cwd: root, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', CI: '1', NO_COLOR: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    child.once('error',error=>{childError=error;});
     child.stdout.pipe(log); child.stderr.pipe(log); children.push(child); return child;
   };
   const kill = (signal) => { for (const child of children) { try { process.kill(-child.pid, signal); } catch {} } };
   const onExit = () => kill('SIGKILL'); process.once('exit', onExit);
-  const stop = async () => { kill('SIGTERM'); await delay(500); kill('SIGKILL'); for (const log of logs) log.end(); process.removeListener('exit', onExit); };
+  const stop = async () => {
+    const exited=Promise.all(children.map(child=>child.exitCode!==null||child.signalCode!==null?undefined:new Promise(resolve=>child.once('exit',resolve))));
+    kill('SIGTERM');await Promise.race([exited,delay(500)]);kill('SIGKILL');await exited;
+    await Promise.all(logs.map(log=>new Promise(resolve=>log.end(resolve))));process.removeListener('exit', onExit);
+  };
   try {
-    launch('builder', process.execPath, [join(root, 'control/operator/builder/server.mjs')], {
+    const builder=launch('builder', process.execPath, [join(root, 'control/operator/builder/server.mjs')], {
       GONVEX_RELEASE_BUILDER_TOKEN: token, GONVEX_KERNEL_URL: url, GONVEX_BUILDER_PORT: String(builderPort),
       GONVEX_KERNEL_GENERATED_DIR: generated, GONVEX_KERNEL_STAGING_DIR: join(state, 'release-pieces'), GONVEX_DEPLOY_DEFER_MS: String(deferMs),
     });
@@ -66,8 +72,10 @@ export async function startLocalAssembly({ state, port, vars = {}, deferMs = 150
     const worker = launch('workerd', join(root, 'node_modules/.bin/wrangler'), args, {});
     const deadline = Date.now() + 60_000;
     for (;;) {
+      if(childError)throw childError;
       if (worker.exitCode !== null) throw new Error(`workerd exited ${worker.exitCode}; see ${join(state, 'workerd.log')}`);
-      try { if ((await fetch(`${url}/healthz`)).ok) break; } catch {}
+      if (builder.exitCode !== null) throw new Error(`builder exited ${builder.exitCode}; see ${join(state, 'builder.log')}`);
+      try { if ((await fetch(`${url}/healthz`)).ok&&(await fetch(`http://127.0.0.1:${builderPort}/healthz`)).ok) break; } catch {}
       if (Date.now() > deadline) throw new Error(`assembly did not become healthy; see ${join(state, 'workerd.log')}`);
       await delay(100);
     }

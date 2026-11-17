@@ -1,14 +1,15 @@
 import { checkedCapacitySample, WINDOW_FIELDS, SAMPLE_MS, type CapacitySample, type DrainResult } from "../gateway/placement";
 import { gatewayShards } from "../session/placement/gateway";
 import { rpc } from "../session/rpc";
+import type { CatalogPort } from "./catalog-port";
 import { CAPACITY_LIMITS as LIMITS, type CapacityPage, type CapacityQuery, type CapacityRead, type CapacitySlot,
   type CapacityObservation, type CapacityEvent, type CapacityIdentity, type CapacityError, type ReadFailure } from "./capacity-contract";
 
 export interface CapacityEnv {
   GATEWAY: DurableObjectNamespace<any>; GATEWAY_CONTROLLER?: DurableObjectNamespace<any>;
+  RUNTIME_CATALOG?: Fetcher;
   GONVEX_GATEWAY_SHARDS?: string; GONVEX_RUNTIME_VERSION?: string; WORKER_VERSION?: WorkerVersionMetadata;
 }
-interface Catalog { version?: string; releases: Record<string, { project: string; hash: string; generation: number }> }
 interface StatusPort { status(): Promise<unknown> }
 interface HolderPort { capacity(epoch: number): Promise<unknown>; drainStatus(): Promise<unknown> }
 type RecordValue = Record<string, unknown>;
@@ -113,20 +114,34 @@ async function bounded<T>(call: () => Promise<T>, signal: AbortSignal, deadline:
   } catch (error) { return { status: error instanceof Refusal ? error.status : "RPC_FAILED" }; }
   finally { if (timer !== undefined) clearTimeout(timer); signal.removeEventListener("abort", onAbort); }
 }
-async function identity(env: CapacityEnv, catalog: Catalog): Promise<CapacityIdentity> {
-  const tuples: [string, string, number][] = [];
-  let valid = label(catalog.version) && Object.keys(catalog.releases).length <= 2048;
-  for (const [key, r] of Object.entries(catalog.releases).slice(0, 2048)) {
-    if (!label(key) || !r || r.project !== key || !label(r.hash) || !integer(r.generation, 1)) { valid = false; break; }
-    tuples.push([key, r.hash, r.generation]);
+function workerVersion(w: unknown): CapacityIdentity["worker"] {
+  return object(w, ["id", "tag", "timestamp"]) && label(w.id) && (w.tag === "" || label(w.tag)) && typeof w.timestamp === "string" && w.timestamp.length <= 64
+    ? { id: w.id, tag: w.tag, timestamp: w.timestamp } : null;
+}
+async function identity(env: CapacityEnv, source: CapacityRead<unknown>): Promise<CapacityIdentity> {
+  let catalog: CapacityIdentity["catalog"] = source.status === "OK" ? { status: "MALFORMED" } : source;
+  let runtimeWorker: CapacityIdentity["runtimeWorker"] = null;
+  if (source.status === "OK") {
+    const input = source.value, tuples: [string, string][] = [];
+    if (object(input, ["version", "worker", "releases"]) && label(input.version) && input.releases !== null && typeof input.releases === "object" && !Array.isArray(input.releases)
+      && Object.keys(input.releases).length <= 2048) {
+      let valid = true;
+      for (const [key, hash] of Object.entries(input.releases)) {
+        if (!label(key) || !label(hash)) { valid = false; break; }
+        tuples.push([key, hash]);
+      }
+      if (valid) {
+        tuples.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+        runtimeWorker = workerVersion(input.worker);
+        catalog = bytes(input) > LIMITS.catalogReplyBytes ? { status: "OVERSIZED" } : { status: "OK", value: {
+          originService: "runtime-catalog", sourceInterface: "RuntimeCatalog.identity", version: input.version,
+          projects: tuples.length, releasesSha256: await digest(tuples), generation: "UNAVAILABLE_IDENTITY_PORT_HAS_HASHES_ONLY" } };
+      }
+    }
   }
-  tuples.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  const config = { controllerBindingPresent: !!env.GATEWAY_CONTROLLER, staticGatewayShards: gatewayShards(env) };
-  const w = env.WORKER_VERSION;
-  return { originService: "kernel-http", worker: w && label(w.id) && (w.tag === "" || label(w.tag)) && typeof w.timestamp === "string" && w.timestamp.length <= 64
-    ? { id: w.id, tag: w.tag, timestamp: w.timestamp } : null,
-    runtimeLabel: label(env.GONVEX_RUNTIME_VERSION) ? env.GONVEX_RUNTIME_VERSION : null,
-    catalog: valid ? { status: "OK", value: { version: catalog.version!, projects: tuples.length, tuplesSha256: await digest(tuples) } } : { status: "MALFORMED" },
+  const config = { controllerBindingPresent: !!env.GATEWAY_CONTROLLER, runtimeCatalogBindingPresent: !!env.RUNTIME_CATALOG, staticGatewayShards: gatewayShards(env) };
+  return { originService: "kernel-http", worker: workerVersion(env.WORKER_VERSION), runtimeWorker,
+    runtimeLabel: label(env.GONVEX_RUNTIME_VERSION) ? env.GONVEX_RUNTIME_VERSION : null, catalog,
     config: { ...config, factsSha256: await digest(config) }, objectCodeVersions: "UNAVAILABLE_NO_OBJECT_VERSION_PORT" };
 }
 const unavailable = Object.freeze([
@@ -140,19 +155,24 @@ function json(value: CapacityPage | CapacityError, statusCode = 200): Response {
   return new Response(text, { status: statusCode, headers: { "content-type": "application/json", "cache-control": "no-store", ...(statusCode === 405 ? { allow: "GET" } : {}) } });
 }
 /** Called ONLY after fixtureControl's existing bearer gate. Never acquires/observes/drains. */
-export async function capacityPage(request: Request, env: CapacityEnv, catalog: Catalog): Promise<Response> {
+export async function capacityPage(request: Request, env: CapacityEnv): Promise<Response> {
   if (request.method !== "GET") return json({ v: 1, error: "METHOD" }, 405);
   const q = capacityQuery(new URL(request.url));
   if (!q) return json({ v: 1, error: "BAD_QUERY" }, 400);
   if (request.signal.aborted) return json({ v: 1, error: "ABORTED" }, 499);
   const at = Date.now(), deadline = at + LIMITS.requestMs;
-  const result: CapacityPage = { v: 1, at, runId: q.runId, mode: q.fresh ? "fresh" : "cached", pageStatus: "PARTIAL", identity: await identity(env, catalog),
+  let catalogIdentityCalls = 0;
+  const catalogRead: CapacityRead<unknown> = env.RUNTIME_CATALOG ? await bounded(() => {
+    catalogIdentityCalls++; return (env.RUNTIME_CATALOG as unknown as CatalogPort).identity();
+  }, request.signal, deadline, LIMITS.catalogMs) : { status: "NOT_BOUND" };
+  const result: CapacityPage = { v: 1, at, runId: q.runId, mode: q.fresh ? "fresh" : "cached", pageStatus: "PARTIAL", identity: await identity(env, catalogRead),
     controller: { status: "NOT_BOUND" }, coverage: null, slots: [], events: [], unavailable,
-    provenance: { clock: "UNIX_MS_SERVICE_CLOCKS_NOT_SYNCHRONIZED", controllerStatusCalls: 0, capacityCalls: 0, drainStatusCalls: 0,
+    provenance: { clock: "UNIX_MS_SERVICE_CLOCKS_NOT_SYNCHRONIZED", catalogIdentityCalls, controllerStatusCalls: 0, capacityCalls: 0, drainStatusCalls: 0,
       controllerReadMayWake: true, freshMayWakeHolders: false, metricsSnapshotMayAdvance: false, socketSampleMayBeRecorded: false,
       drainResult: "LAST_TRACKED_RESULT_NO_RESULT_TIMESTAMP", cancellation: "STOPS_FURTHER_CALLS_INFLIGHT_RPC_NOT_CANCELLED",
       runId: "CORRELATION_ONLY_NOT_COST_ATTRIBUTION", history: "LAST_64_EVENTS_NO_COMPLETE_TIMELINE_OR_LOSS_COUNTER",
       windowHistory: "LATEST_COMPLETED_BUCKET_ONLY_GAPS_REQUIRE_CLIENT_COMPARISON", sockets: "CURRENT_GAUGE_AND_BUCKET_SAMPLED_MIN_NOT_CONTINUOUS_OCCUPANCY" } };
+  if (catalogRead.status === "TIMEOUT" || catalogRead.status === "ABORTED") { result.controller = { status: "NOT_SELECTED" }; return json(result); }
   if (!env.GATEWAY_CONTROLLER) return json(result);
   const read = await bounded(() => {
     result.provenance.controllerStatusCalls++;
@@ -172,7 +192,7 @@ export async function capacityPage(request: Request, env: CapacityEnv, catalog: 
     events: { ...coverage(q.eventCursor, q.eventLimit, s.events.length), sourceLimit: 64, loss: "UNKNOWN", oldestAt: s.events[0]?.at ?? null, newestAt: s.events.at(-1)?.at ?? null },
     pagination: "COMPARE_CONTROLLER_SNAPSHOT_SHA256" };
   result.slots = s.slots.slice(q.cursor, q.cursor + q.limit); result.events = s.events.slice(q.eventCursor, q.eventCursor + q.eventLimit);
-  result.pageStatus = "COMPLETE";
+  result.pageStatus = result.identity.catalog.status === "OK" ? "COMPLETE" : "PARTIAL";
   if (!q.fresh) return json(result);
   let next = 0, stopped: "TIMEOUT" | "ABORTED" | null = null;
   const stop = (read: CapacityRead<unknown>) => {

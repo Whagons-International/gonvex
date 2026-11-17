@@ -40,7 +40,8 @@ prove losslessness: retained oldest/newest timestamps are reported and loss is
 explicitly UNKNOWN. Other31cells, earlier events and inter-page changes are
 outside this page. The bridge keeps no additional history.
 
-Cached mode calls only `GatewayControllerObject.status()` once. It copies
+Cached mode calls the existing private `RuntimeCatalog.identity()` once and
+`GatewayControllerObject.status()` once; it makes no holder calls. It copies
 actual slot modes, original sample.at/window identity, pressure evidence and
 event facts. It does not restamp sample ages or prune expired leases. Null
 samples remain UNKNOWN. Staleness is computed against the HTTP service's wall
@@ -60,8 +61,8 @@ reply retains its original sample and makes the page PARTIAL.
 This observer is **not passive**: controller status can wake/read its DO;
 capacity can wake the holder, restore its existing lifecycle and invoke
 `GatewayMetrics.snapshot`. Snapshot can seal/advance a bucket and records a
-socket sample in the current bucket. The reply records actual capacity/drain
-call counts and these effects. A completed `windowSockets` is the minimum of
+socket sample in the current bucket. The reply records capacity/drain RPC attempt
+counts (not execution/completion attribution) and these effects. A completed `windowSockets` is the minimum of
 actual in-bucket socket observations, with `windowSocketSamples`; zero samples
 means UNKNOWN, not measured empty/quiet. It is not continuous occupancy.
 Window instance/sequence/start/end are copied; skipped history is not invented.
@@ -71,8 +72,11 @@ Normal wake/recovery work can have ordinary side effects even though this
 facade invokes only read ports. It never refreshes a lease or changes scaler
 thresholds, maturity, cooldown, capacity ceilings or drain eligibility.
 
-Budgets are source constants: controller1500ms, each holder RPC750ms, overall
-request5000ms, at most2RPCs in flight, at most1controller+8holder calls. A holder
+Budgets are source constants: runtime catalog750ms, controller1500ms, each
+holder RPC750ms, overall request6000ms, at most2RPCs in flight, at most
+1catalog+1controller+8holder calls. Catalog timeout/abort stops the request
+before controller/holder calls; no uncancellable catalog RPC is left alongside
+further fanout. A holder
 timeout/abort stops scheduling further calls, including drainStatus, so an
 uncancellable timed-out RPC does not permit unlimited replacement calls.
 Workers RPC cancellation is unavailable here: in-flight calls may finish after
@@ -81,16 +85,20 @@ global log or retained per-run state. Pre-abort returns499; later abort becomes
 typed ABORTED. Timers/listeners are removed after each call. A raw exception is
 never serialized. All replies are no-store JSON, capped at32768UTF8bytes; a
 budget overflow returns503 `RESPONSE_BUDGET`. Input ports enforce64slots,
-64events, known field/type/name/cell bounds and96KiB controller/4KiB holder
+64events, known field/type/name/cell bounds and512KiB catalog/96KiB controller/4KiB holder
 budgets. Unknown/malformed fields are refused before projection, never echoed.
 The existing controller120KiB persisted-state guard is unchanged.
 
 Identity reports the HTTP Worker's **actual** existing WORKER_VERSION metadata
-when present, the nonsecret configured runtime label, generated catalog version,
-project count and SHA256 over sorted `[project,hash,generation]` tuples. IDs and
-manifests are not returned. Catalog identity is bounded to2048entries with
-bounded scalar fields. Config facts/digest cover only controller-binding
-presence and existing static shard fallback; they are **not** a provider
+when present, the nonsecret configured runtime label and the actual private
+`RuntimeCatalog.identity()` reply. Runtime-service Worker metadata is distinct
+from HTTP Worker metadata. The catalog version, project count and SHA256 over
+sorted `[project,hash]` pairs are returned; project IDs and manifests are not.
+This existing port exports no generations: generation is explicitly
+UNAVAILABLE_IDENTITY_PORT_HAS_HASHES_ONLY, never inferred from a catalog label.
+The stable Worker imports no generated application code. Catalog identity is
+bounded to2048entries with bounded scalar fields and512KiB. Config facts/digest
+cover only controller/runtime-catalog binding presence and static shard fallback; they are **not** a provider
 settings/binding-namespace audit. No `assembled:true` or `autoscaling:true`
 assertion substitutes for measurements. The existing version port is HTTP
 code identity, not proof of inner DO code adoption. Holder/controller code

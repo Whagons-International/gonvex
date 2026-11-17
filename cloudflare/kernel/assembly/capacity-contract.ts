@@ -3,8 +3,8 @@ import type { CapacitySample, DrainResult } from "../gateway/placement";
 
 export const CAPACITY_PATH = "/__assembly/capacity/v1";
 export const CAPACITY_LIMITS = Object.freeze({ slots: 4, events: 16, responseBytes: 32 * 1024,
-  controllerReplyBytes: 96 * 1024, holderReplyBytes: 4096, concurrency: 2,
-  controllerMs: 1500, holderMs: 750, requestMs: 5000, cachedStaleMs: 30_000 });
+  catalogReplyBytes: 512 * 1024, controllerReplyBytes: 96 * 1024, holderReplyBytes: 4096, concurrency: 2,
+  catalogMs: 750, controllerMs: 1500, holderMs: 750, requestMs: 6000, cachedStaleMs: 30_000 });
 export type ReadFailure = "NOT_BOUND" | "TIMEOUT" | "ABORTED" | "RPC_FAILED" | "MALFORMED"
   | "OVERSIZED" | "EPOCH_MISMATCH" | "NOT_REQUESTED" | "NOT_SELECTED" | "RETIRED";
 export type CapacityRead<T> = { status: "OK"; value: T } | { status: ReadFailure };
@@ -32,9 +32,11 @@ export interface CapacityIdentity {
   originService: "kernel-http";
   /** HTTP Worker only. This does not attribute code execution inside a DO. */
   worker: { id: string; tag: string; timestamp: string } | null;
+  runtimeWorker: { id: string; tag: string; timestamp: string } | null;
   runtimeLabel: string | null;
-  catalog: CapacityRead<{ version: string; projects: number; tuplesSha256: string }>;
-  config: { controllerBindingPresent: boolean; staticGatewayShards: number; factsSha256: string };
+  catalog: CapacityRead<{ originService: "runtime-catalog"; sourceInterface: "RuntimeCatalog.identity";
+    version: string; projects: number; releasesSha256: string; generation: "UNAVAILABLE_IDENTITY_PORT_HAS_HASHES_ONLY" }>;
+  config: { controllerBindingPresent: boolean; runtimeCatalogBindingPresent: boolean; staticGatewayShards: number; factsSha256: string };
   objectCodeVersions: "UNAVAILABLE_NO_OBJECT_VERSION_PORT";
 }
 export interface CapacityCoverage { cursor: number; limit: number; returned: number; total: number; nextCursor: number | null; hasMore: boolean }
@@ -49,7 +51,7 @@ export interface CapacityPage {
   slots: CapacitySlot[]; events: CapacityEvent[];
   provenance: {
     clock: "UNIX_MS_SERVICE_CLOCKS_NOT_SYNCHRONIZED";
-    controllerStatusCalls: number; capacityCalls: number; drainStatusCalls: number;
+    catalogIdentityCalls: number; controllerStatusCalls: number; capacityCalls: number; drainStatusCalls: number;
     controllerReadMayWake: true; freshMayWakeHolders: boolean;
     metricsSnapshotMayAdvance: boolean; socketSampleMayBeRecorded: boolean;
     drainResult: "LAST_TRACKED_RESULT_NO_RESULT_TIMESTAMP";

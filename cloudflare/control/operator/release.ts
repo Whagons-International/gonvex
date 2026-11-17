@@ -72,7 +72,7 @@ export interface ActiveRelease {
 }
 
 export interface DeploymentRef { id: string; fence: number; version: string }
-export type DeploymentGrant = {allowed:true;catalog:ActiveRelease[]} | {allowed:false;completed?:boolean;serving?:boolean};
+export type DeploymentGrant = {allowed:true;catalog:ActiveRelease[];recovery?:true} | {allowed:false;completed?:boolean;serving?:boolean};
 
 /**
  * Build calls are idempotent per (project, hash); serving writes are fenced
@@ -103,7 +103,7 @@ export interface ReleaseBuilder {
    * the response. Locally it waits for the deferred file swap; a restart-cut
    * response is resumed by the CLI with the same publication request ID.
    */
-  deploy(version: string, publication?: DeploymentRef): Promise<{ ok: true } | { ok: false; error: string }>;
+  deploy(version: string, publication?: DeploymentRef): Promise<{ ok: true } | { ok: false; error: string; retain?:true }>;
   /** Serialized after target execution; only this barrier can abandon a publication. */
   abort?(publication: DeploymentRef, error: string): Promise<{ok:true}>;
 }
@@ -165,7 +165,7 @@ export class HttpReleaseBuilder implements ReleaseBuilder {
     return this.call<{ ok: true; version: string } | { ok: false; error: string }>("/activate", { releases });
   }
   deploy(version: string, publication?: DeploymentRef) {
-    return this.call<{ ok: true } | { ok: false; error: string }>("/deploy", { version, ...(publication ? {publication} : {}) });
+    return this.call<{ ok: true } | { ok: false; error: string; retain?:true }>("/deploy", { version, ...(publication ? {publication} : {}) });
   }
   abort(publication: DeploymentRef, error: string) { return this.call<{ok:true}>("/abort",{publication,error}); }
 }
