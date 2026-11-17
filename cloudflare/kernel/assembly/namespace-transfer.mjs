@@ -84,7 +84,7 @@ export async function transferTenantNamespace(plan,{deploy,topology,namespace,co
   await save('bridge');await apply(bridge.path);
  }
  const state=await topology('freeze');if(!state.frozen||state.deployment)throw new Error('Control did not freeze an idle publisher');
- const sorted=rows=>JSON.stringify([...rows].sort((a,b)=>a.project.localeCompare(b.project)));if(sorted(state.releases)!==sorted(plan.catalog))throw new Error('active catalog changed; rebuild bridge while frozen');
+ const sorted=rows=>JSON.stringify(rows.map(({project,hash,generation})=>({project,hash,generation})).sort((a,b)=>a.project.localeCompare(b.project)));if(sorted(state.releases)!==sorted(plan.catalog))throw new Error('active catalog changed; rebuild bridge while frozen');
  if(targetId!==original){
 
  // Target must not already own a tenant namespace: expecting-transfer, never create.

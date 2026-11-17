@@ -93,3 +93,17 @@ test('a stable socket-owner namespace cannot change during transfer or be recapt
  await assert.rejects(transferTenantNamespace(plan,options),/stable socket-owner namespace changed/);
  assert.deepEqual(calls,[]);
 }));
+
+test('catalog equality ignores property insertion order while preserving tuple values',()=>owned(async dir=>{
+ const entry=join(dir,'catalog.js');await writeFile(entry,'export const releases={}; export const version="bootstrap";');
+ const catalog=[{project:'project-a',hash:'hash-a',generation:1}];
+ const plan=await transferConfigs('gonvex-cf-dev-topology',dir,{catalogEntry:entry,actionCatalogEntry:entry,catalog});
+ let target=null;
+ const result=await transferTenantNamespace(plan,{
+  namespace:async name=>name===plan.sourceName?'original':target,
+  topology:async()=>({frozen:true,deployment:null,releases:[{generation:1,hash:'hash-a',project:'project-a'}]}),
+  deploy:async path=>{if(path===plan.phases[2].path)target='original';},
+ });
+ assert.equal(result.namespaceId,'original');
+ assert.equal(result.frozen,true);
+}));
