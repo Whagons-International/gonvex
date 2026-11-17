@@ -5,6 +5,8 @@ interface Env {
   GONVEX_RELEASE_BUILDER_TOKEN: string;
   GONVEX_KERNEL_URL: string;
   GONVEX_KERNEL_SCRIPT: string;
+  /** Release source SHA set by the release that deployed this builder and its image. */
+  GONVEX_RUNTIME_VERSION?: string;
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_API_TOKEN: string;
 }
@@ -25,6 +27,7 @@ export class ReleaseBuilderContainer extends DurableObject<Env> {
         GONVEX_KERNEL_SCRIPT: this.env.GONVEX_KERNEL_SCRIPT,
         GONVEX_KERNEL_GENERATED_DIR: "/gonvex/cloudflare/kernel/assembly/.generated",
         GONVEX_BUILDER_TARGET: "wrangler",
+        GONVEX_SOURCE_VERSION: this.env.GONVEX_RUNTIME_VERSION ?? "",
         CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
       } });

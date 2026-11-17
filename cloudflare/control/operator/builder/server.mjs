@@ -99,7 +99,7 @@ const target =
         if((await api('')).id!==credentials.accountId)throw new Error('deployment account identity differs');
         for(const kind of ['actions','runtime'])if(!await api(`/workers/scripts/${process.env.GONVEX_KERNEL_SCRIPT}-${kind}/settings`,{missing:true}))throw new Error('application companion is missing; framework setup required');
         await deployConfig(['deploy','--config',path,'--keep-vars'],credentials,generatedDir);
-      })
+      }, process.env.GONVEX_SOURCE_VERSION)
     : new LocalTarget(generatedDir, Number(process.env.GONVEX_DEPLOY_DEFER_MS ?? '1500'), stagingDir);
 
 // app.js lives at <generated>/releases/<project>/<hash>/app.js: three levels below the generated dir.

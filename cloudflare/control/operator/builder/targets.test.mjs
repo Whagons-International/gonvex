@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
-import {WranglerTarget} from './targets.mjs';
+import {WranglerTarget,releaseSourceLabel} from './targets.mjs';
 import {transferConfigs,transferTenantNamespace} from '../../../kernel/assembly/namespace-transfer.mjs';
 const owned=async fn=>{const dir=await mkdtemp(join(tmpdir(),'gonvex-topology-'));try{await fn(dir);}finally{await rm(dir,{recursive:true,force:true});}};
 test('app deployment replaces only runtime and Actions; stable socket owner is never a target',()=>owned(async dir=>{
@@ -12,6 +12,18 @@ test('app deployment replaces only runtime and Actions; stable socket owner is n
  assert.equal(sent[0].config.durable_objects.bindings.find(b=>b.name==='TENANT').script_name,'gonvex-cf-dev-topology-runtime');
  assert.equal(runtime.limits.cpu_ms,30000);
  assert.equal(runtime.vars.GONVEX_TOPOLOGY_TRANSITION,'0'); // --keep-vars must clear a retained bridge guard.
+}));
+test('app deployment records the release source label, never the committed development default',()=>owned(async dir=>{
+ const sha='af7e6b83ce19a1ee4d5f83e5c7a75b67402eebee',files=new Map([['releases.js','export const releases={};'],['action-releases.js','export const releases={};']]);
+ const sent=[];const target=new WranglerTarget(dir,'gonvex-cf-dev-topology',async(path,name)=>sent.push({name,vars:JSON.parse(await readFile(path)).vars}),sha);
+ await target.stage(files,'v1');await target.deploy('v1');
+ assert.deepEqual(sent.map(x=>x.vars.GONVEX_RUNTIME_VERSION),[sha,sha]);
+ for(const source of [undefined,'','development','af7e6b83']){
+  const unlabeled=[];const t=new WranglerTarget(dir,'gonvex-cf-dev-topology',async path=>unlabeled.push(JSON.parse(await readFile(path)).vars),source);
+  await t.stage(files,'v1');await t.deploy('v1');
+  assert.ok(unlabeled.every(v=>!('GONVEX_RUNTIME_VERSION' in (v??{}))),'unlabeled builder must leave the deployed label to --keep-vars');
+ }
+ assert.equal(releaseSourceLabel('DEVELOPMENT'),null);
 }));
 test('component write failure is uncertain and a retry deploys the same catalog only to Actions/runtime',()=>owned(async dir=>{
  const calls=[];let fail=true;
