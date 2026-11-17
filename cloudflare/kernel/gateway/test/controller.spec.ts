@@ -1,7 +1,8 @@
 import { env, evictDurableObject, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { GatewayControllerObject } from "../controller";
 import { ASSIGNMENT_HEADER, controllerCell, MAX_PENDING, LEASE_MS, SCALE_IN_MS, type GatewayAssignment } from "../placement";
+import { GatewayMetrics } from "../metrics";
 import { handleWebSocketUpgrade } from "../../session/router";
 
 type Bindings = Env & { GATEWAY_CONTROLLER: DurableObjectNamespace<GatewayControllerObject> };
@@ -94,11 +95,27 @@ describe("X01 durable placement in workerd (package harness)", () => {
     await runInDurableObject(c, async (_object, state) => {
       const s = await state.storage.get<any>("placement");
       s.slots[0].changedAt = Date.now() - 61_000;
-      s.slots[0].pressuredSince = Date.now() - 11_000;
       await state.storage.put("placement", s);
     });
-    await c.observe(a.gateway, { v: 1, epoch: a.epoch, at: Date.now(), sockets: 1,
-      framesPerSecond: 0, bytesPerSecond: 5 * 1024 * 1024, deliveryMs: 0, queueAgeMs: 0, rpcMs: 0 });
+    const windows = await runInDurableObject(bindings.GATEWAY.getByName(a.gateway), (object) => {
+      const now = Date.now(), clock = vi.spyOn(Date, "now");
+      try {
+        clock.mockReturnValue(now - 10_000); const metrics = new GatewayMetrics(); metrics.delivery(150);
+        clock.mockReturnValue(now - 5_000); metrics.delivery(150); const first = metrics.snapshot(a.epoch, 1);
+        clock.mockReturnValue(now); metrics.delivery(150); const second = metrics.snapshot(a.epoch, 1);
+        Object.defineProperty(object, "metrics", { value: metrics });
+        return { first, second };
+      } finally { clock.mockRestore(); }
+    });
+    // Actual completed metrics buckets, not a backdated pressure-start without source history.
+    await runInDurableObject(c, async (_object, state) => {
+      const stored = (await state.storage.get<any>("placement"))!;
+      stored.slots[0].sample = null; stored.slots[0].pressuredSince = null;
+      await state.storage.put("placement", stored);
+    });
+    await c.observe(a.gateway, windows.first);
+    await evictDurableObject(c);
+    await c.observe(a.gateway, windows.second);
     const status = await c.status();
     expect(status.slots).toHaveLength(2);
     expect(status.slots.find(s => s.name === a.gateway)!.mode).toBe("draining");

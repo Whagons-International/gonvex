@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   COOLDOWN_MS, LEASE_MS, MAX_GATEWAYS_PER_CELL, MAX_PENDING, MAX_SOCKETS, SCALE_IN_MS,
-  controllerCell, pressured, quiet, withDeadline,
+  controllerCell, pressured, quiet, withDeadline, checkedCapacitySample, completedWindow, windowPressured, freshWindow, WINDOW_FIELDS,
   type CapacitySample, type GatewayAssignment, type GatewayCapacityRpc,
 } from "./placement";
 
@@ -12,6 +12,7 @@ interface Slot {
   changedAt: number;
   quietSince: number | null;
   pressuredSince: number | null;
+  pressureEvidence?: { epoch: number; window: readonly number[]; since: number };
   replacement: string | null;
   nextCheck?: number;
   sample: CapacitySample | null;
@@ -75,18 +76,58 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
   }
   private async probe(s: Slot): Promise<CapacitySample> {
     const rpc = this.env.GATEWAY.getByName(s.name) as unknown as GatewayCapacityRpc;
-    const sample = await withDeadline(rpc.capacity(s.epoch));
-    if (sample.v !== 1 || sample.epoch !== s.epoch) throw new Error("gateway epoch mismatch");
+    const sample = checkedCapacitySample(await withDeadline(rpc.capacity(s.epoch)), Date.now());
+    if (!sample || sample.epoch !== s.epoch) throw new Error("gateway epoch mismatch");
     this.record(s, sample);
     return sample;
   }
   private record(s: Slot, sample: CapacitySample): void {
     if (s.sample && sample.at < s.sample.at) return;
+    const previous = completedWindow(s.sample), window = completedWindow(sample);
+    if (previous && window && ((window.windowInstance === previous.windowInstance
+      && (window.windowSequence < previous.windowSequence
+        || (window.windowSequence === previous.windowSequence && WINDOW_FIELDS.some(key => window[key] !== previous[key]))
+        || (window.windowSequence > previous.windowSequence && window.windowStart < previous.windowEnd)))
+      || (window.windowInstance !== previous.windowInstance && window.windowStart < previous.windowEnd))) {
+      s.pressuredSince = null; delete s.pressureEvidence; // Keep the high-water observation; a restamped/revised old bucket is not new evidence.
+      return;
+    }
+    const wasHot = s.sample?.currentPressure === 1 && previous && windowPressured(previous)
+      && this.ownsEvidence(s, previous);
     s.sample = sample;
-    if (pressured(sample)) s.pressuredSince ??= Date.now();
-    else s.pressuredSince = null;
+    if (window && freshWindow(window, Date.now()) && sample.currentPressure === 1 && windowPressured(window)) {
+      const repeated = previous && window.windowInstance === previous.windowInstance && window.windowSequence === previous.windowSequence;
+      const adjacent = previous && window.windowInstance === previous.windowInstance
+        && window.windowSequence === previous.windowSequence + 1 && window.windowStart === previous.windowEnd;
+      if (!wasHot || s.pressuredSince === null || (!repeated && !adjacent)) s.pressuredSince = window.windowStart;
+      s.pressureEvidence = { epoch: s.epoch, window: Object.freeze(WINDOW_FIELDS.map(key => window[key])), since: s.pressuredSince };
+    } else { s.pressuredSince = null; delete s.pressureEvidence; }
     if (quiet(sample)) s.quietSince ??= Date.now();
     else s.quietSince = null;
+  }
+  private ownsEvidence(s: Slot, w: NonNullable<ReturnType<typeof completedWindow>>): boolean {
+    const e = s.pressureEvidence;
+    return Boolean(e && e.epoch === s.epoch && e.since === s.pressuredSince && Number.isSafeInteger(e.since)
+      && e.since >= 0 && e.since <= w.windowStart && Array.isArray(e.window) && e.window.length === WINDOW_FIELDS.length
+      && WINDOW_FIELDS.every((key, index) => e.window[index] === w[key]));
+  }
+  private trustedPressure(s: Slot, now: number): boolean {
+    const w = completedWindow(s.sample);
+    return Boolean(w && this.ownsEvidence(s, w) && freshWindow(w, now)
+      && s.sample?.currentPressure === 1 && windowPressured(w));
+  }
+  private mature(s: Slot, now: number): boolean {
+    return this.trustedPressure(s, now) && completedWindow(s.sample)!.windowEnd - s.pressureEvidence!.since >= 10_000;
+  }
+  private allocate(now: number): Slot {
+    const retired = this.state.slots.find(s => s.mode === "retired");
+    if (!retired && this.state.slots.length >= MAX_GATEWAYS_PER_CELL) throw new Error("gateway resource ceiling reached");
+    const index = retired ? this.state.slots.indexOf(retired) : this.state.slots.length;
+    const slot: Slot = { name: `auto-gw-${this.cell()}-${index}`, epoch: ++this.state.epoch, mode: "active",
+      changedAt: now, quietSince: now, pressuredSince: null, replacement: null, sample: null };
+    if (retired) this.state.slots[index] = slot; else this.state.slots.push(slot);
+    this.event("allocate", slot);
+    return slot;
   }
 
   acquire(connectionId: string): Promise<GatewayAssignment> {
@@ -109,17 +150,7 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
           if (!pressured(sample) && sample.sockets + this.pending(s) < MAX_SOCKETS) { chosen = s; break; }
         } catch { /* Faulted holder retains ownership, but receives no new admission. */ }
       }
-      if (!chosen) {
-        const retired = this.state.slots.find(s => s.mode === "retired");
-        if (!retired && this.state.slots.length >= MAX_GATEWAYS_PER_CELL) throw new Error("gateway resource ceiling reached");
-        const epoch = ++this.state.epoch;
-        // Reuse a finite set of holder names; the durable epoch fences delayed assignments.
-        const slot = retired ? this.state.slots.indexOf(retired) : this.state.slots.length;
-        chosen = { name: `auto-gw-${cell}-${slot}`, epoch, mode: "active", changedAt: now, quietSince: now, pressuredSince: null, replacement: null, sample: null };
-        if (retired) this.state.slots[slot] = chosen;
-        else this.state.slots.push(chosen);
-        this.event("allocate", chosen);
-      }
+      if (!chosen) chosen = this.allocate(now);
       const assignment: GatewayAssignment = { v: 1, cell, gateway: chosen.name, epoch: chosen.epoch, token: crypto.randomUUID(), connectionId, expiresAt: now + LEASE_MS };
       this.state.leases.push({ assignment, claimed: false });
       await this.save(); // Durable before the router can use it.
@@ -151,11 +182,12 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
     return this.serial(async () => this.state.slots.some(s => s.name === name && s.epoch === epoch && s.mode === "draining" && s.replacement === replacement)
       && this.state.slots.some(s => s.name === replacement && s.mode === "active"));
   }
-  observe(name: string, sample: CapacitySample): Promise<void> {
+  observe(name: string, input: CapacitySample): Promise<void> {
     return this.serial(async () => {
+      const sample = checkedCapacitySample(input, Date.now());
+      if (!sample) return;
       const s = this.state.slots.find(s => s.name === name && s.epoch === sample.epoch && s.mode !== "retired");
-      if (!s || sample.v !== 1 || !Object.values(sample).every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)
-        || sample.at > Date.now() + 1_000 || sample.at < Date.now() - 30_000) return;
+      if (!s) return;
       this.prune(Date.now());
       this.record(s, sample);
       await this.reconcile();
@@ -165,58 +197,59 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
   }
   private async reconcile(): Promise<void> {
     const now = Date.now();
-    let active = this.state.slots.filter(s => s.mode === "active").length;
-    // At most one reconnecting holder per cell; pressure must persist for two sample windows.
-    if (!this.state.slots.some(s => s.mode === "draining")) {
-      const hot = this.state.slots.find(s => s.mode === "active" && s.pressuredSince !== null
-        && now - s.pressuredSince >= 10_000 && now - s.changedAt >= COOLDOWN_MS && !this.pending(s));
-      if (hot) {
-        let replacement = this.state.slots.find(s => s !== hot && s.mode === "active" && s.sample && !pressured(s.sample));
-        if (!replacement) {
-          const retired = this.state.slots.find(s => s.mode === "retired");
-          if (retired || this.state.slots.length < MAX_GATEWAYS_PER_CELL) {
-            const index = retired ? this.state.slots.indexOf(retired) : this.state.slots.length;
-            replacement = { name: `auto-gw-${this.cell()}-${index}`, epoch: ++this.state.epoch, mode: "active", changedAt: now,
-              quietSince: now, pressuredSince: null, replacement: null, sample: null };
-            if (retired) this.state.slots[index] = replacement; else this.state.slots.push(replacement);
-            this.event("allocate", replacement);
-            active++;
-          }
-        }
-        if (replacement) {
-          try {
-            // Fresh successful probe, never merely an allocation record, before any close.
-            const healthy = await this.probe(replacement);
-            if (!pressured(healthy)) {
-              hot.mode = "draining"; hot.nextCheck = now + 30_000; hot.changedAt = now; hot.quietSince = null; hot.replacement = replacement.name; active--; this.event("drain", hot);
-            }
-          } catch { /* Replacement failure pauses the rebalance; no sockets are closed. */ }
-        }
-      }
-    }
     for (const s of this.state.slots) {
-      let consideredScaleIn = false;
-      if (s.mode === "active" && active > 1 && !this.state.slots.some(s => s.mode === "draining") && s.quietSince !== null
-        && now - s.quietSince >= SCALE_IN_MS && now - s.changedAt >= COOLDOWN_MS && !this.pending(s)) {
-        const replacement = this.state.slots.find(other => other !== s && other.mode === "active");
-        if (replacement) {
-          consideredScaleIn = true;
-          try {
-            if (!pressured(await this.probe(replacement))) {
-              s.mode = "draining"; s.nextCheck = now + 30_000; s.changedAt = now; s.quietSince = null; s.replacement = replacement.name; active--; this.event("drain", s);
-            } else s.quietSince = now;
-          } catch { s.quietSince = now; }
-        }
-      }
-      if (s.mode === "draining" && !this.pending(s)) {
-        s.nextCheck = now + 30_000;
-        try {
-          if ((await this.probe(s)).sockets === 0) { s.mode = "retired"; s.sample = null; s.quietSince = null; s.replacement = null; this.event("retire", s); }
-        } catch { /* Never infer empty from failure; retry on the next active report/admission. */ }
-      }
-      if (s.mode === "active" && active === 1) s.quietSince = null;
-      if (consideredScaleIn) break; // At most one scale-in candidate probe per control event.
+      if (!this.trustedPressure(s, now)) { s.pressuredSince = null; delete s.pressureEvidence; }
     }
+    // One draining holder per cell, and at most TWO holder probes per control event.
+    const draining = this.state.slots.find(s => s.mode === "draining");
+    if (draining) {
+      if (!this.pending(draining)) {
+        draining.nextCheck = now + 30_000;
+        try { if ((await this.probe(draining)).sockets === 0) this.retire(draining); }
+        catch { /* Failure is not proof of empty ownership. */ }
+      }
+      return;
+    }
+    const hot = this.state.slots.find(s => s.mode === "active" && this.mature(s, now)
+      && now - s.changedAt >= COOLDOWN_MS && !this.pending(s));
+    if (hot) {
+      let current: CapacitySample;
+      try { current = await this.probe(hot); } catch { hot.pressuredSince = null; delete hot.pressureEvidence; return; }
+      if (hot.sample !== current || current.currentPressure !== 1 || !this.mature(hot, Date.now())) {
+        hot.pressuredSince = null; delete hot.pressureEvidence; return;
+      } // Revalidate BEFORE allocation/publication, without counting a bucket twice.
+      let replacement = this.state.slots.find(s => s !== hot && s.mode === "active" && s.sample && !pressured(s.sample));
+      if (!replacement) {
+        if (!this.state.slots.some(s => s.mode === "retired") && this.state.slots.length >= MAX_GATEWAYS_PER_CELL) return;
+        replacement = this.allocate(now);
+      }
+      try { if (!pressured(await this.probe(replacement))) this.beginDrain(hot, replacement, now); }
+      catch { /* Replacement failure never authorizes a reconnect. */ }
+      return;
+    }
+    const active = this.state.slots.filter(s => s.mode === "active");
+    if (active.length === 1) { active[0]!.quietSince = null; return; }
+    const low = active.find(s => s.quietSince !== null && now - s.quietSince >= SCALE_IN_MS
+      && now - s.changedAt >= COOLDOWN_MS && !this.pending(s));
+    if (!low) return;
+    try {
+      const current = await this.probe(low);
+      if (!quiet(current)) return;
+      const replacement = active.find(s => s !== low)!;
+      if (!pressured(await this.probe(replacement))) {
+        this.beginDrain(low, replacement, now);
+        // Fresh empty probe + no lease: no third probe or pointless reconnect is needed.
+        if (current.sockets === 0) this.retire(low);
+      } else low.quietSince = now;
+    } catch { low.quietSince = now; }
+  }
+  private beginDrain(slot: Slot, replacement: Slot, now: number): void {
+    slot.mode = "draining"; slot.nextCheck = now + 30_000; slot.changedAt = now;
+    slot.quietSince = null; slot.replacement = replacement.name; this.event("drain", slot);
+  }
+  private retire(slot: Slot): void {
+    slot.mode = "retired"; slot.sample = null; slot.quietSince = null;
+    slot.pressuredSince = null; delete slot.pressureEvidence; slot.replacement = null; this.event("retire", slot);
   }
   private dispatchDrains(): void {
     for (const s of this.state.slots) {
