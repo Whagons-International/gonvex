@@ -147,6 +147,8 @@ export interface DeliveryOptions {
   readonly delivered?: (revision: number) => void;
   /** K22: live queries share the commit snapshot and this ordered outlet. */
   readonly live?: LiveQueries | undefined;
+  /** BUG-2: every socket event or commit that reaches the engine (the tenant keeps itself from hibernating). */
+  readonly activity?: () => void;
 }
 
 export interface DeliveryStats {
@@ -223,6 +225,7 @@ export class ReplicaDeliveryEngine {
       this.removePending(connection, frame.id);
       this.remove(connection, frame.id);
       for (const [generation,ref] of connection.initials) if (ref.kind === "replica" && ref.id === frame.id) connection.initials.delete(generation);
+      this.options.activity?.();
       return [];
     }
     const opens = frame.type === "replica.open" ? [frame] : frame.opens;
@@ -262,6 +265,7 @@ export class ReplicaDeliveryEngine {
     }
     if (refused.length) this.post(connection, { ops: refused, initialCompletions: refusedCompletions });
     this.kick();
+    this.options.activity?.();
     return [];
   }
 
@@ -269,6 +273,7 @@ export class ReplicaDeliveryEngine {
   externalEvent(host: string): void { this.retryBarriers(host); }
 
   observe(socket: SocketView, notify = true): boolean {
+    this.options.activity?.();
     if (socket.tenant) {
       const connection = this.connection(socket, socket.tenant);
       if (!connection) return false;
@@ -318,6 +323,7 @@ export class ReplicaDeliveryEngine {
     this.options.live?.unsubscribe(socket.connectionId, id);
     const connection = this.connections.get(socket.connectionId);
     for (const [generation,ref] of connection?.initials ?? []) if (ref.kind === "query" && ref.id === id) connection!.initials.delete(generation);
+    this.options.activity?.();
     return true;
   }
 
@@ -334,6 +340,7 @@ export class ReplicaDeliveryEngine {
     this.drop(connection);
     this.accepted.delete(connectionId);
     this.connections.delete(connectionId);
+    this.options.activity?.();
   }
 
   /**
@@ -361,6 +368,15 @@ export class ReplicaDeliveryEngine {
     return Math.min(this.accepted.get(connection.id) ?? 0, ...(this.options.live?.computedRevisions(connection.id) ?? []));
   }
 
+  /** BUG-2: true while any socket has a subscription, a pending open or a live query here (state only memory holds). */
+  holdsSubscriptions(): boolean {
+    for (const connection of this.connections.values()) {
+      if (connection.subscriptions.size || connection.pending.length || connection.initials.size) return true;
+      if (this.options.live?.subscriptionIds(connection.id).length) return true;
+    }
+    return false;
+  }
+
   /** Subscriptions of a connection (tests). */
   subscriptions(connectionId: string): ReadonlyMap<string, Subscription> {
     return this.connections.get(connectionId)?.subscriptions ?? new Map();
@@ -380,6 +396,7 @@ export class ReplicaDeliveryEngine {
     for (const host of new Set([...this.recovering.keys(), ...this.fencing.keys()])) this.retryBarriers(host);
     this.wanted = Math.max(this.wanted, revision);
     this.kick();
+    this.options.activity?.();
   }
 
   /** Resolves when no work is queued or running (tests and drains). */

@@ -21,6 +21,7 @@ import { SocketDelivery, type TrackedReplicas } from "../socket.ts";
 import { LiveQueries, snapshotRunner, kernelVisibility, moduleFromManifest } from "../../query/index";
 import { VisibilityRegistry } from "../../visibility";
 import { PAGE_BYTES, PAGE_ROWS } from "../subscription.ts";
+import { keepAliveGrace, KEEPALIVE_GRACE_MS, SubscriberKeepAlive, type KeepAliveClock } from "../keepalive.ts";
 
 let objects = 0;
 
@@ -63,7 +64,7 @@ interface Harness {
   commit(statements: Array<[string, unknown[]]>): Promise<number>;
 }
 
-async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false): Promise<T> {
+async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void): Promise<T> {
   const stub = env.HELLO.getByName(`k10-${++objects}-${Math.random()}`);
   return runInDurableObject(stub, async (_instance, state) => {
     const sql = directSql(state.storage.sql);
@@ -100,6 +101,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       read: async (fn) => { const r = await storage.invoke("query", async (s) => fn(s)); if (!r.ok) throw r.error; return r.value; },
       module: () => module,
       outlet: new LocalOutlet(receive, () => ["h1"], undefined, receive),
+      ...(activity ? { activity } : {}),
     });
     let commands = 0;
     return body({
@@ -564,5 +566,92 @@ describe("K22 ordered query and replica commits", () => {
       engine.reset("live-only", 1);
       expect(live.subscriptionIds("live-only")).toEqual([]);
     }, MODULE, true);
+  });
+});
+
+/** A manual clock for the keep-alive timer: `advance` runs what falls due. */
+function manualClock() {
+  let now = 0, seq = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  const clock: KeepAliveClock = {
+    now: () => now,
+    set: (fn, ms) => { const id = ++seq; timers.set(id, { at: now + ms, fn }); return id; },
+    clear: (id) => { timers.delete(id as number); },
+  };
+  const advance = (ms: number) => {
+    const end = now + ms;
+    for (;;) {
+      const due = [...timers].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) break;
+      timers.delete(due[0]); now = due[1].at; due[1].fn();
+    }
+    now = end;
+  };
+  return { clock, advance };
+}
+
+/** The platform hibernates (and discards memory) after 10 s idle only when no timer is pending. */
+const PLATFORM_HIBERNATION_IDLE_MS = 10_000;
+
+describe("BUG-2 a subscribed tenant stays in memory between a session's events", () => {
+  it("two sockets, ordinary commits after idle pauses: incremental batches, no reset, never hibernatable while subscribed", async () => {
+    const { clock, advance } = manualClock();
+    let keep: SubscriberKeepAlive | undefined;
+    await withEngine(async ({ engine, payloads, commit }) => {
+      keep = new SubscriberKeepAlive(() => engine.holdsSubscriptions(), KEEPALIVE_GRACE_MS, clock);
+      await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      for (const id of ["A", "B"]) engine.dispatch(socket(id, { batchFrames: true }), { type: "replica.open", id: `sub-${id}`, path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      expect(engine.holdsSubscriptions()).toBe(true);
+      expect(keep.holding).toBe(true);
+      const instance = engine.instance;
+      payloads.length = 0;
+      // The walkthrough's pauses between ordinary commits were 6-18 s; each is longer than the platform's idle limit.
+      for (let n = 0; n < 5; n++) {
+        advance(PLATFORM_HIBERNATION_IDLE_MS + 5_000);
+        expect(keep.holding).toBe(true); // a pending timer: the platform cannot hibernate this object
+        await commit([[`INSERT INTO items VALUES ('k${n}', ${10 + n}, 'from A')`, []]]);
+      }
+      const forB = payloads.filter(([, p]) => p.sockets.B);
+      expect(forB).toHaveLength(5);
+      for (const [, payload] of forB) {
+        expect(payload.instance).toBe(instance);
+        const ops = payload.sockets.B!.ops;
+        expect(ops.map((op) => op[0])).toEqual(["i", "d", "r"]); // transaction item, delta, ready: an incremental batch
+        expect(ops.some((op) => op[0] === "f" && /"type":"replica\.reset"/.test(op[1] as string))).toBe(false);
+      }
+      expect(engine.stats.resets).toBe(0);
+      // A tenant nobody subscribes to may hibernate again.
+      for (const id of ["A", "B"]) engine.dispatch(socket(id, { batchFrames: true }), { type: "replica.close", id: `sub-${id}` });
+      await engine.settled();
+      expect(engine.holdsSubscriptions()).toBe(false);
+      expect(keep.holding).toBe(false);
+    }, MODULE, false, () => keep?.touch());
+  });
+
+  it("lets a subscribed tenant hibernate after the grace with no event, and extends the grace on every event", () => {
+    const { clock, advance } = manualClock();
+    let subscribed = true;
+    const keep = new SubscriberKeepAlive(() => subscribed, 60_000, clock);
+    keep.touch();
+    advance(50_000); keep.touch();
+    advance(50_000);
+    expect(keep.holding).toBe(true); // 100 s after the first event, 50 s after the last
+    advance(10_001);
+    expect(keep.holding).toBe(false);
+    keep.touch();
+    expect(keep.holding).toBe(true);
+    subscribed = false;
+    keep.touch();
+    expect(keep.holding).toBe(false);
+    expect(new SubscriberKeepAlive(() => true, 0, clock).holding).toBe(false);
+  });
+
+  it("reads GONVEX_TENANT_KEEPALIVE_MS", () => {
+    expect(keepAliveGrace(undefined)).toBe(KEEPALIVE_GRACE_MS);
+    expect(keepAliveGrace("0")).toBe(0);
+    expect(keepAliveGrace("30000")).toBe(30_000);
+    expect(keepAliveGrace("-1")).toBe(KEEPALIVE_GRACE_MS);
+    expect(keepAliveGrace("forever")).toBe(KEEPALIVE_GRACE_MS);
   });
 });

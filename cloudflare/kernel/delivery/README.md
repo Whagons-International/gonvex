@@ -81,6 +81,12 @@ holder (any object):  Session ─ SocketDelivery (socket.ts) ─ ReplicaBatcher 
 - **Tenant restarts.** Subscriptions live in the tenant object's memory. A holder tracks its sockets' collections and
   the tenant instance serving them; when a delivery comes from a new instance, it sends `replica.reset
   change-feed-reset` for each collection the old one served, and the client resumes by cursor and digest.
+- **Hibernation (BUG-2).** The platform hibernates an object after 10 s with no incoming request when no timer or
+  I/O is pending, and hibernation is such a restart. A tenant has no sockets of its own, so it used to hibernate in
+  ordinary pauses of a session, and the next commit reached every other socket as a reset storm. While the engine
+  holds a subscription, pending open or live query, `keepalive.ts` keeps one timer pending and every socket event or
+  commit extends it; after `GONVEX_TENANT_KEEPALIVE_MS` (default 120 s, 0 disables) with no event it lapses and the
+  object may hibernate. Cost: duration for at most that grace past the last event of a subscribed tenant.
 - **Membership.** A commit that changes a session's own Member in `account_id`, `status`, `role`, `permissions` or
   `membership_revision` (after its admission) drops that connection's subscriptions; the holder sends
   `auth.error membership-changed` and the watermark (lib.rs `membership_affects`).
