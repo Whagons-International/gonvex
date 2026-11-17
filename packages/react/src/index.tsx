@@ -369,7 +369,10 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     persist = true,
     installClientAuth = true,
   ) => {
-    if (!next || next.accessToken !== sessionRef.current?.accessToken) {
+    // New credentials or a successful tenant switch end a recovery pause;
+    // otherwise refreshes stay disabled until the access token expires.
+    if (!next || next.accessToken !== sessionRef.current?.accessToken
+      || next.activeTenantId !== sessionRef.current?.activeTenantId) {
       authRecoveryPausedRef.current = false;
       setAuthRecoveryPaused(false);
     }
