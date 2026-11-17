@@ -333,6 +333,8 @@ it('writes one indexed attempt row before grant and removes it at a successful t
  const granted=f.instance.sql.mark();await f.coordinator.deployments.settle(ref(a),{ok:true});const settled=f.instance.sql.mark();
  const counts={grant:{read:granted.read-before.read,written:granted.written-before.written},settle:{read:settled.read-granted.read,written:settled.written-granted.written}};
  console.log('target attempt SQL rows',JSON.stringify(counts));
- expect(counts.grant.written).toBe(1);expect(counts.settle.written).toBe(1);
+ // SQLite charges the metadata row and its TEXT-primary-key index on INSERT.
+ expect(counts.grant.written).toBe(2);expect(counts.settle.written).toBe(1);
+ expect(f.instance.sql.value('SELECT COUNT(*) FROM gonvex_cf_target_attempts')).toBe(0);
  await f.publish(a);
 }));

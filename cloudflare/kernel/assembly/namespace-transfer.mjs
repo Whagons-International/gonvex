@@ -59,11 +59,16 @@ export async function transferConfigs(name,directory,{catalogEntry,actionCatalog
 /** The caller's deploy function is the normal Wrangler operation; responses are
  * not simulated completion ACKs. Namespace equality is read from the provider.
  * Freeze/thaw are real Control RPC via the authenticated stable HTTP router. */
-export async function transferTenantNamespace(plan,{deploy,topology,namespace,configureRuntime,refreshFrozenPlan=false}) {
+export async function transferTenantNamespace(plan,{deploy,topology,namespace,configureRuntime,stableNamespaces,refreshFrozenPlan=false}) {
  const journalPath=join(plan.directory,`transfer${plan.reverse?'-reverse':''}-state.json`);
  let journal;try{journal=JSON.parse(await readFile(journalPath,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
  const sourceId=await namespace(plan.sourceName),targetId=await namespace(plan.targetName);
  const original=journal?.namespaceId??sourceId;if(!original)throw new Error('source tenant namespace missing');
+ const stable=stableNamespaces?(journal?journal.stable:await stableNamespaces()):undefined;
+ const signature=map=>JSON.stringify(Object.entries(map??{}).sort(([a],[b])=>a.localeCompare(b)));
+ const verifyStable=async()=>{if(stableNamespaces&&(!stable||signature(stable)!==signature(await stableNamespaces())))throw new Error('stable socket-owner namespace changed; retain maintenance/freeze');};
+ const apply=async path=>{await deploy(path);await verifyStable();};
+ await verifyStable();
  if(journal&&(journal.source!==plan.sourceName||journal.target!==plan.targetName))throw new Error('transfer journal names differ');
  if(journal&&journal.fingerprint!==plan.fingerprint){
   // Capturing a newer active catalog is safe only before handoff, after an
@@ -72,30 +77,30 @@ export async function transferTenantNamespace(plan,{deploy,topology,namespace,co
   if(!state?.frozen||state.deployment)throw new Error('transfer inputs changed; retain freeze and inspect the retained plan');
  }
  if(sourceId!==original&&targetId!==original)throw new Error('provider namespace differs from retained transfer');
- const save=async phase=>{journal={source:plan.sourceName,target:plan.targetName,namespaceId:original,phase,fingerprint:plan.fingerprint};await writeFile(journalPath+'.tmp',JSON.stringify(journal),{mode:0o600});await rename(journalPath+'.tmp',journalPath);};
+ const save=async phase=>{journal={source:plan.sourceName,target:plan.targetName,namespaceId:original,phase,fingerprint:plan.fingerprint,...(stable?{stable}:{})};await writeFile(journalPath+'.tmp',JSON.stringify(journal),{mode:0o600});await rename(journalPath+'.tmp',journalPath);};
  const [bridge,receive,commit,bind]=plan.phases;
  if(targetId!==original){
   if(targetId)throw new Error('target already owns a tenant namespace');
-  await save('bridge');await deploy(bridge.path);
+  await save('bridge');await apply(bridge.path);
  }
  const state=await topology('freeze');if(!state.frozen||state.deployment)throw new Error('Control did not freeze an idle publisher');
  const sorted=rows=>JSON.stringify([...rows].sort((a,b)=>a.project.localeCompare(b.project)));if(sorted(state.releases)!==sorted(plan.catalog))throw new Error('active catalog changed; rebuild bridge while frozen');
  if(targetId!==original){
 
  // Target must not already own a tenant namespace: expecting-transfer, never create.
- await deploy(plan.actionBridge.path);
- await deploy(receive.path);await configureRuntime?.();await save('received');await deploy(commit.path);
+ await apply(plan.actionBridge.path);
+ await apply(receive.path);await configureRuntime?.();await save('received');await apply(commit.path);
  if(await namespace(plan.targetName)!==original)throw new Error('tenant namespace changed during transfer; retain freeze');
  }
- await save('committed');await deploy(bind.path);
+ await save('committed');await apply(bind.path);
  for(const kind of ['actions','sandbox']){
   const item=plan.companions[kind];
   for(const binding of item.config.durable_objects.bindings)if(binding.name==='TENANT')binding.script_name=plan.targetName;
-  await writeFile(item.path,JSON.stringify(item.config),{mode:0o600});await deploy(item.path);
+  await writeFile(item.path,JSON.stringify(item.config),{mode:0o600});await apply(item.path);
  }
  // Caller validates its captured active catalog and invokes thaw(version) only
  // after the target/self bindings and stable Control environment have rolled out.
- await save('bound');return {namespaceId:original,frozen:true,target:plan.targetName};
+ await save('bound');return {namespaceId:original,frozen:true,target:plan.targetName,...(stable?{stable}:{})};
 }
 
 /** Production transport for the reviewed transfer procedure. Invoke only from
@@ -115,13 +120,21 @@ export async function migrateExistingAssembly({name,directory,kernelUrl,images,c
   if((r&&r.status<500)||Date.now()>=deadline)throw new Error(`topology ${action} HTTP ${r?.status??'timeout'}; retain maintenance/freeze`);
   await new Promise(resolve=>setTimeout(resolve,250));
  }};
- const namespace=async script=>{
-  const matches=[];for(let page=1;page<=10;page++){
+ const inventory=async()=>{
+  const all=[];for(let page=1;page<=10;page++){
    const rows=await api(`/workers/durable_objects/namespaces?per_page=1000&page=${page}`);
    if(!Array.isArray(rows))throw new Error('namespace API shape differs');
-   matches.push(...rows.filter(n=>n.script===script&&n.class==='AssemblyTenant'));
-   if(rows.length<1000){if(matches.length>1)throw new Error('ambiguous tenant namespaces');return matches[0]?.id??null;}
+   all.push(...rows);if(rows.length<1000)return all;
   }throw new Error('namespace inventory exceeds bounded page budget');
+ };
+ const namespace=async script=>{const matches=(await inventory()).filter(n=>n.script===script&&n.class==='AssemblyTenant');if(matches.length>1)throw new Error('ambiguous tenant namespaces');return matches[0]?.id??null;};
+ const stableNamespaces=async()=>{
+  const rows=await inventory(),result={};
+  for(const klass of ['AssemblyGateway','GatewayControllerObject','SessionControlObject','PublicLimiterObject','IngressObject']){
+   const matches=rows.filter(n=>n.script===name&&n.class===klass);
+   if(matches.length!==1||!matches[0].id)throw new Error('stable namespace mapping missing or ambiguous');
+   result[klass]=matches[0].id;
+  }return result;
  };
  await verify();
  const configureRuntime=reverse?undefined:async()=>{
@@ -129,10 +142,11 @@ export async function migrateExistingAssembly({name,directory,kernelUrl,images,c
   await api(`/workers/scripts/${name}-runtime/secrets`,{method:'PUT',body:{name:'GONVEX_STORAGE_SECRET',text:storageSecret,type:'secret_text'}});
  };
  // The transfer remains frozen on any error; no automatic SQL rollback or deletes.
- const result=await transferTenantNamespace(plan,{deploy,topology,namespace,configureRuntime,refreshFrozenPlan});
+ const result=await transferTenantNamespace(plan,{deploy,topology,namespace,configureRuntime,stableNamespaces,refreshFrozenPlan});
  if(!reverse){
   await deploy(plan.companions.builder.path);
   await deploy(plan.companions.kernel.path);
+  if(Object.entries(await stableNamespaces()).some(([klass,id])=>result.stable?.[klass]!==id))throw new Error('stable namespace changed; retain freeze');
   if(await namespace(plan.targetName)!==result.namespaceId)throw new Error('target namespace changed; retain freeze');
   const thawed=await topology('thaw',`&version=${encodeURIComponent(version)}`);
   if(thawed.frozen)throw new Error('Control retained its topology freeze');

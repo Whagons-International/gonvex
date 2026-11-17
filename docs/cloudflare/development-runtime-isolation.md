@@ -83,7 +83,8 @@ The helper uses the documented [declarative namespace transfer](https://develope
 
 All provider writes verify the exact account and the owned Worker allowlist. Private configs and
 the resumable local journal use mode 0600. The journal pins the original namespace and captured
-inputs. Post-commit retry skips the transfer and resumes binding/companions. A changed capture may
+inputs, plus all five stable kernel namespace IDs. Each phase checks that stable mapping, including
+after the final kernel deployment. Post-commit retry skips the transfer and resumes binding/companions. A changed capture may
 be explicitly refreshed only while the actual source remains durably frozen and still owns the
 original namespace; a committed handoff cannot be reinterpreted with new inputs. Errors retain
 maintenance/freeze. There is no namespace delete, reimport, SQL rewrite or account-wide change.

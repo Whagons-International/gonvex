@@ -82,3 +82,14 @@ test('changed active catalog or foreign target namespace prevents commit and lea
  await assert.rejects(transferTenantNamespace(plan,{...options,namespace:async name=>name===plan.sourceName?'original':'foreign'}),/target already owns/);
  assert.deepEqual(calls,[]);
 }));
+test('a stable socket-owner namespace cannot change during transfer or be recaptured on resume',()=>owned(async dir=>{
+ const entry=join(dir,'catalog.js');await writeFile(entry,'export const releases={}; export const version="bootstrap";');
+ const plan=await transferConfigs('gonvex-cf-dev-topology',dir,{catalogEntry:entry,actionCatalogEntry:entry,catalog:[]});
+ let gateway='stable-id';const calls=[];
+ const options={namespace:async name=>name===plan.sourceName?'tenant-id':null,stableNamespaces:async()=>({AssemblyGateway:gateway}),
+  topology:async()=>({frozen:true,deployment:null,releases:[]}),deploy:async path=>{calls.push(path);gateway='unexpected-id';}};
+ await assert.rejects(transferTenantNamespace(plan,options),/stable socket-owner namespace changed/);
+ assert.deepEqual(calls,[plan.phases[0].path]);calls.length=0;
+ await assert.rejects(transferTenantNamespace(plan,options),/stable socket-owner namespace changed/);
+ assert.deepEqual(calls,[]);
+}));
