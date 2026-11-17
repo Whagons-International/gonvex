@@ -59,6 +59,8 @@ export class SocketHost {
   /** K15: one set of telemetry rate-limit windows for every socket of this object. */
   readonly telemetry: TelemetryHostState;
   private scheduled: number | null | undefined;
+  /** X02: an alarm armed now so waiting outgoing calls get a fresh event. */
+  private wakePending = false;
   private readonly recovery: HolderRecoveryStore;
   private readonly recoveryDirty = new WeakSet<WebSocket>();
   private readonly recoveryRefs = new WeakMap<WebSocket, RecoveryReference>();
@@ -210,7 +212,24 @@ export class SocketHost {
     // Only move the alarm earlier; a later alarm re-arms itself when it fires.
     if (this.scheduled != null && this.scheduled <= next) return;
     this.scheduled = next;
-    void this.options.ctx.storage.setAlarm(Math.max(next, Date.now() + 10));
+    // A pending wake keeps the platform alarm at now; the wake re-arms `scheduled` when it fires.
+    void this.options.ctx.storage.setAlarm(this.wakePending ? Date.now() : Math.max(next, Date.now() + 10));
+  }
+
+  /** X02: arms the alarm now. The host's own due time is kept and re-armed by `wakeOnly`. */
+  wakeNow(): void {
+    this.wakePending = true;
+    void this.options.ctx.storage.setAlarm(Date.now());
+  }
+
+  /** True when this alarm fired only for a wake: the host's own alarm is re-armed and none of its work is due. */
+  wakeOnly(): boolean {
+    if (!this.wakePending) return false;
+    this.wakePending = false;
+    const due = this.scheduled;
+    if (due != null && due <= Date.now() + ALARM_SLACK_MS) return false;
+    if (due != null) void this.options.ctx.storage.setAlarm(Math.max(due, Date.now() + 10));
+    return true;
   }
 
   private sessionOptions(ws: WebSocket) {

@@ -370,6 +370,34 @@ describe("gateway placement", () => {
     c.ws.close(1000);
   });
 
+  it("X02 starts no gateway call while a tenant RPC is the gateway's newest request, and starts it at the next fresh event", async () => {
+    const w = await world({ a: ["ana"] });
+    const c = await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const seen = await inGateway(name!, async (gw) => {
+      // A tenant -> gateway RPC (the platform request the 1011s ran inside). Once finished it
+      // stays the platform's front, and a call now would be counted one hop below it.
+      await gw.deliver({ v: 1, tenantId: w.tenants.a, revision: 1, all: [] });
+      const before = gw.originStats();
+      let launched = false;
+      // Through the gateway's own bindings, as every session port, link and report call is.
+      gw.x02Call = gw.env.TENANT_STUB.getByName(w.tenants.a).ping().then((at: number) => { launched = true; return at; });
+      await Promise.resolve();
+      return { before, after: gw.originStats(), launched };
+    }) as { before: { deferred: number; waiting: number }; after: { deferred: number; waiting: number }; launched: boolean };
+    expect(seen.launched).toBe(false);
+    expect(seen.after.waiting).toBe(seen.before.waiting + 1);
+    expect(seen.after.deferred).toBe(seen.before.deferred + 1);
+    // The wake alarm is a fresh event: it starts the waiting call (unless it already fired by itself).
+    await runDurableObjectAlarm(gateway(name!));
+    const done = await inGateway(name!, async (gw) => ({ at: await gw.x02Call, stats: gw.originStats() })) as { at: number; stats: { waiting: number } };
+    expect(typeof done.at).toBe("number");
+    expect(done.stats.waiting).toBe(0);
+    // A client frame is a fresh event too: the session still works and its calls start at once.
+    c.send({ type: "query.subscribe", id: "q", path: "control.projects.current", args: {} });
+    await c.next(f => f.id === "q");
+  });
+
   it("registers each gateway once with the tenant and delivers each commit once per gateway", async () => {
     const w = await world({ a: ["ana", "ben"] });
     const clients = await Promise.all(Array.from({ length: 12 }, (_, i) => signedIn(w, i % 2 ? "ben" : "ana", "a")));

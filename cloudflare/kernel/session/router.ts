@@ -12,12 +12,35 @@ import { ASSIGNMENT_HEADER, automaticPlacement, withDeadline, type GatewayAssign
  *   public connection slots are reserved in the address limiter before the
  *   upgrade, and an exhausted budget is HTTP 429 with Rust's text.
  */
-import { gatewayFor, type GatewayEnv, UPGRADE_HEADERS } from "./placement/gateway";
+import { ADMISSION_REASON_HEADER, gatewayFor, type GatewayEnv, UPGRADE_HEADERS } from "./placement/gateway";
 import { clientAddress } from "../public/address";
 import { admitUpgrade, type PublicGuardEnv, publicGuard } from "../public/guard";
 
 export interface WebSocketRouteEnv extends GatewayEnv, PublicGuardEnv {
   GATEWAY: DurableObjectNamespace;
+}
+
+/** Router stages of an upgrade, for content-free refusal diagnostics (X02). */
+type UpgradeStage = "placement" | "admission" | "gateway";
+
+/**
+ * A finite, content-free class of a refusal cause: never the message, ids or address.
+ * `deadline` is the router's own `withDeadline`; the rest are platform error families.
+ */
+export function refusalCause(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "gateway RPC deadline") return "deadline";
+  if (/subrequest depth/i.test(message)) return "depth";
+  if (/overloaded/i.test(message)) return "overloaded";
+  if (/reset|no longer active|exceeded its (cpu|memory)/i.test(message)) return "reset";
+  if (/capacity|exhausted|busy|ceiling/i.test(message)) return "capacity";
+  return "error";
+}
+
+function refusedUpgrade(stage: UpgradeStage, error: unknown, started: number, body: string): Response {
+  const cause = refusalCause(error);
+  console.error("router: upgrade refused", { stage, cause, elapsedMs: Date.now() - started });
+  return new Response(body, { status: 503, headers: { "retry-after": "1", [ADMISSION_REASON_HEADER]: `router-${stage}-${cause}` } });
 }
 
 export async function handleWebSocketUpgrade(request: Request, env: WebSocketRouteEnv): Promise<Response> {
@@ -33,11 +56,14 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   let assignment: GatewayAssignment | undefined;
   let slots = "";
   let response: Response | undefined;
+  const started = Date.now();
+  let stage: UpgradeStage = "placement";
   try {
     if (placement) {
       try { assignment = await withDeadline(placement.acquire(connectionId), 5_000); }
-      catch { return new Response("gateway capacity unavailable", { status: 503, headers: { "retry-after": "1" } }); }
+      catch (error) { return refusedUpgrade("placement", error, started, "gateway capacity unavailable"); }
     }
+    stage = "admission";
     const gatewayName = assignment?.gateway ?? gatewayFor(env, connectionId);
     slots = env.PUBLIC_LIMITER ? (publicTransport ? "pending,public" : "pending") : "";
     // The deadline also travels to the limiter: Promise.race cannot cancel a slow audit/RPC.
@@ -45,6 +71,7 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     const refused = await withDeadline(admitUpgrade(env, { address, connectionId, gateway: gatewayName, publicTransport,
       expiresAt: Date.now() + admissionMs }), admissionMs);
     if (refused) return refused;
+    stage = "gateway";
     const headers = new Headers(request.headers);
     headers.delete(ASSIGNMENT_HEADER);
     if (assignment) headers.set(ASSIGNMENT_HEADER, JSON.stringify(assignment));
@@ -54,8 +81,8 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     headers.set(UPGRADE_HEADERS.slots, slots);
     response = await withDeadline(env.GATEWAY.getByName(gatewayName).fetch(new Request(request.url, { method: "GET", headers })));
     return response;
-  } catch {
-    return new Response("gateway admission unavailable", { status: 503, headers: { "retry-after": "1" } });
+  } catch (error) {
+    return refusedUpgrade(stage, error, started, "gateway admission unavailable");
   } finally {
     if (response?.status !== 101) {
       // Release independently: controller failure must not skip K16 cleanup (or mask the refusal).

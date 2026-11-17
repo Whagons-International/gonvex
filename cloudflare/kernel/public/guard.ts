@@ -58,6 +58,8 @@ export function publicGuard(env: PublicGuardEnv): PublicGuard {
 
 /** The answer when the address limiter cannot be reached: the upgrade is refused (0045), not admitted unchecked. */
 export const LIMITER_UNAVAILABLE = "connection limiter is unavailable";
+/** Same content-free header the gateway's own refusals use (`ADMISSION_REASON_HEADER`, placement/gateway.ts). */
+const REASON_HEADER = "x-gonvex-admission-reason";
 
 /**
  * The router's reservation before the upgrade (`websocket_upgrade`,
@@ -82,10 +84,13 @@ export async function admitUpgrade(
     });
   } catch (error) {
     console.error("public guard: connection limiter unavailable; refusing the upgrade", error);
-    return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } });
+    return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [REASON_HEADER]: "limiter-unavailable" } });
   }
   if (result.ok) return null;
-  if (result.error === ADMISSION_EXPIRED_ERROR) return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } });
+  if (result.error === ADMISSION_EXPIRED_ERROR) {
+    console.error("public guard: admission expired before the limiter decided; refusing the upgrade");
+    return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [REASON_HEADER]: "limiter-expired" } });
+  }
   return new Response(result.error, { status: 429, headers: { "content-type": "text/plain; charset=utf-8" } });
 }
 

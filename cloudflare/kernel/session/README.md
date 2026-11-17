@@ -15,6 +15,7 @@ client ──/ws──▶ router Worker ──▶ gateway object (gw-N) ──RP
 | --- | --- |
 | `router.ts` | `GET /ws` in the Worker: handshake checks, `?public=1`, the extension-header grammar (400), then a gateway. |
 | `placement/gateway.ts` | **The only placement-specific module.** Shard choice, `GatewayObject`, tenant registration and `TenantGateways` (the tenant side: one `deliver` RPC per gateway per commit). If gateway placement is overruled, only this file changes. |
+| `placement/origin.ts` | X02: the gateway's outgoing calls start only from a fresh event (see "Subrequest depth" below). |
 | `host.ts` | `SocketHost`: hibernatable sockets in any object, one attachment per socket, the single alarm, batched revalidation, the `{"type":"ping"}` auto-response. |
 | `session.ts` | `Session`: one socket's state machine, placement-neutral. Size checks, the decoder, close codes, `auth`, preservation, update gating, deadline, revalidation, membership changes, liveness. |
 | `decode.ts` | The client frame decoder with serde's exact accept/close boundary (1003). |
@@ -91,6 +92,28 @@ Storage work added here is one synchronous KV-key read per holder construction a
 on the first successful claim, including backfill for an existing named holder. Later admissions and
 frames add no identity writes. The value contains one version and a name of at most 100 UTF-16 code
 units. No tenant schema, row data, controller API, holder limit or security deadline changes.
+
+## Subrequest depth (X02)
+
+The platform counts a Durable Object's outgoing call from its newest in-flight incoming request, not from
+the code that made it, and a finished request stays the newest until another one arrives. A gateway that
+called its tenant while a tenant delivery RPC was its newest request continued the tenant's chain; the
+tenant answered with another delivery, and the two objects ratcheted the depth until the platform refused
+("Subrequest depth limit exceeded", dev 2026-11-17: the three 1011 closes and the failed presence leave,
+connection report and tenant reset notice).
+
+`GatewayObjectBase` gates every binding in `this.env` (`placement/origin.ts`). A call starts at once only
+while every request that can be the platform's front is a fresh event: a client WebSocket event, the
+router's upgrade or the alarm. Otherwise it waits, in order, for the next fresh event; the host arms an
+alarm now (`SocketHost.wakeNow`) so one always comes. A wake-only alarm re-arms the host's own alarm and
+does nothing else. If a call has to wait while the alarm body runs, the alarm handler returns and the body
+continues, because the platform starts no alarm while one is running. Entry tracking wraps the object's
+own methods; names in `INTERNAL_METHODS` are helpers, and any other method counts as a peer RPC.
+Cost: each deferred call waits for one alarm (one storage alarm write); `originStats()` counts them.
+
+Refused upgrades carry `x-gonvex-admission-reason`: `router-<placement|admission|gateway>-<cause>`, where
+the cause is a finite class (`deadline`, `depth`, `overloaded`, `reset`, `capacity`, `error`), or the
+limiter's `limiter-unavailable` / `limiter-expired`, and the router logs the stage, cause and elapsed time.
 
 ## Run
 

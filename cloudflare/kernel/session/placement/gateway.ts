@@ -33,6 +33,17 @@ import { publicLimits } from "../../public/config";
 import { limiterFor } from "../../public/limiter";
 import type { SlotKind } from "../../public/limiter";
 import { GatewayRoutingIdentity } from "./routing-identity";
+import { CallOrigin, gatedEnv, trackEntries, type OriginStats } from "./origin";
+
+/**
+ * Helpers only the gateway itself calls. Every other method is an inbound request
+ * (X02 entry tracking); an unlisted helper only makes the gate more conservative.
+ */
+const INTERNAL_METHODS: ReadonlySet<string> = new Set([
+  "accept", "applyReplica", "loadPlacement", "drainTick", "reportCapacity", "index", "tenantChanged", "link",
+  "bindings", "alarmEntry", "refreshControlWatches",
+]);
+const tracked = new WeakSet<object>();
 
 /** S3: about 125 sockets per gateway carried 30 commits/s to 1,000 sockets. */
 export const SOCKETS_PER_GATEWAY = 125;
@@ -135,11 +146,27 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   private admissionTail: Promise<unknown> = Promise.resolve();
   private admissionWaiting = 0;
   private readonly links = new Map<string, Promise<void>>();
+  /** X02: every outgoing call starts from a fresh event (see `origin.ts`). */
+  private readonly origin: CallOrigin;
+  private alarmBody: Promise<void> | undefined;
 
   protected abstract bindings(): GatewayBindings;
 
-  constructor(ctx: DurableObjectState, env: E) {
-    super(ctx, env);
+  constructor(ctx: DurableObjectState, rawEnv: E) {
+    let wake = () => {};
+    const origin = new CallOrigin(() => wake());
+    // Every binding this object (and its sessions, ports and subclasses) calls through `this.env` is gated.
+    super(ctx, gatedEnv(rawEnv, origin));
+    this.origin = origin;
+    const env = this.env;
+    const proto = new.target.prototype as object;
+    if (!tracked.has(proto)) {
+      tracked.add(proto);
+      trackEntries(proto, DurableObject.prototype, INTERNAL_METHODS, (self) => (self as GatewayObjectBase<E>).origin,
+        (name, original) => name === "alarm"
+          ? function (this: object) { return (this as GatewayObjectBase<E>).alarmEntry(original as () => Promise<void>); }
+          : undefined);
+    }
     this.routingIdentity = env.GATEWAY_CONTROLLER ? new GatewayRoutingIdentity(ctx, env.GATEWAY) : undefined;
     const presence = presenceConfig(env);
     const publicGuard = this.bindings().publicGuard?.(env);
@@ -164,7 +191,35 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       const tenant = session.record.tenant;
       if (tenant && !tenant.anonymous) this.index(tenant.route.tenantId).add(ws);
     }
+    wake = () => this.host.wakeNow();
+    // Calls made while constructing (before any request was seen) wait for an alarm.
+    if (this.origin.stats().waiting) wake();
   }
+
+  /**
+   * X02: the alarm is a fresh event, so it releases waiting calls first. An alarm armed
+   * only for that re-arms the host's own alarm and returns. If a call has to wait while
+   * the alarm body runs, the handler returns and the body continues: the platform runs
+   * no new alarm while a handler is running, and the waiting call needs one.
+   */
+  private async alarmEntry(original: () => Promise<void>): Promise<void> {
+    const entry = this.origin.enter("fresh");
+    const stall = this.origin.stalled();
+    try {
+      if (this.host.wakeOnly() || this.alarmBody) return;
+      const body = original.call(this);
+      this.alarmBody = body;
+      const settled = body.finally(() => { if (this.alarmBody === body) this.alarmBody = undefined; });
+      const yielded = await Promise.race([settled.then(() => false), stall.promise.then(() => true)]);
+      if (yielded) this.ctx.waitUntil(settled.catch((error) => console.error("gateway: alarm failed after yielding to a waiting call", error)));
+    } finally {
+      stall.cancel();
+      this.origin.exit(entry);
+    }
+  }
+
+  /** X02 test seam: how many outgoing calls launched at once or waited for a fresh event. */
+  originStats(): OriginStats { return this.origin.stats(); }
 
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket upgrade", { status: 400 });
