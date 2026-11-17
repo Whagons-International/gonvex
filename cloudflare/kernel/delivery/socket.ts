@@ -72,7 +72,10 @@ export class SocketDelivery {
   /** Whole-holder recovery includes opens tracked by the holder but not yet installed in the tenant. */
   recover(instance: string, reason: string): void {
     this.batcher.flush();
-    for (const [id, path] of Object.entries(this.host.tracked())) this.host.send(resetFrame(id, path, reason));
+    const tracked = Object.entries(this.host.tracked());
+    // X02: content-free, so a reset storm can be attributed (barrier/bootstrap vs tenant instance change).
+    if (tracked.length) console.warn("delivery: socket reset", { cause: "barrier", reason, collections: tracked.length });
+    for (const [id, path] of tracked) this.host.send(resetFrame(id, path, reason));
     this.forget();
     this.batcher.clearBindings();
     this.host.setInstance(instance);
@@ -87,6 +90,8 @@ export class SocketDelivery {
     if (previous !== payload.instance) {
       // A restarted tenant object lost its subscriptions and pending opens: the client resumes each one.
       if (previous !== "") {
+        const resets = Object.keys(tracked).filter((id) => work?.opened?.[id] === undefined).length;
+        if (resets) console.warn("delivery: socket reset", { cause: "instance", reason: "change-feed-reset", collections: resets });
         for (const [id, path] of Object.entries(tracked)) {
           if (work?.opened?.[id] !== undefined) continue;
           delete tracked[id];

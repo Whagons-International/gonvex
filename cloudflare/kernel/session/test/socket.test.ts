@@ -370,6 +370,56 @@ describe("gateway placement", () => {
     c.ws.close(1000);
   });
 
+  it("X02 starts no gateway call while a tenant RPC is the gateway's newest request, and starts it at the next fresh event", async () => {
+    const w = await world({ a: ["ana"] });
+    await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const seen = await inGateway(name!, async (gw) => {
+      // A tenant -> gateway RPC (the platform request the 1011s ran inside). Once finished it
+      // stays the platform's front, and a call now would be counted one hop below it.
+      await gw.deliver({ v: 1, tenantId: w.tenants.a, revision: 1, all: [] });
+      const before = gw.originStats();
+      let launched = false;
+      // Through the gateway's own bindings, as every session port, link and report call is.
+      gw.x02Call = gw.env.TENANT_STUB.getByName(w.tenants.a).ping().then((at: number) => { launched = true; return at; });
+      await Promise.resolve();
+      return { before, after: gw.originStats(), launched };
+    }) as { before: { deferred: number; waiting: number }; after: { deferred: number; waiting: number }; launched: boolean };
+    expect(seen.launched).toBe(false);
+    expect(seen.after.waiting).toBe(seen.before.waiting + 1);
+    expect(seen.after.deferred).toBe(seen.before.deferred + 1);
+    // The wake alarm is a fresh event: it starts the waiting call (unless it already fired by itself).
+    await runDurableObjectAlarm(gateway(name!));
+    const done = await inGateway(name!, async (gw) => ({ at: await gw.x02Call, stats: gw.originStats() })) as { at: number; stats: { waiting: number } };
+    expect(typeof done.at).toBe("number");
+    expect(done.stats.waiting).toBe(0);
+  });
+
+  it("X02 a wake alarm consumed while a yielded alarm body runs re-arms the host's own alarm when the body ends", async () => {
+    const w = await world({ a: ["ana"] });
+    await signedIn(w, "ana", "a");
+    const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+    const armed = await inGatewayState(gateway(name!), async (gw, state) => {
+      await state.storage.deleteAlarm();
+      // A yielded alarm body is still running, and the host's cached deadline is already due:
+      // that body served the deadline before this wake fired, so nothing else re-arms it.
+      let finish!: () => void;
+      gw.alarmBody = new Promise<void>((resolve) => { finish = resolve; });
+      gw.host.scheduled = Date.now() - 1_000;
+      gw.host.wakePending = true;
+      await gw.alarm();
+      const during = await state.storage.getAlarm();
+      finish();
+      // The real body clears this when it settles (alarmEntry); the stand-in must too.
+      gw.alarmBody = undefined;
+      for (let i = 0; i < 20 && (await state.storage.getAlarm()) === null; i++) await new Promise((r) => setTimeout(r, 5));
+      return { during, after: await state.storage.getAlarm() };
+    }) as { during: number | null; after: number | null };
+    expect(armed.during).toBeNull();
+    // The session's liveness/revalidation deadlines are scheduled again.
+    expect(armed.after).not.toBeNull();
+  });
+
   it("registers each gateway once with the tenant and delivers each commit once per gateway", async () => {
     const w = await world({ a: ["ana", "ben"] });
     const clients = await Promise.all(Array.from({ length: 12 }, (_, i) => signedIn(w, i % 2 ? "ben" : "ana", "a")));
