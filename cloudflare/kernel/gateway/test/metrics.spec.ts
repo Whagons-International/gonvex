@@ -68,3 +68,36 @@ it("requires real full sampled buckets and keeps later low counts out of earlier
     expect(sealedLow.windowSockets).toBe(1); expect(sealedLow.windowSocketSamples).toBe(2);
   } finally { clock.mockRestore(); }
 });
+
+for (const kind of ["frames", "bytes"] as const) it(`keeps ${kind} pressure across a report boundary without re-aging its source window`, () => {
+  const clock = vi.spyOn(Date, "now");
+  try {
+    clock.mockReturnValue(1000); const m = new GatewayMetrics();
+    const text = kind === "bytes" ? "x".repeat(512 * 1024) : "x";
+    for (let i = 0; i < (kind === "bytes" ? 50 : 25_000); i++) m.sent(text);
+    clock.mockReturnValue(6000); const first = m.snapshot(1, 1); m.rotate();
+    expect(first.currentPressure).toBe(1);
+    clock.mockReturnValue(10999); const repeated = m.snapshot(1, 1); m.rotate();
+    expect(repeated.currentPressure).toBe(1);
+    expect(repeated.windowSequence).toBe(first.windowSequence);
+    expect(repeated.windowStart).toBe(first.windowStart);
+    expect(repeated.windowEnd).toBe(first.windowEnd);
+    clock.mockReturnValue(11000); const quiet = m.snapshot(1, 1);
+    expect(quiet.currentPressure).toBe(0);
+    expect(quiet.windowSequence).toBe(first.windowSequence! + 1);
+    expect(quiet.windowFramesPerSecond).toBe(0);
+    expect(quiet.windowBytesPerSecond).toBe(0);
+  } finally { clock.mockRestore(); }
+});
+
+it("does not carry completed latency or socket pressure into the current reporting horizon", () => {
+  const clock = vi.spyOn(Date, "now");
+  try {
+    clock.mockReturnValue(1000); const m = new GatewayMetrics();
+    m.delivery(150, 150, 150); m.snapshot(1, 125);
+    clock.mockReturnValue(6000); const current = m.snapshot(1, 1);
+    expect(current.windowDeliveryMs).toBe(150);
+    expect(current.windowSockets).toBe(125);
+    expect(current.currentPressure).toBe(0);
+  } finally { clock.mockRestore(); }
+});

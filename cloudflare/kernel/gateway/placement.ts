@@ -41,7 +41,7 @@ export interface CapacityWindow {
 export const WINDOW_FIELDS = ["windowInstance", "windowSequence", "windowStart", "windowEnd", "windowSockets", "windowSocketSamples",
   "windowFramesPerSecond", "windowBytesPerSecond", "windowDeliveryMs", "windowQueueAgeMs", "windowRpcMs"] as const;
 export interface CapacitySample extends Partial<CapacityWindow> {
-  /** Actual current bucket/gauge pressure, not the retained admission maxima. */
+  /** Current gauge/latency and one reporting interval of throughput, not admission maxima. */
   currentPressure?: 0 | 1;
   v: 1;
   epoch: number;

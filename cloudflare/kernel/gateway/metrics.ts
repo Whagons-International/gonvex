@@ -67,7 +67,12 @@ export class GatewayMetrics {
     this.socketMinimum = this.socketSamples ? Math.min(this.socketMinimum, sockets) : sockets;
     this.socketSamples = Math.min(Number.MAX_SAFE_INTEGER, this.socketSamples + 1);
     const sample = this.current(epoch, sockets, now), last = this.last;
-    sample.currentPressure = pressured(sample) ? 1 : 0;
+    // A rate needs a reporting horizon: just after a bucket boundary the new
+    // counters alone look idle. Keep only the latest completed bucket's work
+    // rates for one interval; never carry its latency maxima or socket gauge.
+    const recentThroughput = last && now - last.windowEnd <= SAMPLE_MS
+      && pressured({ ...last, sockets: 0, deliveryMs: 0, queueAgeMs: 0, rpcMs: 0 });
+    sample.currentPressure = pressured(sample) || recentThroughput ? 1 : 0;
     // Admission retains recent maxima; rebalance receives the EXACT immutable completed bucket separately.
     if (!last || now - last.windowEnd > SAMPLE_MS * 2) return sample;
     return { ...sample, framesPerSecond: Math.max(sample.framesPerSecond, last.framesPerSecond),

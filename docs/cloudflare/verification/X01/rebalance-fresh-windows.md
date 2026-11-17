@@ -25,7 +25,12 @@ cooldown, 120-second quiet grace and delayed safe drain remain unchanged.
 updates report cadence; it cannot create a bucket, erase the current bucket or re-age completed work.
 The existing admission scalars retain current/recent maxima. Rebalance evidence is a SEPARATE immutable
 completed bucket, never a label applied to mixed admission maxima. `currentPressure` is 0/1 computed from
-actual in-progress counters and the current supplied socket count, before recent maxima are merged.
+actual in-progress latency counters and the current supplied socket count. Throughput rates also use the
+latest completed bucket for at most one five-second reporting interval: a report immediately after the
+boundary must not mistake newly reset counters for a quiet sustained stream. This does not create or
+re-age a completed window, carry old latency/socket pressure, or mint another interval of source evidence.
+The next completed quiet bucket, a gap or a clock reset removes that throughput signal. Admission's longer
+recent-max retention remains separate.
 
 All additive wire properties are numeric so the exact previous controller's `Object.values(...).every`
 number/finite/nonnegative gate continues to accept new reports:
