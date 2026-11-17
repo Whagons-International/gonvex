@@ -59,8 +59,9 @@ const FTS5_SHADOW = ['data', 'idx', 'content', 'docsize', 'config'];
  * costs ~14 s of CPU in a Durable Object holding the tenant schema (474 views).
  */
 export function readSchema(sql) {
+  // Filter protected KV tables in SQL before asking SQLite for their schema.
   const rows = sql
-    .exec('SELECT type, name, tbl_name AS tblName, sql FROM sqlite_schema ORDER BY rowid')
+    .exec("SELECT type, name, tbl_name AS tblName, sql FROM sqlite_schema WHERE name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY rowid")
     .toArray()
     .filter((o) => !isPlatformTable(o.name));
   const virtual = new Set(rows.filter((o) => o.type === 'table' && /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(o.sql ?? '')).map((o) => o.name));
@@ -106,12 +107,13 @@ export function schemaFingerprint(schema) {
 /** Copy plans of every ordinary table (no virtual, shadow or sqlite_* tables). */
 export function readPlans(sql, schema = readSchema(sql)) {
   const tables = schema.filter((o) => o.kind === 'table' && !o.name.startsWith('sqlite_'));
-  // One statement for every table's columns.
+  // One statement for every table's columns. Exclude protected KV tables before
+  // invoking pragma_table_xinfo; a serving object also has Durable Object KV.
   const columns = new Map(tables.map((t) => [t.name, []]));
   for (const c of sql
     .exec(
       `SELECT m.name AS tbl, c.name AS name, c.type AS type, c.pk AS pk, c.hidden AS hidden
-       FROM sqlite_schema AS m, pragma_table_xinfo(m.name) AS c WHERE m.type = 'table' ORDER BY m.rowid, c.cid`,
+       FROM sqlite_schema AS m, pragma_table_xinfo(m.name) AS c WHERE m.type = 'table' AND m.name NOT GLOB '_cf_*' AND m.name NOT GLOB '__miniflare*' ORDER BY m.rowid, c.cid`,
     )
     .toArray()) {
     columns.get(c.tbl)?.push(c);

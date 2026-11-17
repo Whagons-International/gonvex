@@ -1,4 +1,5 @@
 // K22: the serving kernel. Fixture routes and the K05 stand-ins are test-only.
+import { handleTenantTransfer, type TransferEnv } from "../kernel/assembly/tenant-transfer";
 import { fixtureControl } from "../kernel/assembly/fixture-control";
 import type { RolloutMessage } from "../control/operator/release";
 import { handleWebSocketUpgrade } from "../kernel/session/router";
@@ -16,13 +17,15 @@ export { GatewayControllerObject } from "../kernel/gateway/controller";
 export { PublicLimiterObject } from "../kernel/public";
 export { IngressObject } from "../router/ingress/object";
 
-interface ServingEnv extends Env { GONVEX_ASSEMBLY_FIXTURE_KEY?: string }
+interface ServingEnv extends Env, TransferEnv { GONVEX_ASSEMBLY_FIXTURE_KEY?: string }
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/") return Response.json({ ok: true, service: "gonvex-cloudflare" });
     if (url.pathname === "/ws") return handleWebSocketUpgrade(request, env);
+    const transfer = await handleTenantTransfer(request, env);
+    if (transfer) return transfer;
     const fixture = await fixtureControl(request, env);
     if (fixture) return fixture;
     const dev = await handleDevRequest(request, env, ctx);

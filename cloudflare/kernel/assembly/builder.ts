@@ -8,6 +8,11 @@ interface Env {
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_API_TOKEN: string;
 }
+export function containerRequest(request: Request): Request {
+  const upstream = new URL(request.url);
+  upstream.protocol = "http:";
+  return new Request(upstream, request);
+}
 export class ReleaseBuilderContainer extends DurableObject<Env> {
   override async fetch(request: Request): Promise<Response> {
     if (!this.env.GONVEX_KERNEL_SCRIPT.startsWith("gonvex-cf-dev-")) return new Response("development target required", { status: 503 });
@@ -33,7 +38,8 @@ export class ReleaseBuilderContainer extends DurableObject<Env> {
       if (Date.now() - start > 60_000) return new Response("release builder did not start", { status: 503 });
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return port.fetch(request);
+    // Container TCP fetchers speak HTTP even when the public/service request is HTTPS.
+    return port.fetch(containerRequest(request));
   }
 }
 export default { fetch: (request: Request, env: Env) => env.BUILDER.getByName("builder").fetch(request) };
