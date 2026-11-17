@@ -1,5 +1,5 @@
 {
-  "runtimeSourceBase": "8646997ffd05875072c88101cdb9b75fd5e7d086",
+  "runtimeSourceBase": "471a01c6ca047c42865e2fd9668a9e3c9d73836e",
   "webSourceCommitFromImmutableHandoff": "3ad4fa47ed7f6c0c7d41d0b3d5a9cfd92c8d01b9",
   "appModuleIdentityFromHandoff": "f8336ddff29861c552dc03aeb9e5b0a8c7056589c709fd29d0d4e4dbd91171bc",
   "observedFiles": [
@@ -47,5 +47,6 @@
     }
   ],
   "cachedSdkPackageVersion": "0.5.2-sqlite.1",
-  "readiness": "NOT_ELIGIBLE: cached SDK lacks current receipt API; compiled current SDK/localRuntime and reviewed live bindings still required"
+  "readiness": "NOT_ELIGIBLE: cached SDK lacks current receipt API; compiled current SDK/localRuntime and reviewed live bindings still required",
+  "sdkSourceUnchangedFrom": "8646997ffd05875072c88101cdb9b75fd5e7d086"
 }

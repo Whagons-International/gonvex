@@ -36,6 +36,7 @@ export async function loadFixture(file) {
     }
   };
   f.operations.forEach(operation); list(f.cleanup, 16, 'cleanup', 0); f.cleanup.forEach(operation);
+  if (f.operations.some(o => o.kind !== 'query') && !f.cleanup.length) refuse('fixture.cleanup-required');
   const expectations = f.operations.filter(o => o.kind !== 'query').flatMap(o => o.cases.map(c => JSON.stringify(c.expect)));
   unique(expectations, 'write-expectations.must-be-distinct');
   list(f.finalChecks, 100000, 'finalChecks');

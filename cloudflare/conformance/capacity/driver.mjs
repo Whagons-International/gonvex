@@ -24,6 +24,8 @@ async function runBoundCell({ cell, manifest, signal, emit }) {
   let cleanupMaximum = 0;
   for (const tenant of b.tenants) {
     const f = await loadFixture(tenant.fixture);
+    if (b.mix.kind === 'source-derived' && f.operations.some(o => o.kind === 'action'))
+      throw new Refusal('UNSUPPORTED', 'command-bound-action/background-completion-port');
     cleanupMaximum += f.cleanup.reduce((n, op) => n + op.cases.length, 0);
     for (const phase of b.phases) for (const t of phase.tenants.filter(t => t.alias === tenant.alias)) for (const r of t.rates) {
       const op = f.operations.find(o => o.alias === r.operation);

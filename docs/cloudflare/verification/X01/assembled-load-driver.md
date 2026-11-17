@@ -1,6 +1,7 @@
 # Executable assembled SDK capacity driver
 
-Source base: `8646997ffd05875072c88101cdb9b75fd5e7d086`. This is source preparation, not V03,
+Source base: `471a01c6ca047c42865e2fd9668a9e3c9d73836e`, normally merged after preserving the initial
+864-based driver work. This is source preparation, not V03,
 X01, V01 or OWNER acceptance. No target, authentication, provisioning, browser or load call was made.
 The stopped historical model qualification/branches are not used. Serving code and SDK contracts are unchanged.
 
@@ -32,17 +33,17 @@ Top-level required keys:
 | Key | Required contents |
 |---|---|
 | `v`, `runId`, `cell` | `1`, bounded safe filename identity, exact shell cell identity |
-| `deployment` | `accountId` (the authorized dev account), exact `sourceSha`, `moduleSha256`, `configSha256`, `endpoint` (`wss`), four `resources` with exact `role,name,version` |
+| `deployment` | `accountId` (the authorized dev account), exact `sourceSha`, `moduleSha256`, `configSha256`, `endpoint` (`wss`), five `resources` (kernel/runtime/actions/builder/sandbox) with exact `role,name,version`, `catalogVersion`, `catalogReleases:[{projectId,moduleSha256}]` |
 | `sources` | hashed compiled `sdk`, generated `refs`, generated `localRuntime` (or null/DORMANT); `sdkSourceSha`, `webSourceSha`, hashed `closure` including those entries |
 | `auth` | only `{fileEnv:'WHAGONS_CREDENTIAL_FILE'}`; no token/header/login in a binding or parent argv |
-| `tenants` | at most 26 explicit `{alias,tenantId,project,principals,fixture,dataProvenance}`; hashed actual copy/schema/data provenance required at execution, never invented memberships |
+| `tenants` | at most 26 explicit `{alias,tenantId,project,projectId,principals,fixture,dataProvenance}`; `project` is the SDK routing input, `projectId` the authoritative catalog/admission identity; hashed actual copy/schema/data provenance required at execution, never invented memberships |
 | `phases` | at most 32 `{name,stage:'warmup'|'measure'|'cooldown',durationMs,tenants}`; each tenant is `{alias,connections,active,reconnect,rates:[{operation,perSecond}]}` |
 | `mix` | `{kind:'synthetic-stress'|'source-derived',evidence:hashed-file|null}`; source-derived requires sanitized source evidence, never labelled typical merely because it is declared |
-| `telemetry` | `{url,contractSha256,providerFile}`; nulls keep execution DORMANT. Contract digest is the driver's proposed input profile (`telemetry.mjs`), **not** a claim an installed endpoint implements it |
+| `telemetry` | `{url,adapter,contractSha256,providerFile}`; nulls keep execution DORMANT. The hashed adapter translates K22's actual typed serving contract into the driver's normalized measurement profile. Contract digest hashes `telemetry.mjs`, **not** a shared serving API proposal |
 | `budget` | all numeric fields below, with finite enforced ranges |
 | `resourceAdmission` | hashed normal resource-helper receipt or null/DORMANT; not a new approval mechanism or proof that compatibility memory flags enforce caps |
 
-Budget fields: `maxWallMs,maxConnections,maxPending,maxOffered,maxSentBytes,maxReceivedBytes,maxArtifactBytes,
+Budget fields: `maxWallMs,maxConnections,maxPending,maxOffered,maxSentBytes,maxReceivedBytes,maxBufferedBytes,maxArtifactBytes,
 maxResidentRows,maxResidentBytes,maxGeneratorRssBytes,maxGeneratorFds,maxUsd,maxLagMs,operationTimeoutMs,
 setupTimeoutMs,cleanupTimeoutMs,opensPerSecond,telemetryIntervalMs,maxTelemetryAgeMs,maxCostAgeMs`.
 Whole-run offered operations include cleanup; maximum 100,000. At most 26,000 simultaneous sessions,
@@ -68,6 +69,7 @@ Ownership allowlists bound effects; they do not prove that copied customer rows 
 the actual fixture provisioning/ownership evidence before execution. Cleanup operations use the same genuine
 refs, ownership checks, command evidence and independent receiver checks. `finalChecks` verifies a declared
 field projection and emits its hash, not a fabricated whole-tenant checksum/exactly-once assertion.
+Write fixtures without an explicit cleanup operation refuse before client construction.
 
 Refs are resolved from actual generated `api`, preserving `localExecution`, authorization and other metadata.
 Current genuine task refs include `tasks.create`, `tasks.assign`, `tasks.requestTransition`, `tasks.rename`
@@ -76,6 +78,9 @@ The audited catalog does not expose a task-comment reducer under an assumed `tas
 people-feed and workbench comments are different app operations. No substitute is silently selected. Scheduled
 or background work may be triggered by genuine app actions/reducers, but an action response is explicitly
 NOT durable completion of its downstream jobs. A real job-completion port/scenario is still required.
+Source-derived workloads containing actions refuse with `UNSUPPORTED: command-bound-action/background-completion-port`.
+Synthetic stress can exercise the supported SDK action method, but its response-only metric cannot qualify
+the original durable-write gate.
 
 Reducers call **only** `reducerWithTransactionEvidence(...,{offline:'reject',optimistic:[],timeoutMs,
 execution:'server'})`. Genuine local refs require the genuine generated `localRuntime` artifact and an
@@ -123,13 +128,23 @@ Holders scans 32 controllers and exposes per-socket labels; metrics has placehol
 They are not promoted to the new content-free capacity contract. K22 owns the proposed serving adapter after
 its current release; this driver leaves it unbound pending the exact reviewed contract/installed version.
 
+The actual 471 `/__assembly/version` shape is checked through its existing authenticated fixture gate before
+SDK construction: stable Worker ID, Runtime Worker ID, catalog version, ready and project release mapping.
+This does not substitute for five-component provider/deployment evidence. Old four-component/monolith
+bindings refuse; the current live 864 release is not represented as a Runtime-aware target.
+
 The driver profile validates exact deployment/app/config/resource identities; bounded per-service samples
 (writer, Control, auth, limiter, routing, gateway, builder, Workflow, sandbox); holder/controller identity,
 epochs, original source `at`/windows/mode and drain-blocked count; sample loss and observation mode. Unknown
 service facts are null. Gateway socket/frame/byte/lag/queue/RPC facts must be measured, not placeholders.
 Unknown/lost history refuses eligibility instead of calling it a complete scaling timeline. Cached observations
 retain original timestamps. Fresh probes must be explicitly `bounded-fresh` with induced RPC/wakeup/snapshot
-counts: `Gateway.capacity()` mutates lazy measurement buckets and is not passive/neutral.
+counts: `Gateway.capacity()` mutates lazy measurement buckets and is not passive/neutral. The missing
+K22-typed transport translation is an explicit external binding, never a guessed HTTP response schema.
+Its reviewed module exports `readCapacity({url,bearer,signal,fetch,readJSON,binding})`; imports and requests
+run inside the same effect boundary. `readJSON` bounds response bytes. No serving stub or fake metric
+implementation is provided. A bound adapter must preserve unavailable statuses as null/UNKNOWN and must
+not map `/dev/metrics` placeholder zeros to measured facts.
 
 Cost is a **separate** private `providerFile`, refreshed by an actual reviewed collector. Its closed schema is
 `{v:1,resourceVersions,costAsOfUnixMs,measuredUsd,facts:hashed-file,attribution:hashed-file}`. Driver checks
@@ -141,5 +156,24 @@ guarantee on final invoices. Real attribution/provider collection remains an exe
 
 Generator CPU, RSS/heap, event-loop lag, FDs and application-frame bytes are sampled from actual local ports;
 application bytes exclude TLS/billed network overhead. They are never serving-isolate memory measurements.
+Before sends, aggregate native `bufferedAmount` is checked against the declared queue-byte ceiling; inspecting
+owned sockets is generator work and can itself saturate the producer. Queued bytes do not prove a heap cap.
 Repeat/split generators and repeat gate/bracket points later to distinguish generator saturation from service
 limits; no workload/cost curve or safe maximum user count is claimed by these source tests.
+
+## Source verification
+
+Run under the normal resource helper/headroom gate, with existing dependencies and acquisition disabled:
+
+```sh
+cd cloudflare
+COREPACK_ENABLE_NETWORK=0 pnpm exec vitest run --config conformance/capacity/vitest.config.mjs
+pnpm exec tsc -p conformance/capacity/tsconfig.json
+node --test conformance/test/*.test.mjs
+```
+
+For local qualification, `GONVEX_CAPACITY_APP_REFS` points to the immutable cached real `api.ts`; without it,
+tests use a frozen selected-descriptor fixture. `source-audit.json` records actual source/file hashes and the
+cached compiled SDK's missing receipt method despite its identical version string. Current SDK public calls
+are typechecked directly against source. The Node tests use inert transports/DATA only, not an assembled
+target. Earlier author alias/auth-fixture corrections remain in local logs, not rewritten as runtime evidence.

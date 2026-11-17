@@ -16,7 +16,7 @@ function setup() {
     close() { this.closed = true; } connect() { this.closed = false; }
     connectionState() { return { isWebSocketConnected: !this.closed, connectionCount: 1, connectionRetries: 0 }; }
     localSessionState() { return 'authenticated'; } activeArtifactHash() { return b.deployment.moduleSha256; }
-    tenantAdmission() { return { tenantId: this.options.tenant, accountId: 'a', memberId: 'm' }; }
+    tenantAdmission() { return { project: 'DATA', tenantId: this.options.tenant, accountId: 'a', memberId: 'm' }; }
     subscribeToConnectionState() { return () => {}; }
     watchReplica() { return { localReplicaResult: () => [{ id: 'DATA', name: 'DATA' }], localReplicaState: () => ({ source: 'server', completeness: 'complete', isUpToDate: true }), onUpdate: () => () => {} }; }
     async query() { return []; }

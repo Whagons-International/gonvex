@@ -27,7 +27,7 @@ it('actual SDK deferred auth cannot send after owner stop, including a later rec
   let resolve!: (token: string) => void;
   const url = 'ws://DATA.invalid/ws', controller = new AbortController();
   const f = installEffects({ WebSocket: DataSocket, fetch: async () => {}, socketUrl: url, httpUrls: [], deadline: Infinity, signal: controller.signal,
-    budget: { maxConnections: 2, opensPerSecond: 100, maxSentBytes: 100000, maxReceivedBytes: 100000 } });
+    budget: { maxConnections: 2, opensPerSecond: 100, maxSentBytes: 100000, maxReceivedBytes: 100000, maxBufferedBytes: 100000 } });
   vi.stubGlobal('WebSocket', f.WebSocket);
   const client = new GonvexClient(url, { project: 'DATA', tenant: 'DATA', fetchToken: () => new Promise<string>(r => { resolve = r; }), errorReporting: false, outbox: { enabled: false } });
   try {
@@ -40,7 +40,7 @@ it('actual SDK deferred auth cannot send after owner stop, including a later rec
 it('actual SDK auth fallback, direct auth and direct receipt send obey the independent lifetime boundary', async () => {
   let now = 0; const url = 'ws://DATA.invalid/ws';
   const f = installEffects({ WebSocket: DataSocket, fetch: async () => {}, socketUrl: url, httpUrls: [], deadline: 10,
-    budget: { maxConnections: 2, opensPerSecond: 100, maxSentBytes: 1000000, maxReceivedBytes: 1000000 }, now: () => now });
+    budget: { maxConnections: 2, opensPerSecond: 100, maxSentBytes: 1000000, maxReceivedBytes: 1000000, maxBufferedBytes: 1000000 }, now: () => now });
   vi.stubGlobal('WebSocket', f.WebSocket);
   const client = new GonvexClient(url, { project: 'DATA', tenant: 'DATA', token: 'DATA', fetchToken: async () => { throw Error('DATA-offline'); }, errorReporting: false, outbox: { enabled: false } });
   try {
@@ -73,7 +73,7 @@ it('actual SDK auth fallback, direct auth and direct receipt send obey the indep
 it('actual SDK direct setAuth bypass cannot send on an OPEN socket after expiry', async () => {
   let now = 0; const url = 'ws://DATA.invalid/ws';
   const f = installEffects({ WebSocket: DataSocket, fetch: async () => {}, socketUrl: url, httpUrls: [], deadline: 10,
-    budget: { maxConnections: 2, opensPerSecond: 100, maxSentBytes: 100000, maxReceivedBytes: 100000 }, now: () => now });
+    budget: { maxConnections: 2, opensPerSecond: 100, maxSentBytes: 100000, maxReceivedBytes: 100000, maxBufferedBytes: 100000 }, now: () => now });
   vi.stubGlobal('WebSocket', f.WebSocket);
   const c = new GonvexClient(url, { project: 'DATA', tenant: 'DATA', token: 'DATA', errorReporting: false, outbox: { enabled: false } });
   try {

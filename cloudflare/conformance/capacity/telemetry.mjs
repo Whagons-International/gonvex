@@ -1,5 +1,7 @@
 import { shape, integer, list, text, refuse, Refusal, jsonFile, checkedFile, hash } from './binding.mjs';
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { readJSON } from './identity.mjs';
 export const METRICS = ['sockets', 'frames', 'bytes', 'deliveryLagMs', 'queueAgeMs', 'rpcMs', 'cpuMs', 'isolateMemoryBytes', 'sqlStatements', 'rowsRead', 'rowsWritten', 'backlog'];
 export const SCOPES = ['writer', 'control', 'auth', 'limiter', 'routing', 'gateway', 'builder', 'workflow', 'sandbox'];
 // Driver input profile, NOT an assertion that a serving endpoint implements it. K22 owns that adapter contract.
@@ -57,12 +59,12 @@ export async function readCost(b, previous) {
   return value; // Attribution is the separately reviewed collector's evidence, never client runId authority.
 }
 export async function sampleTelemetry(b, token, previous, signal) {
-  if (!b.telemetry.url) throw new Refusal('UNSUPPORTED', 'authenticated-assembled-capacity-telemetry-v1');
-  const response = await fetch(b.telemetry.url, { signal, redirect: 'error', headers: { authorization: `Bearer ${token}`, 'x-gonvex-capacity-run': b.runId } });
-  if (!response.ok || !response.body) refuse('telemetry.response');
-  const reader = response.body.getReader(); let length = 0; const parts = [];
-  try { for (;;) { const { done, value } = await reader.read(); if (done) break; length += value.byteLength;
-    if (length > 512 * 1024) refuse('telemetry.byte-bound'); parts.push(value); }
-  } finally { await reader.cancel(); }
-  return validateTelemetry(JSON.parse(Buffer.concat(parts).toString('utf8')), b, previous);
+  if (!b.telemetry.url || !b.telemetry.adapter) throw new Refusal('UNSUPPORTED', 'K22-typed-capacity-handoff-adapter');
+  // The serving contract is K22-owned and not guessed here. Bind its reviewed translation artifact only after handoff.
+  await checkedFile(b.telemetry.adapter);
+  const adapter = await import(pathToFileURL(b.telemetry.adapter.path).href);
+  if (typeof adapter.readCapacity !== 'function') throw new Refusal('UNSUPPORTED', 'capacity-adapter.readCapacity');
+  const sample = await adapter.readCapacity({ url: b.telemetry.url, bearer: token, signal, fetch, readJSON, binding: b });
+  if (Buffer.byteLength(JSON.stringify(sample)) > 512 * 1024) refuse('telemetry.byte-bound');
+  return validateTelemetry(sample, b, previous);
 }

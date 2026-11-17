@@ -19,7 +19,15 @@ export function installEffects({ WebSocket: NativeSocket, fetch: nativeFetch, so
       this.addEventListener('close', () => sockets.delete(this), { once: true });
       this.addEventListener('message', e => { try { receivedFrames++; account('receive', bytes(e.data)); } catch { this.close(); } });
     }
-    send(data) { account('send', bytes(data)); frames++; return super.send(data); }
+    send(data) {
+      const n = bytes(data); check();
+      if (sent + n > budget.maxSentBytes) { stopped = true; throw new Refusal('STOPPED', 'wire-byte-budget'); }
+      // Node's native queues are separate from the scheduler's pending promises. Inspect actual queued
+      // application bytes across owned sockets; no claim that this equals heap/TLS/provider memory.
+      let buffered = 0; for (const socket of sockets) buffered += socket.bufferedAmount ?? 0;
+      if (buffered + n > budget.maxBufferedBytes) { stopped = true; throw new Refusal('STOPPED', 'native-buffer-budget'); }
+      const result = super.send(data); sent += n; frames++; return result;
+    }
   }
   const fetch = async (url, options = {}) => {
     check(); const target = String(url instanceof Request ? url.url : url);

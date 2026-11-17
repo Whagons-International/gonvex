@@ -9,6 +9,7 @@ import { execute } from './engine.mjs';
 import { sampleTelemetry, readCost, CONTRACT_SHA256 } from './telemetry.mjs';
 import { sleep } from './schedule.mjs';
 import { distribution } from './statistics.mjs';
+import { versionUrl, readJSON, verifyIdentity } from './identity.mjs';
 
 const controller = new AbortController();
 parentPort.on('message', m => { if (m === 'stop') { controller.abort(); effects?.stop(); } if (m === 'ack') unacked = Math.max(0, unacked - 1); });
@@ -57,8 +58,10 @@ try {
   handle = await open(`${workerData.out}/receipts.jsonl`, 'wx', 0o600);
   const { writeSync } = await import('node:fs'); file = { writeSync: line => { const data = Buffer.from(line); let n = 0; while (n < data.length) n += writeSync(handle.fd, data, n, data.length - n); } };
   effects = installEffects({ WebSocket: globalThis.WebSocket, fetch: globalThis.fetch, socketUrl: b.deployment.endpoint,
-    httpUrls: [b.telemetry.url], deadline, budget: b.budget, signal: controller.signal });
+    httpUrls: [b.telemetry.url, versionUrl(b)], deadline, budget: b.budget, signal: controller.signal });
   globalThis.WebSocket = effects.WebSocket; globalThis.fetch = effects.fetch;
+  const identity = await readJSON(await fetch(versionUrl(b), { redirect: 'error', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(b.budget.maxTelemetryAgeMs)]), headers: { authorization: `Bearer ${credentials.monitorToken}` } }));
+  verifyIdentity(identity, b); // Existing authenticated typed RUNTIME_CATALOG bridge, before any SDK client construction.
   const fixtures = new Map(); for (const t of b.tenants) fixtures.set(t.alias, await loadFixture(t.fixture));
   // Install the realm boundary BEFORE importing the genuine SDK or generated app modules.
   const sdk = await import(pathToFileURL(b.sources.sdk.path).href);

@@ -14,7 +14,7 @@ it('executable preflight/runCell/cleanup remain inert and explicit when real por
     const module = join(root, 'never-import.mjs'), raw = 'throw Error("MUST_NOT_IMPORT");'; await writeFile(module, raw);
     const fixture = { ownedIds: ['DATA'], replica: { ref: ['DATA'], args: {}, keyPath: ['id'] }, liveQueries: [],
       operations: [{ alias: 'rename', kind: 'reducer', ref: ['DATA'], identityPaths: [['id']], cases: [{ args: { id: 'DATA' }, expect: { key: 'DATA', valuePath: ['name'], value: 'DATA' } }] }],
-      cleanup: [], finalChecks: [{ key: 'DATA', valuePath: ['name'], value: 'DATA' }] };
+      cleanup: [{ alias: 'cleanup', kind: 'reducer', ref: ['DATA'], identityPaths: [['id']], cases: [{ args: { id: 'DATA' }, expect: { key: 'DATA', valuePath: ['name'], value: 'old' } }] }], finalChecks: [{ key: 'DATA', valuePath: ['name'], value: 'DATA' }] };
     const rawFixture = JSON.stringify(fixture), fixturePath = join(root, 'fixture.json'); await writeFile(fixturePath, rawFixture);
     const b = binding(), f = { path: module, sha256: hash(raw) }; b.sources.sdk = f; b.sources.refs = f; b.sources.closure = [f];
     b.tenants[0].fixture = { path: fixturePath, sha256: hash(rawFixture) };

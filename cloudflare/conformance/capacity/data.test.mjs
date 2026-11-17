@@ -62,6 +62,13 @@ describe('effect boundary DATA', () => {
     const f = installEffects({ WebSocket: DataSocket, fetch: async () => {}, socketUrl: b.deployment.endpoint, httpUrls: [], deadline: Infinity, budget: b.budget });
     const s = new f.WebSocket(b.deployment.endpoint); expect(() => new f.WebSocket(b.deployment.endpoint)).toThrow(); expect(() => s.send('oversize')).toThrow(); expect(s.sent).toHaveLength(0); f.stop();
   });
+  it('bounds aggregate actual native queues before a further send', () => {
+    const b = binding(); b.budget.maxBufferedBytes = 10; let now = 0;
+    const f = installEffects({ WebSocket: DataSocket, fetch: async () => {}, socketUrl: b.deployment.endpoint, httpUrls: [], deadline: Infinity, budget: b.budget, now: () => now });
+    const first = new f.WebSocket(b.deployment.endpoint); first.bufferedAmount = 5; now = 1000;
+    const second = new f.WebSocket(b.deployment.endpoint); second.bufferedAmount = 5;
+    expect(() => second.send('x')).toThrow(); expect(second.sent).toHaveLength(0); expect(f.snapshot().sentBytes).toBe(0); f.stop();
+  });
 });
 describe('open loop DATA', () => {
   it('keeps intended timestamps with independent rates and no retry/double count', async () => {

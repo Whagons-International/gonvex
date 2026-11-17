@@ -38,12 +38,14 @@ export function validateBinding(b) {
   if (b.v !== 1) refuse('version');
   if (!/^[a-zA-Z0-9-]{1,64}$/.test(b.runId)) refuse('runId'); text(b.cell, 'cell');
   const d = b.deployment;
-  shape(d, ['accountId', 'sourceSha', 'moduleSha256', 'configSha256', 'endpoint', 'resources'], 'deployment');
+  shape(d, ['accountId', 'sourceSha', 'moduleSha256', 'configSha256', 'endpoint', 'resources', 'catalogVersion', 'catalogReleases'], 'deployment');
   if (d.accountId !== '30962192f9607a89eda812daa15e55fa') refuse('account');
   hex(d.sourceSha, 40, 'sourceSha'); hex(d.moduleSha256, 64, 'moduleSha256'); hex(d.configSha256, 64, 'configSha256'); endpoint(d.endpoint, true);
-  list(d.resources, 4, 'resources', 4); unique(d.resources.map(r => r.role), 'resource.roles');
+  list(d.resources, 5, 'resources', 5); unique(d.resources.map(r => r.role), 'resource.roles'); text(d.catalogVersion, 'catalogVersion');
+  list(d.catalogReleases, 128, 'catalogReleases'); unique(d.catalogReleases.map(r => r.projectId), 'catalogReleases');
+  for (const r of d.catalogReleases) { shape(r, ['projectId', 'moduleSha256'], 'catalogRelease'); text(r.projectId, 'projectId'); hex(r.moduleSha256, 64, 'release.module'); }
   for (const r of d.resources) { shape(r, ['role', 'name', 'version'], 'resource');
-    if (!['kernel', 'actions', 'builder', 'sandbox'].includes(r.role) || !/^gonvex-cf-dev-[a-z0-9-]+$/.test(r.name)) refuse('resource.identity'); text(r.version, 'resource.version'); }
+    if (!['kernel', 'runtime', 'actions', 'builder', 'sandbox'].includes(r.role) || !/^gonvex-cf-dev-[a-z0-9-]+$/.test(r.name)) refuse('resource.identity'); text(r.version, 'resource.version'); }
   const kernel = d.resources.find(r => r.role === 'kernel').name;
   if (endpoint(d.endpoint, true).hostname.split('.')[0] !== kernel || d.resources.some(r => r.role !== 'kernel' && !r.name.startsWith(`${kernel}-`))) refuse('resource.scope');
   shape(b.sources, ['sdk', 'refs', 'localRuntime', 'sdkSourceSha', 'webSourceSha', 'closure'], 'sources');
@@ -52,18 +54,19 @@ export function validateBinding(b) {
   shape(b.mix, ['kind', 'evidence'], 'mix');
   if (!['synthetic-stress', 'source-derived'].includes(b.mix.kind) || (b.mix.kind === 'source-derived' && !b.mix.evidence)) refuse('mix.evidence');
   list(b.tenants, 26, 'tenants'); unique(b.tenants.map(t => t.alias), 'tenant.alias'); unique(b.tenants.map(t => t.tenantId), 'tenant.id');
-  for (const t of b.tenants) { shape(t, ['alias', 'tenantId', 'project', 'principals', 'fixture', 'dataProvenance'], 'tenant');
-    for (const k of ['alias', 'tenantId', 'project']) text(t[k], `tenant.${k}`);
+  for (const t of b.tenants) { shape(t, ['alias', 'tenantId', 'project', 'projectId', 'principals', 'fixture', 'dataProvenance'], 'tenant');
+    for (const k of ['alias', 'tenantId', 'project', 'projectId']) text(t[k], `tenant.${k}`);
+    if (!d.catalogReleases.some(r => r.projectId === t.projectId && r.moduleSha256 === d.moduleSha256)) refuse('tenant.catalog-release');
     list(t.principals, 1000, 'principals'); unique(t.principals, 'principals'); t.principals.forEach(p => text(p, 'principal.alias')); }
   const limits = { maxWallMs: [100, 3600000], maxConnections: [2, 26000], maxPending: [1, 1000], maxOffered: [1, 100000],
-    maxSentBytes: [1, 2 ** 40], maxReceivedBytes: [1, 2 ** 40], maxArtifactBytes: [1024, 2 ** 30],
+    maxSentBytes: [1, 2 ** 40], maxReceivedBytes: [1, 2 ** 40], maxBufferedBytes: [1, 2 ** 40], maxArtifactBytes: [1024, 2 ** 30],
     maxResidentRows: [1, 100000], maxResidentBytes: [1024, 2 ** 30], maxGeneratorRssBytes: [1024, 2 ** 40], maxGeneratorFds: [16, 100000],
     maxLagMs: [1, 60000], operationTimeoutMs: [1, 60000], setupTimeoutMs: [1, 300000], cleanupTimeoutMs: [1, 60000],
     opensPerSecond: [1, 1000], telemetryIntervalMs: [100, 60000], maxTelemetryAgeMs: [100, 60000], maxCostAgeMs: [100, 60000] };
   shape(b.budget, [...Object.keys(limits), 'maxUsd'], 'budget');
   for (const [k, [low, high]] of Object.entries(limits)) integer(b.budget[k], low, high, k);
   if (!Number.isFinite(b.budget.maxUsd) || b.budget.maxUsd <= 0) refuse('maxUsd');
-  shape(b.telemetry, ['url', 'contractSha256', 'providerFile'], 'telemetry');
+  shape(b.telemetry, ['url', 'adapter', 'contractSha256', 'providerFile'], 'telemetry');
   if (b.telemetry.url !== null && endpoint(b.telemetry.url).host !== endpoint(d.endpoint, true).host) refuse('telemetry.resource-scope');
   if (b.telemetry.contractSha256 !== null) hex(b.telemetry.contractSha256, 64, 'telemetry.contractSha256');
   if (b.telemetry.providerFile !== null && !isAbsolute(b.telemetry.providerFile)) refuse('providerFile');
@@ -98,10 +101,11 @@ export async function preflight(path) {
   for (const f of b.sources.closure) { closureBytes += (await stat(f.path)).size; if (closureBytes > 128 * 1024 * 1024) refuse('closure.bytes'); await checkedFile(f); }
   for (const f of [b.sources.sdk, b.sources.refs, b.sources.localRuntime].filter(Boolean))
     if (!b.sources.closure.some(c => c.path === f.path && c.sha256 === f.sha256)) refuse('closure.entry');
-  for (const f of [b.sources.localRuntime, b.mix.evidence, b.resourceAdmission, ...b.tenants.flatMap(t => [t.fixture, t.dataProvenance])].filter(Boolean)) await checkedFile(f);
+  for (const f of [b.sources.localRuntime, b.telemetry.adapter, b.mix.evidence, b.resourceAdmission, ...b.tenants.flatMap(t => [t.fixture, t.dataProvenance])].filter(Boolean)) await checkedFile(f);
   const missing = [];
   if (!b.sources.localRuntime) missing.push('generated-localRuntime-for-localExecution-evidence');
   if (!b.telemetry.url) missing.push('authenticated-assembled-capacity-telemetry-v1');
+  if (!b.telemetry.adapter) missing.push('K22-typed-capacity-handoff-adapter');
   if (!b.telemetry.contractSha256) missing.push('reviewed-capacity-adapter-contract');
   if (!b.telemetry.providerFile) missing.push('actual-provider-run-attribution-and-cost-collector');
   if (b.telemetry.contractSha256 && b.telemetry.contractSha256 !== hash(await readFile(new URL('./telemetry.mjs', import.meta.url)))) missing.push('driver-input-profile-mismatch');

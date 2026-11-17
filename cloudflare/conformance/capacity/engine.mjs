@@ -83,7 +83,7 @@ export async function execute({ b, sdk, api, localRuntime, credentials, fixtures
     for (const q of fixture.liveQueries) session.off.push(client.watchLiveQuery(reference(api, q.ref, 'query'), q.args).onUpdate(() => {}));
     await until(() => ready(session, b), { check, signal, timeoutMs: b.budget.setupTimeoutMs });
     const admission = client.tenantAdmission();
-    if (!admission || admission.tenantId !== tenant.tenantId || admission.accountId !== credential.accountId || admission.memberId !== credential.memberId) refuse('authoritative-principal-identity');
+    if (!admission || admission.project !== tenant.projectId || admission.tenantId !== tenant.tenantId || admission.accountId !== credential.accountId || admission.memberId !== credential.memberId) refuse('authoritative-principal-identity');
     return session;
   };
   const emitOffered = e => { if (e.offered) { offered += e.offered; if (offered > b.budget.maxOffered) throw new Refusal('STOPPED', 'offered-budget'); } emit(e); };
