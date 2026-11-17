@@ -7,7 +7,7 @@
  * Local and test only. Deployed kernels compose the same pieces in the real
  * router Worker (`cloudflare/src/index.ts`) once the tenant object exists.
  */
-import { OperatorControlObject } from "../../../control/operator/object.ts";
+import { OperatorControlObject as Control } from "../../../control/operator/object.ts";
 import type { RolloutMessage } from "../../../control/operator/release.ts";
 import type { OperatorTenantPort } from "../../../control/operator/tenant/port.ts";
 import { handleRolloutBatch } from "../rollout.ts";
@@ -18,7 +18,10 @@ import * as generated from "gonvex:releases";
 
 const releasesVersion = (generated as { version?: string }).version;
 
-export { LocalKernelTenant, OperatorControlObject };
+export { LocalKernelTenant };
+export class OperatorControlObject extends Control {
+  protected override publicationVersionReady(version:string):boolean {return releasesVersion===version;}
+}
 
 export interface LocalKernelEnv extends DevRouterEnv {
   TENANT: DurableObjectNamespace<LocalKernelTenant>;

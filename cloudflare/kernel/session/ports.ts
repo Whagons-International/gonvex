@@ -167,6 +167,8 @@ export interface ControlPort {
 
 export interface ModuleInfo {
   artifactHash: string;
+  /** Server publication identity, only on reload delivery (never client authority). */
+  publicationId?: string;
   /** `client-contract.json` version, or null when the module declares none. */
   clientContract: number | null;
 }

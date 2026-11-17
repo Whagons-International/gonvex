@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { lazyReferenceRuntime, renderLazyReferences } from "./lazy-reference-bindings.js";
 import { createHash } from "node:crypto";
+import { postDevSync } from "./sync-request.js";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile, copyFile } from "node:fs/promises";
@@ -1752,7 +1753,7 @@ function mergeSchemaDefinition(target: SchemaDefinition, source: SchemaDefinitio
 }
 
 async function syncRuntime(settings: Settings, manifest: Manifest): Promise<SchemaDefinition | undefined> {
-  const response = await fetch(`${settings.runtimeURL.replace(/\/$/, "")}/dev/sync`, {
+  const response = await postDevSync(`${settings.runtimeURL.replace(/\/$/, "")}/dev/sync`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

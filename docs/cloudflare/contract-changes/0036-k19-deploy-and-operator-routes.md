@@ -45,14 +45,27 @@ the build's alias, so a release in R2 does not depend on a builder's file layout
 project's release into a K04 `ModuleRegistry` on first use. Measured locally: the Whagons release (1,997
 functions) installs with no error.
 
-- **Who deploys.** A Worker deploy restarts active objects, and the control object is the one holding the
-  `/dev/sync` request. So the control object only builds the version; the router deploys it after the control
-  object answered, then answers the client. On the platform the client therefore sees the 200 after the version
-  is live, as in Rust.
-- **Local only:** `wrangler dev` restarts workerd on the swap, which cuts every request in flight, including
-  the sync response. The local builder swaps 1.5 s after answering, so locally the new code serves shortly
-  *after* the 200. The kernel's own drift check (`GET /dev/manifest`) reads the control object, which is
-  already up to date.
+- **Who deploys.** The control object stages the version and durably records a pending publication; the router
+  deploys it after that RPC answers. A fresh HTTP ingress at `GONVEX_PUBLIC_URL` selects the deployed Worker,
+  whose Control object checks its baked version, activates each tenant's baked release, saves the active
+  manifest, and awaits gateway notifications before acknowledging completion. The publication endpoint uses
+  the existing release-builder token. A successful sync therefore acknowledges tenant activation and reload
+  delivery, rather than only the Worker's upload. Project holder watches survive Control resets and include
+  control-only sockets registered before their auth acknowledgement.
+- **Whole catalog ownership.** A unique active-owner index serializes different projects from preparation
+  through publication. The durable sync row's identity fences every builder deployment at execution time.
+  A later project recovers a staged predecessor before capturing its own catalog. The pinned catalog in
+  Control allows a restarted builder to reconstruct the exact version; completed/failed delayed requests
+  cannot deploy an older snapshot. The builder waits for actual target execution, including the local
+  deferred swap, before another deploy or terminal abort passes its queue.
+  A transient publication/notification error retains that owner for same-ID retry, including when the
+  deployment already serves. A new request for the same project can recover the preceding publication,
+  but still returns 409 without preparing its new body; the caller may then retry it normally.
+- **Local only:** `wrangler dev` cuts HTTP requests and WebSockets on replacement. The CLI retains one
+  `x-gonvex-sync-request-id` across a restart retry. The operator validates the same project and canonical
+  artifact hash, then resumes the durable publication without another rollout or generation. Every attempt
+  still has a separate temporary R2 body. SQL/validation failures are not retried. This does not make local
+  Wrangler preserve live sockets; connected deployment acceptance still requires a platform run.
 - **Size.** Every project's bundle is in one upload. With Whagons alone that is about 1 MB gzip (S2); a second
   large app would approach the 10 MB limit. That is the split-script question of S5 §11.4 and stays open.
 
@@ -68,7 +81,12 @@ functions) installs with no error.
   kernel answers Rust's `DatabaseError` text without them, and SQLite failures in sqlx's form.
 - After `GONVEX_SYNC_DEADLINE_MS` (default 10 minutes) the sync answers **503** `tenant migration rollout did not
   finish within N s`. Rust has no deadline. **Lead:** confirm 503.
-- The lock row expires at the deadline plus a minute, so a reset control object never keeps it.
+- A preparation lease expires at the deadline plus a minute. Its retired fence cannot later stage/deploy.
+  Once a publication is staged, its owner survives reset and lease expiry until successful publication or
+  the real builder's serialized terminal result/abort. Same-ID retries resume it; a different project's
+  sync can recover it before proceeding. An operator can inspect the pending reference at authenticated
+  `GET /_gonvex/k19/deployments/current` with the existing builder token, then resume `/deploy` and publication
+  or use the builder's `/abort` barrier. A caller timeout alone never releases an external deployment.
 
 ## 6. Operator authentication: Local only on explicit opt-in (CONTRACT D.3)
 

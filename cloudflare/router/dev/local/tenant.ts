@@ -149,6 +149,10 @@ export class LocalKernelTenant extends DurableObject<LocalTenantEnv> implements 
     return this.served;
   }
 
+  async operatorActivateRelease(event: { projectId: string; hash: string; generation: number }): Promise<boolean> {
+    const served = await this.operatorServedModule(event.projectId);
+    return served?.hash === event.hash && served.generation === event.generation && served.error === null;
+  }
   async operatorModuleReloaded(event: { projectId: string; hash: string; generation: number; clientContract: number | null }): Promise<void> {
     if (this.project() !== event.projectId) this.ctx.storage.kv.put(PROJECT_KEY, event.projectId);
     // In stage 1 the new Worker version restarts or wakes this object with the

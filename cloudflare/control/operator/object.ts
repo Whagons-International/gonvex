@@ -21,10 +21,11 @@ import type { TenantRoute } from "../src/types";
 import { OperatorAuth, bearer } from "./auth";
 import { operatorConfig, type OperatorConfig, type OperatorEnv } from "./config";
 import { DASHBOARD_TAG, LOGS_TAG, METRICS_TAG, OperatorSockets } from "./sockets";
-import { error, json } from "./http";
-import { HttpReleaseBuilder, type ReleaseBuilder, type ReleaseSummary, type RolloutMessage, type RolloutReport } from "./release";
+import { error, json, HttpError } from "./http";
+import { HttpReleaseBuilder, type DeploymentRef, type DeploymentGrant, type ReleaseBuilder, type ReleaseSummary, type RolloutMessage, type RolloutReport } from "./release";
 import { handleOperatorRoute, type Op } from "./routes";
 import { OPERATOR_SCHEMA, SyncCoordinator, type SyncOutcome, type SyncRequest } from "./sync";
+import { installDeploymentSchema } from "./deployment";
 import { rustTenantError, waitForRelease, type OperatorTenantPort } from "./tenant/port";
 
 export interface OperatorObjectEnv extends ControlEnv, OperatorEnv {
@@ -53,6 +54,7 @@ export class OperatorControlObject extends ControlObject {
     this.operatorConfig = operatorConfig(env);
     state.blockConcurrencyWhile(async () => {
       this.sql.script(OPERATOR_SCHEMA);
+      installDeploymentSchema(this.sql);
     });
     this.syncs = new SyncCoordinator({
       sql: this.sql,
@@ -67,9 +69,18 @@ export class OperatorControlObject extends ControlObject {
         if (!queue) throw new Error("the rollout queue (ROLLOUT) is not bound");
         await queue.send(message, { contentType: "json" });
       },
-      moduleReloaded: (project, tenants, hash, generation, clientContract) => {
-        for (const tenant of tenants) {
-          this.ctx.waitUntil(this.tenantPort(tenant).operatorModuleReloaded({ projectId: project, hash, generation, clientContract }).catch(() => undefined));
+      versionReady: (version) => this.publicationVersionReady(version),
+      activateTenants: async (projectId, tenants, hash, generation) => {
+        for (const tenant of tenants) if (!await this.activatePublicationTenant(tenant, { projectId, hash, generation })) return false;
+        return true;
+      },
+      moduleReloaded: async (projectId, _tenants, artifactHash, _generation, clientContract, publicationId) => {
+        // Durable watches include tenant and control-only sockets, even after a reset.
+        for (const { binding, name } of this.watchersFor(projectId).values()) {
+          if (binding !== "GATEWAY") continue;
+          const namespace = this.env[binding] as DurableObjectNamespace;
+          const stub = namespace.get(namespace.idFromString(name)) as unknown as import("../../kernel/session/rpc").GatewayRpc;
+          await stub.moduleReloaded(projectId, { artifactHash, clientContract, publicationId });
         }
       },
       syncCrons: async () => {
@@ -86,6 +97,32 @@ export class OperatorControlObject extends ControlObject {
       armAlarm: () => this.armAlarm(),
       operatorConfig: this.operatorConfig,
     });
+  }
+
+  /** Generic K19 fixtures have no baked catalog; the serving assembly overrides this. */
+  protected publicationVersionReady(_version: string): boolean { return true; }
+  protected activatePublicationTenant(tenant: string, release: {projectId:string;hash:string;generation:number}): Promise<boolean> {
+    return this.tenantPort(tenant).operatorActivateRelease(release);
+  }
+  async publishRelease(syncId: string): Promise<{ready:boolean;error?:string;status?:number}> {
+    try { return await this.syncs.publish(syncId); }
+    catch (cause) {
+      if (cause instanceof HttpError) return {ready:false,error:cause.message,status:cause.status};
+      throw cause;
+    }
+  }
+  async publicationReference(id:string):Promise<DeploymentRef> { return this.syncs.deployments.reference(id); }
+  async currentDeployment():Promise<DeploymentRef|null> {return this.syncs.deployments.current();}
+  async deploymentRequest(action:"authorize"|"settle"|"abort", ref:DeploymentRef, result:{ok?:boolean;error?:string}):Promise<{ok:true;grant?:DeploymentGrant}|{ok:false;status:number;error:string}> {
+    try {
+      if (action === "authorize") return {ok:true,grant:this.syncs.deployments.authorize(ref)};
+      if (action === "settle") this.syncs.deployments.settle(ref,{ok:result.ok===true,...(result.error?{error:result.error}:{})});
+      else this.syncs.deployments.abort(ref,result.error ?? "publication aborted");
+      return {ok:true};
+    } catch (cause) {
+      if (cause instanceof HttpError) return {ok:false,status:cause.status,error:cause.message};
+      throw cause;
+    }
   }
 
   /** Tests swap the builder for an in-process one. */

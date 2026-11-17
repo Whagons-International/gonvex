@@ -71,8 +71,12 @@ export interface ActiveRelease {
   generation: number;
 }
 
+export interface DeploymentRef { id: string; fence: number; version: string }
+export type DeploymentGrant = {allowed:true;catalog:ActiveRelease[]} | {allowed:false;completed?:boolean;serving?:boolean};
+
 /**
- * The release builder. All three calls are idempotent per (project, hash).
+ * Build calls are idempotent per (project, hash); serving writes are fenced
+ * by the durable publication and checked inside the builder execution queue.
  */
 export interface ReleaseBuilder {
   /**
@@ -88,7 +92,7 @@ export interface ReleaseBuilder {
    */
   prepare(incoming: string, project: string): Promise<{ ok: true; summary: ReleaseSummary } | { ok: false; status: number; error: string }>;
   /**
-   * Builds and deploys the Worker version that carries `releases` (every
+   * Builds and stages the Worker version that carries `releases` (every
    * project's active bundle, 0016 G0-2). Locally this rewrites the generated
    * module the local kernel imports, and workerd reloads.
    */
@@ -96,10 +100,12 @@ export interface ReleaseBuilder {
   /**
    * Puts an activated version live. The router calls it after the control
    * object answered, so a deploy that restarts the control object cannot cut
-   * the response. Locally it returns at once and swaps the version shortly
-   * after (workerd reloads, which would cut every request in flight).
+   * the response. Locally it waits for the deferred file swap; a restart-cut
+   * response is resumed by the CLI with the same publication request ID.
    */
-  deploy(version: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  deploy(version: string, publication?: DeploymentRef): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Serialized after target execution; only this barrier can abandon a publication. */
+  abort?(publication: DeploymentRef, error: string): Promise<{ok:true}>;
 }
 
 export const releaseKey = (project: string, hash: string, piece: "manifest.json" | "view.json" | "app.js" | "actions.js" | "release.json") =>
@@ -140,7 +146,12 @@ export class HttpReleaseBuilder implements ReleaseBuilder {
   private async call<T>(path: string, body: unknown): Promise<T> {
     const response = await this.send(path, body);
     const text = await response.text();
-    if (!response.ok) throw new Error(`release builder ${path} failed (${response.status}): ${text.slice(0, 500)}`);
+    if (!response.ok) {
+      let detail = "non-JSON upstream response";
+      try { const data = JSON.parse(text); if (typeof data.error === "string") detail = data.error.slice(0,1000); } catch { /* retain status and edge request id, never raw HTML */ }
+      const ray = response.headers.get("cf-ray");
+      throw new Error(`release builder ${path} failed (HTTP ${response.status}${ray ? `; cf-ray ${ray}` : ""}): ${detail}`);
+    }
     return JSON.parse(text) as T;
   }
 
@@ -153,7 +164,8 @@ export class HttpReleaseBuilder implements ReleaseBuilder {
   activate(releases: ActiveRelease[]) {
     return this.call<{ ok: true; version: string } | { ok: false; error: string }>("/activate", { releases });
   }
-  deploy(version: string) {
-    return this.call<{ ok: true } | { ok: false; error: string }>("/deploy", { version });
+  deploy(version: string, publication?: DeploymentRef) {
+    return this.call<{ ok: true } | { ok: false; error: string }>("/deploy", { version, ...(publication ? {publication} : {}) });
   }
+  abort(publication: DeploymentRef, error: string) { return this.call<{ok:true}>("/abort",{publication,error}); }
 }

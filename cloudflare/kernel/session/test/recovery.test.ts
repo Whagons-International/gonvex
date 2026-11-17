@@ -1,7 +1,7 @@
 // Deterministic Session wiring tests. The ports below are synthetic controls;
 // deployed auth/visibility and CPU enforcement require the assembled matrix.
 import { describe, expect, it } from "vitest";
-import { Session } from "../session";
+import { ModuleCache, Session } from "../session";
 import type { Ports, TenantSession } from "../ports";
 import { initialCompletion, type InitialRequestRef, type ReplicaDelivery } from "../../delivery/protocol";
 import type { RecoveryDelivery, RecoverySocketView, ScopedSocketWork } from "../../delivery/recovery";
@@ -14,7 +14,7 @@ function tenant(name: string, id = "t"): TenantSession {
     admissionRevision: 0, delegation: null, developerSession: null, anonymous: false,
   };
 }
-function fixture() {
+function fixture(hooks: import("../session").SessionHooks = {}) {
   const fail={send:false};
   const sent: string[] = [], closes: Array<{ code: number; reason: string }> = [];
   const dispatches: RecoverySocketView[] = [];
@@ -33,6 +33,7 @@ function fixture() {
   const session = Session.open({ ports, host: "holder", connectionId: "c", publicTransport: false,
     ready: { runtimeVersion: "test", presence: false }, sink: { send: (text) => { if(fail.send)throw new Error("sink unavailable"); sent.push(text); }, close: (frame) => closes.push(frame) },
     timers: { later: () => () => {} },
+    hooks,
   });
   const auth = (name = "alice", id = "t") => session.receive(JSON.stringify({ type: "auth", id: "auth", project: "p", tenant: id, token: name }));
   const payload = (epoch: number, instance = "I", text = '{"type":"private-data"}', watermark = 5): ReplicaDelivery => ({
@@ -51,6 +52,47 @@ function fixture() {
 }
 
 describe("K22 session delivery scope", () => {
+  it("auth reads the published module after registering and a late read cannot overwrite a newer reload", async () => {
+    let current={artifactHash:"old",clientContract:null};
+    const f=fixture({projectAuthenticated:async()=>{current={artifactHash:"new",clientContract:null};}});
+    f.ports.modules.module=async()=>current;
+    await f.auth();
+    expect(JSON.parse(f.sent.at(-1)!)).toMatchObject({type:"auth.result",result:{artifactHash:"new"}});
+    const cache=new ModuleCache(f.ports);
+    let release!:(value:typeof current)=>void;
+    f.ports.modules.module=()=>new Promise(resolve=>{release=resolve;});
+    const reading=cache.refresh("p");
+    cache.set("p",{artifactHash:"newer",clientContract:null});
+    release(current);
+    expect(await reading).toEqual({artifactHash:"newer",clientContract:null});
+  });
+  it("awaits holder publication registration before tenant and control-only auth acknowledgements", async () => {
+    for (const controlOnly of [false,true]) {
+      let release!:()=>void;
+      const gate=new Promise<void>(resolve=>{release=resolve;});
+      const projects:string[]=[];
+      const f=fixture({projectAuthenticated:async(project)=>{projects.push(project);await gate;}});
+      const auth=f.session.receive(JSON.stringify({type:"auth",id:"a",token:"alice",project:"p",tenant:"t",controlOnly}));
+      await new Promise(resolve=>setTimeout(resolve,0));
+      expect(projects).toEqual(["p"]);
+      expect(f.sent.some(text=>JSON.parse(text).type==="auth.result")).toBe(false);
+      release();await auth;
+      expect(JSON.parse(f.sent.at(-1)!)).toMatchObject({type:"auth.result",id:"a"});
+    }
+  });
+
+  it("deduplicates publication retry after attachment restore without suppressing a new same-artifact publication", async () => {
+    const f=fixture();await f.auth();
+    const reload={artifactHash:"a",clientContract:null,publicationId:"publication-1"};
+    await f.session.moduleReloaded(reload);
+    const restored=Session.restore(structuredClone(f.session.record),{ports:f.ports,host:"holder",ready:{runtimeVersion:"test",presence:false},
+      sink:{send:text=>f.sent.push(text),close:frame=>f.closes.push(frame)},timers:{later:()=>()=>{}}});
+    await restored.moduleReloaded(reload);
+    expect(f.sent.filter(text=>JSON.parse(text).type==="system.reload")).toHaveLength(1);
+    expect(f.session.record.publicationId).toBe("publication-1");
+    await restored.moduleReloaded({...reload,publicationId:"publication-2"});
+    expect(f.sent.filter(text=>JSON.parse(text).type==="system.reload")).toHaveLength(2);
+  });
   it("counts ControlOnly tenantControl connections without granting tenant-data dispatch", async () => {
     const f = fixture();
     const reported: unknown[] = [];

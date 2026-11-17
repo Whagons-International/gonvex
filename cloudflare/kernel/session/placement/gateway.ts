@@ -88,6 +88,7 @@ export interface TenantLink {
 
 export interface GatewayBindings {
   ports(env: unknown): Ports;
+  projectAuthenticated?(env: unknown, projectId: string, holderId: string): Promise<void>;
   tenantLink(env: unknown, route: TenantRoute): TenantLink;
   /** K16: public-function limits and the address budgets (absent: default payload cap only). */
   publicGuard?(env: unknown): PublicGuard;
@@ -143,6 +144,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       name: this.gatewayName,
       ready: { runtimeVersion: env.GONVEX_RUNTIME_VERSION || "development", presence: presence.enabled },
       tenantChanged: (ws, previous, next) => this.tenantChanged(ws, previous, next),
+      projectAuthenticated: (project) => this.bindings().projectAuthenticated?.(env, project, ctx.id.toString()) ?? Promise.resolve(),
     });
     // Restored sockets: rebuild the tenant index only (the tenant already has this gateway registered).
     for (const [ws, session] of this.host.sessions) {

@@ -54,6 +54,8 @@ export interface SessionRecord {
   tenant: TenantSession | null;
   /** `connected_client_contract`, as decimal text (u64). */
   clientContract: string | null;
+  /** Last completed publication delivered to this socket; retries survive hibernation. */
+  publicationId?: string;
   negotiated: Negotiated;
   /** Public sockets: the (project, tenant) pinned by the first public auth. */
   publicScope: [string, string] | null;
@@ -110,6 +112,8 @@ export interface SocketSink {
 }
 
 export interface SessionHooks {
+  /** Register this holder for project publications before acknowledging auth. */
+  projectAuthenticated?(projectId: string): Promise<void>;
   /** Semantic recovery metadata changed; generic attachment writes never dirty it. */
   recoveryChanged?(): void;
   /** The tenant data session changed (feed subscription in Rust): placement registers the socket with the tenant. */
@@ -162,6 +166,14 @@ export class ModuleCache {
     return entry;
   }
   set(projectId: string, info: ModuleInfo | null): void { this.entries.set(projectId, Promise.resolve(info)); }
+  async refresh(projectId: string): Promise<ModuleInfo | null> {
+    const previous = this.entries.get(projectId);
+    const info = await this.ports.modules.module(projectId);
+    // An awaited reload can advance this cache while auth reads Control.
+    if (this.entries.get(projectId) !== previous) return this.get(projectId);
+    this.set(projectId, info);
+    return info;
+  }
 }
 
 class AuthTimeout extends Error {}
@@ -1050,7 +1062,16 @@ export class Session {
     }
     record.clientContract = frame.clientContract === undefined ? null : frame.clientContract.toString();
 
-    const module = await this.modules.get(connection.projectId);
+    let module = await this.modules.get(connection.projectId);
+    if (response.ok && this.hooks.projectAuthenticated) {
+      try {
+        await withDeadline(this.hooks.projectAuthenticated(connection.projectId), deadline - this.now());
+        module = await withDeadline(this.modules.refresh(connection.projectId), deadline - this.now());
+        response.result.artifactHash = module?.artifactHash ?? "";
+      } catch {
+        return this.close(CLOSE.failed);
+      }
+    }
     if (module?.clientContract != null && !frame.controlOnly && connection.tenant && record.clientContract !== String(module.clientContract)) {
       this.send(frames.clientUpdateRequired(module.clientContract));
       return this.close(CLOSE.ended);
@@ -1264,6 +1285,7 @@ export class Session {
   moduleReloaded(module: ModuleInfo | null): Promise<void> {
     return this.serial(() => {
       if (this.closed) return;
+      if (module?.publicationId && this.record.publicationId === module.publicationId) return;
       this.hooks.subscriptionsReset?.();
       this.resetSubscriptions(this.record.tenant);
       if (module?.clientContract != null && this.record.tenant && this.record.clientContract !== String(module.clientContract)) {
@@ -1271,6 +1293,10 @@ export class Session {
         return this.close(CLOSE.ended);
       }
       this.send(frames.systemReload(module?.artifactHash));
+      if (module?.publicationId) {
+        this.record.publicationId = module.publicationId;
+        this.hooks.persist?.();
+      }
     });
   }
 

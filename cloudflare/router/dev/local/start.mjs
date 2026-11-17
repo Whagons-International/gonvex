@@ -85,6 +85,7 @@ export async function startLocalKernel({ port, state, logs, vars = {}, deferMs =
   }
 
   const kernelVars = {
+    GONVEX_PUBLIC_URL: url,
     GONVEX_ADMIN_KEY: adminKey,
     GONVEX_RELEASE_BUILDER_URL: `http://127.0.0.1:${builderPort}`,
     GONVEX_RELEASE_BUILDER_TOKEN: builderToken,

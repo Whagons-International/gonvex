@@ -400,6 +400,13 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     const module = this.kernel.module;
     return module?.projectId === projectId ? { projectId, hash: module.artifactHash, generation: module.generation, functions: module.functions.size, loadMs: 0, error: null } : null;
   }
+  async operatorActivateRelease(event: { projectId: string; hash: string; generation: number }): Promise<boolean> {
+    const release = releases[event.projectId];
+    if (!release || release.hash !== event.hash || release.generation !== event.generation) return false;
+    if (this.kernel.module?.projectId !== event.projectId || this.kernel.module.artifactHash !== event.hash) await super.activate(event.projectId, release.manifest, null);
+    await this.setupScheduled();
+    return this.kernel.module?.artifactHash === event.hash;
+  }
   async operatorModuleReloaded(event: { projectId: string; hash: string; generation: number; clientContract: number | null }): Promise<void> {
     const info = { artifactHash: event.hash, clientContract: event.clientContract };
     await Promise.all((await this.registeredGateways()).map((name) => rpc<GatewayRpc>(this.env.GATEWAY, name).moduleReloaded(event.projectId, info)));
