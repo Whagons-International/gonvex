@@ -17,6 +17,8 @@
  * deploy's skew (10-40 s, S3 §7) never breaks a call: unknown fields are
  * ignored and every method tolerates older callers.
  */
+import { ASSIGNMENT_HEADER, MAX_SOCKETS, controller, withDeadline, parseAssignment, type AutoscaleEnv, type CapacitySample, type DrainCommand, type DrainResult, pressured, hashConnection } from "../../gateway/placement";
+import { GatewayMetrics } from "../../gateway/metrics";
 import { DurableObject } from "cloudflare:workers";
 import type { ModuleInfo, Ports, TenantRoute, TenantSession } from "../ports";
 import { SocketHost } from "../host";
@@ -27,6 +29,8 @@ import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt 
 import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt } from "../../delivery/protocol";
 import { UNKNOWN_ADDRESS } from "../../public/address";
 import type { PublicGuard } from "../../public/guard";
+import { publicLimits } from "../../public/config";
+import { limiterFor } from "../../public/limiter";
 import type { SlotKind } from "../../public/limiter";
 
 /** S3: about 125 sockets per gateway carried 30 commits/s to 1,000 sockets. */
@@ -34,7 +38,9 @@ export const SOCKETS_PER_GATEWAY = 125;
 export const DEFAULT_GATEWAY_SHARDS = 8;
 export const PROTOCOL_VERSION = 1;
 
-export interface GatewayEnv extends PresenceEnv, TelemetryEnv {
+export interface GatewayEnv extends PresenceEnv, TelemetryEnv, AutoscaleEnv {
+  GATEWAY?: DurableObjectNamespace;
+  PUBLIC_LIMITER?: DurableObjectNamespace<any>;
   GONVEX_GATEWAY_SHARDS?: string;
   GONVEX_RUNTIME_VERSION?: string;
   GONVEX_PRESENCE?: string;
@@ -42,7 +48,7 @@ export interface GatewayEnv extends PresenceEnv, TelemetryEnv {
 
 /**
  * Number of gateway shards. Size it as expected concurrent sockets / 125.
- * Stage 1 uses a fixed count (0004); X01 later grows it from frames per second.
+ * Explicit legacy/static adapter only. With GATEWAY_CONTROLLER bound, X01 owns admission.
  */
 export function gatewayShards(env: GatewayEnv): number {
   const n = Number(env.GONVEX_GATEWAY_SHARDS ?? DEFAULT_GATEWAY_SHARDS);
@@ -106,6 +112,17 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   readonly gatewayName: string;
   /** tenantId -> sockets of that tenant here. */
   private readonly byTenant = new Map<string, Set<WebSocket>>();
+  private readonly metrics = new GatewayMetrics();
+  private placementEpoch = 0;
+  private placementCell: number | undefined;
+  private reportInFlight = false;
+  private reportAgain = false;
+  private draining: (DrainCommand & { nextAt: number }) | undefined;
+  private drainOffset = 0;
+  private drainTickRunning = false;
+  private drainResult: DrainResult = { closed: 0, blocked: {}, remaining: 0 };
+  private admissionTail: Promise<unknown> = Promise.resolve();
+  private admissionWaiting = 0;
   private readonly links = new Map<string, Promise<void>>();
 
   protected abstract bindings(): GatewayBindings;
@@ -118,6 +135,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     this.host = new SocketHost({
       ...(publicGuard ? { publicGuard } : {}),
       presence,
+      sent: (text) => this.metrics.sent(text),
+      placementWake: () => this.draining?.nextAt ?? null,
       telemetry: telemetryHostFromEnv(env, presence.enabled),
       ctx,
       ports: this.bindings().ports(env),
@@ -135,6 +154,36 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket upgrade", { status: 400 });
     const headers = request.headers;
+    if (this.env.GATEWAY_CONTROLLER) {
+      const assignment = parseAssignment(headers.get(ASSIGNMENT_HEADER));
+      if (!assignment || assignment.gateway !== this.gatewayName || assignment.connectionId !== headers.get(UPGRADE_HEADERS.connectionId)) return new Response("gateway assignment required", { status: 503 });
+      // No socket migration: an admitted socket owns this holder until normal disconnect.
+      // Serialize claim + accept, so parallel upgrades cannot race the socket ceiling.
+      if (this.admissionWaiting >= 16) return new Response("gateway admission busy", { status: 503 });
+      this.admissionWaiting++;
+      const accepted = this.admissionTail.then(async () => {
+        await this.loadPlacement();
+        if (assignment.epoch < this.placementEpoch || this.host.sessions.size >= MAX_SOCKETS) return new Response("gateway full", { status: 503 });
+        if (!await withDeadline(controller(this.env, assignment.cell).claim(assignment))) return new Response("gateway assignment expired", { status: 503 });
+        if (assignment.epoch !== this.placementEpoch) {
+          if (this.host.sessions.size) return new Response("gateway epoch busy", { status: 503 });
+          this.draining = undefined;
+          await this.ctx.storage.delete("autoscale-drain");
+          this.placementEpoch = assignment.epoch;
+          this.placementCell = assignment.cell;
+          await this.ctx.storage.put("autoscale-placement", { epoch: this.placementEpoch, cell: this.placementCell });
+        }
+        const response = this.accept(headers);
+        this.reportCapacity();
+        return response;
+      }).finally(() => { this.admissionWaiting--; });
+      this.admissionTail = accepted.catch(() => undefined);
+      return accepted;
+    }
+    return this.accept(headers);
+  }
+
+  private accept(headers: Headers): Response {
     const connectionId = headers.get(UPGRADE_HEADERS.connectionId) ?? crypto.randomUUID();
     const slots = (headers.get(UPGRADE_HEADERS.slots) ?? "").split(",").filter((k): k is SlotKind => k === "pending" || k === "public");
     return this.host.accept(headers.get(UPGRADE_HEADERS.publicTransport) === "1", connectionId, headers.get(UPGRADE_HEADERS.address) ?? UNKNOWN_ADDRESS, slots);
@@ -142,18 +191,25 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     await this.host.message(ws, message);
+    this.reportCapacity();
   }
 
   override async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
     await this.host.closed(ws, code, reason);
+    this.reportCapacity(this.host.sessions.size === 0);
   }
 
   override async webSocketError(ws: WebSocket): Promise<void> {
     await this.host.closed(ws);
+    this.reportCapacity(this.host.sessions.size === 0);
   }
 
   override async alarm(): Promise<void> {
+    await this.loadPlacement();
     await this.host.alarm();
+    await this.drainTick();
+    this.host.reschedule();
+    this.reportCapacity();
   }
 
   // ---- RPC from tenant objects and the deploy path ---------------------------------
@@ -226,8 +282,23 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
    * overtakes, the commit frames the tenant already delivered.
    */
   async deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+    const started = performance.now();
     const sockets = this.byTenant.get(tenantId);
     const seen = new Set<string>();
+    if (payload.recovery) {
+      const sessions = [...(sockets ?? [])].map(ws => this.host.sessions.get(ws))
+        .filter((session): session is NonNullable<typeof session> => Boolean(session && !session.record.tenant?.anonymous && session.record.tenant?.route.tenantId === tenantId));
+      const receivers = sessions.map(session => session as unknown as {
+        recoverReplica?: (tenantId: string, payload: ReplicaDelivery) => Promise<void>;
+      });
+      // Skew is fail-closed: an old session must not be mistaken for an applied whole-holder barrier.
+      if (receivers.some(session => typeof session.recoverReplica !== "function")) return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length };
+      await Promise.all(receivers.map(session => session.recoverReplica!(tenantId, payload)));
+      this.host.reschedule();
+      this.metrics.delivery(performance.now() - started, payload.pressure?.queueAgeMs, payload.pressure?.rpcMs);
+      this.reportCapacity();
+      return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length, recoveryAck: 1 };
+    }
     const membership = payload.membership;
     const work: Array<Promise<void>> = [];
     for (const ws of sockets ?? []) {
@@ -245,6 +316,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     }
     if (work.length) this.ctx.waitUntil(Promise.all(work).then(() => this.host.reschedule()));
     this.host.reschedule();
+    this.metrics.delivery(performance.now() - started, payload.pressure?.queueAgeMs, payload.pressure?.rpcMs);
+    this.reportCapacity();
     const missing = Object.keys(payload.sockets).filter((id) => !seen.has(id));
     return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}) };
   }
@@ -256,6 +329,107 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
 
   /** Liveness of the RPC path itself; used by the hop benchmark. */
   async ping(): Promise<number> { return Date.now(); }
+
+  private async loadPlacement(): Promise<void> {
+    if (this.placementEpoch) return;
+    this.draining = await this.ctx.storage.get<DrainCommand & { nextAt: number }>("autoscale-drain");
+    this.drainResult = await this.ctx.storage.get<DrainResult>("autoscale-drain-result") ?? this.drainResult;
+    const stored = await this.ctx.storage.get<{ epoch: number; cell: number }>("autoscale-placement");
+    if (stored) { this.placementEpoch = stored.epoch; this.placementCell = stored.cell; }
+  }
+
+  /** Authoritative open-socket count on wake; no controller estimate can retire a live holder. */
+  async capacity(epoch: number): Promise<CapacitySample> {
+    await this.loadPlacement();
+    if (this.placementEpoch > epoch || (this.placementEpoch < epoch && this.host.sessions.size)) throw new Error("gateway epoch mismatch");
+    // A new/reused empty holder is probed before its first admission; no state is changed by a probe.
+    return this.metrics.snapshot(epoch, this.host.sessions.size);
+  }
+
+  /** Idempotent command. Session eligibility is supplied by K22, never duplicated here. */
+  async drain(command: DrainCommand): Promise<DrainResult> {
+    await this.loadPlacement();
+    if (command.v !== 1 || command.epoch !== this.placementEpoch) return this.drainResult;
+    if (!this.draining) {
+      this.draining = { ...command, nextAt: Math.max(Date.now(), command.notBefore) + (hashConnection(`${this.gatewayName}:${this.placementEpoch}`) % 1000) };
+      await this.ctx.storage.put("autoscale-drain", this.draining);
+    }
+    await this.drainTick();
+    this.host.reschedule();
+    return this.drainResult;
+  }
+
+  async drainStatus(): Promise<DrainResult> { await this.loadPlacement(); return this.drainResult; }
+
+  private async drainTick(): Promise<void> {
+    const drain = this.draining;
+    if (!drain || Date.now() < drain.nextAt || this.drainTickRunning) return;
+    this.drainTickRunning = true;
+    try {
+    const blocked: Record<string, number> = {};
+    let closed = 0;
+    try {
+      if (this.placementCell === undefined || !await withDeadline(controller(this.env, this.placementCell).drainReady(this.gatewayName, this.placementEpoch, drain.replacement))) throw new Error("controller unavailable");
+      // Recheck replacement each cohort. Auth/limiter-wide health remains a V03 measured gate.
+      const replacement = this.env.GATEWAY && (this.env.GATEWAY as DurableObjectNamespace).getByName(drain.replacement) as unknown as { capacity(epoch: number): Promise<CapacitySample> };
+      if (!replacement) throw new Error("replacement unavailable");
+      if (pressured(await withDeadline(replacement.capacity(drain.replacementEpoch)))) throw new Error("replacement pressured");
+      const sessions = [...this.host.sessions.values()];
+      const candidates = Array.from({ length: Math.min(2, sessions.length) }, (_, i) => sessions[(this.drainOffset + i) % sessions.length]!);
+      this.drainOffset = (this.drainOffset + candidates.length) % Math.max(1, sessions.length);
+      const items = candidates.map(s => s.revalidationItem()).filter(i => i !== null);
+      const controlPort = this.bindings().ports(this.env).control;
+      const valid = await withDeadline(controlPort.revalidate(items));
+      if (valid.length !== items.length || valid.some(v => !v)) throw new Error("auth not healthy");
+      for (const session of candidates) {
+        const scope = session.publicScope();
+        if (scope && !(await withDeadline(controlPort.resolvePublicTenant(scope[0], scope[1]))).ok) throw new Error("public auth not healthy");
+      }
+      const limits = publicLimits(this.env as unknown as import("../../public/config").PublicLimitsEnv);
+      for (const address of new Set(candidates.map(s => s.record.address ?? UNKNOWN_ADDRESS))) {
+        if (!this.env.PUBLIC_LIMITER) continue;
+        const counts = await withDeadline(limiterFor(this.env.PUBLIC_LIMITER, address).counts());
+        if (counts.pending + candidates.length > limits.pendingPerAddress || counts.public > limits.connectionsPerAddress) throw new Error("limiter not healthy");
+      }
+      for (const session of candidates) {
+        if (closed >= 2) break;
+        const eligible = session as unknown as { gatewayDrain?(): { closed: boolean; blocked?: string } };
+        const result = eligible.gatewayDrain?.() ?? { closed: false, blocked: "session-hook-unavailable" };
+        if (result.closed) closed++;
+        else { const reason = result.blocked ?? "inflight"; blocked[reason] = (blocked[reason] ?? 0) + 1; }
+      }
+    } catch { blocked["replacement-or-admission-unavailable"] = this.host.sessions.size; }
+    this.drainResult = { closed, blocked, remaining: this.host.sessions.size };
+    await this.ctx.storage.put("autoscale-drain-result", this.drainResult);
+    if (!this.host.sessions.size) {
+      this.draining = undefined;
+      await this.ctx.storage.delete("autoscale-drain");
+      this.reportCapacity(true);
+    } else {
+      // No tight retry for a long Action: defer a full 30s when no eligible socket was found.
+      drain.nextAt = Date.now() + (closed ? 5_000 : 30_000) + (hashConnection(`${this.gatewayName}:${this.placementEpoch}`) % 1000);
+      await this.ctx.storage.put("autoscale-drain", drain);
+    }
+    } finally { this.drainTickRunning = false; }
+  }
+
+  private reportCapacity(force = false): void {
+    if (!this.env.GATEWAY_CONTROLLER) return;
+    if (this.reportInFlight) { this.reportAgain ||= force; return; }
+    if (!force && !this.metrics.due()) return;
+    this.reportInFlight = true;
+    this.ctx.waitUntil((async () => {
+      await this.loadPlacement();
+      if (this.placementCell === undefined) return;
+      const sample = this.metrics.snapshot(this.placementEpoch, this.host.sessions.size);
+      this.metrics.rotate();
+      try { await controller(this.env, this.placementCell).observe(this.gatewayName, sample); }
+      catch { /* Existing sessions continue. The next active event reports; no idle retry timer. */ }
+    })().finally(() => {
+      this.reportInFlight = false;
+      if (this.reportAgain) { this.reportAgain = false; this.reportCapacity(true); }
+    }));
+  }
 
   // ---- tenant registration ------------------------------------------------------------
 
@@ -294,7 +468,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     };
     const next = previous.then(run, run).catch((error) => console.error(`gateway ${this.gatewayName}: ${action} ${key} failed`, error));
     this.links.set(key, next);
-    this.ctx.waitUntil(next);
+    this.ctx.waitUntil(next.finally(() => { if (this.links.get(key) === next) this.links.delete(key); }));
   }
 }
 

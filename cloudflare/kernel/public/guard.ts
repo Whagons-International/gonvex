@@ -11,7 +11,7 @@
  */
 import type { ControlPort } from "../session/ports";
 import { ADMISSION_VALIDATE_TIMEOUT_MS, type PublicLimits, type PublicLimitsEnv, publicLimits } from "./config";
-import { type AdmitResult, limiterFor, type SlotKind } from "./limiter";
+import { ADMISSION_EXPIRED_ERROR, type AdmitResult, limiterFor, type SlotKind } from "./limiter";
 
 export interface PublicGuardEnv extends PublicLimitsEnv {
   /** The address limiter objects (`PublicLimiterObject`). Without it, per-address budgets are off (test Workers only). */
@@ -69,7 +69,7 @@ export const LIMITER_UNAVAILABLE = "connection limiter is unavailable";
  */
 export async function admitUpgrade(
   env: PublicGuardEnv,
-  request: { address: string; connectionId: string; gateway: string; publicTransport: boolean },
+  request: { address: string; connectionId: string; gateway: string; publicTransport: boolean; expiresAt?: number },
 ): Promise<Response | null> {
   if (!env.PUBLIC_LIMITER) return null;
   const limits = publicLimits(env);
@@ -78,12 +78,14 @@ export async function admitUpgrade(
     result = await limiterFor(env.PUBLIC_LIMITER, request.address).admit({
       v: 1, connectionId: request.connectionId, gateway: request.gateway, publicTransport: request.publicTransport,
       pendingLimit: limits.pendingPerAddress, publicLimit: limits.connectionsPerAddress,
+      ...(request.expiresAt === undefined ? {} : { expiresAt: request.expiresAt }),
     });
   } catch (error) {
     console.error("public guard: connection limiter unavailable; refusing the upgrade", error);
     return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } });
   }
   if (result.ok) return null;
+  if (result.error === ADMISSION_EXPIRED_ERROR) return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } });
   return new Response(result.error, { status: 429, headers: { "content-type": "text/plain; charset=utf-8" } });
 }
 

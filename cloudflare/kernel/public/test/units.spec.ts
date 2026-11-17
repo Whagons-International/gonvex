@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { addressBucket, clientAddress, UNKNOWN_ADDRESS } from "../address";
 import { DEFAULT_PUBLIC_LIMITS, PublicConfigError, publicLimits } from "../config";
 import { frameCost, publicAdmissionErrors, publicLimitErrors, runsTenantCode } from "../frames";
-import { AddressBudget, AUDIT_GRACE_MS, AUDIT_INTERVAL_MS, type AdmitRequest, MemorySlotStore, PENDING_LIMIT_ERROR, PUBLIC_LIMIT_ERROR } from "../limiter";
+import { ADMISSION_EXPIRED_ERROR, AddressBudget, AUDIT_GRACE_MS, AUDIT_INTERVAL_MS, type AdmitRequest, MemorySlotStore, PENDING_LIMIT_ERROR, PUBLIC_LIMIT_ERROR } from "../limiter";
 import { admitUpgrade, LIMITER_UNAVAILABLE, publicGuard } from "../guard";
 import { allowCalls, newWindow } from "../window";
 import type { ClientFrame } from "../../session/decode";
@@ -136,6 +136,37 @@ describe("address budget", () => {
     expect(await woken.admit(request("c", true))).toEqual({ ok: true });
   });
 
+  it("cannot install abandoned slots when a pending-slot audit finishes after the router deadline", async () => {
+    let now = 0, release!: () => void;
+    const audit = new Promise<void>(resolve => { release = resolve; });
+    const store = new MemorySlotStore();
+    const budget = new AddressBudget(() => ({ liveConnections: async () => { await audit; return []; } }), () => now, store);
+    await budget.admit({ ...request("old", true), pendingLimit: 1 });
+    now = AUDIT_GRACE_MS + 1;
+    const late = budget.admit({ ...request("late", true), pendingLimit: 1, expiresAt: now + 2_000 });
+    budget.release({ v: 1, connectionId: "late", kinds: ["pending", "public"] });
+    now += 2_001; release();
+    expect(await late).toEqual({ ok: false, error: ADMISSION_EXPIRED_ERROR });
+    expect([budget.count("pending"), budget.count("public"), store.entries.size]).toEqual([0, 0, 0]);
+    expect(await budget.admit({ ...request("next", true), pendingLimit: 1, expiresAt: now + 2_000 })).toEqual({ ok: true });
+  });
+
+  it("checks expiry after a public-slot audit and before an RPC delayed until after expiry", async () => {
+    let now = 0, release!: () => void;
+    const audit = new Promise<void>(resolve => { release = resolve; });
+    const budget = new AddressBudget(() => ({ liveConnections: async () => { await audit; return []; } }), () => now);
+    await budget.admit({ ...request("old", true), publicLimit: 1 });
+    now = AUDIT_GRACE_MS + 1;
+    const late = budget.admit({ ...request("late", true), publicLimit: 1, expiresAt: now + 2_000 });
+    // Let the pending-room await complete so the public-slot audit is in flight.
+    await Promise.resolve();
+    now += 2_001; release();
+    expect(await late).toEqual({ ok: false, error: ADMISSION_EXPIRED_ERROR });
+    expect([budget.count("pending"), budget.count("public")]).toEqual([0, 0]);
+    expect(await budget.admit({ ...request("delayed", true), expiresAt: now - 1 })).toEqual({ ok: false, error: ADMISSION_EXPIRED_ERROR });
+    expect([budget.count("pending"), budget.count("public")]).toEqual([0, 0]);
+  });
+
   it("the sweep drops leaked slots past the grace whatever the fill, and the store with them", async () => {
     let now = 0;
     const store = new MemorySlotStore();
@@ -205,6 +236,20 @@ describe("limiter failure modes (0045)", () => {
 
   it("refuses an upgrade with 503 when the limiter cannot be reached", async () => {
     const response = await admitUpgrade(env, { address: "198.51.100.9", connectionId: "c", gateway: "gw-0", publicTransport: true });
+    expect(response?.status).toBe(503);
+    expect(await response?.text()).toBe(LIMITER_UNAVAILABLE);
+  });
+
+  it("keeps an expired upgrade retryable instead of reporting a real socket-cap refusal", async () => {
+    let deadline: number | undefined;
+    const namespace = { getByName: () => ({ admit: async (request: AdmitRequest) => {
+      deadline = request.expiresAt;
+      return { ok: false, error: ADMISSION_EXPIRED_ERROR };
+    } }) };
+    const response = await admitUpgrade({ PUBLIC_LIMITER: namespace as unknown as DurableObjectNamespace }, {
+      address: "198.51.100.9", connectionId: "expired", gateway: "gw-0", publicTransport: true, expiresAt: 1_234,
+    });
+    expect(deadline).toBe(1_234);
     expect(response?.status).toBe(503);
     expect(await response?.text()).toBe(LIMITER_UNAVAILABLE);
   });

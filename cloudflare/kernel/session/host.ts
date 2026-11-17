@@ -42,6 +42,10 @@ export interface HostOptions {
   publicGuard?: PublicGuard;
   /** K15: telemetry state shared by this object's sockets (rate limits per owning object, 0012 R11). */
   telemetry?: TelemetryHostState;
+  /** X01: aggregate actual outbound work at the common sink, including live-query/replica batches. */
+  sent?(text: string): void;
+  /** Placement shares the host alarm; null when no reconnect work is due. */
+  placementWake?(): number | null;
 }
 
 interface Attachment { session: SessionRecord }
@@ -161,7 +165,7 @@ export class SocketHost {
 
   /** Arms the single alarm for the earliest session need. */
   reschedule(): void {
-    let next: number | null = null;
+    let next: number | null = this.options.placementWake?.() ?? null;
     for (const session of this.sessions.values()) {
       const at = session.nextWake();
       if (at !== null && (next === null || at < next)) next = at;
@@ -193,7 +197,7 @@ export class SocketHost {
       ...(this.options.publicGuard ? { publicGuard: this.options.publicGuard } : {}),
       telemetry: this.telemetry,
       sink: {
-        send: (text: string) => ws.send(text),
+        send: (text: string) => { ws.send(text); this.options.sent?.(text); },
         close: (frame: { code: number; reason: string }) => {
           const session = this.sessions.get(ws);
           if (session) this.releaseSlots(ws, session, session.record.slots ?? []);
