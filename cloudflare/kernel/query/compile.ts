@@ -1,9 +1,11 @@
 /**
  * Structured plan to SQL: a port of `execute_in_transaction` and its helpers
- * (`live_query.rs` 1032-1810). The SQL text is Rust's, so SQLite evaluates
- * the same predicates in the same order; only the 100-parameter limit of
- * Durable Object SQLite is handled afterwards (`parameters.ts`).
+ * (`live_query.rs` 1032-1810). Keeps Rust's predicate and row semantics.
+ * Boolean trees are balanced and relation key sets
+ * use CTEs to stay within SQLite's expression-depth limit. Parameter fitting
+ * happens afterwards (`parameters.ts`).
  */
+import { booleanSql } from "../storage/boolean-sql";
 import type { JsonKind } from "../storage";
 import type { LiveExpression, LiveFilters, LiveQueryPlan, LiveSearch, LiveSort, LiveValue, LiveWindow } from "./plan";
 import { LiveQueryError, quote } from "./plan";
@@ -103,7 +105,7 @@ function compileOrder(plan: LiveQueryPlan, args: Args): string {
 
 function compileExpression(
   expression: LiveExpression, args: Args, parameters: unknown[], alias: string, related: Related,
-  context: Readonly<Record<string, string>>, visibility: QueryVisibility,
+  context: Readonly<Record<string, string>>, visibility: QueryVisibility, relations: string[],
 ): string {
   const children = expression.children ?? [];
   switch (expression.operator) {
@@ -114,18 +116,25 @@ function compileExpression(
       if (!entry) throw LiveQueryError.visibilityMissing(relation.table);
       const relatedAlias = `${alias}_related`;
       const guard = visibility.compilePredicate(entry.plan, entry.resolved, relatedAlias, parameters);
-      const predicate = relation.where ? compileExpression(relation.where, args, parameters, relatedAlias, related, context, visibility) : "TRUE";
-      return `CAST(${alias}.${quote(expression.column ?? "")} AS TEXT) IN (SELECT CAST(${relatedAlias}.${quote(relation.column)} AS TEXT) FROM ${quote(relation.table)} AS ${relatedAlias} WHERE (${guard}) AND (${predicate}))`;
+      const predicate = relation.where ? compileExpression(relation.where, args, parameters, relatedAlias, related, context, visibility, relations) : "TRUE";
+      // inRelation is an uncorrelated key set. Give each set its own SELECT
+      // boundary rather than nesting complete visibility trees in its parent.
+      // ':' cannot occur in a validated plan identifier, so it cannot shadow
+      // an application table. Ordinary CTEs leave execution choices to SQLite;
+      // each IN subquery remains an uncorrelated, statement-local key set.
+      const name = `"_gonvex:relation:${relations.length}"`;
+      relations.push(`${name} AS (SELECT CAST(${relatedAlias}.${quote(relation.column)} AS TEXT) AS key FROM ${quote(relation.table)} AS ${relatedAlias} WHERE (${guard}) AND (${predicate}))`);
+      return `CAST(${alias}.${quote(expression.column ?? "")} AS TEXT) IN (SELECT key FROM ${name})`;
     }
     case "and":
     case "or": {
       if (!children.length) return "FALSE";
-      const parts = children.map((child) => `(${compileExpression(child, args, parameters, alias, related, context, visibility)})`);
-      return `(${parts.join(expression.operator === "and" ? " AND " : " OR ")})`;
+      const parts = children.map((child) => compileExpression(child, args, parameters, alias, related, context, visibility, relations));
+      return booleanSql(expression.operator === "and" ? "AND" : "OR", parts);
     }
     case "not": {
       if (children.length !== 1) throw LiveQueryError.invalid("live not expression requires one child");
-      return `NOT (${compileExpression(children[0]!, args, parameters, alias, related, context, visibility)})`;
+      return `NOT (${compileExpression(children[0]!, args, parameters, alias, related, context, visibility, relations)})`;
     }
     case "server":
       throw LiveQueryError.invalid("server-only arbitrary reactive predicates are not supported");
@@ -357,12 +366,13 @@ export interface CompileInput {
 export function compilePlan(input: CompileInput): CompiledPlan {
   const { plan, args, related, visibility, resolved } = input;
   const parameters: unknown[] = [];
+  const relations: string[] = [];
   const predicates = [visibility.compilePredicate(input.visibilityPlan, resolved, "r", parameters)];
   if (!resolved.ephemeralMember) {
     parameters.push(resolved.direct["account.id"]);
     predicates.push(`EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = $${parameters.length} AND _gonvex_member.status = 'active')`);
   }
-  if (plan.where) predicates.push(indexPredicate(plan, compileExpression(plan.where, args, parameters, "r", related, resolved.direct, visibility)));
+  if (plan.where) predicates.push(indexPredicate(plan, compileExpression(plan.where, args, parameters, "r", related, resolved.direct, visibility, relations)));
   if (plan.filters) {
     const filter = compileFilters(plan.filters, args, parameters, "r");
     if (filter) predicates.push(indexPredicate(plan, filter));
@@ -377,12 +387,13 @@ export function compilePlan(input: CompileInput): CompiledPlan {
   const source = compileSource(plan);
   const columns = (plan.columns ?? []).map((column) => { quote(column); return [column, input.kinds.get(column) ?? "text"] as const; });
   const base = [...parameters];
-  let statement = `SELECT ${jsonObjectExpr("r", columns)} FROM ${source} WHERE ${predicates.join(" AND ")} ORDER BY ${order}`;
+  const withRelations = relations.length ? `WITH ${relations.join(", ")} ` : "";
+  let statement = `${withRelations}SELECT ${jsonObjectExpr("r", columns)} FROM ${source} WHERE ${predicates.join(" AND ")} ORDER BY ${order}`;
   if (limit > 0) statement += ` LIMIT ${push(parameters, limit)}`;
   else if (offset > 0) statement += " LIMIT -1";
   if (offset > 0) statement += ` OFFSET ${push(parameters, offset)}`;
   const count = plan.window?.count === "exact" && (plan.resultPath ?? []).length
-    ? { statement: `SELECT count(*) FROM ${source} WHERE ${predicates.join(" AND ")}`, parameters: base }
+    ? { statement: `${withRelations}SELECT count(*) FROM ${source} WHERE ${predicates.join(" AND ")}`, parameters: base }
     : undefined;
   return { statement, parameters, count, offset, limit };
 }
