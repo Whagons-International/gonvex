@@ -27,6 +27,7 @@ export default defineConfig({
   plugins: [modulePrelude(), cloudflareTest({ wrangler: { configPath: "./test/wrangler.jsonc" }, miniflare: { bindings: { GONVEX_ADMIN_KEY: "k17-test-admin" } } })],
   resolve: {
     alias: {
+      "gonvex:releases": fileURLToPath(new URL("../assembly/releases.ts", import.meta.url)),
       "@gonvex/module-sdk": moduleSdk,
       "@conformance-fixture": fileURLToPath(new URL("../../conformance/fixtures/app/gonvex", import.meta.url)),
     },

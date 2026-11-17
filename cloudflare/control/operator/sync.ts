@@ -12,11 +12,10 @@
  *  6. tenant rollout: one queue message per tenant, sequential in `tenant_id`
  *     order, first failure aborts with 422 (fail-fast, R1); the request is held
  *     open until the last tenant reports or the deadline passes (R4);
- *  7. activation: the Worker version carrying every project's active bundle is
- *     built (builder), the release becomes active and the manifest is saved;
- *     the router then deploys that version (outside this object, so a deploy
- *     that restarts this object cannot cut the response) and tenant objects
- *     send `system.reload` / `client.updateRequired` (`ModuleReloaded`).
+ *  7. stage the Worker version carrying every project's bundle and persist its
+ *     pending publication. The router deploys outside this object, then fresh
+ *     ingress acknowledges the baked version and tenant activation, saves the
+ *     active manifest and awaits `system.reload` / `client.updateRequired`.
  */
 import type { Sql } from "../src/sql";
 import { NOW_MS, num, str } from "../src/sql";

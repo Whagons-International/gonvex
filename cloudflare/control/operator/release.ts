@@ -88,7 +88,7 @@ export interface ReleaseBuilder {
    */
   prepare(incoming: string, project: string): Promise<{ ok: true; summary: ReleaseSummary } | { ok: false; status: number; error: string }>;
   /**
-   * Builds and deploys the Worker version that carries `releases` (every
+   * Builds and stages the Worker version that carries `releases` (every
    * project's active bundle, 0016 G0-2). Locally this rewrites the generated
    * module the local kernel imports, and workerd reloads.
    */
