@@ -103,6 +103,7 @@
   },
   "vars": {
     "GONVEX_RUNTIME_VERSION": "development",
-    "GONVEX_PRESENCE": "1"
+    "GONVEX_PRESENCE": "1",
+    "GONVEX_TOPOLOGY_TRANSITION": "0"
   }
 }

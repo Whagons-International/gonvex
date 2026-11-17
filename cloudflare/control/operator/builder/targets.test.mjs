@@ -11,6 +11,7 @@ test('app deployment replaces only runtime and Actions; stable socket owner is n
  assert.equal(runtime.durable_objects.bindings.find(b=>b.name==='GATEWAY').script_name,'gonvex-cf-dev-topology');
  assert.equal(sent[0].config.durable_objects.bindings.find(b=>b.name==='TENANT').script_name,'gonvex-cf-dev-topology-runtime');
  assert.equal(runtime.limits.cpu_ms,30000);
+ assert.equal(runtime.vars.GONVEX_TOPOLOGY_TRANSITION,'0'); // --keep-vars must clear a retained bridge guard.
 }));
 test('component write failure is uncertain and a retry deploys the same catalog only to Actions/runtime',()=>owned(async dir=>{
  const calls=[];let fail=true;
@@ -24,6 +25,7 @@ test('transfer uses expecting/commit/bind without a create or delete and preserv
  const entry=join(dir,'catalog.js');await writeFile(entry,'export const releases={}; export const version="bootstrap";');
  const plan=await transferConfigs('gonvex-cf-dev-topology',dir,{catalogEntry:entry,actionCatalogEntry:entry,catalog:[]});const [bridge,receive,commit,bind]=plan.phases;
  assert.equal(bridge.config.main.endsWith('/src/transition.ts'),true);assert.equal(bridge.config.exports.AssemblyTenant.state,undefined);
+ assert.equal(bridge.config.vars.GONVEX_TOPOLOGY_TRANSITION,'1');assert.equal(bind.config.vars.GONVEX_TOPOLOGY_TRANSITION,'0');
  assert.equal(receive.config.exports.AssemblyTenant.state,'expecting-transfer');assert.ok(!receive.config.durable_objects.bindings.some(b=>b.name==='TENANT'));
  assert.deepEqual(commit.config.exports.AssemblyTenant,{type:'durable-object',state:'transferred',transferred_to:plan.targetName});
  assert.deepEqual(bind.config.exports.AssemblyTenant,{type:'durable-object',storage:'sqlite'});
@@ -34,6 +36,7 @@ test('transfer uses expecting/commit/bind without a create or delete and preserv
 test('reverse transfer names the same namespace owners and stays frozen; no deletion rollback',()=>owned(async dir=>{
  const entry=join(dir,'catalog.js');await writeFile(entry,'export const releases={}; export const version="bootstrap";');const plan=await transferConfigs('gonvex-cf-dev-topology',dir,{catalogEntry:entry,actionCatalogEntry:entry,catalog:[],reverse:true});
  assert.equal(plan.sourceName,'gonvex-cf-dev-topology-runtime');assert.equal(plan.targetName,'gonvex-cf-dev-topology');
+ assert.equal(plan.phases[0].config.vars.GONVEX_TOPOLOGY_TRANSITION,'1');assert.equal(plan.phases[3].config.vars.GONVEX_TOPOLOGY_TRANSITION,'1');
  assert.equal(plan.phases[1].config.exports.AssemblyTenant.transfer_from,plan.sourceName);assert.equal(plan.phases[2].config.exports.AssemblyTenant.transferred_to,plan.targetName);
 }));
 test('a committed transfer resumes from retained namespace identity without repeating the handoff',()=>owned(async dir=>{

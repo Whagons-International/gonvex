@@ -103,6 +103,8 @@ the original namespace back and repoints companion bindings without deleting dat
 remains frozen: the isolated builder must not deploy a new Runtime namespace while Tenant ownership
 is back on the monolith. Returning to a publishing monolithic framework requires a separately
 approved compatible framework/builder release. Neither direction undoes application migrations.
+Steady kernel and Runtime configurations explicitly set the transition flag to `0`, so normal
+`--keep-vars` deployment cannot accidentally retain a bridge's activation guard.
 
 ## Local qualification and limits
 
