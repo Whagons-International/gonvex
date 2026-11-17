@@ -14,6 +14,7 @@
  * `class` or `retryable` (the reference renders the error to a string first),
  * except the batch refusal, which is classed `rejected`.
  */
+import type { ActionSession } from "../../actions/src/session";
 import type { ClientFrame, Json } from "../session/decode";
 import { frames } from "../session/protocol";
 import { rustDebug } from "../reducer/errors";
@@ -24,6 +25,8 @@ export type ServiceCallKind = "reducer" | "action" | "query";
 /** One allowlisted tenant call, as the tenant object receives it. */
 export interface ServiceTenantCall {
   kind: ServiceCallKind;
+  /** Stamped by the socket owner, never decoded from a client frame. */
+  reply?: ActionSession["reply"];
   /** The frame id: the command id of a Reducer (row ids derive from it). */
   id: string;
   path: string;
@@ -33,7 +36,7 @@ export interface ServiceTenantCall {
 
 /** A tenant call's outcome: the result as JSON text (spliced, never re-parsed), or the reference's error text. */
 export type ServiceTenantOutcome =
-  | { ok: true; result: string; committedRevision?: number }
+  | { ok: true; result: string; committedRevision?: number; pending?: boolean }
   | { ok: false; error: string };
 
 /** A control Reducer's outcome (`control.servicePrincipals.*`). */
@@ -123,6 +126,7 @@ export async function handleServiceFrame(calls: ServiceCalls, grant: ServiceGran
       const outcome = await tenantCall(calls, grant, {
         kind: "action", id, path, args: frame.args, ...(frame.idempotencyKey !== undefined ? { idempotencyKey: frame.idempotencyKey } : {}),
       });
+      if (outcome.ok && outcome.pending) return [];
       return [outcome.ok ? serviceActionResult(id, path, outcome.result, outcome.committedRevision) : serviceActionError(id, path, outcome.error)];
     }
     case "query.call": {

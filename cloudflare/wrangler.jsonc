@@ -1,41 +1,48 @@
-// Gonvex on Cloudflare: Worker + SQLite-backed Durable Objects.
-// Deploys go through scripts/deploy-preview.mjs, which overrides `name` with
-// gonvex-cf-dev-preview-<branch-slug>. The default name keeps the
-// gonvex-cf-dev- prefix so an accidental `wrangler deploy` stays in the
-// development namespace.
+// The assembled development kernel; never a staging/production target.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "gonvex-cf-dev-local",
+  "name": "gonvex-cf-dev-k22",
   "main": "src/index.ts",
-  // Must not be newer than the pinned workerd (wrangler 4.155.0 -> workerd 1.20261023.1).
+  "version_metadata": { "binding": "WORKER_VERSION" },
   "compatibility_date": "2026-10-23",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": false,
   "observability": { "enabled": true },
-  "durable_objects": {
-    "bindings": [
-      { "name": "HELLO", "class_name": "HelloObject" },
-      // K05: gateway objects hold client sockets (0016 G0-1).
-      { "name": "GATEWAY", "class_name": "GatewayObject" },
-      // K05 stand-ins for the control object (K06) and the tenant object; replaced by those packages.
-      { "name": "CONTROL_STUB", "class_name": "ControlStubObject" },
-      { "name": "TENANT_STUB", "class_name": "TenantStubObject" },
-      // K16: one object per client address bucket: pending and public sockets, calls per address (0040).
-      { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" }
-    ]
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  "alias": {
+    "gonvex:releases": "./kernel/assembly/releases.ts",
+    "gonvex:module-globals": "./kernel/host/src/module-globals.ts"
   },
-  "vars": {
-    // A.1.3 runtimeVersion. Deploys set the Git SHA; "development" matches a local Rust runtime.
-    "GONVEX_RUNTIME_VERSION": "development",
-    // Gateway shards: expected concurrent sockets / 125 (S3). Stage 1 fixed count (0004).
-    "GONVEX_GATEWAY_SHARDS": "8",
-    // Presence v2 advertised in session.ready, as Rust does by default.
-    "GONVEX_PRESENCE": "1"
-  },
-  // Durable Object classes must be SQLite-backed: always `new_sqlite_classes`.
+  "durable_objects": { "bindings": [
+    { "name": "GATEWAY", "class_name": "AssemblyGateway" },
+    { "name": "GATEWAY_CONTROLLER", "class_name": "GatewayControllerObject" },
+    { "name": "CONTROL", "class_name": "SessionControlObject" },
+    { "name": "TENANT", "class_name": "AssemblyTenant" },
+    { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" },
+    { "name": "INGRESS", "class_name": "IngressObject" }
+  ] },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["HelloObject"] },
     { "tag": "v2", "new_sqlite_classes": ["GatewayObject", "ControlStubObject", "TenantStubObject"] },
-    { "tag": "v3", "new_sqlite_classes": ["PublicLimiterObject"] }
-  ]
+    { "tag": "v3", "new_sqlite_classes": ["PublicLimiterObject"] },
+    { "tag": "v4", "new_sqlite_classes": ["AssemblyGateway", "SessionControlObject", "AssemblyTenant", "IngressObject"], "deleted_classes": ["HelloObject", "GatewayObject", "ControlStubObject", "TenantStubObject"] },
+    { "tag": "v5", "new_sqlite_classes": ["GatewayControllerObject"] }
+  ],
+  "r2_buckets": [
+    { "binding": "RELEASES", "bucket_name": "gonvex-cf-dev-k22-releases" },
+    { "binding": "FILES", "bucket_name": "gonvex-cf-dev-k22-files" }
+  ],
+  "queues": {
+    "producers": [{ "binding": "ROLLOUT", "queue": "gonvex-cf-dev-k22-rollout" }],
+    "consumers": [{ "queue": "gonvex-cf-dev-k22-rollout", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 10 }]
+  },
+  "services": [
+    { "binding": "ACTIONS", "service": "gonvex-cf-dev-k22-actions", "entrypoint": "ActionWorker" },
+    { "binding": "RELEASE_BUILDER", "service": "gonvex-cf-dev-k22-builder" }
+  ],
+  "workflows": [{ "binding": "ACTION_WORKFLOW", "name": "gonvex-cf-dev-k22-actions", "class_name": "ActionWorkflow", "script_name": "gonvex-cf-dev-k22-actions" }],
+  "analytics_engine_datasets": [{ "binding": "TELEMETRY_EVENTS", "dataset": "gonvex-cf-dev-k22-telemetry" }],
+  "limits": { "cpu_ms": 5000 },
+  "vars": { "GONVEX_RUNTIME_VERSION": "development", "GONVEX_PRESENCE": "1" }
 }

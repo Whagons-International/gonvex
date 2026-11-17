@@ -46,6 +46,12 @@ export class TelemetryLimiter {
   get size(): number {
     return this.windows.size;
   }
+
+  /** Read-only diagnostics; never creates, refreshes or charges a window. */
+  inspect(key: string): Readonly<Window> | null {
+    const window = this.windows.get(key);
+    return window ? { ...window } : null;
+  }
 }
 
 /** `telemetry_allowed`'s key and limit: 120 per account, else 20 per connection, per project. */

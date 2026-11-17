@@ -6,7 +6,7 @@ import { defineConfig } from "vitest/config";
 // or network access is needed. GONVEX_STUB_ADMIN_KEY enables the K05 stub
 // routes (kernel/session/stub/routes.ts) for the session tests.
 export default defineConfig({
-  plugins: [cloudflareTest({ wrangler: { configPath: "./wrangler.jsonc" }, miniflare: { bindings: { GONVEX_STUB_ADMIN_KEY: "test-key" } } })],
+  plugins: [cloudflareTest({ wrangler: { configPath: "./test/legacy-wrangler.jsonc" }, miniflare: { bindings: { GONVEX_STUB_ADMIN_KEY: "test-key" } } })],
   resolve: {
     // The kernel storage tests (K01) run the SDK's own SQL suites against
     // Durable Object SQLite, from the SDK's sources.

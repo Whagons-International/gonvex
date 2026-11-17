@@ -20,6 +20,8 @@ export interface TenantCall {
   args: unknown;
   identity: Identity;
   invocation: InvocationInfo;
+  /** Server-only durable lineage; never exposed on module ctx.invocation. */
+  hostProvenance?: Record<string, unknown>;
   /** Host-stamped `ctx.now`; omitted or 0 stamps the object's clock at start. */
   now?: number;
   intentEntropy?: string;
@@ -69,15 +71,15 @@ export interface CallStats {
 
 /** Commands whose earlier run overran the platform CPU limit (R25). */
 export interface Quarantine {
-  has(commandId: string): boolean;
-  add(commandId: string): void;
+  has(commandId: string, path?: string, artifact?: string): boolean;
+  add(commandId: string, path?: string, artifact?: string): void;
 }
 
 /** In-memory quarantine; the caller re-records a command after an object reset (probes/r25/FINDINGS.md). */
 export class MemoryQuarantine implements Quarantine {
   private readonly ids = new Set<string>();
-  has(commandId: string) { return this.ids.has(commandId); }
-  add(commandId: string) { this.ids.add(commandId); }
+  has(commandId: string, path?: string, artifact?: string) { return this.ids.has(commandId) || this.ids.has(JSON.stringify([commandId, path, artifact])); }
+  add(commandId: string, path?: string, artifact?: string) { this.ids.add(path === undefined || artifact === undefined ? commandId : JSON.stringify([commandId, path, artifact])); }
 }
 
 /**
@@ -160,7 +162,7 @@ export class TenantModuleHost {
   async run(call: TenantCall): Promise<CallReport> {
     const registry = this.options.registry;
     const commandId = call.invocation.commandId;
-    if (typeof commandId === "string" && this.quarantine.has(commandId)) {
+    if (typeof commandId === "string" && this.quarantine.has(commandId, call.function, registry.activeGeneration?.artifact.artifactHash)) {
       // A retry of a command that reset this object: answer as Rust's deadline overrun, without running it.
       const timeoutMs = registry.activeGeneration?.engine.config.executionTimeoutMs;
       return { ok: false, error: deadlineOverrunError(registry.moduleId, call.function, timeoutMs), committed: false, generation: registry.activeGeneration?.generation, stats: emptyStats() };
@@ -181,6 +183,7 @@ export class TenantModuleHost {
           session,
           identity: call.identity,
           invocation: call.invocation,
+          ...(call.hostProvenance ? { provenance: call.hostProvenance } : {}),
           schedulable: (path) => generation.schedulable(path),
           permissions: this.options.permissions,
           files: this.options.files,

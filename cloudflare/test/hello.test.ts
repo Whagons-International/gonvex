@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { HelloObject } from "../src/index";
+import type { HelloObject } from "../src/hello";
 
 const BASE = "https://gonvex.test";
 

@@ -1,0 +1,16 @@
+{
+  "name": "gonvex-cf-dev-k22-actions",
+  "main": "actions.ts",
+  "version_metadata": { "binding": "WORKER_VERSION" },
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": { "gonvex:action-releases": "./releases.ts", "gonvex:module-globals": "../host/src/module-globals.ts" },
+  "durable_objects": { "bindings": [
+    { "name": "TENANT", "class_name": "AssemblyTenant", "script_name": "gonvex-cf-dev-k22" },
+    { "name": "CONTROL", "class_name": "SessionControlObject", "script_name": "gonvex-cf-dev-k22" }
+  ] },
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-k22-files" }],
+  "services": [{ "binding": "SANDBOX", "service": "gonvex-cf-dev-k22-sandbox", "entrypoint": "SandboxWorker" }],
+  "workflows": [{ "binding": "ACTION_WORKFLOW", "name": "gonvex-cf-dev-k22-actions", "class_name": "ActionWorkflow" }],
+  "limits": { "cpu_ms": 300000 }
+}

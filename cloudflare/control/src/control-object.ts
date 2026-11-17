@@ -66,6 +66,7 @@ export interface ControlEnv {
 /** Socket owners receive `controlChanged(projectId)` (RuntimeEvent::ControlChanged). */
 export interface ControlWatcher {
   controlChanged(projectId: string): Promise<void>;
+  presenceChanged?(projectId: string): Promise<void>;
 }
 
 export interface ConnectionState {
@@ -260,6 +261,9 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
         this.sql.tx(() => this.sql.run("UPDATE gonvex_support_sessions SET last_seen_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1", id));
       }
     }
+    if (before?.projectId !== state?.projectId || before?.tenantId !== state?.tenantId || before?.authenticated !== state?.authenticated) {
+      for (const project of new Set([before?.projectId, state?.projectId])) if (project) this.notifyPresence(project);
+    }
   }
 
   tenantCounts(projectId: string): Map<string, number> {
@@ -349,6 +353,18 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
       if (!namespace) continue;
       const stub = namespace.get(namespace.idFromString(name)) as unknown as ControlWatcher;
       this.ctx.waitUntil(stub.controlChanged(projectId).catch(() => this.watchers.get(projectId)?.delete(`${binding}:${name}`)));
+    }
+  }
+
+  private notifyPresence(projectId: string): void {
+    for (const { binding, name } of this.watchers.get(projectId)?.values() ?? []) {
+      // K22's real gateway implements this additive hook; package fixture
+      // socket owners retain their existing ControlChanged contract.
+      if (binding !== "GATEWAY") continue;
+      const namespace = this.env[binding] as DurableObjectNamespace | undefined;
+      if (!namespace) continue;
+      const stub = namespace.get(namespace.idFromString(name)) as unknown as Required<ControlWatcher>;
+      this.ctx.waitUntil(stub.presenceChanged(projectId).catch((error) => console.error("control: presence refresh failed", error)));
     }
   }
 

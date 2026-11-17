@@ -1,0 +1,992 @@
+{
+  "sourceHead": "18afb02a5cccde933c571f7448a930ebafe574a0",
+  "allExit": "0 0 0",
+  "checksEnvelopeExit": "0",
+  "workerdPassed": 869,
+  "workerdExistingSkipped": 15,
+  "nodeDeployPassed": 4,
+  "conformanceUnitPassed": 49,
+  "bundleBytes": 1678656,
+  "bundleSha256": "f811381cc615a951906c7ab92e0ef2f5ef04dd6e1c78c79ab261fab241d2eadb",
+  "gzipBytes": 401105,
+  "prepareExit": "0",
+  "runtimeCycles": {
+    "base": 1,
+    "candidate": 1,
+    "added": 0
+  },
+  "quietProbe": {
+    "report": "/mnt/data/work/gonvex-k22/quiet-initial-4/runtime/report.json",
+    "sha256": "7700211a4d5fcd76fbd174c9fe23c3eb0d42c7b524346413ebab944df9a8c9f8",
+    "failures": [],
+    "digestsChecked": 12,
+    "classification": "Controlled synthetic registration RPC fault; real serving handlers and unchanged SDK; local only; not Rust/backend/platform comparison"
+  },
+  "classification": "Local author evidence; NOT independent approval/deployment/platform or automatic-capacity proof",
+  "acceptance": "UNMET",
+  "full38": {
+    "head": "18afb02a5cccde933c571f7448a930ebafe574a0",
+    "overall": "FAILED/INCOMPLETE",
+    "wallSecondsReported": 526.0,
+    "full38": {
+      "passed": 34,
+      "failed": 4,
+      "skipped": 0
+    },
+    "twoBackendPass": 31,
+    "kernelOnlyPass": 3,
+    "excludedLocal0057": "reducer-errors BLOCKED/FAILED; not rerun",
+    "fullReportSha256": "ad018db4af8c7cb2914b767312e9b83768f648e95a110948f4e0d3c4cfc3130a",
+    "rows": [
+      {
+        "name": "thin-sdk-parity",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 48,
+            "watermarksChecked": 35
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 46,
+            "watermarksChecked": 32
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "reducer-second-client",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 39,
+            "watermarksChecked": 17
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 39,
+            "watermarksChecked": 17
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "replica-resume",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 35,
+            "watermarksChecked": 11
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 35,
+            "watermarksChecked": 11
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "presence",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "live-query-window",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 13
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 9
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "control-auth",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "control-tenants",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "control-invitations",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "control-support",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "control-external-auth",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "control-native-auth",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "control-sessions",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "receipt-lost-reply",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "receipt-owner-switch",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 18,
+            "watermarksChecked": 13
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 18,
+            "watermarksChecked": 13
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "receipt-upgrade",
+        "status": "FAIL",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 8,
+            "watermarksChecked": 6
+          },
+          {
+            "name": "kernel",
+            "status": "failed",
+            "skipped": null,
+            "failures": [
+              "step \"the connected socket runs generation 2\": timed out waiting for generation 2 active",
+              "step \"a call pinned to the generation 1 artifact\": raw socket closed while waiting for board.rename reply",
+              "step \"generation 1 receipts survive the upgrade\": raw socket closed while waiting for __gonvex.reducerReceipt reply",
+              "step \"SDK clients on v1 and v2 definitions converge\": timed out waiting for v1 SDK sees the new row"
+            ],
+            "digestsChecked": 3,
+            "watermarksChecked": 4
+          }
+        ],
+        "failures": [
+          "[kernel] step \"the connected socket runs generation 2\": timed out waiting for generation 2 active",
+          "[kernel] step \"a call pinned to the generation 1 artifact\": raw socket closed while waiting for board.rename reply",
+          "[kernel] step \"generation 1 receipts survive the upgrade\": raw socket closed while waiting for __gonvex.reducerReceipt reply",
+          "[kernel] step \"SDK clients on v1 and v2 definitions converge\": timed out waiting for v1 SDK sees the new row"
+        ],
+        "diffCount": 103
+      },
+      {
+        "name": "storage-sql",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "module-host",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "session-handshake",
+        "status": "FAIL",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 3
+      },
+      {
+        "name": "session-frames",
+        "status": "FAIL",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 3
+      },
+      {
+        "name": "change-capture",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "visibility-masks",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 68,
+            "watermarksChecked": 38
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 68,
+            "watermarksChecked": 47
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "receipt-expiry",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "skipped",
+            "skipped": "backend lacks receiptExpiry",
+            "failures": [],
+            "digestsChecked": null,
+            "watermarksChecked": null
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "scheduler",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "live-query-task-grid",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 46
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 32
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "operator-routes",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "presence-edges",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "actions",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "replica-windows",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 23,
+            "watermarksChecked": 20
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 23,
+            "watermarksChecked": 20
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "replica-reset",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 15,
+            "watermarksChecked": 10
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 15,
+            "watermarksChecked": 10
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "replica-orphan-reveal",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "skipped",
+            "skipped": "backend lacks orphanReveal",
+            "failures": [],
+            "digestsChecked": null,
+            "watermarksChecked": null
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 14,
+            "watermarksChecked": 8
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "replica-tenant-restart",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "skipped",
+            "skipped": "backend lacks tenantRestart",
+            "failures": [],
+            "digestsChecked": null,
+            "watermarksChecked": null
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 9,
+            "watermarksChecked": 6
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "replica-reconnect-wave",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 78,
+            "watermarksChecked": 53
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 78,
+            "watermarksChecked": 54
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "bridge-upstream",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 5,
+            "watermarksChecked": 6
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 5,
+            "watermarksChecked": 5
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "service-principals",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "public-limits",
+        "status": "FAIL",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "failed",
+            "skipped": null,
+            "failures": [
+              "setup failed: POST /dev/sync -> 503: Your worker restarted mid-request. Please try sending the request again. Only GET or HEAD requests are retried automatically."
+            ],
+            "digestsChecked": null,
+            "watermarksChecked": null
+          }
+        ],
+        "failures": [
+          "[kernel] setup failed: POST /dev/sync -> 503: Your worker restarted mid-request. Please try sending the request again. Only GET or HEAD requests are retried automatically."
+        ],
+        "diffCount": 10
+      },
+      {
+        "name": "public-calls",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "error-telemetry",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 0,
+            "watermarksChecked": 0
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      },
+      {
+        "name": "receipt-crash",
+        "status": "PASS",
+        "backends": [
+          {
+            "name": "rust",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 7,
+            "watermarksChecked": 5
+          },
+          {
+            "name": "kernel",
+            "status": "executed",
+            "skipped": null,
+            "failures": [],
+            "digestsChecked": 7,
+            "watermarksChecked": 5
+          }
+        ],
+        "failures": [],
+        "diffCount": 0
+      }
+    ]
+  },
+  "isolatedPublicLimits": {
+    "status": "PASS",
+    "report": "/mnt/data/work/gonvex-k22/evidence/18afb02a5cccde933c571f7448a930ebafe574a0/public-limits-isolated/report.json",
+    "sha256": "4c5cf0bf335faa36aed93ffc1090b78298624aeb7a6d3aabca35ed44695c36fb",
+    "classification": "Fresh unchanged isolated run; DOES NOT relabel full campaign setup503 failure"
+  },
+  "cloudflareDeployment": null,
+  "remainingGates": [
+    "terminal/UNKNOWN owner lifecycle (0069/0071 not implemented)",
+    "stranded durable OWNER platform lifecycle",
+    "unknown/unrebuilt/omitted initial availability and long-duration growth",
+    "receipt-upgrade raw actual deployment boundary",
+    "session-handshake raw Control continuity",
+    "session-frames NONE client close propagation",
+    "public-limits full-campaign real /dev/sync setup503",
+    "enabled K13 matching configuration and real file matrix",
+    "eight package comparison coverage gaps",
+    "K20 input provenance/real Container DuckDB assembly",
+    "private actual CPU5000 caller quarantine/rollback/neighbors",
+    "aggregate128MiB isolate fit and real cost/wakes",
+    "legacy Action reply deployment/drain/rollback preconditions",
+    "V01-V06/R01-R06 and actual-duration soak/shadow/backup/rollback"
+  ]
+}

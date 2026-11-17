@@ -386,7 +386,13 @@ const server = createServer(async (request, response) => {
 });
 
 await mkdir(ROOT, { recursive: true });
-server.listen(PORT, "0.0.0.0", () => console.log(`k20 sandbox manager on :${PORT}`));
+server.listen(PORT, "0.0.0.0", () => {
+  const port = server.address().port;
+  console.log(`k20 sandbox manager on :${port}`);
+  // Local test fixtures use PORT=0 and learn this child's actual listening
+  // address over their private Node IPC channel. Containers have no channel.
+  process.send?.({ type: "sandbox-manager-ready", port });
+});
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     for (const workspace of workspaces.values()) for (const execution of workspace.executions.values()) execution.cancel();

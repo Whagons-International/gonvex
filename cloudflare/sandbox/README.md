@@ -63,7 +63,12 @@ K12 host call ─► SandboxService (Rust's checks and texts) ─► ContainerBa
 ## Tests
 
 `pnpm test` runs `vitest run --root sandbox`. `test/global-setup.mjs` decides what the tests' Container object
-talks to:
+talks to. Local fixtures bind an OS-assigned port and provide the actual URL to workerd
+only after the child reports listening and its health/capability check passes. Startup exit, spawn
+failure or a 10-second readiness timeout fails setup with the manager stderr tail. Teardown awaits
+child exit before removing its workspace. `node --test sandbox/test/global-setup.test.mjs` covers
+startup failures, overlapping fixture isolation and cleanup.
+
 
 | Setting | Manager | Run |
 |---|---|---|

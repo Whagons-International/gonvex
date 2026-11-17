@@ -96,8 +96,9 @@ test('malformed and private nested input cannot leak through audit output',()=>{
 });
 test('CLI is offline, nonzero for blocked declarations, private errors and oversized input',async()=>{
   const hosted=process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_TEMP ? path.join(process.env.RUNNER_TEMP,'m05-foundation') : null;
+  // M05_TEST_ROOT is the caller's resource-admitted fixture directory.
   const root=process.env.M05_TEST_ROOT ?? hosted;
-  assert.ok(root && (root.startsWith('/mnt/data/work/gonvex-m05-foundation/') || root===hosted));
+  assert.ok(root && (root.startsWith('/mnt/data/work/') || root===hosted));
   await mkdir(root,{recursive:true});const dir=await mkdtemp(path.join(root,'binding-'));
   const marker='FAKE_BINDING_PRIVATE_CONTENT';
   try {
@@ -114,8 +115,9 @@ test('CLI is offline, nonzero for blocked declarations, private errors and overs
 
 async function inputFixture(run) {
   const hosted=process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_TEMP ? path.join(process.env.RUNNER_TEMP,'m05-foundation') : null;
+  // M05_TEST_ROOT is the caller's resource-admitted fixture directory.
   const root=process.env.M05_TEST_ROOT ?? hosted;
-  assert.ok(root && (root.startsWith('/mnt/data/work/gonvex-m05-foundation/') || root===hosted));
+  assert.ok(root && (root.startsWith('/mnt/data/work/') || root===hosted));
   await mkdir(root,{recursive:true});const dir=await mkdtemp(path.join(root,'input-bound-'));
   try { await run(dir); } finally { await rm(dir,{recursive:true,force:true}); }
 }

@@ -226,6 +226,10 @@ export function normalizeSession(records) {
       return v;
     }
     if (typeof v === 'string') {
+      // 0015 also applies when an Action catches an actual host error and
+      // returns its string. Only JS stack lines are free here; preserve the
+      // complete first line, non-stack detail, UUIDs, tokens and durations.
+      if (key !== 'error' && key !== 'reason' && key !== 'message' && v.startsWith('GonvexHostError: host call failed:')) return v.replace(/\n[ \t]*at [^\n]*/g, '');
       if (key && RULES.timeKey.test(key) && RULES.rfc3339.test(v)) return '<time>';
       if (key && envelope && RULES.serverTokens.has(key)) return `<${key}>`;
       if (key && envelope && RULES.idKeys.has(key) && opaque(v)) return names.name(key === 'epoch' ? 'epoch' : key.endsWith('Scope') || key === 'scope' ? 'scope' : key === 'artifactHash' ? 'artifact' : 'id', v);

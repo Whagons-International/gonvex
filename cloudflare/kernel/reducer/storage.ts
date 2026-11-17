@@ -20,6 +20,8 @@ import { TenantStorage, type InvocationKind, type InvocationResult, type Storage
 /** What the Reducer path adds to one invocation's transaction. */
 export interface InvocationHooks {
   readonly provenance: Provenance;
+  /** Control invitation admission in the same module transaction. */
+  readonly before?: (session: StorageSession) => void;
   /**
    * After the module returned a value, before finalize; still inside the
    * transaction. `value` is the result's JSON text. Throwing (a
@@ -77,6 +79,7 @@ export class ReducerStorage extends TenantStorage {
     if (!hooks || kind !== "reducer") return super.invoke(kind, body);
     const invoker = { invoke: <U>(k: InvocationKind, b: (s: StorageSession) => Promise<U>) => super.invoke(k, b) };
     const result = await invokeCaptured(invoker, kind, hooks.provenance, async (session) => {
+      hooks.before?.(session);
       const value = await body(session);
       const text = moduleValue(value);
       if (text !== undefined && session.aborted === undefined && !session.discarded) hooks.afterSuccess?.(session, text);

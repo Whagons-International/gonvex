@@ -10,15 +10,17 @@
 //     (reads accountId / apiToken from $WHAGONS_CREDENTIAL_FILE)
 //   - CI: CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN in the environment.
 // They are passed only to the wrangler child process.
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deployAssembly, deleteAssembly } from "../kernel/assembly/deploy.mjs";
+import { randomBytes } from "node:crypto";
 
 const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PREFIX = "gonvex-cf-dev-preview-";
-const MAX_NAME = 63; // Worker names become a DNS label on workers.dev.
+const MAX_NAME = 54; // Leave room for the assembled companion Workers and buckets.
 const NAME_PATTERN = /^gonvex-cf-dev-preview-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
 export function previewName(branch) {
@@ -44,55 +46,6 @@ function currentBranch() {
     process.env.GITHUB_HEAD_REF ||
     execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: PACKAGE_DIR, encoding: "utf8" }).trim()
   );
-}
-
-function credentials() {
-  const file = process.env.WHAGONS_CREDENTIAL_FILE;
-  if (file) {
-    let parsed;
-    try {
-      parsed = JSON.parse(readFileSync(file, "utf8"));
-    } catch {
-      throw new Error("WHAGONS_CREDENTIAL_FILE is not valid JSON (contents not shown)");
-    }
-    const accountId = parsed?.accountId;
-    const apiToken = parsed?.apiToken;
-    if (typeof accountId !== "string" || !accountId || typeof apiToken !== "string" || !apiToken) {
-      throw new Error("credential is missing accountId or apiToken");
-    }
-    return { accountId, apiToken };
-  }
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
-  if (!accountId || !apiToken) {
-    throw new Error(
-      "no credentials: run under `whagons-dev credentials exec full-cloudflare-access --` or set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN",
-    );
-  }
-  return { accountId, apiToken };
-}
-
-function wrangler(args, creds) {
-  const env = { ...process.env, WRANGLER_SEND_METRICS: "false" };
-  delete env.WHAGONS_CREDENTIAL_FILE;
-  env.CLOUDFLARE_ACCOUNT_ID = creds.accountId;
-  env.CLOUDFLARE_API_TOKEN = creds.apiToken;
-  return new Promise((resolve, reject) => {
-    const child = spawn("pnpm", ["exec", "wrangler", ...args], {
-      cwd: PACKAGE_DIR,
-      env,
-      stdio: ["ignore", "pipe", "inherit"],
-    });
-    let stdout = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      process.stdout.write(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (code) =>
-      code === 0 ? resolve(stdout) : reject(new Error(`wrangler ${args[0]} exited with ${code}`)),
-    );
-  });
 }
 
 async function smoke(url) {
@@ -125,17 +78,26 @@ async function main() {
       console.log(name);
       return;
     case "deploy": {
-      const output = await wrangler(["deploy", "--name", name], credentials());
-      const url = output.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/)?.[0];
-      if (!url) throw new Error("deployed, but wrangler printed no workers.dev URL");
+      const imagesFile = process.env.GONVEX_ASSEMBLY_IMAGES_FILE;
+      if (!imagesFile) throw new Error("GONVEX_ASSEMBLY_IMAGES_FILE with exact-source immutable Container digests is required");
+      const built = JSON.parse(readFileSync(imagesFile, "utf8"));
+      const source = execFileSync("git", ["rev-parse", "HEAD"], { cwd: PACKAGE_DIR, encoding: "utf8" }).trim();
+      if (built.source !== source) throw new Error("Container build source differs from the serving Worker checkout");
+      const directory = process.env.GONVEX_ASSEMBLY_DEPLOY_DIR;
+      if (!directory) throw new Error("GONVEX_ASSEMBLY_DEPLOY_DIR is required");
+      const deployed = await deployAssembly({ name, directory, images: built.images, secrets: {
+        GONVEX_ADMIN_KEY: randomBytes(32).toString("hex"), GONVEX_DASHBOARD_SESSION_SECRET: randomBytes(32).toString("hex"),
+      } });
+      const url = deployed.url;
       const body = await smoke(url);
       console.log(`preview ${name} healthy at ${url}: ${body}`);
       if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `name=${name}\nurl=${url}\n`);
       return;
     }
     case "delete":
-      await wrangler(["delete", "--name", name, "--force"], credentials());
-      console.log(`deleted preview ${name}`);
+      if (!process.env.GONVEX_ASSEMBLY_DEPLOY_DIR) throw new Error("GONVEX_ASSEMBLY_DEPLOY_DIR is required");
+      await deleteAssembly({ name, directory: process.env.GONVEX_ASSEMBLY_DEPLOY_DIR });
+      console.log(`deleted assembled preview ${name}`);
       return;
     default:
       throw new Error("usage: deploy-preview.mjs deploy|delete|name [--branch NAME]");

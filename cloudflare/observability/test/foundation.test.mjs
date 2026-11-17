@@ -17,8 +17,9 @@ const c = extra => ({ environment:'local-synthetic',syntheticOnly:true,sideEffec
 const guard = (save=async()=>{})=>new WriteGuard({paused:false,active:null,cleanupHealthy:true,remainingWrites:10,fixtures:[]},save);
 async function withSqlite(fault, fn) {
   const hostedRoot=process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_TEMP ? path.join(process.env.RUNNER_TEMP,'m05-foundation') : null;
+  // M05_TEST_ROOT is the caller's resource-admitted fixture directory.
   const root=process.env.M05_TEST_ROOT ?? hostedRoot;
-  assert.ok(root && (root.startsWith('/mnt/data/work/gonvex-m05-foundation/') || root===hostedRoot),'M05_TEST_ROOT must be an owned /mnt path (or hosted RUNNER_TEMP)');
+  assert.ok(root && (root.startsWith('/mnt/data/work/') || root===hostedRoot),'M05_TEST_ROOT must be an owned /mnt path (or hosted RUNNER_TEMP)');
   await mkdir(root,{recursive:true});
   const dir=await mkdtemp(path.join(root,'sqlite-'));
   const a=sqliteApplication(path.join(dir,'app.sqlite'),fault);

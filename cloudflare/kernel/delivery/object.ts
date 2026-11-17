@@ -10,7 +10,7 @@
 import type { ClientFrame } from "../session/decode";
 import type { SocketView } from "../session/ports";
 import { rpc } from "../session/rpc";
-import { snapshotRunner } from "../query/live.ts";
+import { LiveQueries, snapshotRunner } from "../query/live.ts";
 import { MODULE_KEY, type StoredModule } from "../reducer/tenant.ts";
 import { ReducerTenantObject, type ReducerTenantEnv } from "../reducer/object.ts";
 import { replicaModule, type ReplicaModule } from "./definition.ts";
@@ -19,6 +19,8 @@ import { GatewayOutlet, type ReplicaHolderRpc } from "./outlet.ts";
 
 export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTenantEnv> extends ReducerTenantObject<E> {
   readonly delivery: ReplicaDeliveryEngine;
+  protected liveQueries(): LiveQueries | undefined { return undefined; }
+
   private cachedModule: { key: string; module: ReplicaModule } | undefined;
   private dataChangedScheduled = false;
 
@@ -33,6 +35,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
     const tenantId = ctx.id.name ?? ctx.id.toString();
+    const owner = this;
     this.delivery = new ReplicaDeliveryEngine({
       tenantId,
       serial: (fn) => this.kernel.reducers.serial(fn),
@@ -40,8 +43,9 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
       module: () => this.replicaModule(),
       outlet: new GatewayOutlet(tenantId, (name) => rpc<ReplicaHolderRpc>(env.GATEWAY, name), () => this.gateways.list()),
       delivered: () => this.dataChanged(tenantId),
+      get live() { return owner.liveQueries(); },
     });
-    this.kernel.capture.wake.subscribe((wake) => this.delivery.wake(wake.revision));
+    this.kernel.capture.wake.subscribe((wake) => { this.delivery.wake(wake.revision); this.dataChanged(tenantId); });
     // Commits after this point are owed to the sockets; a tenant not provisioned yet has no clock.
     try {
       const row = ctx.storage.sql.exec<{ epoch: string; revision: number }>("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = 1").toArray()[0];

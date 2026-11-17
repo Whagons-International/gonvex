@@ -26,7 +26,7 @@ import { deliveryClass } from "../session";
 import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../presence/hub";
 import { type TelemetryEnv, telemetryHostFromEnv } from "../../telemetry/env";
 import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
-import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt } from "../../delivery/protocol";
+import { validRecoveryInitialDelivery, initialDeliveryOnly, initialFailureOnly, validInitialCompletions, REPLICA_DELIVERY_VERSION, type InitialCompletionStatus, type ReplicaDelivery, type ReplicaReceipt, type SocketWork } from "../../delivery/protocol";
 import { UNKNOWN_ADDRESS } from "../../public/address";
 import type { PublicGuard } from "../../public/guard";
 import { publicLimits } from "../../public/config";
@@ -281,26 +281,67 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
    * the socket is still handling, so a call's reply never waits for, nor
    * overtakes, the commit frames the tenant already delivered.
    */
-  async deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+  /** Additive marker-only method: old receivers fail before ordinary apply. */
+  async deliverInitialFailures(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+    if (!initialFailureOnly(payload)) throw new Error("invalid initial-failure-only delivery");
+    const pending = new Set(Object.keys(payload.initialFailure!.requests));
+    const work: Array<Promise<void>> = [];
+    for (const ws of this.byTenant.get(tenantId) ?? []) {
+      const session = this.host.sessions.get(ws);
+      if (!session || session.closed || session.record.tenant?.route.tenantId !== tenantId) continue;
+      const refs = payload.initialFailure!.requests[session.record.connectionId];
+      if (!refs) continue;
+      pending.delete(session.record.connectionId);
+      work.push(session.failReplicaInitials(tenantId, refs));
+    }
+    await Promise.all(work);
+    this.host.reschedule();
+    return { v: REPLICA_DELIVERY_VERSION, sockets: work.length, initialFailureAck: 1,
+      ...(pending.size ? { missing: [...pending] } : {}) };
+  }
+
+  async deliverReplicaInitial(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt> {
+    if(!initialDeliveryOnly(payload))throw new Error("invalid initial-only delivery");
+    return this.applyReplica(tenantId,payload);
+  }
+  async deliverReplica(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt> {
+    if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length))throw new Error("initial work requires the initial-only receiver");
+    return this.applyReplica(tenantId,payload);
+  }
+  private async applyReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+    if (payload.initialFailure) throw new Error("initial failures require the marker-only receiver");
+    if (!validRecoveryInitialDelivery(payload)) throw new Error("invalid recovery initial offer");
+    if (Object.values(payload.sockets).some(work=>!validInitialCompletions(work))) throw new Error("invalid initial completion metadata");
+    const initialCompletions: Record<string, readonly InitialCompletionStatus[]> = Object.create(null);
     const started = performance.now();
     const sockets = this.byTenant.get(tenantId);
     const seen = new Set<string>();
     if (payload.recovery) {
       const sessions = [...(sockets ?? [])].map(ws => this.host.sessions.get(ws))
         .filter((session): session is NonNullable<typeof session> => Boolean(session && !session.record.tenant?.anonymous && session.record.tenant?.route.tenantId === tenantId));
+      const scopes=sessions.map(session=>session.record.subscriptionEpoch??0);
       const receivers = sessions.map(session => session as unknown as {
-        recoverReplica?: (tenantId: string, payload: ReplicaDelivery) => Promise<void>;
+        recoverReplica?: (tenantId: string, payload: ReplicaDelivery) => Promise<readonly InitialCompletionStatus[]|void>;
       });
       // Skew is fail-closed: an old session must not be mistaken for an applied whole-holder barrier.
       if (receivers.some(session => typeof session.recoverReplica !== "function")) return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length };
-      await Promise.all(receivers.map(session => session.recoverReplica!(tenantId, payload)));
+      const facts=await Promise.all(receivers.map(session => session.recoverReplica!(tenantId, payload)));
+      if(sessions.some((session,i)=>session.closed||session.record.tenant?.route.tenantId!==tenantId||(session.record.subscriptionEpoch??0)!==scopes[i]))throw new Error("delivery recovery scope changed");
+      for(let i=0;i<sessions.length;i++)if(facts[i]?.length)initialCompletions[sessions[i]!.record.connectionId]=facts[i]!;
       this.host.reschedule();
       this.metrics.delivery(performance.now() - started, payload.pressure?.queueAgeMs, payload.pressure?.rpcMs);
       this.reportCapacity();
-      return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length, recoveryAck: 1 };
+      return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length, recoveryAck: 1,
+        ...(Object.keys(initialCompletions).length?{initialCompletions:Object.fromEntries(Object.entries(initialCompletions))}:{}) };
     }
     const membership = payload.membership;
     const work: Array<Promise<void>> = [];
+    const scopeRequired: Record<string, number> = {};
+    const scopeAck: Record<string, number> = {};
+    const bootstraps: Array<Promise<void>> = [];
+    const bootstrapScopes=new Map<string,{session:NonNullable<ReturnType<SocketHost["sessions"]["get"]>>;epoch:number|undefined}>();
+    const wholeHolderChallenge = !Object.keys(payload.sockets).length && !payload.shared.length
+      && payload.watermark === undefined && !payload.membership;
     for (const ws of sockets ?? []) {
       const session = this.host.sessions.get(ws);
       const tenant = session?.record.tenant;
@@ -312,14 +353,64 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
         work.push(session.membershipChanged(membership.revision));
         continue;
       }
-      session.replicaDelivery(payload, payload.sockets[id]);
+      const own = payload.sockets[id];
+      if (!own) {
+        if (payload.scopeFence === 1 && (wholeHolderChallenge || payload.watermark !== undefined)) {
+          // A global watermark needs authority even for the same instance.
+          // An unaddressed socket applies no instance, data or watermark.
+          scopeRequired[id] = session.record.subscriptionEpoch ?? 0;
+          continue;
+        }
+        // Targeted work for another socket grants no authority over this one.
+        if (payload.watermark === undefined) continue;
+      }
+      if (payload.scopeFence === 1 && own && !own.ops.length && own.watermark === undefined && !own.opened && !own.removed
+        && !payload.shared.length && payload.watermark === undefined && !payload.membership && !own.initialScope && !own.initialCompletions?.length) {
+        const epoch = (own as SocketWork & { subscriptionEpoch?: number }).subscriptionEpoch;
+        bootstrapScopes.set(id,{session,epoch});
+        bootstraps.push(session.bootstrapReplica(tenantId, payload, own).then((facts) => {
+          if (epoch !== undefined) scopeAck[id] = epoch;
+          if(facts?.length)initialCompletions[id]=facts;
+        }, (error) => {
+          if ((error as Error)?.message !== "delivery recovery scope changed") throw error;
+          // A scope switch is a fresh negative challenge, never an ack or an
+          // automatic replay of this fence's epoch/data.
+          if (!session.closed && session.record.tenant?.route.tenantId === tenantId) scopeRequired[id] = session.record.subscriptionEpoch ?? 0;
+          else seen.delete(id);
+        }));
+        continue;
+      }
+      const completed = session.replicaDelivery(payload, own);
+      if (own?.initialCompletions?.length) initialCompletions[id] = completed;
+    }
+    await Promise.all(bootstraps);
+    for(const [id,{session,epoch}] of bootstrapScopes){
+      if(session.closed||session.record.tenant?.route.tenantId!==tenantId||(session.record.subscriptionEpoch??0)!==epoch){
+        delete scopeAck[id];delete initialCompletions[id];
+        if(!session.closed&&session.record.tenant?.route.tenantId===tenantId)scopeRequired[id]=session.record.subscriptionEpoch??0;
+        else seen.delete(id);
+      }
     }
     if (work.length) this.ctx.waitUntil(Promise.all(work).then(() => this.host.reschedule()));
     this.host.reschedule();
     this.metrics.delivery(performance.now() - started, payload.pressure?.queueAgeMs, payload.pressure?.rpcMs);
     this.reportCapacity();
     const missing = Object.keys(payload.sockets).filter((id) => !seen.has(id));
-    return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}) };
+    for (const id of missing) {
+      const own = payload.sockets[id]!;
+      if (!own.initialCompletions?.length) continue;
+      const physical = [...this.host.sessions.values()].find(session=>session.record.connectionId===id);
+      if (physical) {
+        // Actual current physical scope superseded the old tenant/epoch.
+        initialCompletions[id] = own.initialCompletions.map(c=>({generation:c.request.generation,status:"obsolete"}));
+      } else {
+        if (this.host.ownsConnection(id)) throw new Error("initial completion holder unavailable with retained owner");
+        initialCompletions[id] = own.initialCompletions.map(c=>({generation:c.request.generation,status:"obsolete"}));
+      }
+    }
+    return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}),
+      ...(Object.keys(scopeRequired).length ? { scopeRequired } : {}), ...(Object.keys(scopeAck).length ? { scopeAck } : {}),
+      ...(Object.keys(initialCompletions).length ? { initialCompletions: Object.fromEntries(Object.entries(initialCompletions)) } : {}) };
   }
 
   /** K16: which of these connections are open here (the address limiter's audit of leaked slots). */

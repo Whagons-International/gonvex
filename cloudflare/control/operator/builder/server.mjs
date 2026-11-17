@@ -28,7 +28,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
-import { PRELUDE_SPECIFIER, ReleaseBuilderCore, RELEASES_ENTRY } from './core.ts';
+import { PRELUDE_SPECIFIER, ReleaseBuilderCore, RELEASES_ENTRY, ACTION_RELEASES_ENTRY } from './core.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -86,7 +86,7 @@ class LocalTarget {
   }
   async stage(files, version) {
     for (const [path, content] of files) {
-      if (path === RELEASES_ENTRY) continue;
+      if (path === RELEASES_ENTRY || path === ACTION_RELEASES_ENTRY) continue;
       const file = join(this.stagingDir, path);
       await mkdir(dirname(file), { recursive: true });
       await writeFile(file, content);
@@ -94,7 +94,8 @@ class LocalTarget {
     // The entry imports `./releases/...`; point it at the staging directory.
     const base = relative(this.dir, this.stagingDir).split('\\').join('/') || '.';
     const entry = files.get(RELEASES_ENTRY).replaceAll('from "./releases/', `from "${base.startsWith('.') ? base : `./${base}`}/releases/`);
-    this.staged.set(version, entry);
+    const actions = files.get(ACTION_RELEASES_ENTRY)?.replaceAll('from "./releases/', `from "${base.startsWith('.') ? base : `./${base}`}/releases/`);
+    this.staged.set(version, { kernel: entry, actions });
   }
   async deploy(version) {
     const entry = this.staged.get(version);
@@ -103,7 +104,12 @@ class LocalTarget {
     // the /dev/sync response; swap after it has gone out.
     setTimeout(async () => {
       const file = join(this.dir, RELEASES_ENTRY);
-      await writeFile(`${file}.tmp`, entry);
+      if (entry.actions) {
+        const actions = join(this.dir, ACTION_RELEASES_ENTRY);
+        await writeFile(`${actions}.tmp`, entry.actions);
+        await rename(`${actions}.tmp`, actions);
+      }
+      await writeFile(`${file}.tmp`, entry.kernel);
       await rename(`${file}.tmp`, file);
       log(`version ${version} is live (workerd reloads)`);
     }, this.deferMs);
@@ -120,15 +126,38 @@ class WranglerTarget extends LocalTarget {
   async deploy(version) {
     const entry = this.staged.get(version);
     if (entry === undefined) throw new Error(`version ${version} was not staged`);
-    await writeFile(join(this.dir, RELEASES_ENTRY), entry);
-    const args = ['deploy', '--config', this.config, ...(this.script ? ['--name', this.script] : [])];
-    await new Promise((resolveDeploy, reject) => {
-      const child = spawn(resolve(here, '../../../node_modules/.bin/wrangler'), args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } });
-      let output = '';
-      child.stdout.on('data', (chunk) => (output += chunk));
-      child.stderr.on('data', (chunk) => (output += chunk));
-      child.on('exit', (code) => (code === 0 ? resolveDeploy() : reject(new Error(`wrangler deploy exited ${code}: ${output.slice(-2000)}`))));
-    });
+    if (!this.script.startsWith('gonvex-cf-dev-')) throw new Error('development script name required');
+    await writeFile(join(this.dir, RELEASES_ENTRY), entry.kernel);
+    if (entry.actions) await writeFile(join(this.dir, ACTION_RELEASES_ENTRY), entry.actions);
+    const load = async (path) => JSON.parse((await readFile(path, 'utf8')).replace(/^\s*\/\/.*$/gm, ''));
+    const kernel = await load(this.config);
+    const root = dirname(this.config);
+    const actionPath = join(root, 'kernel/assembly/actions.wrangler.jsonc');
+    const actions = await load(actionPath);
+    for (const [config, dir, name, alias, generatedEntry] of [
+      [actions, dirname(actionPath), `${this.script}-actions`, 'gonvex:action-releases', ACTION_RELEASES_ENTRY],
+      [kernel, root, this.script, 'gonvex:releases', RELEASES_ENTRY],
+    ]) {
+      config.name = name;
+      config.main = resolve(dir, config.main);
+      config.alias = Object.fromEntries(Object.entries(config.alias ?? {}).map(([key, value]) => [key, resolve(dir, value)]));
+      config.alias[alias] = join(this.dir, generatedEntry);
+      for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) binding.script_name = this.script;
+      for (const service of config.services ?? []) service.service = service.binding === 'SANDBOX' ? `${this.script}-sandbox` : service.binding === 'ACTIONS' ? `${this.script}-actions` : `${this.script}-builder`;
+      for (const workflow of config.workflows ?? []) { workflow.name = `${this.script}-actions`; if (workflow.script_name) workflow.script_name = `${this.script}-actions`; }
+      for (const bucket of config.r2_buckets ?? []) bucket.bucket_name = `${this.script}-${bucket.binding.toLowerCase()}`;
+      for (const q of [...(config.queues?.producers ?? []), ...(config.queues?.consumers ?? [])]) q.queue = `${this.script}-rollout`;
+      for (const dataset of config.analytics_engine_datasets ?? []) dataset.dataset = `${this.script}-telemetry`;
+      const path = join(this.dir, `${name}.json`);
+      await writeFile(path, JSON.stringify(config));
+      await new Promise((resolveDeploy, reject) => {
+        const child = spawn(resolve(here, '../../../node_modules/.bin/wrangler'), ['deploy', '--config', path, '--keep-vars'], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } });
+        // Raw Wrangler output can contain request data. Report only the exit status.
+        child.stdout.resume(); child.stderr.resume();
+        child.on('error', reject);
+        child.on('exit', (code) => code === 0 ? resolveDeploy() : reject(new Error(`wrangler deploy exited ${code}`)));
+      });
+    }
     log(`version ${version} deployed`);
   }
 }

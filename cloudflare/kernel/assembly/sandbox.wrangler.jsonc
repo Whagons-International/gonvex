@@ -1,0 +1,16 @@
+{
+  "name": "gonvex-cf-dev-k22-sandbox",
+  "main": "sandbox.ts",
+  "version_metadata": { "binding": "WORKER_VERSION" },
+  "compatibility_date": "2026-10-23",
+  "containers": [{ "class_name": "SandboxContainer", "image": "../../sandbox/container/Dockerfile", "image_build_context": "../../..", "instance_type": "basic", "max_instances": 10 }],
+  "durable_objects": { "bindings": [
+    { "name": "SANDBOX_CONTAINER", "class_name": "SandboxContainer" },
+    { "name": "SANDBOX_REGISTRY", "class_name": "SandboxRegistry" },
+    { "name": "TENANT", "class_name": "AssemblyTenant", "script_name": "gonvex-cf-dev-k22" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SandboxContainer", "SandboxRegistry"] }],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-k22-files" }],
+  "vars": { "GONVEX_SANDBOX_ENABLED": "true" },
+  "limits": { "cpu_ms": 300000 }
+}

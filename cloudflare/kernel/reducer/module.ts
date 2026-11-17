@@ -71,7 +71,7 @@ export function projectModuleFromManifest(projectId: string, manifest: Record<st
     functions.set(path, {
       path, kind, internal,
       public: raw.public === true,
-      interactive: typeof raw.interactive === "boolean" ? raw.interactive : !internal,
+      interactive: typeof raw.interactive === "boolean" ? raw.interactive : raw.classification === "interactive" ? true : raw.classification === "system" || raw.classification === "internal" ? false : !internal && kind !== "action",
       delivery: typeof raw.delivery === "string" ? raw.delivery : "",
       replica: raw.replica !== undefined && raw.replica !== null,
       argsSchema: raw.args,
@@ -106,7 +106,7 @@ export function moduleArtifact(module: ProjectModule, generation: number, export
       ...(definition.exportName ? { export: definition.exportName } : {}),
       argsSchema: definition.argsSchema,
       resultSchema: definition.resultSchema,
-      metadata: { public: definition.public, interactive: definition.interactive, delivery: definition.delivery },
+      metadata: { ...definition.raw, public: definition.public, interactive: definition.interactive, delivery: definition.delivery },
     });
   }
   return {

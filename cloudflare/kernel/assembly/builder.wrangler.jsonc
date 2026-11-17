@@ -1,0 +1,10 @@
+{
+  "name": "gonvex-cf-dev-k22-builder",
+  "main": "builder.ts",
+  "version_metadata": { "binding": "WORKER_VERSION" },
+  "compatibility_date": "2026-10-23",
+  "containers": [{ "class_name": "ReleaseBuilderContainer", "image": "../../control/operator/builder/Dockerfile", "image_build_context": "../../..", "instance_type": "standard-2", "max_instances": 1 }],
+  "durable_objects": { "bindings": [{ "name": "BUILDER", "class_name": "ReleaseBuilderContainer" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ReleaseBuilderContainer"] }],
+  "vars": { "GONVEX_KERNEL_SCRIPT": "gonvex-cf-dev-k22" }
+}

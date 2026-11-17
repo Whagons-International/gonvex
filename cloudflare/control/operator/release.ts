@@ -102,7 +102,7 @@ export interface ReleaseBuilder {
   deploy(version: string): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
-export const releaseKey = (project: string, hash: string, piece: "manifest.json" | "view.json" | "app.js" | "release.json") =>
+export const releaseKey = (project: string, hash: string, piece: "manifest.json" | "view.json" | "app.js" | "actions.js" | "release.json") =>
   `releases/${encodeURIComponent(project)}/${hash}/${piece}`;
 export const incomingKey = (id: string) => `incoming/${id}.json`;
 
