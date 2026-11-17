@@ -60,6 +60,7 @@ export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
 
 const bindings: GatewayBindings = {
   ports: (env) => assemblyPorts(env as AssemblyGatewayEnv),
+  projectAuthenticated: (env, project, holder) => rpc<Control>((env as AssemblyGatewayEnv).CONTROL, "control").watch(project, "GATEWAY", holder),
   tenantLink: (env, route) => rpc<Pick<TenantRpc, "attachGateway" | "detachGateway">>((env as AssemblyGatewayEnv).TENANT, route.tenantId),
   publicGuard: (env) => publicGuard(env as AssemblyGatewayEnv),
 };
@@ -73,7 +74,7 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
     ctx.waitUntil(this.refreshControlWatches());
   }
   private async refreshControlWatches(): Promise<void> {
-    const projects = new Set([...this.host.sessions.values()].filter((session) => !session.closed && Object.keys(session.record.controlQueries ?? {}).length).map((session) => session.record.connection.projectId));
+    const projects = new Set([...this.host.sessions.values()].filter((session) => !session.closed && session.record.connection.projectId).map((session) => session.record.connection.projectId));
     const control = rpc<Control>(this.env.CONTROL, "control");
     if (!projects.size) return;
     const instance = await control.runtimeInstance();

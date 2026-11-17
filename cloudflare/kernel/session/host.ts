@@ -37,6 +37,7 @@ export interface HostOptions {
   name: string;
   /** The placement's reaction to a socket entering or leaving a tenant. */
   tenantChanged?(socket: WebSocket, previous: TenantSession | null, next: TenantSession | null): void;
+  projectAuthenticated?(projectId: string): Promise<void>;
   /** Presence v2 settings (K14); default: on when `ready.presence`. */
   presence?: PresenceConfig;
   /** K16: public-function limits and the address budgets. */
@@ -214,6 +215,7 @@ export class SocketHost {
 
   private sessionOptions(ws: WebSocket) {
     const hooks: SessionHooks = {
+      projectAuthenticated: (project) => this.options.projectAuthenticated?.(project) ?? Promise.resolve(),
       recoveryChanged: () => this.recoveryDirty.add(ws),
       persist: () => this.persist(ws, this.sessions.get(ws)),
       tenantChanged: (previous, next) => this.options.tenantChanged?.(ws, previous, next),

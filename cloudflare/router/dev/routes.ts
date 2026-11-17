@@ -24,6 +24,7 @@ export interface DevRouterEnv {
   RELEASE_BUILDER?: Fetcher;
   GONVEX_RELEASE_BUILDER_URL?: string;
   GONVEX_RELEASE_BUILDER_TOKEN?: string;
+  GONVEX_PUBLIC_URL?: string;
 }
 
 /** The control object's name (one per deployment, as K06's test Worker names it). */
@@ -63,8 +64,25 @@ export function releaseBuilder(env: DevRouterEnv): ReleaseBuilder | undefined {
 
 /** Handles `/healthz`, `/dev/*` and the builder's blob route; `null` for any other path. */
 export async function handleDevRequest(request: Request, env: DevRouterEnv, ctx: ExecutionContext): Promise<Response | null> {
+  try { return await devRequest(request, env, ctx); }
+  catch (cause) { return withCors(syncFailure(cause, env, "operator")); }
+}
+
+async function devRequest(request: Request, env: DevRouterEnv, ctx: ExecutionContext): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.pathname.startsWith("/_gonvex/k19/blobs/")) return handleBlob(request, env, url);
+  if (url.pathname.startsWith("/_gonvex/k19/publications/")) {
+    const token = env.GONVEX_RELEASE_BUILDER_TOKEN;
+    if (!token || !sameText(request.headers.get("authorization") ?? "", `Bearer ${token}`)) return new Response(null, {status:404});
+    if (request.method !== "POST") return new Response(null, {status:405});
+    const id = url.pathname.slice("/_gonvex/k19/publications/".length);
+    if (!/^[0-9a-f-]{36}$/.test(id)) return new Response(null, {status:400});
+    try {
+      const result = await env.CONTROL.getByName(CONTROL_NAME).publishRelease(id);
+      return result.error ? jsonError(result.status ?? 503,result.error) : Response.json(result);
+    }
+    catch (cause) { return syncFailure(cause, env, "publication"); }
+  }
   const control = env.CONTROL.getByName(CONTROL_NAME);
   if (url.pathname === "/healthz") {
     try {
@@ -96,6 +114,8 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
   const length = request.headers.get("content-length");
   if (length !== null && Number(length) > BODY_LIMIT) return plain(413, "Failed to buffer the request body: length limit exceeded");
   const headerProject = (request.headers.get("x-gonvex-project-id") ?? "").trim();
+  const requestId = request.headers.get("x-gonvex-sync-request-id");
+  if (requestId !== null && !/^[0-9a-f-]{36}$/.test(requestId)) return jsonError(400,"invalid sync request id");
   const authorization = request.headers.get("authorization");
   const key = (authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : request.headers.get("x-gonvex-key") ?? "").trim();
   const control = env.CONTROL.getByName(CONTROL_NAME);
@@ -116,7 +136,7 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
     return jsonError(503, `the sync body could not be stored: ${(cause as Error).message}`);
   }
   try {
-    const outcome = (await control.devSync({ incoming, headerProject, key })) as SyncOutcome;
+    const outcome = (await control.devSync({ incoming, headerProject, key, ...(requestId ? {requestId} : {}) })) as SyncOutcome;
     if (!outcome.ok) return outcome.plain ? plain(outcome.status, outcome.error) : jsonError(outcome.status, outcome.error);
     if (outcome.deploy) {
       const builder = releaseBuilder(env);
@@ -124,10 +144,47 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
       // Rust answers 500 when the last step fails while the new code serves (D.2.2 item 12).
       if (!deployed.ok) return jsonError(500, deployed.error);
     }
+    if (outcome.publication) {
+      const deadline = Date.now() + 180_000;
+      let lastError = "serving Worker version not ready";
+      for (;;) {
+        // A fresh HTTP ingress selects the deployed Worker. An in-flight
+        // router's old DO binding can otherwise keep serving its old catalog.
+        let ready: boolean;
+        if (env.GONVEX_PUBLIC_URL) {
+          const reply = await fetch(new URL(`/_gonvex/k19/publications/${outcome.publication}`, env.GONVEX_PUBLIC_URL), {
+            method: "POST", headers: {authorization:`Bearer ${env.GONVEX_RELEASE_BUILDER_TOKEN}`},
+          });
+          let result:{ready?:boolean;error?:string;retryable?:boolean};
+          try { result=await reply.json(); }
+          catch { return jsonError(503,`release publication HTTP ${reply.status}; cf-ray ${reply.headers.get("cf-ray") ?? "unavailable"}`); }
+          if (!reply.ok && !(result as {retryable?:boolean}).retryable) return jsonError(reply.status, result.error ?? `release publication HTTP ${reply.status}`);
+          if (result.error) lastError = result.error;
+          ready = result.ready === true;
+        } else {
+          const result=await env.CONTROL.getByName(CONTROL_NAME).publishRelease(outcome.publication);
+          if (result.error) return jsonError(result.status ?? 503,result.error);
+          ready=result.ready;
+        }
+        if (ready) break;
+        if (Date.now() >= deadline) return jsonError(503, `release publication timed out: ${lastError}`);
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
     return Response.json(outcome.body);
+  } catch (cause) {
+    // Preserve the actual RPC/deploy cause instead of an opaque edge HTML500.
+    return syncFailure(cause, env, "sync/deploy");
   } finally {
     ctx.waitUntil(env.RELEASES.delete(incomingKey(incoming)).catch(() => undefined));
   }
+}
+
+function syncFailure(cause: unknown, env: DevRouterEnv, phase: string): Response {
+  let message = cause instanceof Error ? cause.message : "unknown release error";
+  if (env.GONVEX_RELEASE_BUILDER_TOKEN) message = message.replaceAll(env.GONVEX_RELEASE_BUILDER_TOKEN, "[redacted]");
+  const retryable = cause != null && typeof cause === "object" && "retryable" in cause && cause.retryable === true;
+  return Response.json({error:`release ${phase} failed: ${message.slice(0, 1500)}`, ...(retryable ? {retryable:true} : {})}, {status:503});
 }
 
 function sameText(left: string, right: string): boolean {

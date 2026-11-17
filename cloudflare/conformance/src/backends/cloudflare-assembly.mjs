@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { postDevSync } from '../../../../packages/gonvex/src/sync-request.ts';
 export class CloudflareAssemblyBackend extends RustBackend {
   constructor(options) { super({ ...options, binary: process.execPath }); }
   get capabilities() { return { ...super.capabilities, orphanReveal: true, tenantRestart: true, receiptExpiry: true }; }
@@ -46,7 +47,9 @@ export class CloudflareAssemblyBackend extends RustBackend {
     await this.stop(); this.restarts++; await this.start();
   }
   async deploy(project, manifest) {
-    const outcome = await super.deploy(project, manifest);
+    const reply = await postDevSync(this.httpUrl + '/dev/sync', {headers:{authorization:`Bearer ${this.keys.get(project)}`,'content-type':'application/json','x-gonvex-project-id':project},body:JSON.stringify({...manifest,project})});
+    if (!reply.ok) throw new Error(`POST /dev/sync -> ${reply.status}: ${(await reply.text()).slice(0,1500)}`);
+    const result=await reply.json(),outcome={ok:result.ok===true,functionCount:result.functionCount};
     const deadline = Date.now() + 120_000;
     for (;;) {
       try {

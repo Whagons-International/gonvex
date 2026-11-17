@@ -140,7 +140,12 @@ export class HttpReleaseBuilder implements ReleaseBuilder {
   private async call<T>(path: string, body: unknown): Promise<T> {
     const response = await this.send(path, body);
     const text = await response.text();
-    if (!response.ok) throw new Error(`release builder ${path} failed (${response.status}): ${text.slice(0, 500)}`);
+    if (!response.ok) {
+      let detail = "non-JSON upstream response";
+      try { const data = JSON.parse(text); if (typeof data.error === "string") detail = data.error.slice(0,1000); } catch { /* retain status and edge request id, never raw HTML */ }
+      const ray = response.headers.get("cf-ray");
+      throw new Error(`release builder ${path} failed (HTTP ${response.status}${ray ? `; cf-ray ${ray}` : ""}): ${detail}`);
+    }
     return JSON.parse(text) as T;
   }
 

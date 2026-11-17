@@ -45,14 +45,18 @@ the build's alias, so a release in R2 does not depend on a builder's file layout
 project's release into a K04 `ModuleRegistry` on first use. Measured locally: the Whagons release (1,997
 functions) installs with no error.
 
-- **Who deploys.** A Worker deploy restarts active objects, and the control object is the one holding the
-  `/dev/sync` request. So the control object only builds the version; the router deploys it after the control
-  object answered, then answers the client. On the platform the client therefore sees the 200 after the version
-  is live, as in Rust.
-- **Local only:** `wrangler dev` restarts workerd on the swap, which cuts every request in flight, including
-  the sync response. The local builder swaps 1.5 s after answering, so locally the new code serves shortly
-  *after* the 200. The kernel's own drift check (`GET /dev/manifest`) reads the control object, which is
-  already up to date.
+- **Who deploys.** The control object stages the version and durably records a pending publication; the router
+  deploys it after that RPC answers. A fresh HTTP ingress at `GONVEX_PUBLIC_URL` selects the deployed Worker,
+  whose Control object checks its baked version, activates each tenant's baked release, saves the active
+  manifest, and awaits gateway notifications before acknowledging completion. The publication endpoint uses
+  the existing release-builder token. A successful sync therefore acknowledges tenant activation and reload
+  delivery, rather than only the Worker's upload. Project holder watches survive Control resets and include
+  control-only sockets registered before their auth acknowledgement.
+- **Local only:** `wrangler dev` cuts HTTP requests and WebSockets on replacement. The CLI retains one
+  `x-gonvex-sync-request-id` across a restart retry. The operator validates the same project and canonical
+  artifact hash, then resumes the durable publication without another rollout or generation. Every attempt
+  still has a separate temporary R2 body. SQL/validation failures are not retried. This does not make local
+  Wrangler preserve live sockets; connected deployment acceptance still requires a platform run.
 - **Size.** Every project's bundle is in one upload. With Whagons alone that is about 1 MB gzip (S2); a second
   large app would approach the 10 MB limit. That is the split-script question of S5 §11.4 and stays open.
 

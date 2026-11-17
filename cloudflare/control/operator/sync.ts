@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS gonvex_cf_syncs (
   started_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
   expires_at INTEGER NOT NULL, finished_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS gonvex_cf_publications (
+  sync_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, hash TEXT NOT NULL,
+  generation INTEGER NOT NULL, version TEXT NOT NULL, previous_hash TEXT,
+  tenants JSON NOT NULL, completed INTEGER NOT NULL DEFAULT 0
+);
 CREATE INDEX IF NOT EXISTS gonvex_cf_syncs_running ON gonvex_cf_syncs(project_id, state);
 `;
 
@@ -56,8 +61,10 @@ export interface SyncPorts {
   builder: ReleaseBuilder;
   /** Sends one rollout step to the queue. */
   enqueue(message: RolloutMessage): Promise<void>;
-  /** Tells tenant objects the module changed (best effort). */
-  moduleReloaded(project: string, tenants: string[], hash: string, generation: number, clientContract: number | null): void;
+  /** Only the serving composition can acknowledge its baked Worker version. */
+  versionReady(version: string): boolean;
+  activateTenants(project: string, tenants: string[], hash: string, generation: number): Promise<boolean>;
+  moduleReloaded(project: string, tenants: string[], hash: string, generation: number, clientContract: number | null, publicationId: string): Promise<void>;
   /** K11: re-plan the project's crons for the new module. A no-op until K11 provides it. */
   syncCrons(project: string, summary: ReleaseSummary, tenants: string[]): Promise<void>;
   deadlineMs: number;
@@ -68,12 +75,14 @@ export interface SyncPorts {
 
 export interface SyncRequest {
   incoming: string;
+  /** A client retry resumes this publication; each incoming body still has a unique R2 key. */
+  requestId?: string;
   headerProject: string;
   key: string;
 }
 
 export type SyncOutcome =
-  | { ok: true; body: Record<string, unknown>; deploy: string | null }
+  | { ok: true; body: Record<string, unknown>; deploy: string | null; publication?: string }
   | { ok: false; status: number; error: string; plain?: boolean };
 
 interface Waiter {
@@ -107,6 +116,7 @@ export function applyControlMigrations(sql: Sql, migrations: ReleaseSummary["con
 
 export class SyncCoordinator {
   private readonly waiters = new Map<string, Waiter>();
+  private readonly publications = new Map<string, Promise<{ ready: boolean }>>();
 
   constructor(private readonly ports: SyncPorts) {}
 
@@ -148,7 +158,17 @@ export class SyncCoordinator {
     const project = inspection.project;
     if (!this.ports.acceptsKey(project, request.key, this.ports.devSyncKey)) return { ok: false, status: 401, error: "invalid Gonvex sync key" };
 
-    const syncId = crypto.randomUUID();
+    const syncId = request.requestId ?? crypto.randomUUID();
+    const publication = this.sql.get(`SELECT p.*,r.summary,s.state FROM gonvex_cf_publications p JOIN gonvex_cf_releases r
+      ON r.project_id=p.project_id AND r.hash=p.hash JOIN gonvex_cf_syncs s ON s.sync_id=p.sync_id WHERE p.sync_id=$1`, syncId);
+    if (publication) {
+      if (publication.project_id !== project || publication.hash !== inspection.hash) return {ok:false,status:409,error:"sync request id already belongs to a different module"};
+      if (!num(publication.completed) && publication.state !== "publishing") return {ok:false,status:409,error:"sync publication is no longer current"};
+      const summary = JSON.parse(str(publication.summary)) as ReleaseSummary;
+      return {ok:true,deploy:num(publication.completed) || this.ports.versionReady(str(publication.version)) ? null : str(publication.version),publication:syncId,body:this.response(project,summary)};
+    }
+    const prior = this.sql.get("SELECT project_id,hash,state FROM gonvex_cf_syncs WHERE sync_id=$1",syncId);
+    if (prior && (prior.project_id !== project || (prior.hash && prior.hash !== inspection.hash) || ["finished","failed"].includes(str(prior.state)))) return {ok:false,status:409,error:"sync request id already used"};
     if (!this.lock(project, syncId)) return { ok: false, status: 409, error: `a /dev/sync of project ${project} is already running` };
     try {
       const prepared = await builder.prepare(request.incoming, project);
@@ -187,27 +207,57 @@ export class SyncCoordinator {
       const activated = await builder.activate(releases);
       if (!activated.ok) return this.failed(project, summary.hash, 422, activated.error);
 
-      try {
-        await this.ports.syncCrons(project, summary, tenants);
-      } catch (error) {
-        // scheduler.sync_project fails after activation in Rust too: 422, new code live.
-        this.activate(project, summary, generation, activated.version, previous?.hash);
-        return { ok: false, status: 422, error: (error as Error).message };
-      }
-      try {
-        this.activate(project, summary, generation, activated.version, previous?.hash);
-      } catch (error) {
-        return { ok: false, status: 500, error: (error as Error).message };
-      }
-      this.ports.moduleReloaded(project, tenants, summary.hash, generation, summary.clientContract?.version ?? null);
+      // The router deploys outside this object: a real code update may reset it.
+      // Persist the publication before handing off, and keep its project lock.
+      this.sql.tx(() => {
+        this.sql.run(`INSERT INTO gonvex_cf_publications(sync_id,project_id,hash,generation,version,previous_hash,tenants)
+          VALUES($1,$2,$3,$4,$5,$6,$7)`, syncId, project, summary.hash, generation, activated.version, previous?.hash ?? null, JSON.stringify(tenants));
+        this.sql.run("UPDATE gonvex_cf_syncs SET state='publishing' WHERE sync_id=$1", syncId);
+      });
       return {
         ok: true,
         deploy: activated.version,
-        body: { ok: true, project, functionCount: summary.functionCount, schemaDefinition: summary.schemaDefinition ?? {}, runtimeReloaded: true },
+        publication: syncId,
+        body: this.response(project,summary),
       };
     } finally {
       this.unlock(syncId);
     }
+  }
+
+  private response(project: string, summary: ReleaseSummary): Record<string, unknown> {
+    return {ok:true,project,functionCount:summary.functionCount,schemaDefinition:summary.schemaDefinition ?? {},runtimeReloaded:true};
+  }
+
+  /** Idempotent post-deploy publication, safe to resume after a Control reset. */
+  publish(syncId: string): Promise<{ ready: boolean }> {
+    const existing = this.publications.get(syncId);
+    if (existing) return existing;
+    const work = this.publishOnce(syncId).finally(() => this.publications.delete(syncId));
+    this.publications.set(syncId, work);
+    return work;
+  }
+
+  private async publishOnce(syncId: string): Promise<{ ready: boolean }> {
+    const row = this.sql.get(`SELECT p.*,r.summary,s.state FROM gonvex_cf_publications p JOIN gonvex_cf_releases r
+      ON r.project_id=p.project_id AND r.hash=p.hash JOIN gonvex_cf_syncs s ON s.sync_id=p.sync_id WHERE p.sync_id=$1`, syncId);
+    if (!row) throw new Error("release publication not found");
+    if (num(row.completed)) return { ready: true };
+    if (row.state !== "publishing") throw new HttpError(409, "release publication is no longer current");
+    if (!this.ports.versionReady(str(row.version))) return { ready: false };
+    const project = str(row.project_id), hash = str(row.hash), generation = num(row.generation);
+    const tenants = JSON.parse(str(row.tenants)) as string[], summary = JSON.parse(str(row.summary)) as ReleaseSummary;
+    if (!await this.ports.activateTenants(project, tenants, hash, generation)) return { ready: false };
+    if (this.sql.value("SELECT state FROM gonvex_cf_syncs WHERE sync_id=$1", syncId) !== "publishing") throw new HttpError(409, "release publication was superseded");
+    this.activate(project, summary, generation, str(row.version), row.previous_hash == null ? undefined : str(row.previous_hash));
+    try { await this.ports.syncCrons(project, summary, tenants); }
+    catch (cause) { throw new HttpError(422,(cause as Error).message); }
+    await this.ports.moduleReloaded(project, tenants, hash, generation, summary.clientContract?.version ?? null, syncId);
+    this.sql.tx(() => {
+      this.sql.run("UPDATE gonvex_cf_publications SET completed=1 WHERE sync_id=$1", syncId);
+      this.sql.run(`UPDATE gonvex_cf_syncs SET state='finished',finished_at=${NOW_MS} WHERE sync_id=$1`, syncId);
+    });
+    return { ready: true };
   }
 
   private failed(project: string, hash: string, status: number, error: string): SyncOutcome {
@@ -243,15 +293,19 @@ export class SyncCoordinator {
 
   private lock(project: string, syncId: string): boolean {
     return this.sql.tx(() => {
+      const publishing=this.sql.value<string>("SELECT sync_id FROM gonvex_cf_syncs WHERE project_id=$1 AND state='publishing'",project);
+      if (publishing && this.publications.has(publishing)) return false;
       // A lock outlives a reset of this object only until its deadline.
-      this.sql.run(`UPDATE gonvex_cf_syncs SET state='abandoned',finished_at=${NOW_MS} WHERE project_id=$1 AND state='running' AND expires_at<=${NOW_MS}`, project);
+      this.sql.run(`UPDATE gonvex_cf_syncs SET state='abandoned',finished_at=${NOW_MS} WHERE project_id=$1 AND state IN('running','publishing') AND expires_at<=${NOW_MS}`, project);
+      if (this.sql.value("SELECT 1 FROM gonvex_cf_syncs WHERE project_id=$1 AND state='publishing'", project) !== undefined) return false;
       const running = this.sql.value("SELECT sync_id FROM gonvex_cf_syncs WHERE project_id=$1 AND state='running'", project);
       if (running !== undefined && this.waiters.has(`lock:${str(running)}`)) return false;
       if (running !== undefined) {
         // Held by a request this object instance no longer serves (it restarted): the request is gone.
         this.sql.run(`UPDATE gonvex_cf_syncs SET state='abandoned',finished_at=${NOW_MS} WHERE sync_id=$1`, running);
       }
-      this.sql.run(`INSERT INTO gonvex_cf_syncs(sync_id,project_id,state,expires_at) VALUES($1,$2,'running',${NOW_MS}+$3)`, syncId, project, this.ports.deadlineMs + 60_000);
+      this.sql.run(`INSERT INTO gonvex_cf_syncs(sync_id,project_id,state,expires_at) VALUES($1,$2,'running',${NOW_MS}+$3)
+        ON CONFLICT(sync_id) DO UPDATE SET state='running',started_at=${NOW_MS},expires_at=excluded.expires_at,finished_at=NULL`, syncId, project, this.ports.deadlineMs + 60_000);
       this.waiters.set(`lock:${syncId}`, { resolve: () => undefined });
       return true;
     });
@@ -259,7 +313,7 @@ export class SyncCoordinator {
 
   private unlock(syncId: string): void {
     this.waiters.delete(`lock:${syncId}`);
-    this.sql.run(`UPDATE gonvex_cf_syncs SET state=CASE WHEN state='running' THEN 'finished' ELSE state END,finished_at=${NOW_MS} WHERE sync_id=$1`, syncId);
+    this.sql.run(`UPDATE gonvex_cf_syncs SET state='finished',finished_at=${NOW_MS} WHERE sync_id=$1 AND state='running'`, syncId);
   }
 
   /** Projects with a sync in flight in this instance (tests, health). */

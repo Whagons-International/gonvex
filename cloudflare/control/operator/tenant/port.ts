@@ -81,6 +81,8 @@ export interface OperatorTenantPort {
   operatorLedger(): Promise<Array<{ name: string; checksum: string; applied_at: number; duration_ms: number }>>;
   /** The release this object's Worker version carries for its project, if any. */
   operatorServedModule(projectId: string): Promise<ServedModule | null>;
+  /** Acknowledge and install the release actually baked into this serving Worker. */
+  operatorActivateRelease(event: { projectId: string; hash: string; generation: number }): Promise<boolean>;
   /** `RuntimeEvent::ModuleReloaded` after activation: sockets get `system.reload` or `client.updateRequired`. */
   operatorModuleReloaded(event: { projectId: string; hash: string; generation: number; clientContract: number | null }): Promise<void>;
   /** `DELETE /dev/tenants/{t}`, `DELETE /dev/projects/{p}`: the database file's removal. */
@@ -118,13 +120,24 @@ export interface OperatorDataSink {
  * when the object lost track of the plan (a reset before its first commit).
  */
 export async function waitForRelease(port: OperatorTenantPort, planId: string, projectId: string, deadline: number, pollMs = 200): Promise<MigrationStatus | "timeout"> {
-  let status = await port.operatorApplyRelease(planId, projectId);
+  const duringCodeUpdate = async <T>(call:()=>Promise<T>):Promise<T> => {
+    for (;;) {
+      try { return await call(); }
+      catch (cause) {
+        // Only this platform reset is safe to resume here. The plan and ledger
+        // persist; ordinary migration/SQL failures must still fail fast.
+        if (!(cause instanceof Error) || !cause.message.includes("Durable Object reset because its code was updated") || Date.now() >= deadline) throw cause;
+        await new Promise(resolve=>setTimeout(resolve,pollMs));
+      }
+    }
+  };
+  let status = await duringCodeUpdate(()=>port.operatorApplyRelease(planId, projectId));
   for (;;) {
     if (status.planId === planId && (status.state === "done" || status.state === "failed")) return status;
     if (Date.now() > deadline) return "timeout";
     await new Promise((resolve) => setTimeout(resolve, pollMs));
-    status = await port.operatorMigrationStatus();
-    if (status.planId !== planId && status.state !== "running") status = await port.operatorApplyRelease(planId, projectId);
+    status = await duringCodeUpdate(()=>port.operatorMigrationStatus());
+    if (status.planId !== planId && status.state !== "running") status = await duringCodeUpdate(()=>port.operatorApplyRelease(planId, projectId));
   }
 }
 

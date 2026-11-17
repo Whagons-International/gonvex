@@ -21,7 +21,7 @@ import type { TenantRoute } from "../src/types";
 import { OperatorAuth, bearer } from "./auth";
 import { operatorConfig, type OperatorConfig, type OperatorEnv } from "./config";
 import { DASHBOARD_TAG, LOGS_TAG, METRICS_TAG, OperatorSockets } from "./sockets";
-import { error, json } from "./http";
+import { error, json, HttpError } from "./http";
 import { HttpReleaseBuilder, type ReleaseBuilder, type ReleaseSummary, type RolloutMessage, type RolloutReport } from "./release";
 import { handleOperatorRoute, type Op } from "./routes";
 import { OPERATOR_SCHEMA, SyncCoordinator, type SyncOutcome, type SyncRequest } from "./sync";
@@ -67,9 +67,18 @@ export class OperatorControlObject extends ControlObject {
         if (!queue) throw new Error("the rollout queue (ROLLOUT) is not bound");
         await queue.send(message, { contentType: "json" });
       },
-      moduleReloaded: (project, tenants, hash, generation, clientContract) => {
-        for (const tenant of tenants) {
-          this.ctx.waitUntil(this.tenantPort(tenant).operatorModuleReloaded({ projectId: project, hash, generation, clientContract }).catch(() => undefined));
+      versionReady: (version) => this.publicationVersionReady(version),
+      activateTenants: async (projectId, tenants, hash, generation) => {
+        for (const tenant of tenants) if (!await this.activatePublicationTenant(tenant, { projectId, hash, generation })) return false;
+        return true;
+      },
+      moduleReloaded: async (projectId, _tenants, artifactHash, _generation, clientContract, publicationId) => {
+        // Durable watches include tenant and control-only sockets, even after a reset.
+        for (const { binding, name } of this.watchersFor(projectId).values()) {
+          if (binding !== "GATEWAY") continue;
+          const namespace = this.env[binding] as DurableObjectNamespace;
+          const stub = namespace.get(namespace.idFromString(name)) as unknown as import("../../kernel/session/rpc").GatewayRpc;
+          await stub.moduleReloaded(projectId, { artifactHash, clientContract, publicationId });
         }
       },
       syncCrons: async () => {
@@ -86,6 +95,19 @@ export class OperatorControlObject extends ControlObject {
       armAlarm: () => this.armAlarm(),
       operatorConfig: this.operatorConfig,
     });
+  }
+
+  /** Generic K19 fixtures have no baked catalog; the serving assembly overrides this. */
+  protected publicationVersionReady(_version: string): boolean { return true; }
+  protected activatePublicationTenant(tenant: string, release: {projectId:string;hash:string;generation:number}): Promise<boolean> {
+    return this.tenantPort(tenant).operatorActivateRelease(release);
+  }
+  async publishRelease(syncId: string): Promise<{ready:boolean;error?:string;status?:number}> {
+    try { return await this.syncs.publish(syncId); }
+    catch (cause) {
+      if (cause instanceof HttpError) return {ready:false,error:cause.message,status:cause.status};
+      throw cause;
+    }
   }
 
   /** Tests swap the builder for an in-process one. */

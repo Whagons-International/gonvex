@@ -1,12 +1,125 @@
 // /dev/sync end to end in workerd: router → R2 → control object → builder →
 // control migrations → queue rollout → tenant objects (K02) → activation.
-import { runInDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { OperatorControlObject } from "../../../control/operator/object.ts";
-import type { ReleaseBuilder } from "../../../control/operator/release.ts";
-import { ADMIN, CONTROL_MIGRATION, FALLBACK_SYNC_KEY, NOTES_MIGRATION, call, control, createProject, manifest, sync, tenantObject, useBuilder } from "./helpers.ts";
+import { HttpReleaseBuilder, type ReleaseBuilder } from "../../../control/operator/release.ts";
+import { ADMIN, CONTROL_MIGRATION, FALLBACK_SYNC_KEY, NOTES_MIGRATION, call, control, createProject, manifest, sync, tenantObject, testEnv, useBuilder } from "./helpers.ts";
+import { SyncCoordinator, type SyncPorts, type SyncOutcome } from "../../../control/operator/sync";
+import { waitForRelease, type OperatorTenantPort } from "../../../control/operator/tenant/port";
 
 describe("/dev/sync", () => {
+  it("keeps publication private and reports builder HTTP status/request id without copying HTML", async () => {
+    const path=`/_gonvex/k19/publications/${crypto.randomUUID()}`;
+    expect((await call("POST",path,{token:null})).status).toBe(404);
+    expect((await call("POST",path,{token:ADMIN})).status).toBe(404);
+    const absent=await call("POST",path,{token:"k19-builder-token"});
+    expect(absent.status).toBe(503);expect(absent.body.error).toContain("publication");
+    const builder=new HttpReleaseBuilder(async()=>new Response('<html>private upstream context</html>',{status:503,headers:{'cf-ray':'synthetic-ray'}}));
+    await expect(builder.inspect("incoming","p")).rejects.toThrow('release builder /inspect failed (HTTP 503; cf-ray synthetic-ray): non-JSON upstream response');
+  });
+  it("resumes a code-update reset with the same real tenant plan and never repeats its migration rows", async () => {
+    await useBuilder();
+    const project=await createProject("provision-reset");
+    expect((await sync(project.id,await manifest(project.id),project.key)).status).toBe(200);
+    const tenant="provision-reset-tenant";
+    expect((await call("POST","/dev/tenants",{body:{projectId:project.id,id:tenant,name:tenant}})).status).toBe(201);
+    const actual=tenantObject(tenant), status=await actual.operatorMigrationStatus();
+    let calls=0;
+    const port={operatorApplyRelease:async(plan:string,projectId:string)=>{
+      const result=await actual.operatorApplyRelease(plan,projectId);
+      if(++calls===1)throw new Error("Durable Object reset because its code was updated.");
+      return result;
+    },operatorMigrationStatus:()=>actual.operatorMigrationStatus()} as unknown as OperatorTenantPort;
+    expect(await waitForRelease(port,status.planId!,project.id,Date.now()+5000,1)).toMatchObject({state:"done"});
+    expect(calls).toBe(2);expect((await actual.operatorLedger()).map(row=>row.name)).toEqual(["0001_notes.sql"]);
+    expect((await actual.operatorReadRows("notes",{limit:10,offset:0,search:"",sort:"",direction:"",filters:"",columns:"",count:""}))).toMatchObject({ok:true,value:{total:3}});
+    const refused={operatorApplyRelease:async()=>{throw new Error("migration constraint failed");}} as unknown as OperatorTenantPort;
+    await expect(waitForRelease(refused,status.planId!,project.id,Date.now()+5000,1)).rejects.toThrow("migration constraint failed");
+  });
+  it("retries one sync request without another rollout/generation and rejects request-id reuse for different content", async () => {
+    await useBuilder();
+    const project=await createProject("request-retry"),body=await manifest(project.id),headers={"x-gonvex-sync-request-id":crypto.randomUUID()};
+    expect((await sync(project.id,body,project.key,headers)).status).toBe(200);
+    const before=await call("GET",`/dev/manifest?project=${project.id}`,{token:project.key});
+    expect((await sync(project.id,body,project.key,headers)).status).toBe(200);
+    expect((await call("GET",`/dev/manifest?project=${project.id}`,{token:project.key})).body.module).toEqual(before.body.module);
+    const changed=await manifest(project.id,{files:{"changed.txt":"new content"}});
+    expect((await sync(project.id,changed,project.key,headers)).status).toBe(409);
+  });
+
+  it("persists project holder watches across a real Control eviction", async () => {
+    const id="synthetic-holder",project="watch-persistence";
+    await control().watch(project,"GATEWAY",id);
+    await evictDurableObject(control());
+    await runInDurableObject(control(),async(instance:OperatorControlObject)=>{
+      const actual=instance as unknown as {watchersFor(project:string):Map<string,{binding:string;name:string}>};
+      expect([...actual.watchersFor(project).values()]).toEqual([{binding:"GATEWAY",name:id}]);
+      await instance.unwatch(project,"GATEWAY",id);
+      expect([...actual.watchersFor(project).values()]).toEqual([]);
+    });
+  });
+  it("publishes only after version and tenant activation, resumes after a real Control eviction, and awaits notification", async () => {
+    await useBuilder();
+    const project = await createProject("publication");
+    const body = await manifest(project.id);
+    await testEnv.RELEASES.put("incoming/publication.json", JSON.stringify(body));
+    const outcome = await control().devSync({incoming:"publication",headerProject:project.id,key:project.key}) as SyncOutcome;
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok || !outcome.publication) throw new Error("publication not staged");
+    const id = outcome.publication;
+    expect((await call("GET", `/dev/manifest?project=${project.id}`, {token:project.key})).status).toBe(404);
+    // Its durable publication survives losing the old request and builder override.
+    await evictDurableObject(control());
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      let version = false, tenant = false, delivered = false;
+      const events: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => {release=resolve;});
+      const ports = {
+        sql:instance.sql,
+        versionReady:()=>version,
+        activateTenants:async()=>{events.push("tenant");return tenant;},
+        syncCrons:async()=>{events.push("crons");},
+        moduleReloaded:async()=>{events.push("reload");await gate;delivered=true;},
+      } as unknown as SyncPorts;
+      const coordinator = new SyncCoordinator(ports);
+      expect(await coordinator.publish(id)).toEqual({ready:false});
+      expect(events).toEqual([]);
+      version=true;
+      expect(await coordinator.publish(id)).toEqual({ready:false});
+      expect(coordinator.activeRelease(project.id)).toBeNull();
+      tenant=true;
+      const publishing = coordinator.publish(id);
+      await new Promise(resolve=>setTimeout(resolve,0));
+      expect(delivered).toBe(false);
+      expect(events).toEqual(["tenant","tenant","crons","reload"]);
+      expect(instance.sql.value("SELECT completed FROM gonvex_cf_publications WHERE sync_id=$1",id)).toBe(0);
+      release();
+      expect(await publishing).toEqual({ready:true});
+      expect(delivered).toBe(true);
+      expect(await coordinator.publish(id)).toEqual({ready:true});
+      expect(events).toEqual(["tenant","tenant","crons","reload"]);
+      expect(coordinator.activeRelease(project.id)?.hash).toBe((body.module as {hash:string}).hash);
+    });
+  });
+
+  it("does not complete a failed notification and retries it without rerunning the sync", async () => {
+    await useBuilder();
+    const project = await createProject("publication-retry");
+    await testEnv.RELEASES.put("incoming/publication-retry.json",JSON.stringify(await manifest(project.id)));
+    const outcome=await control().devSync({incoming:"publication-retry",headerProject:project.id,key:project.key}) as SyncOutcome;
+    if (!outcome.ok || !outcome.publication) throw new Error("publication not staged");
+    const id=outcome.publication;
+    await runInDurableObject(control(),async(instance:OperatorControlObject)=>{
+      let fail=true,calls=0;
+      const coordinator=new SyncCoordinator({sql:instance.sql,versionReady:()=>true,activateTenants:async()=>true,
+        syncCrons:async()=>{},moduleReloaded:async()=>{calls++;if(fail)throw new Error("holder unavailable");}} as unknown as SyncPorts);
+      await expect(coordinator.publish(id)).rejects.toThrow("holder unavailable");
+      expect(instance.sql.value("SELECT completed FROM gonvex_cf_publications WHERE sync_id=$1",id)).toBe(0);
+      fail=false;expect(await coordinator.publish(id)).toEqual({ready:true});expect(calls).toBe(2);
+    });
+  });
   it("rejects a wrong key, a project mismatch and a body that is not a module, with Rust's texts", async () => {
     await useBuilder();
     const project = await createProject("sync-errors");

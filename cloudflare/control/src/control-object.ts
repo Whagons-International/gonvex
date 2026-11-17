@@ -334,20 +334,31 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
     return ids;
   }
 
+  protected watchersFor(projectId: string) {
+    let set = this.watchers.get(projectId);
+    if (!set) {
+      const stored = this.ctx.storage.kv.get<Array<{binding:string;name:string}>>(`control/watchers/${projectId}`) ?? [];
+      set = new Map(stored.map(w => [`${w.binding}:${w.name}`, w]));
+      this.watchers.set(projectId, set);
+    }
+    return set;
+  }
+
   /** `id` is the watcher object's id string in the `binding` namespace. */
   async watch(projectId: string, binding: string, id: string): Promise<void> {
-    const set = this.watchers.get(projectId) ?? new Map();
+    const set = this.watchersFor(projectId);
+    if (set.has(`${binding}:${id}`)) return;
     set.set(`${binding}:${id}`, { binding, name: id });
-    this.watchers.set(projectId, set);
+    this.ctx.storage.kv.put(`control/watchers/${projectId}`, [...set.values()]);
   }
 
   async unwatch(projectId: string, binding: string, id: string): Promise<void> {
-    this.watchers.get(projectId)?.delete(`${binding}:${id}`);
+    const set = this.watchersFor(projectId); set.delete(`${binding}:${id}`);
+    this.ctx.storage.kv.put(`control/watchers/${projectId}`, [...set.values()]);
   }
 
   private notify(projectId: string): void {
-    const set = this.watchers.get(projectId);
-    if (!set) return;
+    const set = this.watchersFor(projectId);
     for (const { binding, name } of set.values()) {
       const namespace = this.env[binding] as DurableObjectNamespace | undefined;
       if (!namespace) continue;
@@ -357,7 +368,7 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
   }
 
   private notifyPresence(projectId: string): void {
-    for (const { binding, name } of this.watchers.get(projectId)?.values() ?? []) {
+    for (const { binding, name } of this.watchersFor(projectId).values()) {
       // K22's real gateway implements this additive hook; package fixture
       // socket owners retain their existing ControlChanged contract.
       if (binding !== "GATEWAY") continue;
