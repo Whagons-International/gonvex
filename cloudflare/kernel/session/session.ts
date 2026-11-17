@@ -941,7 +941,6 @@ export class Session {
   /** The socket's subscriptions are gone (re-auth without preservation, discard, reload, close): tell the tenant. */
   private resetSubscriptions(previous: TenantSession | null): void {
     this.record.subscriptionEpoch = (this.record.subscriptionEpoch ?? 0) + 1;
-    this.delivery.forget();
     this.record.liveQueries = Object.create(null);
     this.record.pendingLiveQueries = Object.create(null);
     this.record.initialRequests = Object.create(null);
@@ -951,6 +950,10 @@ export class Session {
     this.record.controlQueries = Object.create(null);
     this.record.replicaInstance = "";
     this.hooks.recoveryChanged?.();
+    // forget() publishes synchronously through trackedChanged. The new epoch
+    // and its entire semantic book must agree before that recovery write;
+    // pending old-epoch initials are invalid even during a scope transition.
+    this.delivery.forget();
     if (!previous || previous.anonymous || !this.ports.tenants.connectionReset) return;
     const work = this.ports.tenants.connectionReset(previous.route, this.record.connectionId, this.record.subscriptionEpoch)
       .catch((error) => console.error("session: tenant reset notice failed", error));
@@ -1293,10 +1296,10 @@ export class Session {
         return this.close(CLOSE.ended);
       }
       this.send(frames.systemReload(module?.artifactHash));
-      if (module?.publicationId) {
-        this.record.publicationId = module.publicationId;
-        this.hooks.persist?.();
-      }
+      if (module?.publicationId) this.record.publicationId = module.publicationId;
+      // A query-only reset has no delivery.forget() publication callback.
+      // Persist it even when this event has no deduplication identity.
+      this.hooks.persist?.();
     });
   }
 
