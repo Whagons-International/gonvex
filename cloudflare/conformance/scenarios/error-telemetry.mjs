@@ -288,6 +288,9 @@ async function http(ctx, method, path, body) {
 
 export default {
   name: 'error-telemetry',
+  // 0062: the parity comparison runs where one holder owns every socket (Rust; the assembly's verified
+  // static one-holder placement). Automatic placement runs `error-telemetry-holders` instead.
+  requires: ['singleTelemetryHolder'],
   description: 'error.register/envelope/heartbeat acks, envelope limits, scrubbing, grouping, rate limits, performance events, error-triage routes',
   tenants: { a: ['alice'] },
   tables: [],

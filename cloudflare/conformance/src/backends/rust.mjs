@@ -66,7 +66,7 @@ export class RustBackend extends Backend {
     this.restarts = 0;
   }
 
-  get capabilities() { return { restart: true, crash: true, changeLog: true, servicePrincipals: true, epochReset: true, publicCalls: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
+  get capabilities() { return { restart: true, crash: true, changeLog: true, servicePrincipals: true, epochReset: true, publicCalls: true, singleTelemetryHolder: true, firebaseEmulator: !!process.env.GONVEX_CONFORMANCE_FIREBASE_EMULATOR }; }
 
   async start() {
     await mkdir(this.dataDir, { recursive: true });
