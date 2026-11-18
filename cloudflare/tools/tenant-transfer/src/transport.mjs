@@ -22,15 +22,32 @@
 // per request, request sizes chosen by the caller and capped below.
 // `ms` in responses is wall time inside the object; on the platform the clock
 // does not advance during synchronous work, so it reads 0 there.
+//
+// CPU per request (X10): the object's CPU limit applies to each request, so
+// the operations whose work grows with the tenant (`schema`, `checksum`,
+// `check`) stop at `budgetMs` and answer with `next` (a cursor; `consumed` for
+// `schema`). The caller sends the request again with that cursor. Time is read
+// after a macrotask yield, when it includes the CPU spent before it.
 
 import { createHash } from 'node:crypto';
 import { RowHasher, fromWire, keyIndexes, quoteIdent, readTypedRows, toWire } from './codec.mjs';
+import { Sha256, createResumableHash } from './sha256.mjs';
 import { buildInserts, readPlans, readSchema, readSequences } from './sql.mjs';
 
 const MAX_READ_BYTES = 8 * 1024 * 1024;
+/** Rows hashed between clock reads. */
+const CHECKSUM_PAGE_ROWS = 2_000;
+/** Default CPU budget of one request, measured after yields. */
+export const REQUEST_BUDGET_MS = 1_000;
+
+/** A macrotask turn: on the platform, `Date.now()` afterwards includes the CPU spent before it. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 export class TenantTransfer {
-  constructor(ctx) { this.ctx = ctx; }
+  constructor(ctx, { budgetMs = REQUEST_BUDGET_MS } = {}) {
+    this.ctx = ctx;
+    this.budgetMs = budgetMs;
+  }
   get sql() {
     return this.ctx.storage.sql;
   }
@@ -62,30 +79,44 @@ export class TenantTransfer {
     return { databaseSize: this.sql.databaseSize, tables, objects };
   }
 
-  // DDL. A batch runs in one transaction; if any statement fails, the batch
-  // is rolled back and replayed one statement per transaction, so a statement
-  // the platform refuses is reported by name and the rest still apply.
-  op_schema({ statements }) {
+  // DDL. Statements run in transactions of a few statements each (a DDL
+  // statement costs milliseconds on a schema of thousands of objects); if a
+  // transaction fails it is rolled back and replayed one statement per
+  // transaction, so a statement the platform refuses is reported by name and
+  // the rest still apply. Stops at the budget: `consumed` statements were
+  // handled (applied or failed); the caller sends the rest again.
+  async op_schema({ statements }) {
     this.cachedPlans = null;
-    try {
-      this.ctx.storage.transactionSync(() => {
-        for (const { sql } of statements) this.sql.exec(sql);
-      });
-      return { applied: statements.length, failed: [] };
-    } catch {
-      // fall through to one transaction per statement
-    }
+    const started = Date.now();
     const failed = [];
     let applied = 0;
-    for (const { name, sql } of statements) {
+    let consumed = 0;
+    let size = 8;
+    while (consumed < statements.length) {
+      const batch = statements.slice(consumed, consumed + size);
+      const t0 = Date.now();
       try {
-        this.ctx.storage.transactionSync(() => this.sql.exec(sql));
-        applied++;
-      } catch (error) {
-        failed.push({ name, bytes: sql.length, error: String(error?.message ?? error) });
+        this.ctx.storage.transactionSync(() => {
+          for (const { sql } of batch) this.sql.exec(sql);
+        });
+        applied += batch.length;
+      } catch {
+        for (const { name, sql } of batch) {
+          try {
+            this.ctx.storage.transactionSync(() => this.sql.exec(sql));
+            applied++;
+          } catch (error) {
+            failed.push({ name, bytes: sql.length, error: String(error?.message ?? error) });
+          }
+        }
       }
+      consumed += batch.length;
+      await settle();
+      const ms = Date.now() - t0;
+      size = Math.max(1, Math.min(64, size * 2, ms > 0 ? Math.floor((batch.length * this.budgetMs) / (4 * ms)) : size * 2));
+      if (Date.now() - started >= this.budgetMs) break;
     }
-    return { applied, failed };
+    return { applied, failed, consumed };
   }
 
   // Rows for one or more tables, in one transaction: all or nothing.
@@ -159,44 +190,88 @@ export class TenantTransfer {
     return { pages };
   }
 
-  op_checksum({ tables = null }) {
+  // Row count + content sha256 per table, in key order. A table may take
+  // several requests: `next` carries the key of the last row hashed and the
+  // running hash state; send it back as `cursor` to continue.
+  async op_checksum({ tables = null, cursor = null }) {
     const plans = this.plans().filter((p) => !tables || tables.includes(p.name));
+    const started = Date.now();
     const out = {};
-    for (const plan of plans) {
-      const hasher = new RowHasher(createHash);
-      for (const raw of readTypedRows(this.sql, plan)) hasher.addTyped(raw);
+    let index = 0;
+    let resume = null;
+    if (cursor) {
+      index = plans.findIndex((p) => p.name === cursor.table);
+      if (index < 0) throw new Error(`checksum cursor names no requested table ${cursor.table}`);
+      resume = cursor;
+    }
+    for (; index < plans.length; index++) {
+      const plan = plans[index];
+      const keys = keyIndexes(plan);
+      const hasher = resume?.state ? RowHasher.resume(resume.state, (h) => Sha256.load(h)) : new RowHasher(createResumableHash);
+      let after = resume?.after ?? null;
+      resume = null;
+      for (;;) {
+        let last = null;
+        let n = 0;
+        for (const raw of readTypedRows(this.sql, plan, { after, limit: CHECKSUM_PAGE_ROWS })) {
+          hasher.addTyped(raw);
+          last = raw;
+          n++;
+        }
+        if (n < CHECKSUM_PAGE_ROWS) break;
+        after = keys.map((i) => toWire(last[2 * i], last[2 * i + 1]));
+        await settle();
+        if (Date.now() - started >= this.budgetMs) return { checksums: out, next: { table: plan.name, after, state: hasher.save() } };
+      }
       out[plan.name] = hasher.digest();
+      await settle();
+      if (index + 1 < plans.length && Date.now() - started >= this.budgetMs) {
+        return { checksums: out, next: { table: plans[index + 1].name, after: null, state: null } };
+      }
     }
     return { checksums: out };
   }
 
-  op_check({ fts = [] }) {
-    // A whole-database PRAGMA quick_check over ~9,500 schema objects returns
-    // SQLITE_NOMEM in local workerd (an opcode cap per program; some platform
-    // hosts allow it) and integrity_check is not authorized there.
-    // quick_check(table) checks each table with its indexes and works on both.
-    const quick = [];
+  // A whole-database PRAGMA quick_check over ~9,500 schema objects returns
+  // SQLITE_NOMEM in local workerd (an opcode cap per program; some platform
+  // hosts allow it) and integrity_check is not authorized there.
+  // quick_check(table) checks each table with its indexes and works on both.
+  // foreign_key_check runs per table too (the sum equals the whole-database
+  // count), and the FTS5 integrity-checks one index at a time. Stops at the
+  // budget with `next`; send it back as `cursor` to continue.
+  async op_check({ fts = [], cursor = null }) {
+    const started = Date.now();
     const tables = this.sql
-      .exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'")
-      .toArray();
-    for (const { name } of tables) {
-      for (const row of this.sql.exec(`PRAGMA quick_check(${quoteIdent(name)})`).toArray()) {
-        const value = Object.values(row)[0];
-        if (value !== 'ok') quick.push(`${name}: ${value}`);
+      .exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY rowid")
+      .toArray()
+      .map(({ name }) => name);
+    const at = cursor ?? { step: 0, quick: [], foreignKeys: 0, fts: {} };
+    if (!Number.isSafeInteger(at.step) || at.step < 0 || !Array.isArray(at.quick) || !Number.isSafeInteger(at.foreignKeys)) throw new Error('invalid check cursor');
+    const steps = tables.length * 2 + fts.length;
+    while (at.step < steps) {
+      const step = at.step;
+      if (step < tables.length) {
+        const name = tables[step];
+        for (const row of this.sql.exec(`PRAGMA quick_check(${quoteIdent(name)})`).toArray()) {
+          const value = Object.values(row)[0];
+          if (value !== 'ok') at.quick.push(`${name}: ${value}`);
+        }
+      } else if (step < tables.length * 2) {
+        at.foreignKeys += this.sql.exec('SELECT count(*) AS n FROM pragma_foreign_key_check(?)', tables[step - tables.length]).one().n;
+      } else {
+        const name = fts[step - tables.length * 2];
+        try {
+          this.sql.exec(`INSERT INTO ${quoteIdent(name)}(${quoteIdent(name)}) VALUES ('integrity-check')`);
+          at.fts[name] = 'ok';
+        } catch (error) {
+          at.fts[name] = String(error?.message ?? error);
+        }
       }
+      at.step++;
+      await settle();
+      if (at.step < steps && Date.now() - started >= this.budgetMs) return { next: at };
     }
-    if (!quick.length) quick.push('ok');
-    const foreignKeys = this.sql.exec('PRAGMA foreign_key_check').toArray().length;
-    const ftsResults = {};
-    for (const name of fts) {
-      try {
-        this.sql.exec(`INSERT INTO ${quoteIdent(name)}(${quoteIdent(name)}) VALUES ('integrity-check')`);
-        ftsResults[name] = 'ok';
-      } catch (error) {
-        ftsResults[name] = String(error?.message ?? error);
-      }
-    }
-    return { quickCheck: quick.join('; '), foreignKeyViolations: foreignKeys, fts: ftsResults };
+    return { quickCheck: at.quick.length ? at.quick.join('; ') : 'ok', foreignKeyViolations: at.foreignKeys, fts: at.fts };
   }
 
   // Connection settings (foreign_keys); SQLite ignores them inside a

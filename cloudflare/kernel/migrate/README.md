@@ -40,10 +40,24 @@ statements per chunk (`<unit>/<index>`). An object reads the manifest once and o
 
 ## Chunks, resume and restore points
 
-- Each chunk (A01 T7: ≤ 200 statements, ≤ 1 MB) is one `transactionSync`. Progress lives in `ctx.storage.kv`
-  (`gonvex/migrate/progress`) and commits in the same transaction, so a reset loses at most the chunk in flight.
-- Each event runs at most `maxChunksPerEvent` transactions and stops starting new ones after `maxMsPerEvent`. A watchdog
-  alarm is set at the start of every event; when work remains the next alarm is set for now.
+- Each chunk (A01 T7: ≤ 200 statements, ≤ 1 MB) runs in one or more `transactionSync` calls of `batch` statements.
+  Progress (chunk and statement offset) lives in `ctx.storage.kv` (`gonvex/migrate/progress`) and commits in the same
+  transaction, so a reset loses at most the transaction in flight. A migration's last statements still commit with its
+  finalize and ledger row, and a failure after any committed transaction still restores the migration's bookmark.
+- CPU budget (0022 §5b, X10): on a schema of thousands of objects one DDL statement costs about 9 ms (local workerd),
+  so a whole 200-statement chunk took about 1.8 s locally and 2.5 s on the platform. `batch` starts at
+  `initialStatementsPerTransaction` (8) and adapts to `transactionMs` (300 ms), at most doubling per transaction and
+  capped by `maxStatementsPerTransaction` (50). The platform clock does not advance during synchronous work, so the
+  migrator reads it only after a macrotask yield (`settle`), when it includes the CPU of the transaction just run.
+- Each event runs at most `maxChunksPerEvent` (4) transactions and stops starting new ones after `maxMsPerEvent`
+  (1000 ms) measured that way. A watchdog alarm is set at the start of every event; when work remains the next alarm
+  is set for now.
+- The change-feed install is planned (a whole-catalog read, about a second on the Whagons schema) once and applied over
+  several transactions while `sqlite_schema` is as the migrator left it (`PRAGMA schema_version` is not authorized); it is planned again after the
+  infrastructure unit, in a new instance, and at the end. A new plan that repeats a receipt installed since the last one
+  fails as "does not converge", as before.
+- A single statement cannot be split. One that alone takes longer than `maxMsPerEvent` is logged as
+  `gonvex.migrate.unsplittable` (Workers Logs) with its migration and chunk.
 - Before each transactional migration, and before the change-feed install, the object takes a point-in-time bookmark.
   A migration that fails after one of its chunks committed is restored to it: `onNextSessionRestoreBookmark`, then the
   next event aborts the object. Rust's semantics follow: the failing migration rolls back, earlier ones stay.

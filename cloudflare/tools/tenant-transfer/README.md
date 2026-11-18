@@ -54,7 +54,7 @@ exactly.
 | 100 result columns | Exact-value reads need two result fields per source column. Wide tables use synchronous scans of at most 50 source columns in the same key order; the current row is assembled before hashing or encoding. No values or storage-class tags are omitted. |
 | 100 KB per statement | Values always travel as bound parameters. Only placeholders are inlined, so statement text stays a few KB. |
 | 2 MB per row | Rows are copied as they are. A row over the limit fails loudly. |
-| CPU / memory per request | About 1.5 MB of rows per insert request, about 4 MB per read response, 400 DDL statements per schema request, 60 tables per checksum request. One request is one transaction. |
+| CPU / memory per request | About 1.5 MB of rows per insert request, about 4 MB per read response, 400 DDL statements per schema request, 60 tables per checksum request. An insert request is one transaction. `schema`, `checksum` and `check` stop at a CPU budget of about 1 s (X10, read after macrotask yields) and continue in the next request: `schema` answers `consumed` (the caller sends the rest), `checksum` and `check` answer `next` (send it back as `cursor`). A checksum cursor carries the running SHA-256 state (`src/sha256.mjs`), so a table hashed over several requests has the same digest as one pass of node:crypto. In the assembled runtime the `check` and `verify` cursors stay in the object, and a write clears them. |
 | Foreign keys | `PRAGMA foreign_keys = OFF` during the copy (rows arrive table by table, as in `export-sqlite`), then `foreign_key_check`, then enforcement goes back on. |
 
 Exact values across JavaScript: every read asks SQLite for `typeof(x)` and an

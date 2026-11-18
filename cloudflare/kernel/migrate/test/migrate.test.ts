@@ -1,7 +1,7 @@
 // K02 against real Durable Object SQLite in workerd: release plans, chunked
 // apply with resume, the ledger, directives, restore points.
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildReleasePlan,
   MemoryPlanStore,
@@ -16,6 +16,9 @@ import {
   type ReleasePlan,
 } from "../index.ts";
 import { APP, fakeCapture } from "./fixtures.ts";
+
+// Every transaction ends with a macrotask yield (X10), so a run of many small chunks takes longer than vitest's 5 s default.
+vi.setConfig({ testTimeout: 60_000 });
 
 let objects = 0;
 async function withObject<T>(fn: (state: DurableObjectState) => Promise<T>): Promise<T> {
@@ -231,6 +234,43 @@ describe("resume after interruption", () => {
       expect(second.m.ledger().map((r) => [r.name, r.checksum])).toEqual(reference.ledger);
       // A reset inside a transaction leaves no trace: progress is in the same transaction.
       expect(state.storage.sql.exec("PRAGMA foreign_keys").one()).toEqual({ foreign_keys: 1 });
+    });
+  });
+
+  it("a plan chunk applies over several budgeted transactions, resumes mid-chunk, and keeps one finalize and ledger row (X10)", async () => {
+    // Whole migrations in one plan chunk; the object splits each into transactions of two statements.
+    const release = await plan(APP, { chunk: { maxStatements: 200 } });
+    expect(release.migrations.every((m) => m.chunks === 1)).toBe(true);
+    const reference = await withObject(async (state) => {
+      const { m } = migrator(state, new MemoryPlanStore(release), { budget: { maxChunksPerEvent: 100, maxMsPerEvent: 60_000 } });
+      await m.applyRelease(release.id);
+      await drain(m);
+      return { schema: schema(state.storage.sql), ledger: m.ledger().map((r) => [r.name, r.checksum]) };
+    });
+    await withObject(async (state) => {
+      const store = new MemoryPlanStore(release);
+      const budget = { maxChunksPerEvent: 1, maxStatementsPerTransaction: 2, initialStatementsPerTransaction: 2 };
+      const events: Array<{ unit: string; statements: number }> = [];
+      const first = migrator(state, store, { budget, observe: (e) => events.push(e) });
+      await first.m.applyRelease(release.id);
+      // Stop inside 0001's only chunk, after some of its statements committed: a reset between transactions.
+      for (let i = 0; i < 200; i += 1) {
+        const p = state.storage.kv.get<Progress>(PROGRESS_KEY)!;
+        if (p.phase === "migrations" && p.unit === 0 && (p.statement ?? 0) >= 4) break;
+        await first.m.alarm();
+      }
+      const mid = state.storage.kv.get<Progress>(PROGRESS_KEY)!;
+      expect(mid).toMatchObject({ phase: "migrations", unit: 0, chunk: 0, statement: 4, unitState: "running" });
+      expect(first.m.gateClosed()).toBe(true);
+      expect(events.filter((e) => e.unit === "migration/0001_init.sql").every((e) => e.statements <= 2)).toBe(true);
+      const second = migrator(state, store, { budget });
+      const done = await drain(second.m);
+      expect(done).toMatchObject({ state: "done", error: null });
+      expect(schema(state.storage.sql)).toEqual(reference.schema);
+      expect(second.m.ledger().map((r) => [r.name, r.checksum])).toEqual(reference.ledger);
+      // Still one finalize per migration, with Rust's provenance.
+      expect(second.capture.finalizeCalls.map((c) => c.commandId)).toEqual(["migration:0001_init.sql", "migration:0002_comments.sql", "migration:0003_rebuild_tasks.sql"]);
+      expect(state.storage.sql.exec("SELECT count(*) AS n FROM tasks").one().n).toBe(3);
     });
   });
 
