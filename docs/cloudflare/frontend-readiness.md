@@ -63,6 +63,67 @@ Browser-matrix selection, by copied rows:
 | `devcopy-stg1117-15` | PASS | 15,563 | 15,563 | PASS (380 tables, 0 checksum mismatches) | [Report](/home/gabriel/work/gonvex-cf-dev-integration-20261117/import/devcopy-stg1117-15.json) |
 | Historical `devcopy-source-2` / `devcopy-source-3` | Superseded | 1001 / 2335 historical | 1001 / 2335 historical | Historical PASS only | [Old import](/mnt/data/work/gonvex-cf-dev-integration-20261117/import-431/report.json) |
 
+### P03b: file blobs (BUG-7a)
+
+**2,207 objects (4,090,716,377 bytes) copied for 2,245 file rows. 0 missing for `uploaded` rows, 0 size mismatches, 0 content mismatches.**
+
+P03 copied the `_gonvex_files` rows but not the bytes behind them. Staging keeps file bytes in the R2 bucket `whagons-staging`, the staging runtime's `S3_BUCKET`, in the same Cloudflare account. The staging key is the row's `object_key`, `{safe(project)}/{safe(tenant)}/{fileId}` (`rust/crates/runtime/src/storage.rs` `object_key`). The dev Workers (kernel, runtime and actions) bind `FILES` to `gonvex-cf-dev-integration-20261117-files`.
+
+Each object was written at the key the kernel derives for the dev copy, `kernel/files/keys.ts` `objectKey(project, tenant, fileId)`: `9a356c10-f834-407e-8376-fe810528fc8f/devcopy-stg1117-NN/{fileId}`. That is also the key the router uses to pick the tenant object for a `/storage` download. The walkthrough's fresh dev uploads already use the same shape.
+
+Method, 2026-11-18 02:51–03:00 UTC:
+- The rows to copy were listed from the P03 A01 images (`p03/devcopy-stg1117-NN.a01.db`). These are row-for-row equal to the dev objects.
+- Each object was copied server side with R2 `CopyObject` and `MetadataDirective=COPY`, so the content type is preserved. Nothing was downloaded.
+- Staging got HEAD and GET only, through a read-only client. Nothing was written, locked or deleted there.
+- Existing dev objects were never overwritten.
+- Credential: `cloudflare_r2_access` through `whagons-dev credentials exec`.
+- 8 batches of at most 300 objects, each 20 s or less. The tool and its private inventory are in `/home/gabriel/work/gonvex-p03b-files-20261117/`. Staging keys contain staging tenant ids, so they stay there.
+
+Checks:
+- HEAD on every row. Size matches staging, and for `uploaded` rows it also matches `size_bytes`.
+- Etag matches staging, except 30 objects on -12 whose staging copy was multipart. R2 gives a copy a single-part MD5 etag. All 30 were sha256-compared in full and match.
+- 284 `uploaded` rows store a sha256 `checksum`, written by `store`, instead of an etag. All 284 match the copied bytes.
+- sha256 of up to 5 random objects per tenant (seed 20261117), staging against dev. Every sample matches. The table shows the first two.
+
+Missing: 38 objects, all for `pending` rows whose upload never finished on staging. The staging bucket has no object for them either: 2 on -06 and 36 on -12. The 278 `pending` rows that do have an object were copied as well (243 on -12), so finalize-on-read can mark them uploaded.
+
+| Dev copy | File rows (uploaded / pending) | Objects | Bytes | Missing | Size mismatches | sha256 samples | Sample sha256 (first two) |
+|---|---:|---:|---:|---:|---:|---|---|
+| `devcopy-stg1117-01` | 8 (8 / 0) | 8 | 853,191 | 0 | 0 | 5/5 match | `c4a16e475938…` (25,413 B), `8a3318681ea7…` (184,438 B) |
+| `devcopy-stg1117-02` | 105 (104 / 1) | 105 | 300,788,060 | 0 | 0 | 5/5 match | `a0b2636ebf9b…` (2,114,354 B), `82b547d0c3c7…` (13,275 B) |
+| `devcopy-stg1117-03` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| `devcopy-stg1117-04` | 23 (13 / 10) | 23 | 17,579,920 | 0 | 0 | 5/5 match | `8ce2498c921b…` (3,066 B), `9ed7401fe723…` (2,702 B) |
+| `devcopy-stg1117-05` | 9 (9 / 0) | 9 | 6,628,441 | 0 | 0 | 5/5 match | `958090482758…` (371,756 B), `45bd5dad70ce…` (108,137 B) |
+| `devcopy-stg1117-06` | 337 (316 / 21) | 335 | 642,016,332 | 2 | 0 | 5/5 match | `d7f83e63acb8…` (1,736,895 B), `d2e782c6648b…` (3,624,156 B) |
+| `devcopy-stg1117-07` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| `devcopy-stg1117-08` | 13 (10 / 3) | 13 | 20,677 | 0 | 0 | 5/5 match | `9ca38d02e66f…` (68 B), `9ca38d02e66f…` (68 B) |
+| `devcopy-stg1117-09` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| `devcopy-stg1117-10` | 1 (0 / 1) | 1 | 4,319 | 0 | 0 | 1/1 match | `29dca7612341…` (4,319 B) |
+| `devcopy-stg1117-11` | 16 (15 / 1) | 16 | 11,469,407 | 0 | 0 | 5/5 match | `61ba9861f6fb…` (345,394 B), `650f063e9a7e…` (718,892 B) |
+| `devcopy-stg1117-12` | 1,732 (1,453 / 279) | 1,696 | 3,111,167,050 | 36 | 0 | 5/5 match | `2d27757fe23e…` (1,122,209 B), `c26ac53ae2e5…` (575,148 B) |
+| `devcopy-stg1117-13` | 1 (1 / 0) | 1 | 188,980 | 0 | 0 | 1/1 match | `f339d9e011d1…` (188,980 B) |
+| `devcopy-stg1117-14` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| `devcopy-stg1117-15` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| **Total** | **2,245 (1,929 / 316)** | **2,207** | **4,090,716,377** | **38 (all pending, absent at source)** | **0** | **56/56 match** | |
+
+**Still FAIL until the BUG-7b remap: the blobs are present, but the copied rows cannot reach them yet.** P03 copied `_gonvex_files` byte for byte, so each row still carries the staging tenant id, project and bucket. Both the kernel and Rust look a file up with `WHERE id=? AND tenant_id=<session tenant>`, so every copied row reads "file not found". Lead decision (PR #464): remap through a DEV-only route that the X11b owner is adding. The existing data routes refuse it: `/dev/data/tables/*/rows` and `/dev/data/references/replace` skip `_gonvex_*` tables and `tenant_id` columns. The remap will run per tenant, under the lane lock, on the 10 tenants with file rows (-01, -02, -04, -05, -06, -08, -10, -11, -12, -13).
+
+A scan of every column of every table in the 15 images found exactly 3 columns to remap, all in `_gonvex_files`:
+
+| Column | From | To |
+|---|---|---|
+| `_gonvex_files.tenant_id` | staging tenant id | `devcopy-stg1117-NN` |
+| `_gonvex_files.object_key` | `{staging project}/{staging tenant}/{fileId}` | `9a356c10-f834-407e-8376-fe810528fc8f/devcopy-stg1117-NN/{fileId}` |
+| `_gonvex_files.bucket` | `whagons-staging` | `gonvex-cf-dev-integration-20261117-files` |
+
+After the remap, the P03 row checksums stay row for row on every table except these three columns of `_gonvex_files`. The staging tenant or project id also appears inside text, and those values are left as they are (lead decision):
+- `_gonvex_action_outbox.last_error`
+- `_gonvex_action_outbox.provenance` (-08: `commandId`)
+- `_gonvex_reducer_idempotency.idempotency_key` (-08)
+- assistant message and pending-action text
+
+None of these is an id column. Tenant -01's staging id is a short word, so its other substring hits are ordinary text. Once the remap is done, `files.getFileUrls` on -12 must return URLs whose downloads answer 200 with the copied bytes.
+
 ## Feature by selected tenant
 
 Every FAIL below currently means not verified against frontend678bdc80 and the exact current dev backend, unless a specific defect/evidence link replaces it. Capture actual UI screenshots and content-free logs for each result; maintain original login/account ownership and copied-user authorization. Identify unsupported staging features from actual staging behavior rather than silently omitting them. No synthetic ready flag, fake receipt or mock can pass a row.
