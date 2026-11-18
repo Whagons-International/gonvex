@@ -202,4 +202,22 @@ describe("X07 BUG-5 a socket never goes silent across a publication", () => {
       expect(await f.settled(call)).toBe(true);
     });
   }
+
+  it("X07b: the stall log names the frame that holds the queue (type and paths, never arguments)", async () => {
+    const f = fixture();
+    await f.auth("login");
+    f.stopTenant();
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args); };
+    try {
+      void f.session.receive(JSON.stringify({ type: "reducer.callMany", calls: [{ id: "x", path: "assistant.submitUserMessage", args: { secret: "never-logged" } }] }));
+      await f.tick();
+      f.advance(LIMITS.stallMs);
+    } finally { console.error = original; }
+    const line = logged.find((args) => String(args[0]).includes("ordered queue stalled"));
+    expect(line?.[1]).toMatchObject({ item: "reducer.callMany assistant.submitUserMessage" });
+    expect(JSON.stringify(line)).not.toContain("never-logged");
+  });
 });
+

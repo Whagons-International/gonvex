@@ -2,7 +2,7 @@
 
 Updated 2026-11-17. This file is the single source of truth for Cloudflare frontend readiness. ROOT owns matrix updates; implementation and verification owners supply evidence.
 
-**Acceptance: 2/6 criteria PASS. Feature cells: 34/90 PASS.** FAIL includes not yet verified, and does not by itself assert a product defect. The three test-tenant columns remain unselected until the complete current inventory and row counts identify the largest tenant and two typical tenants. Expand the import table for every actual staging tenant; do not treat these three test selections as the import denominator.
+**Acceptance: 2/6 criteria PASS. Feature cells: 47/90 PASS.** FAIL includes not yet verified, and does not by itself assert a product defect. The three test-tenant columns remain unselected until the complete current inventory and row counts identify the largest tenant and two typical tenants. Expand the import table for every actual staging tenant; do not treat these three test selections as the import denominator.
 
 ## Exact target
 
@@ -63,47 +63,108 @@ Browser-matrix selection, by copied rows:
 | `devcopy-stg1117-15` | PASS | 15,563 | 15,563 | PASS (380 tables, 0 checksum mismatches) | [Report](/home/gabriel/work/gonvex-cf-dev-integration-20261117/import/devcopy-stg1117-15.json) |
 | Historical `devcopy-source-2` / `devcopy-source-3` | Superseded | 1001 / 2335 historical | 1001 / 2335 historical | Historical PASS only | [Old import](/mnt/data/work/gonvex-cf-dev-integration-20261117/import-431/report.json) |
 
+### P03b: file blobs (BUG-7a)
+
+**2,207 objects (4,090,716,377 bytes) copied for 2,245 file rows. 0 missing for `uploaded` rows, 0 size mismatches, 0 content mismatches.**
+
+P03 copied the `_gonvex_files` rows but not the bytes behind them. Staging keeps file bytes in the R2 bucket `whagons-staging`, the staging runtime's `S3_BUCKET`, in the same Cloudflare account. The staging key is the row's `object_key`, `{safe(project)}/{safe(tenant)}/{fileId}` (`rust/crates/runtime/src/storage.rs` `object_key`). The dev Workers (kernel, runtime and actions) bind `FILES` to `gonvex-cf-dev-integration-20261117-files`.
+
+Each object was written at the key the kernel derives for the dev copy, `kernel/files/keys.ts` `objectKey(project, tenant, fileId)`: `9a356c10-f834-407e-8376-fe810528fc8f/devcopy-stg1117-NN/{fileId}`. That is also the key the router uses to pick the tenant object for a `/storage` download. The walkthrough's fresh dev uploads already use the same shape.
+
+Method, 2026-11-18 02:51–03:00 UTC:
+- The rows to copy were listed from the P03 A01 images (`p03/devcopy-stg1117-NN.a01.db`). These are row-for-row equal to the dev objects.
+- Each object was copied server side with R2 `CopyObject` and `MetadataDirective=COPY`, so the content type is preserved. Nothing was downloaded.
+- Staging got HEAD and GET only, through a read-only client. Nothing was written, locked or deleted there.
+- Existing dev objects were never overwritten.
+- Credential: `cloudflare_r2_access` through `whagons-dev credentials exec`.
+- 8 batches of at most 300 objects, each 20 s or less. The tool and its private inventory are in `/home/gabriel/work/gonvex-p03b-files-20261117/`. Staging keys contain staging tenant ids, so they stay there.
+
+Checks:
+- HEAD on every row. Size matches staging, and for `uploaded` rows it also matches `size_bytes`.
+- Etag matches staging, except 30 objects on -12 whose staging copy was multipart. R2 gives a copy a single-part MD5 etag. All 30 were sha256-compared in full and match.
+- 284 `uploaded` rows store a sha256 `checksum`, written by `store`, instead of an etag. All 284 match the copied bytes.
+- sha256 of up to 5 random objects per tenant (seed 20261117), staging against dev. Every sample matches. The table shows the first two.
+
+Missing: 38 objects, all for `pending` rows whose upload never finished on staging. The staging bucket has no object for them either: 2 on -06 and 36 on -12. The 278 `pending` rows that do have an object were copied as well (243 on -12), so finalize-on-read can mark them uploaded.
+
+| Dev copy | File rows (uploaded / pending) | Objects | Bytes | Missing | Size mismatches | sha256 samples | Sample sha256 (first two) |
+|---|---:|---:|---:|---:|---:|---|---|
+| `devcopy-stg1117-01` | 8 (8 / 0) | 8 | 853,191 | 0 | 0 | 5/5 match | `c4a16e475938…` (25,413 B), `8a3318681ea7…` (184,438 B) |
+| `devcopy-stg1117-02` | 105 (104 / 1) | 105 | 300,788,060 | 0 | 0 | 5/5 match | `a0b2636ebf9b…` (2,114,354 B), `82b547d0c3c7…` (13,275 B) |
+| `devcopy-stg1117-03` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| `devcopy-stg1117-04` | 23 (13 / 10) | 23 | 17,579,920 | 0 | 0 | 5/5 match | `8ce2498c921b…` (3,066 B), `9ed7401fe723…` (2,702 B) |
+| `devcopy-stg1117-05` | 9 (9 / 0) | 9 | 6,628,441 | 0 | 0 | 5/5 match | `958090482758…` (371,756 B), `45bd5dad70ce…` (108,137 B) |
+| `devcopy-stg1117-06` | 337 (316 / 21) | 335 | 642,016,332 | 2 | 0 | 5/5 match | `d7f83e63acb8…` (1,736,895 B), `d2e782c6648b…` (3,624,156 B) |
+| `devcopy-stg1117-07` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| `devcopy-stg1117-08` | 13 (10 / 3) | 13 | 20,677 | 0 | 0 | 5/5 match | `9ca38d02e66f…` (68 B), `9ca38d02e66f…` (68 B) |
+| `devcopy-stg1117-09` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| `devcopy-stg1117-10` | 1 (0 / 1) | 1 | 4,319 | 0 | 0 | 1/1 match | `29dca7612341…` (4,319 B) |
+| `devcopy-stg1117-11` | 16 (15 / 1) | 16 | 11,469,407 | 0 | 0 | 5/5 match | `61ba9861f6fb…` (345,394 B), `650f063e9a7e…` (718,892 B) |
+| `devcopy-stg1117-12` | 1,732 (1,453 / 279) | 1,696 | 3,111,167,050 | 36 | 0 | 5/5 match | `2d27757fe23e…` (1,122,209 B), `c26ac53ae2e5…` (575,148 B) |
+| `devcopy-stg1117-13` | 1 (1 / 0) | 1 | 188,980 | 0 | 0 | 1/1 match | `f339d9e011d1…` (188,980 B) |
+| `devcopy-stg1117-14` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| `devcopy-stg1117-15` | 0 (0 / 0) | 0 | 0 | 0 | 0 | 0/0 match | — |
+| **Total** | **2,245 (1,929 / 316)** | **2,207** | **4,090,716,377** | **38 (all pending, absent at source)** | **0** | **56/56 match** | |
+
+**Still FAIL until the BUG-7b remap: the blobs are present, but the copied rows cannot reach them yet.** P03 copied `_gonvex_files` byte for byte, so each row still carries the staging tenant id, project and bucket. Both the kernel and Rust look a file up with `WHERE id=? AND tenant_id=<session tenant>`, so every copied row reads "file not found". Lead decision (PR #464): remap through a DEV-only route that the X11b owner is adding. The existing data routes refuse it: `/dev/data/tables/*/rows` and `/dev/data/references/replace` skip `_gonvex_*` tables and `tenant_id` columns. The remap will run per tenant, under the lane lock, on the 10 tenants with file rows (-01, -02, -04, -05, -06, -08, -10, -11, -12, -13).
+
+A scan of every column of every table in the 15 images found exactly 3 columns to remap, all in `_gonvex_files`:
+
+| Column | From | To |
+|---|---|---|
+| `_gonvex_files.tenant_id` | staging tenant id | `devcopy-stg1117-NN` |
+| `_gonvex_files.object_key` | `{staging project}/{staging tenant}/{fileId}` | `9a356c10-f834-407e-8376-fe810528fc8f/devcopy-stg1117-NN/{fileId}` |
+| `_gonvex_files.bucket` | `whagons-staging` | `gonvex-cf-dev-integration-20261117-files` |
+
+After the remap, the P03 row checksums stay row for row on every table except these three columns of `_gonvex_files`. The staging tenant or project id also appears inside text, and those values are left as they are (lead decision):
+- `_gonvex_action_outbox.last_error`
+- `_gonvex_action_outbox.provenance` (-08: `commandId`)
+- `_gonvex_reducer_idempotency.idempotency_key` (-08)
+- assistant message and pending-action text
+
+None of these is an id column. Tenant -01's staging id is a short word, so its other substring hits are ordinary text. Once the remap is done, `files.getFileUrls` on -12 must return URLs whose downloads answer 200 with the copied bytes.
+
 ## Feature by selected tenant
 
 Every FAIL below currently means not verified against frontend678bdc80 and the exact current dev backend, unless a specific defect/evidence link replaces it. Capture actual UI screenshots and content-free logs for each result; maintain original login/account ownership and copied-user authorization. Identify unsupported staging features from actual staging behavior rather than silently omitting them. No synthetic ready flag, fake receipt or mock can pass a row.
 
 | ID | Feature | Largest `devcopy-stg1117-12` | Typical A `devcopy-stg1117-11` | Typical B `devcopy-stg1117-04` | Current evidence / blocker |
 |---|---|---|---|---|---|
-| auth-login | Login with an existing copied user | PASS | PASS | PASS | [Rendered-form login, member resolved on all three (b3 22:14, kernel 537df10e). O-1: one retried `auth.error transient` per login. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| auth-logout | Logout | FAIL: BUG-4 | FAIL: not run | FAIL: not run | [Not rerun on these copies (verified on warm-up source-3 only); waits for lane lock. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| auth-refresh | Session refresh | FAIL: BUG-4 | PASS | PASS | [Reload restores session and grid on 858f19e0 (01:12); T12 stuck "Restoring your secure session…" (BUG-4). Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| workspace-load | Initial workspace load versus staging | FAIL: BUG-4 | PASS | PASS | [Dev only (staging not measurable without login): Get Started→grid 1.0–1.4 s, first rows 1.6–1.9 s; reload grid 1.3 s. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| navigation | Every main navigation screen; no backend HTTP/console errors | FAIL: BUG-4 | PASS | PASS | [147 static routes, 0 backend 4xx/5xx/console errors on 858f19e0 (01:18–01:31). Disabled powerups redirect to /welcome (31/22). Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| tasks-create | Create task | FAIL: BUG-4 | PASS | PASS | [tasks.create commits in 3–8 s; second client sees it after the commit. O-2: assistant.rewriteText action.error (dev OPENROUTER secret missing). Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| tasks-edit | Edit task | FAIL: BUG-4 | PASS | PASS | [tasks.updateDetails/updateDescription committed; second client converged. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| tasks-status | Change task status | FAIL: BUG-4 | PASS | PASS | [Grid status change, second client 0.53 s (-11) / 0.73 s (-04). Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| tasks-assign | Assign task | FAIL: BUG-4 | PASS | PASS | [Assign non-admin member, second client 0.54 s / 0.52 s; notification delivered to assignee. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| tasks-delete | Delete task | FAIL: BUG-4 | PASS | PASS | [UI Delete → tasks.archive, archived view, restore → tasks.bulkRestore. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| tasks-bulk | Bulk task actions | FAIL: BUG-4 | FAIL: partial | FAIL: partial | [bulkUpdatePriority, bulkReassign, bulkComplete, bulkArchive OK; reschedule (date picker) not exercised. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| comments | Comments | FAIL: BUG-4 | PASS | PASS | [createNote/updateNote/removeNote on 858f19e0. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| files-upload | File upload | FAIL: BUG-4 | PASS | PASS | [generateUploadUrl → upload → createNote → getFileUrls; stored bytes sha256 match fixture (-11). Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| files-download | File download | FAIL: BUG-4 | FAIL: BUG-6 | FAIL: BUG-6 | [Page fetch of signed URL fails (service worker cached opaque entry; dev image proxy 404). Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| files-preview | File preview | FAIL: BUG-4 | FAIL: BUG-6 | FAIL: BUG-6 | [Full image renders; thumbnails via image proxy 404 (BUG-6). Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| files-private | Private-file owner and foreign-user checks | FAIL: BUG-4 | FAIL: not run | FAIL: not run | [Confidential files not exercised yet. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| forms-fields | Forms and custom fields | FAIL: BUG-4 | FAIL: not run | FAIL: not run | [Not exercised yet. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| boards-dashboards | Boards and dashboards | FAIL: BUG-4 | FAIL: not run | FAIL: not run | [Not exercised yet. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| search-filters | Search and filters | FAIL: BUG-4 | PASS | PASS | [Search finds marker; priority filter applied and cleared. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| notifications | Notifications | FAIL: BUG-4 | PASS | PASS | [Non-admin receives "Assigned to you"; click opens the task; Clear all. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| presence | Presence | FAIL: BUG-4 | FAIL: not verified | FAIL: not verified | [presence.snapshot flows to both clients; no UI indicator of the other member was verifiable. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| admin-users | Settings/admin: users | FAIL: BUG-4 | FAIL: recheck | PASS | [Users list + team edit (members.saveProfileAndTeams); non-admin denied on -04; -11 denial check flaky at 00:46. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| admin-roles | Settings/admin: roles | FAIL: BUG-4 | PASS | PASS | [8 / 6 roles listed; non-admin gets "You don't have access". Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| admin-invitations | Settings/admin: invitations | FAIL: BUG-4 | PASS | PASS | [control.invitations.create + claim by the non-admin test member. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| admin-integrations | Settings/admin: integrations and API keys | FAIL: BUG-4 | FAIL: partial | FAIL: partial | [apiKeys.create OK on 6397e41d/858f19e0 (BUG-1 fixed); revoke not exercised. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| realtime | Second-client update within 1 second | FAIL: BUG-4 | FAIL | FAIL | [Status/assign ≤1 s; create/edit 3–10 s end to end (reducer commit latency; delivery <0.25 s after commit). No change-feed-reset outside publications (#449). BUG-5 half-open socket after a publication. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| offline | Offline edit, reconnect and convergence | FAIL: BUG-4 | PASS | PASS | [Offline status change queued, replayed on reconnect (0.3 s / 4.8 s), second client converged. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| jobs-reports | UI-triggered scheduled reports/jobs | FAIL: BUG-4 | FAIL: disabled | FAIL: not run | [-11: /cleaning and /reports disabled on this copy; -04: /reports enabled, not exercised. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| jobs-automations | UI-triggered automations/actions | FAIL: BUG-4 | FAIL: not run | FAIL: not run | [Not exercised yet. Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
-| jobs-ai | AI/agent actions present on staging | FAIL: BUG-4 | FAIL: O-2 | FAIL: O-2 | [assistant.createThread/submitUserMessage commit; reply never arrives (dev OPENROUTER_API_KEY not configured). Backend 858f19e0 (kernel 738336a3) unless noted.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| auth-login | Login with an existing copied user | PASS | PASS | PASS | [Rendered-form login, member resolved (-12 on afecea5e 02:00). O-1: one retried auth.error transient per login. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| auth-logout | Logout | PASS | PASS | PASS | [Sign out → /auth/signin; protected URL redirects; no auth storage keys (b7 02:34, afecea5e). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| auth-refresh | Session refresh | PASS | PASS | PASS | [Reload restores session and grid; -12 0 resets after #453. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| workspace-load | Initial workspace load versus staging | PASS | PASS | PASS | [Dev only (staging not measurable without login): Get Started→grid 1.0–2.0 s, first rows 1.6–1.9 s. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| navigation | Every main navigation screen; no backend HTTP/console errors | FAIL: BUG-7 | PASS | PASS | [147 routes. -12: files.getFileUrls fails with "file not found" (copied blobs missing, whole batch fails) on /tech-support and a workspace route. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| tasks-create | Create task | PASS | PASS | PASS | [tasks.create commits in 3–8 s; second client sees it after the commit. O-2: assistant.rewriteText action.error (dev OPENROUTER secret). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| tasks-edit | Edit task | PASS | PASS | PASS | [tasks.updateDetails/updateDescription committed; other client converged (-12 1.15 s). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| tasks-status | Change task status | FAIL: BUG-5 | PASS | PASS | [-11 0.53 s / -04 0.73 s. -12: the write was parked by a stalled app socket (no publication) and replayed only after a reconnect. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| tasks-assign | Assign task | PASS | PASS | PASS | [Assign second member; other client 0.52–0.54 s; assignee notified. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| tasks-delete | Delete task | FAIL: restore | PASS | PASS | [UI Delete → tasks.archive OK everywhere; -12 restore from the archived view not completed. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| tasks-bulk | Bulk task actions | FAIL: partial | FAIL: partial | FAIL: partial | [bulkUpdatePriority, bulkReassign, bulkComplete, bulkArchive OK; reschedule (date picker) not exercised. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| comments | Comments | PASS | PASS | PASS | [createNote/updateNote/removeNote. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| files-upload | File upload | PASS | PASS | PASS | [generateUploadUrl → upload → createNote → getFileUrls; stored bytes sha256 = fixture (-11). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| files-download | File download | FAIL: BUG-6 | FAIL: BUG-6 | FAIL: BUG-6 | [Blocked on the image-proxy decision (SW serves cached opaque entry; dev proxy 404). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| files-preview | File preview | FAIL: BUG-6 | FAIL: BUG-6 | FAIL: BUG-6 | [Full image renders; thumbnails via the image proxy return 404 (BUG-6). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| files-private | Private-file owner and foreign-user checks | FAIL: not run | FAIL: not run | FAIL: not run | [Confidential files not exercised. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| forms-fields | Forms and custom fields | FAIL: not run | FAIL: not run | FAIL: not run | [Not exercised. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| boards-dashboards | Boards and dashboards | FAIL: not run | FAIL: not run | FAIL: not run | [Not exercised. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| search-filters | Search and filters | PASS | PASS | PASS | [Search finds marker; filter applied and cleared. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| notifications | Notifications | PASS | PASS | PASS | [Assignee receives "Assigned to you"; click opens the task. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| presence | Presence | FAIL: not verified | FAIL: not verified | FAIL: not verified | [presence.snapshot flows to both clients; no UI indicator of the other member verifiable. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| admin-users | Settings/admin: users | FAIL: role data | PASS | PASS | [-11/-04: users list, team edit, non-admin denied. -12: the copied admin role lacks view-users, so admins see "You don't have access" (no owner login). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| admin-roles | Settings/admin: roles | FAIL: role data | PASS | PASS | [-12 denied for the copied admin role (no owner login). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| admin-invitations | Settings/admin: invitations | FAIL: role data | PASS | PASS | [-11/-04: invitation created and claimed by the non-admin. -12: Users page denied. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| admin-integrations | Settings/admin: integrations and API keys | FAIL: BUG-8 | FAIL: BUG-8 | FAIL: BUG-8 | [apiKeys.create commits, but the API Keys list stays empty, so revoke is impossible from the UI. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| realtime | Second-client update within 1 second | FAIL: BUG-5 | FAIL | FAIL | [Status/assign ≤1 s; create/edit 3–10 s end to end (reducer commit latency). -12 app socket stalled 114 s without a publication (BUG-5). -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| offline | Offline edit, reconnect and convergence | FAIL: BUG-5 | PASS | PASS | [-11/-04 queued and replayed, second client converged. -12 entangled with the BUG-5 stall. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| jobs-reports | UI-triggered scheduled reports/jobs | FAIL: not run | FAIL: disabled | FAIL: not run | [-11 /cleaning and /reports disabled on the copy. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| jobs-automations | UI-triggered automations/actions | FAIL: not run | FAIL: not run | FAIL: not run | [Not exercised. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
+| jobs-ai | AI/agent actions present on staging | FAIL: O-2 | FAIL: O-2 | FAIL: O-2 | [Blocked on the OpenRouter key decision: message stays Queued. -12 and logout/admin rechecks: afecea5e (runtime 5bac472a, kernel 738336a3); other -11/-04 cells: 858f19e0.](/home/gabriel/work/gonvex-c3-walkthrough-20261117/REPORT.md) |
 
 Matrix notes (C3 walkthrough, 2026-11-18):
-- Tenant logins (DEV copies only, coordinator-authorized): `staging-smoke-admin` was added as admin to -12/-11/-04 via `POST /dev/internal/e2e/members`, then given all teams on -11/-04 through Settings → Users (`members.saveProfileAndTeams`). The vault test account `staging-smoke-test` was invited as a non-admin member with all teams on -11/-04 (`control.invitations.create`, claimed through the invitation link). These are added test members, not original copied users. No Firebase, staging or production account was changed, and no password was set. -12 could not be completed: its admin UI never loads (BUG-4), so no teams or non-admin member could be added there. [Change record](/home/gabriel/work/gonvex-c3-walkthrough-20261117/membership/CHANGES.md)
-- Open bugs: BUG-4 -12 `change-feed-lagged` loop (#453 pending); BUG-5 half-open application socket after a publication (auth unanswered, writes parked until reload); BUG-6 storage fetch / dev image proxy 404. BUG-1 (#448) and BUG-2 (#449) are verified fixed on 6397e41d/858f19e0: Actions rows work, and no `change-feed-reset` occurred outside fixture publications. O-2: dev lacks the OPENROUTER project secret. [Repros](/home/gabriel/work/gonvex-c3-walkthrough-20261117/bugs)
-- The 30-minute two-client session runs on -11 while -12 is blocked, under `/home/gabriel/work/gonvex-dev-lane.lock`.
+- Tenant logins (DEV copies only, coordinator-authorized). On -11/-04, `staging-smoke-admin` was added as admin via `POST /dev/internal/e2e/members` and given all teams through Settings → Users; `staging-smoke-test` was invited as a non-admin member with all teams. On -12 the copied `admin` role lacks `view-users`, so the UI could not add teams or invite. There, both accounts were added as admins via the e2e route, with team rows written through the DEV operator data route. -12 has no non-admin member, and its admin/permission rows remain FAIL. These are added test members, not original copied users. No Firebase, staging or production account was changed. [Change record](/home/gabriel/work/gonvex-c3-walkthrough-20261117/membership/CHANGES.md)
+- Verified fixed: BUG-1 (#448), BUG-2 (#449), BUG-4 (#453; -12 loads with 0 resets on afecea5e). Open: BUG-5 half-open application socket (after a publication, and once on -12 without one); BUG-6 storage fetch / image proxy (#456); BUG-7 `files.getFileUrls` fails the whole batch when a copied blob is missing (-12); BUG-8 created API keys never appear in the API Keys list. O-2: no dev OpenRouter secret (AI rows blocked on that decision). [Repros](/home/gabriel/work/gonvex-c3-walkthrough-20261117/bugs)
+- The 30-minute two-client session was not started: the walkthrough was not clean (BUG-5 stall and an unsolicited close on -12 at 02:24:35 with no publication). It will run on -11 under `/home/gabriel/work/gonvex-dev-lane.lock` once BUG-5 is fixed.
 - Cutover follow-up (Gabriel, non-blocking): the whagons5-client service worker must not serve an opaque cached response to fetch() (BUG-6 triage, #456).
 
 ## Execution and failure handling
