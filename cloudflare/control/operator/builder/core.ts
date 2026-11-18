@@ -32,6 +32,8 @@ export interface VersionTarget {
 }
 
 /** Memoizes one release's module, functions and manifest per isolate; evaluated on first access only. */
+/** X13d: the artifact file that carries the Action-only bundle (packages/gonvex `ACTION_BUNDLE_FILE`). */
+export const ACTION_BUNDLE_FILE = "actions/bundle.js";
 export const LAZY_PRELUDE = "const lazy = (load) => { let value; return () => (value ??= load()); };\n";
 
 /** The module the kernel Worker imports for the active releases (the `gonvex:releases` alias). */
@@ -208,7 +210,11 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
     await this.options.blobs.put(releaseKey(project, hash, "manifest.json"), JSON.stringify(manifest));
     await this.options.blobs.put(releaseKey(project, hash, "view.json"), JSON.stringify({ functions: manifest.functions ?? {}, schema: manifest.schema ?? {}, visibility: module.visibility ?? manifest.visibility ?? {} }));
     await this.options.blobs.put(releaseKey(project, hash, "app.js"), app);
-    const actions = wrapBundle(decodeBase64Utf8(String((module.javascript as Json).code)), this.options.preludeSpecifier);
+    // X13d: an artifact that carries the Action-only bundle (`files["actions/bundle.js"]`, signed by the artifact
+    // hash) gives the Actions Worker only Action code: a cold isolate compiles and evaluates about half of the
+    // complete bundle (Whagons 678bdc80: 3.0 of 6.3 MB). Otherwise the complete bundle, as before.
+    const actionFile = (module.files as Json | undefined)?.[ACTION_BUNDLE_FILE];
+    const actions = wrapBundle(decodeBase64Utf8(String(typeof actionFile === "string" && actionFile ? actionFile : (module.javascript as Json).code)), this.options.preludeSpecifier);
     await this.options.blobs.put(releaseKey(project, hash, "actions.js"), actions);
     await this.options.blobs.put(`releases/${encodeURIComponent(project)}/${hash}/functions.json`, JSON.stringify(contracts));
     // Written last: a release is prepared only when every piece is.
