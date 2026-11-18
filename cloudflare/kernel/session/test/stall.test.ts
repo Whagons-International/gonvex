@@ -21,6 +21,9 @@ function fixture() {
   const sent: string[] = [], closes: Array<{ code: number; reason: string }> = [];
   const timers: Array<{ at: number; fn: () => void; cancelled: boolean }> = [];
   let tenantAnswers = true;
+  const dispatched: string[] = [];
+  const held: Array<() => void> = [];
+  let hold = false;
   const ports: Ports = {
     control: {
       project: async () => ({ ok: true, value: null }),
@@ -33,9 +36,13 @@ function fixture() {
     modules: { module: async () => ({ artifactHash: "v1", clientContract: null }), epoch: async () => "db-epoch" },
     tenants: {
       // A tenant being replaced by a publication: the call is accepted and never answered.
-      dispatch: (_socket, frame) => tenantAnswers
-        ? Promise.resolve([JSON.stringify({ type: "reducer.result", id: (frame as { id: string }).id, result: null })])
-        : new Promise<string[]>(() => {}),
+      dispatch: (_socket, frame) => {
+        const id = (frame as { id: string }).id;
+        dispatched.push(id);
+        const reply = [JSON.stringify({ type: "reducer.result", id, result: null })];
+        if (hold) return new Promise<string[]>((resolve) => { held.push(() => resolve(reply)); });
+        return tenantAnswers ? Promise.resolve(reply) : new Promise<string[]>(() => {});
+      },
       connectionReset: async () => {},
     },
   };
@@ -60,7 +67,7 @@ function fixture() {
     for (let i = 0; i < 20; i++) await Promise.resolve();
     return done;
   };
-  return { session, sent, closes, frames, auth, create, advance, settled, tick, stopTenant: () => { tenantAnswers = false; }, now: () => clock };
+  return { session, sent, closes, frames, auth, create, advance, settled, tick, dispatched, held, holdTenant: () => { hold = true; }, stopTenant: () => { tenantAnswers = false; }, now: () => clock };
 }
 
 describe("X07 BUG-5 a socket never goes silent across a publication", () => {
@@ -137,5 +144,39 @@ describe("X07 BUG-5 a socket never goes silent across a publication", () => {
     expect(f.frames().at(-1)).toMatchObject({ type: "reducer.result", id: "later" });
     expect(f.session.checkStall(f.now() + LIMITS.stallMs * 2)).toBe(false);
     expect(f.closes).toEqual([]);
+  });
+
+  it("review r4608168740: work released by a stall starts no further port call and sends nothing", async () => {
+    const f = fixture();
+    await f.auth("login");
+    f.holdTenant();
+    const batch = f.session.receive(JSON.stringify({ type: "reducer.callMany", calls: [
+      { id: "first", path: "tasks.create", args: {} }, { id: "second", path: "tasks.create", args: {} },
+    ] }));
+    await f.tick();
+    expect(f.dispatched).toEqual(["first"]);
+    f.advance(LIMITS.stallMs);
+    expect(f.closes).toEqual([CLOSE.stalled]);
+    expect(await f.settled(batch)).toBe(true);
+    const before = f.sent.length;
+    // The tenant finally answers the first write: the abandoned handler must stop here.
+    f.held.shift()!();
+    await f.tick();
+    expect(f.dispatched).toEqual(["first"]);
+    expect(f.sent.length).toBe(before);
+  });
+
+  it("review r4608168745: settled queue items leave no stall handler behind", async () => {
+    const f = fixture();
+    await f.auth("login");
+    for (let i = 0; i < 2_000; i++) {
+      await f.create(`c${i}`);
+      await f.session.liveness(f.now());
+    }
+    expect(f.session.pendingStallHandlers()).toBe(0);
+    const inflight = Array.from({ length: 50 }, (_, i) => f.create(`q${i}`));
+    expect(f.session.pendingStallHandlers()).toBeLessThanOrEqual(50 + 1);
+    await Promise.all(inflight);
+    expect(f.session.pendingStallHandlers()).toBe(0);
   });
 });
