@@ -2,7 +2,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { OperatorControlObject } from "../../../control/operator/object.ts";
-import { ADMIN, call, control, createProject, manifest, sync, useBuilder } from "./helpers.ts";
+import { ADMIN, FALLBACK_SYNC_KEY, call, control, createProject, manifest, sync, useBuilder } from "./helpers.ts";
 
 const CONFIGURED = { email: "operator@example.test", password: "configured-password-123" };
 
@@ -167,6 +167,36 @@ describe("projects, keys, members, env", () => {
     expect((await sync(next.id, await manifest(next.id), next.key)).status).toBe(200);
     const topology = await runInDurableObject(control(), async (instance: OperatorControlObject) => instance.runtimeTopology("status"));
     expect((topology as { releases: { project: string }[] }).releases.map((r) => r.project)).not.toContain(gone.id);
+  });
+
+  it("project delete: an expired preparation does not block it, any live sync (any project) does; a later sync cannot revive the project", async () => {
+    await useBuilder();
+    const p = await createProject("delete-race");
+    expect((await sync(p.id, await manifest(p.id), p.key)).status).toBe(200);
+    const stale = crypto.randomUUID(), live = crypto.randomUUID();
+    // A preparation abandoned past its lease (state stays 'running' until the next acquire) must not block deletion.
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      instance.sql.run("INSERT INTO gonvex_cf_syncs(sync_id,project_id,state,expires_at) VALUES($1,$2,'running',$3)", live, p.id, Date.now() + 60_000);
+    });
+    expect((await call("DELETE", `/dev/projects/${p.id}`)).status).toBe(409);
+    // Another project's live sync blocks it too: its staged catalog snapshot still carries this project's release.
+    const other = await createProject("delete-race-other");
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      instance.sql.run("UPDATE gonvex_cf_syncs SET project_id=$2,state='publishing' WHERE sync_id=$1", live, other.id);
+    });
+    const refused = await call("DELETE", `/dev/projects/${p.id}`);
+    expect([refused.status, refused.body]).toEqual([409, { error: "a /dev/sync is still running or publishing; delete the project after it finishes or is aborted" }]);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 1 }]);
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      instance.sql.run("UPDATE gonvex_cf_syncs SET sync_id=$2,project_id=$3,state='running',expires_at=$4 WHERE sync_id=$1", live, stale, p.id, Date.now() - 1);
+    });
+    expect((await call("DELETE", `/dev/projects/${p.id}`)).body).toEqual({ ok: true });
+    // A /dev/sync after the delete (the fallback key accepts unknown projects) is refused: no fence, no release, no manifest.
+    const revived = await sync(p.id, await manifest(p.id), FALLBACK_SYNC_KEY);
+    expect([revived.status, revived.body]).toEqual([410, { error: `project ${p.id} was deleted` }]);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 0 }]);
+    expect((await call("GET", `/dev/manifest?project=${p.id}`)).status).toBe(404);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_syncs WHERE project_id=$1 AND state IN('running','publishing') AND sync_id<>$2", p.id, stale)).toEqual([{ n: 0 }]);
   });
 
   it("env: the project key reads and writes; dotenv replace; names validated", async () => {

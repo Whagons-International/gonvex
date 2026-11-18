@@ -17,7 +17,7 @@ import { OperatorAuth, credentialName, globalAdmin, has, type OperatorActor, typ
 import { devTransferAllowed, type OperatorConfig } from "./config";
 import { Body, HttpError, PlainError, byteLength, displayName, error, isoTime, isoTimeOrNull, json, normalizeEmail, plainResponse, projectHeaderOrQuery } from "./http";
 import { releaseKey, type ReleaseSummary } from "./release";
-import type { SyncCoordinator } from "./sync";
+import { liveSync, type SyncCoordinator } from "./sync";
 import type { OperatorTenantPort, PortResult, RowsQuery } from "./tenant/port";
 import { internalTable, validIdent } from "./tenant/rows";
 import { findPrincipal } from "../src/auth";
@@ -482,14 +482,26 @@ const updateProject: Handler = async (op, request, _url, [project]) => {
   return json({ project: projectJson(row) });
 };
 
-/** Retires a deleted project's active release: the next publication's Worker catalog omits it and its manifest is no longer served. */
+/** Retires a deleted project's active release (caller's transaction): the next publication's Worker catalog omits it and its manifest is no longer served. */
 function retireProjectRelease(op: Op, project: string): void {
-  op.ctx.sql.tx(() => {
-    op.ctx.sql.run("UPDATE gonvex_cf_releases SET state='retired' WHERE project_id=$1 AND state='active'", project);
-    op.ctx.sql.run("DELETE FROM gonvex_cf_active_releases WHERE project_id=$1", project);
-    op.ctx.sql.run("DELETE FROM gonvex_runtime_manifests WHERE project_id=$1", project);
+  op.ctx.sql.run("UPDATE gonvex_cf_releases SET state='retired' WHERE project_id=$1 AND state='active'", project);
+  op.ctx.sql.run("DELETE FROM gonvex_cf_active_releases WHERE project_id=$1", project);
+  op.ctx.sql.run("DELETE FROM gonvex_runtime_manifests WHERE project_id=$1", project);
+}
+
+/**
+ * In one transaction: refuse while any live sync can still deploy a catalog (shared by every project), else tombstone it so
+ * no later /dev/sync claims a fence for it (SyncCoordinator.lock checks the tombstone in its own transaction).
+ */
+function tombstoneProject(op: Op, project: string, then: () => void = () => {}): boolean {
+  return op.ctx.sql.tx(() => {
+    if (liveSync(op.ctx.sql)) return false;
+    op.ctx.sql.run(`INSERT INTO gonvex_cf_deleted_projects(project_id,deleted_at) VALUES($1,${NOW}) ON CONFLICT(project_id) DO NOTHING`, project);
+    then();
+    return true;
   });
 }
+const SYNC_IN_FLIGHT = "a /dev/sync is still running or publishing; delete the project after it finishes or is aborted";
 
 const deleteProject: Handler = async (op, request, _url, [project]) => {
   await op.auth.authorizeProject(request.headers, "projects:delete", project!, true, "project owner or admin access is required");
@@ -499,17 +511,13 @@ const deleteProject: Handler = async (op, request, _url, [project]) => {
     // the orphaned release. With no project row and no active release the project is simply unknown.
     if (op.ctx.sql.value("SELECT 1 FROM gonvex_runtime_projects WHERE id=$1", project) !== undefined
       || op.ctx.sql.value("SELECT 1 FROM gonvex_cf_active_releases WHERE project_id=$1", project) === undefined) return error(422, dbError.projectNotFound(project!));
-    if (op.ctx.sql.value("SELECT 1 FROM gonvex_cf_syncs WHERE project_id=$1 AND state IN('running','publishing')", project) !== undefined)
-      return error(409, "a /dev/sync of this project is still running; finish or abort its publication first");
-    retireProjectRelease(op, project!);
+    if (!tombstoneProject(op, project!, () => retireProjectRelease(op, project!))) return error(409, SYNC_IN_FLIGHT);
     return json({ ok: true, retiredOrphanRelease: true });
   }
   if (!bool(row.runtime_created)) return error(422, dbError.protocol("only runtime-created projects may be deleted through this operation"));
   // A publication still in flight would re-activate the project's release after it is retired below.
-  if (op.ctx.sql.value("SELECT 1 FROM gonvex_cf_syncs WHERE project_id=$1 AND state IN('running','publishing')", project) !== undefined)
-    return error(409, "a /dev/sync of this project is still running; finish or abort its publication first");
+  if (!tombstoneProject(op, project!, () => op.ctx.sql.run(`UPDATE gonvex_runtime_projects SET status='deleting',updated_at=${NOW} WHERE id=$1`, project))) return error(409, SYNC_IN_FLIGHT);
   const tenants = op.ctx.sql.all("SELECT tenant_id FROM gonvex_runtime_tenants WHERE project_id=$1 AND runtime_created=1 AND database_url<>''", project).map((t) => str(t.tenant_id));
-  op.ctx.sql.tx(() => op.ctx.sql.run(`UPDATE gonvex_runtime_projects SET status='deleting',updated_at=${NOW} WHERE id=$1`, project));
   for (const tenant of tenants) await op.deleteTenantStorage(tenant);
   op.ctx.sql.tx(() => {
     op.ctx.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'", project);
