@@ -160,8 +160,9 @@ export default {
     await ctx.step('100 pending sockets per address, both transports', async () => {
       const address = nextAddress();
       const anonymous = await opened(address, { public: true });
-      const sockets = [anonymous];
-      for (let i = 0; i < 99; i++) sockets.push(await opened(address));
+      // All 100 pending at once, as the limit is about: opened one by one, a remote backend's upgrade latency
+      // let the first sockets reach the 10 s pending-auth deadline (1008) and free their slots before the 101st.
+      const sockets = [anonymous, ...await Promise.all(Array.from({ length: 99 }, () => opened(address)))];
       const refused = await open(wsUrl, address);
       ctx.observe('socket101', refused.refused ?? 'admitted');
       const refusedPublic = await open(wsUrl, address, { public: true });
