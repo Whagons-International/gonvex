@@ -1,10 +1,10 @@
 # 0089: a runaway Reducer on the assembled kernel (`reducer-errors`, `errors.spin`)
 
 Raised by X09 on 2026-11-17. **Status: adapt accepted by lead 2026-11-18 (conditional on measurement).**
-**Measured 2026-11-18: the condition is not met.** Legitimate tenant events in the runtime script need more than
-5 s of CPU (see "Measurement" below). The runtime `cpu_ms` therefore stays 30000, pinned by a deploy guard. 5000
-waits on the chunking work listed under "Path to 5000". The conformance assertion, fixture and 15 s wait are
-unchanged, and `reducer-errors` keeps failing on the kernel until then.
+**Condition met 2026-11-18 (X10c): the runtime `cpu_ms` is 5000**, pinned by the same deploy guard. The first
+measurement failed it (migration alarms up to 10.6 s, imports up to 5.0 s; below). After X10 (#471) and X10b (#492),
+re-measured on dev on a fresh import of the largest copy, the worst legitimate tenant event is 1,836 ms (see
+"Re-measurement"). The conformance assertion, fixture and 15 s wait are unchanged.
 
 ## Observation
 
@@ -84,11 +84,29 @@ limit, and one already took 5,006 ms.
   value would be **16,000** (66 %). It brings no conformance benefit, though: the reset arrives 3–6 s after the CPU
   limit (R25), so about 19–22 s wall, still past the 15 s harness wait. With nothing to gain, 30000 stays until
   the chunking lands. Lowering it to 16,000 only shortens the blast window. That is the lead's call.
-- **Path to 5000 (owner K02/K22):** the migration alarm must stop at a CPU budget per chunk on imported data, as
+- **Path to 5000 (owner K02/K22), done in X10/X10b:** the migration alarm must stop at a CPU budget per chunk on imported data, as
   0022 §5b and 0027 already require, and so must P03 `insert`/`checksum`/`check` pages, either with smaller pages
   or with a resumable operation. 5000 also needs every legitimate event at ≤ 3.5 s, so re-measure the same table
   after those fixes. Then set `TENANT_CPU_LIMIT_MS` to 5000. Expected result from R25: `errors.spin` answers in
   about 8 s with Rust's deadline error, inside the 15 s wait.
+
+## Re-measurement (2026-11-18, runtime e785f303 with #471 and #492)
+
+`devcopy-stg1117-12z`, a fresh copy of the largest staging tenant (115,547 rows, 381 tables, the -12 snapshot),
+imported, registered (migration alarms) and deleted under the dev lane lock, 17:03:53Z–17:05:37Z, gate variables off
+afterwards; all six P03 checksum legs matched. Workers Logs, events view, unsampled, that object:
+
+| Invocation | n | max CPU | max wall |
+|---|---|---|---|
+| `alarm` (the first after registration is the largest) | 24 | **1,836 ms** | 2,434 ms |
+| `assemblyTransfer` (P03 import pages) | 103 | **1,554 ms** | 1,634 ms |
+| `operatorMigrationStatus` / `operatorDeleteAll` / `operatorApplyRelease` | 1 each | 377 / 220 / 29 ms | |
+
+Before: the same alarm was 3,609 ms on #471 alone (`devcopy-stg1117-12x`) and 6,003 ms before X10; imports 5,006 ms.
+Runtime events above 3 s over the 24 h before 17:10Z are only those pre-fix alarms and imports and the conformance
+`errors.spin` runaways (`exceededCpu`). Every legitimate event is under 3.5 s (70 % of 5000), so 5000 is set. Expected
+from R25: `errors.spin` answers with the deadline error after about 5–8 s, inside the harness's 15 s wait; the
+caller mapping (`recordOverrun`) is unchanged, and the next operator call after the reset recovers (#492).
 
 ## What remains different from Rust (proposal: adapt)
 
