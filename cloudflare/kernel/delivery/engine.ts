@@ -342,16 +342,31 @@ export class ReplicaDeliveryEngine {
 
   /** Called while the assembled tenant still owns the snapshot's invocation turn. */
   queryReply(socket: SocketView, replies: readonly string[]): void {
-    if (!socket.tenant) return;
+    const reply = this.queryWork(socket, replies);
+    if (reply) this.post(reply.connection, reply.work);
+  }
+
+  /**
+   * BUG-10: a live query's initial reply waits for room on its holder's channel, as snapshot pages do
+   * (`postWhenRoom`), instead of being refused there. During a fresh session's initial burst the channel is full;
+   * a refused reply reset the whole holder `change-feed-lagged` (every replica of the socket, 81 on -12).
+   */
+  private queryReplyWhenRoom(socket: SocketView, replies: readonly string[]): Promise<void> {
+    const reply = this.queryWork(socket, replies);
+    return reply ? this.postWhenRoom(reply.connection, reply.work) : Promise.resolve();
+  }
+
+  private queryWork(socket: SocketView, replies: readonly string[]): { connection: Connection; work: SocketWork } | undefined {
+    if (!socket.tenant) return undefined;
     const connection = this.connection(socket, socket.tenant);
-    if (!connection) return;
+    if (!connection) return undefined;
     const computed = this.options.live?.computedRevisions(connection.id) ?? [];
     const initial = socket.initialRequests?.find(ref => ref.kind === "query" && ref.epoch === connection.epoch);
     const ops = replies.map((text): SocketOp => ["f", text]);
     const initialCompletions = initial ? ops.flatMap((op, index) => { const c = initialCompletion(initial, op, index); return c ? [c] : []; }) : [];
     // BUG-4: a deferred holder's watermark comes with its catch-up, never ahead of the replica commits it owes.
     const certify = computed.length && initialCompletions.some(c=>c.outcome==="accepted") && !this.behind.has(connection.host);
-    this.post(connection, { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(certify ? { watermark: Math.min(...computed) } : {}) });
+    return { connection, work: { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(certify ? { watermark: Math.min(...computed) } : {}) } };
   }
 
   /** Initial LQ snapshots and their enqueue share the reducer/commit serialization turn. */
@@ -375,7 +390,7 @@ export class ReplicaDeliveryEngine {
       }
       const replies = await this.options.read((db) => [snapshot(db)]);
       if (recovery) return replies;
-      this.queryReply(socket, replies);
+      await this.queryReplyWhenRoom(socket, replies);
       return [];
     })();
   }

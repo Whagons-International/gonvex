@@ -916,6 +916,49 @@ describe("BUG-4 a large tenant's first load converges under ordinary commits", (
   });
 });
 
+describe("BUG-10 a live query's initial reply waits for room on a full channel", () => {
+  // -12 on 6e76ce42, 09:08:52 Z: a fresh session's live-query reply met a full holder channel; `queryReply` posted it
+  // without waiting, the outlet refused it (DeliveryCapacityError) and the whole holder was reset change-feed-lagged:
+  // 81 replicas, templates.list and priorities.list among them, so the create dialog showed no templates.
+  it("holds the reply until the in-flight payload completes, then sends it; no reset", { timeout: 120_000 }, async () => {
+    let recoveries = 0, hold = false;
+    const held: Array<() => void> = [];
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 4_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 1500)]]);
+      for (let i = 0; i < insert.length; i += 1000) await h.commit(insert.slice(i, i + 1000));
+      h.receiver.deliver = async (_host, payload) => {
+        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        if (hold) await new Promise<void>((resolve) => held.push(resolve));
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      h.engine.dispatch(socket("S1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "S1").some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // A commit's delta (400 rows) is in flight on h1 and stays there.
+      hold = true;
+      await h.commit([["UPDATE items SET label = 'busy-' || label WHERE rank < 400", []]], false);
+      for (let spin = 0; spin < 2000 && !held.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(held.length).toBe(1);
+      // A live query on the same holder: its initial result (every row, over the holder's budget) can go only alone.
+      const view = { ...socket("Q"), queryId: "live" };
+      const subscribed = h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }));
+      for (let i = 0; i < 40; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(recoveries).toBe(0);
+      expect(frames(h.payloads, "Q")).toEqual([]);
+      hold = false;
+      held.splice(0).forEach((release) => release());
+      expect(await subscribed).toEqual([]);
+      await h.engine.settled();
+      const replies = frames(h.payloads, "Q").filter((f) => f.type === "query.result");
+      expect(replies.map((f) => [f.reason, f.result.length])).toEqual([["initial", 4_000]]);
+      expect(recoveries).toBe(0);
+      expect(frames(h.payloads, "S1").filter((f) => f.type === "replica.reset")).toEqual([]);
+      expect(h.conflicts).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
+  });
+});
+
 describe("BUG-8 apiKeys.list visibility is the Member's direct permission grant, as in Rust", () => {
   // whagons5-client 678bdc80 gonvex/apiKeys.ts: `apiKeys.create` (Action) -> `apiKeys.createRecord` (Reducer) authorizes
   // through the Member's roles (hasSettingsPermission), but `apiKeysVisibility` admits rows with
