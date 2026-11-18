@@ -82,6 +82,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       sql.run("CREATE TABLE tasks (id TEXT PRIMARY KEY, state TEXT)");
       sql.run("CREATE TABLE tnotes (id TEXT PRIMARY KEY, task_id TEXT, body TEXT)");
       sql.run("CREATE INDEX tnotes_task ON tnotes (task_id)");
+      sql.run("CREATE TABLE apiKeys (_id TEXT PRIMARY KEY, _creationTime REAL, name TEXT, keyHash TEXT, keyHint TEXT, scopes JSON, isActive INTEGER, lastUsedAt REAL, expiresAt REAL, revokedAt REAL, createdByUserId TEXT)");
       installChangeFeed(sql);
       sql.run("INSERT INTO members VALUES ('m-alice', 'acct-alice', 'active', 'admin', '{}')");
     });
@@ -883,5 +884,63 @@ describe("BUG-4 a large tenant's first load converges under ordinary commits", (
     expect(recoveries).toBeGreaterThanOrEqual(1);
     expect(recoveries).toBeLessThanOrEqual(2);
     expect(ready).toBe(4);
+  });
+});
+
+describe("BUG-8 apiKeys.list visibility is the Member's direct permission grant, as in Rust", () => {
+  // whagons5-client 678bdc80 gonvex/apiKeys.ts: `apiKeys.create` (Action) -> `apiKeys.createRecord` (Reducer) authorizes
+  // through the Member's roles (hasSettingsPermission), but `apiKeysVisibility` admits rows with
+  // `{operator: "permission", value: "config.integrations"}`, which both runtimes evaluate against the Member's direct
+  // `members.permissions` JSON only (Rust visibility.rs `resolve_principal` / visibility_class.rs BitAtom::Permission;
+  // the SQL form reads `json_each(_gonvex_member.permissions)`). The walkthrough admin came from
+  // `/dev/internal/e2e/members` (Rust lib.rs:1301-1326, kernel reducer/object.ts), which seeds role admin with
+  // permissions {"e2e":true}: its keys are stored and, on either backend, never visible to it.
+  const APP: ReplicaModule = {
+    ...MODULE,
+    functions: new Map([["apiKeys.list", { path: "apiKeys.list", kind: "query", delivery: "replica", replica: parseDefinition({
+      table: "apiKeys", key: "_id",
+      columns: ["_id", "_creationTime", "name", "keyHint", "scopes", "isActive", "lastUsedAt", "expiresAt", "revokedAt", "createdByUserId"],
+      excludeWhenSet: ["revokedAt"], orderBy: "_creationTime", orderDirection: "desc", mode: "eager", maxRows: 10000, maxBytes: 33554432,
+    }) }]]),
+    visibility: new Map([["apiKeys", parsePlan({
+      table: "apiKeys", key: "_id", sets: {}, where: { operator: "permission", value: "config.integrations" }, version: 2,
+      permissionTables: ["teams", "memberTeams", "workspaceTeams", "memberSpots", "spots", "members", "globalSettings", "workspaces", "personalWorkspaceMembers", "plugins", "permissions", "roles", "rolePermissions", "conversationParticipants", "boardMembers", "workspaceViewShares", "workbenchShares", "marketMembers", "templates", "categories", "formPublicLinks"],
+    })]]),
+  };
+  // The row `apiKeys.createRecord` inserts (no revokedAt, isActive true, createdByUserId = the creator's Member id).
+  const insertKey = (id: string, at: number): [string, unknown[]] =>
+    ["INSERT INTO apiKeys (_id, _creationTime, name, keyHash, keyHint, scopes, isActive, createdByUserId) VALUES ($1, $2, $3, 'h', 'abcd', '[\"ext:read\",\"ext:tasks:write\"]', 1, 'm-alice')", [id, at, `key ${id}`]];
+  const open = (engine: ReplicaDeliveryEngine, id: string) =>
+    engine.dispatch(socket("s1"), { type: "replica.open", id, path: "apiKeys.list", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+  const rowsOf = (payloads: Array<[string, ReplicaDelivery]>) => frames(payloads, "s1").filter((f) => f.type === "replica.snapshotPage").flatMap((p) => p.result);
+
+  it("an admin seeded with {\"e2e\":true} sees none of its own keys; a direct config.integrations grant shows them, newest first", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      await commit([["UPDATE members SET role = 'admin', permissions = '{\"e2e\":true}' WHERE id = 'm-alice'", []]]);
+      await commit([insertKey("k1", 1000)]);
+      open(engine, "hidden");
+      await engine.settled();
+      const hidden = frames(payloads, "s1");
+      expect(hidden.find((f) => f.type === "replica.ready")).toBeDefined();
+      expect(rowsOf(payloads)).toEqual([]);
+      engine.dispatch(socket("s1"), { type: "replica.close", id: "hidden" });
+      await engine.settled();
+
+      await commit([["UPDATE members SET permissions = '{\"e2e\":true,\"config.integrations\":true}' WHERE id = 'm-alice'", []]]);
+      payloads.length = 0;
+      open(engine, "granted");
+      await engine.settled();
+      expect(rowsOf(payloads).map((r: { _id: string }) => r._id)).toEqual(["k1"]);
+      expect(rowsOf(payloads)[0]).toMatchObject({ isActive: 1, revokedAt: null, createdByUserId: "m-alice" });
+
+      // A key created while the list is open arrives as a delta; a revoked key leaves it (excludeWhenSet).
+      payloads.length = 0;
+      await commit([insertKey("k2", 2000)]);
+      expect(frames(payloads, "s1").map((f) => f.type)).toEqual(["replica.transaction", "replica.delta", "replica.ready"]);
+      payloads.length = 0;
+      await commit([["UPDATE apiKeys SET revokedAt = 3000, isActive = 0 WHERE _id = 'k1'", []]]);
+      const revoked = frames(payloads, "s1").find((f) => f.type === "replica.delta");
+      expect(JSON.stringify(revoked)).toContain("k1");
+    }, APP);
   });
 });
