@@ -13,7 +13,7 @@ import { parsePlan } from "../../visibility/plan.ts";
 import { ReplicaBatcher } from "../batcher.ts";
 import { Aggregate, stableJson } from "../canonical.ts";
 import { parseDefinition, type ReplicaModule } from "../definition.ts";
-import { ReplicaDeliveryEngine } from "../engine.ts";
+import { ReplicaDeliveryEngine, STALL_TICKS, type DeliveryClock } from "../engine.ts";
 import { LocalOutlet } from "../outlet.ts";
 import type { ReplicaDelivery, ReplicaReceipt } from "../protocol.ts";
 import type { ScopedSocketWork } from "../recovery.ts";
@@ -70,7 +70,7 @@ interface Harness {
   commit(statements: Array<[string, unknown[]]>, settle?: boolean): Promise<number>;
 }
 
-async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void, stallMs?: number, hosts: string[] = ["h1"]): Promise<T> {
+async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void, stallMs?: number, hosts: string[] = ["h1"], clock?: DeliveryClock): Promise<T> {
   const stub = env.HELLO.getByName(`k10-${++objects}-${Math.random()}`);
   return runInDurableObject(stub, async (_instance, state) => {
     const sql = directSql(state.storage.sql);
@@ -125,6 +125,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       outlet: new LocalOutlet(receive, () => hosts, undefined, receive),
       ...(activity ? { activity } : {}),
       ...(stallMs !== undefined ? { stallMs } : {}),
+      ...(clock ? { clock } : {}),
     });
     let commands = 0;
     return body({
@@ -880,7 +881,7 @@ describe("BUG-4 a large tenant's first load converges under ordinary commits", (
   });
 
   it("still resets a holder that stops making progress, after the stall bound, and then converges", { timeout: 120_000 }, async () => {
-    const { recoveries, ready } = await load(2_000, 4, { hold: 400, stallMs: 50 });
+    const { recoveries, ready } = await load(2_000, 4, { hold: 5_000, stallMs: 50 });
     expect(recoveries).toBeGreaterThanOrEqual(1);
     expect(recoveries).toBeLessThanOrEqual(2);
     expect(ready).toBe(4);
@@ -977,42 +978,112 @@ describe("BUG-4b one large commit is delivered, never reset lagged", () => {
     return { recoveries, delivered: deltas.size };
   };
 
-  it("a commit over the budget waits for no stall reset while another holder keeps the isolate's credits busy", { timeout: 120_000 }, async () => {
-    // Holder h1 holds every row; h2 holds two rows and keeps receiving small commits over a slow hop, so the
-    // isolate's shared normal credits are never zero. The stall bound is shortened to 300 ms.
-    let recoveries = 0, bulkSeen = false, done = false;
+  /** Deferral timers on a clock the test advances; between timers the real event loop runs the engine's I/O. */
+  const manualClock = () => {
+    let now = 0, next = 0;
+    const timers = new Map<number, { at: number; fn: () => void }>();
+    const turn = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
+    return {
+      clock: {
+        now: () => now,
+        setTimeout: (fn: () => void, ms: number) => { timers.set(++next, { at: now + ms, fn }); return next; },
+        clearTimeout: (handle: unknown) => { timers.delete(handle as number); },
+      } satisfies DeliveryClock,
+      /** Runs every timer due within `ms`, in order, letting the engine's work settle after each. */
+      async advance(ms: number) {
+        const end = now + ms;
+        await turn();
+        for (;;) {
+          const due = [...timers].filter(([, t]) => t.at <= end).sort((x, y) => x[1].at - y[1].at || x[0] - y[0])[0];
+          if (!due) break;
+          timers.delete(due[0]);
+          now = Math.max(now, due[1].at);
+          due[1].fn();
+          await turn();
+        }
+        now = end;
+        await turn();
+      },
+    };
+  };
+
+  it("a commit over the budget is never reset while another holder keeps the isolate busy; only a stalled holder is (explicit ticks)", { timeout: 120_000 }, async () => {
+    // Holder h1 holds every row; h2 holds two rows over an RPC the test resolves by hand. Time moves only by
+    // `advance`: the outcome depends on stall ticks, not on how fast this machine builds the bulk payload.
+    const STALL = 30_000, TICK = STALL / STALL_TICKS;
+    const { clock, advance } = manualClock();
+    let recoveries = 0;
+    const recovered: string[] = [];
+    let holdH2 = false;
+    const heldH2: Array<() => void> = [];
+    const bulkTo = new Set<string>();
     await withEngine(async (h) => {
       const insert: Array<[string, unknown[]]> = [];
-      for (let i = 0; i < 12_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+      for (let i = 0; i < 6_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
       for (let i = 0; i < insert.length; i += 2500) await h.commit(insert.slice(i, i + 2500));
       h.receiver.deliver = async (host, payload) => {
-        await new Promise((resolve) => setTimeout(resolve, host === "h2" ? 40 : 2));
-        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
-        if ((payload.sockets.S1?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && (op[1] as string).includes("reassigned i011999"))) bulkSeen = true;
+        if (host === "h2" && holdH2 && !payload.recovery) await new Promise<void>((resolve) => heldH2.push(resolve));
+        if (payload.recovery) { recoveries += 1; recovered.push(host); return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        for (const [id, work] of Object.entries(payload.sockets)) {
+          if (work.ops.some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && ((op[1] as string).includes("bulk-") || (op[1] as string).includes("again-")))) bulkTo.add(id);
+        }
         return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
       };
       h.engine.dispatch(socket("S1", {}, "h1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
       h.engine.dispatch(socket("S2", {}, "h2"), { type: "replica.open", id: "top", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false });
       const ready = () => new Set(h.payloads.flatMap(([, p]) => Object.entries(p.sockets).filter(([, w]) => w.ops.some((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"'))).map(([id]) => id)));
-      for (let spin = 0; spin < 4000 && ready().size < 2; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
-      await h.engine.settled();
-      let n = 0;
-      const writer = (async () => { while (!done) { await h.commit([[`UPDATE items SET label = 'w${++n}' WHERE id = 'i000000'`, []]], false); await new Promise((resolve) => setTimeout(resolve, 5)); } })();
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await h.commit([["UPDATE items SET label = 'reassigned ' || id WHERE id <> 'i000000'", []]], false);
-      for (let spin = 0; spin < 600 && !bulkSeen && !recoveries; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
-      done = true;
-      await writer;
-      await h.engine.settled();
+      for (let step = 0; step < 200 && ready().size < 2; step++) { await advance(TICK); await h.engine.settled(); }
+      expect(ready().size).toBe(2);
+
+      // 1. h2's RPC is in flight and stays there: the isolate's normal credits are not zero.
+      holdH2 = true;
+      await h.commit([["UPDATE items SET label = 'w1' WHERE id = 'i000000'", []]], false);
+      for (let step = 0; step < 50 && !heldH2.length; step++) await advance(1);
+      expect(heldH2.length).toBe(1);
+      // 2. The bulk reassign: h1's payload is over the budget and can go only alone; h1's own channel is empty.
+      await h.commit([["UPDATE items SET label = 'bulk-' || id WHERE id <> 'i000000'", []]], false);
+      // 3. Just under the stall bound with h2 still in flight: nothing is reset, nothing over the budget went.
+      for (let tick = 0; tick < STALL_TICKS - 2; tick++) await advance(TICK);
+      expect({ recoveries, bulk: [...bulkTo] }).toEqual({ recoveries: 0, bulk: [] });
+      // 4. h2 makes progress: its RPC completes. The isolate drains, h1's large payload goes, then h2's catch-up.
+      holdH2 = false;
+      heldH2.splice(0).forEach((release) => release());
+      for (let tick = 0; tick < 4 * STALL_TICKS && bulkTo.size < 2; tick++) await advance(TICK);
+      for (let tick = 0; tick < 2 * STALL_TICKS; tick++) await advance(TICK); // well past the bound: still nothing
+      expect({ recoveries, bulk: [...bulkTo].sort() }).toEqual({ recoveries: 0, bulk: ["S1", "S2"] });
+
+      // 5. A holder that really stops: h2's next RPC never completes. Exactly the stall bound in ticks resets it, and
+      //    only it. (h2 is deferred behind h1's next large payload's claim, so its stall is watched.)
+      const deferred = () => (h.engine as unknown as { behind: Map<string, unknown> }).behind.size;
+      for (let tick = 0; tick < 4 * STALL_TICKS && deferred(); tick++) await advance(TICK);
+      expect(deferred()).toBe(0);
+      holdH2 = true;
+      await h.commit([["UPDATE items SET label = 'w2' WHERE id = 'i000000'", []]], false);
+      for (let step = 0; step < 50 && !heldH2.length; step++) await advance(1);
+      await h.commit([["UPDATE items SET label = 'again-' || id WHERE id <> 'i000000'", []]], false);
+      const resetsBefore = h.engine.stats.resets;
+      for (let tick = 0; tick < STALL_TICKS - 2; tick++) await advance(TICK);
+      expect(h.engine.stats.resets).toBe(resetsBefore);
+      for (let tick = 0; tick < 4; tick++) await advance(TICK);
+      // The engine reset h2 at the bound; its barrier waits on h2's channel behind the stuck RPC (as a stalled
+      // socket's close would), so the holder sees it once that RPC returns.
+      expect(h.engine.stats.resets).toBeGreaterThan(resetsBefore);
+      expect(recovered).toEqual([]);
+      // h2 resumes (its stuck RPC completes): the isolate drains and h1's large payload goes; h1 was never reset.
+      bulkTo.clear();
+      holdH2 = false;
+      heldH2.splice(0).forEach((release) => release());
+      for (let tick = 0; tick < 4 * STALL_TICKS && !bulkTo.has("S1"); tick++) await advance(TICK);
+      expect(bulkTo.has("S1")).toBe(true);
+      expect(recovered).toEqual(["h2"]); // only the stalled holder
       expect(h.conflicts).toEqual([]);
-    }, MODULE, false, undefined, 300, ["h1", "h2"]);
-    expect({ recoveries, bulkSeen }).toEqual({ recoveries: 0, bulkSeen: true });
+    }, MODULE, false, undefined, STALL, ["h1", "h2"], clock);
   });
 
   it("one holder", { timeout: 120_000 }, async () => {
-    expect(await bulk(12_000, ["h1"], 2)).toEqual({ recoveries: 0, delivered: 1 });
+    expect(await bulk(6_000, ["h1"], 2)).toEqual({ recoveries: 0, delivered: 1 });
   });
   it("three holders sharing the isolate's credits", { timeout: 120_000 }, async () => {
-    expect(await bulk(12_000, ["h1", "h2", "h3"], 20)).toEqual({ recoveries: 0, delivered: 3 });
+    expect(await bulk(6_000, ["h1", "h2", "h3"], 20)).toEqual({ recoveries: 0, delivered: 3 });
   });
 });

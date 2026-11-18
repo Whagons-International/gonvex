@@ -121,8 +121,10 @@ export interface DeliveryOutlet {
   backlogged?(host: string): boolean;
   /** BUG-4: whether `send` would accept `payload` now, without queueing it or tripping recovery. */
   admits?(host: string, payload: ReplicaDelivery): boolean;
-  /** BUG-4b: how long the holder's channel has had work without progress (0 with none): what "stalled" means. */
-  stalledFor?(host: string): number;
+  /** BUG-4b: RPCs this holder's channel has completed (a counter): the stall rule watches it from tick to tick. */
+  progress?(host: string): number;
+  /** BUG-4b: the holder no longer waits for room; any isolate claim it holds for a large payload ends. */
+  unclaim?(host: string): void;
   /** X01: same ordered channel, constant-size recovery reserve; an ordinary receipt is never an ack. */
   reset?(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
   /** Drops what is queued for `host` (lag), keeping order for what comes next. */
@@ -170,7 +172,27 @@ export interface DeliveryOptions {
   readonly activity?: () => void;
   /** BUG-4: `HOLDER_STALL_MS` (tests shorten it). */
   readonly stallMs?: number;
+  /** BUG-4b: the timers of the deferral (stall ticks, room backoff); tests drive them explicitly. */
+  readonly clock?: DeliveryClock;
 }
+
+export interface DeliveryClock {
+  now(): number;
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+const systemClock: DeliveryClock = {
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+/**
+ * BUG-4b: a holder is stalled after this many consecutive stall ticks (one every `HOLDER_STALL_MS / STALL_TICKS`)
+ * that each found work on its channel and no RPC completed since the tick before. Counted in ticks, not elapsed
+ * time: an isolate busy with its own work (a large commit's payload) delays the ticks too, so it cannot make a
+ * moving holder look stalled.
+ */
+export const STALL_TICKS = 30;
 
 export interface DeliveryStats {
   opens: number;
@@ -195,7 +217,7 @@ interface HostBarrier { pending: boolean; retryAt: number; catchup: boolean; owe
  * change log until its channel has room. `outbox` holds payloads waiting for admission, in order: an open's last work
  * that did not fit, then catch-up chunks.
  */
-interface Deferred { from: number; since: number; outbox: Array<{ payload: ReplicaDelivery; revision: number }>; waiting: boolean; attempts: number; timer?: ReturnType<typeof setTimeout> }
+interface Deferred { from: number; outbox: Array<{ payload: ReplicaDelivery; revision: number }>; waiting: boolean; attempts: number; ticks: number; seen: number; tick?: unknown }
 interface DeferredQuery { readonly socket: SocketView; readonly id: string; readonly snapshot: (db: StorageSession) => string }
 
 /** FNV-1a 64 of path and arguments: the stream identity (any per-socket-unique token works, A.4 row 2). */
@@ -549,6 +571,7 @@ export class ReplicaDeliveryEngine {
   // ---- BUG-4: per-holder deferral -------------------------------------------------------
 
   private stallMs(): number { return this.options.stallMs ?? HOLDER_STALL_MS; }
+  private get clock(): DeliveryClock { return this.options.clock ?? systemClock; }
 
   /** Whether `host` can take more now: not backlogged, and its next deferred open work fits. */
   private hasRoom(host: string, deferred?: Deferred): boolean {
@@ -566,38 +589,34 @@ export class ReplicaDeliveryEngine {
   private defer(host: string, from: number): Deferred {
     let deferred = this.behind.get(host);
     if (!deferred) {
-      deferred = { from, since: 0, outbox: [], waiting: false, attempts: 0 };
+      deferred = { from, outbox: [], waiting: false, attempts: 0, ticks: 0, seen: this.options.outlet.progress?.(host) ?? 0 };
       this.behind.set(host, deferred);
-      this.progressed(deferred);
+      this.scheduleTick(host, deferred);
     }
     this.awaitRoom(host, deferred);
     return deferred;
   }
 
-  /** The holder accepted something: the stall bound starts again (and wakes the loop if it passes). */
-  private progressed(deferred: Deferred): void {
-    deferred.since = Date.now();
-    clearTimeout(deferred.timer);
-    deferred.timer = setTimeout(() => this.kick(), this.stallMs());
+  /** One stall tick: count it if the holder's channel has work and completed nothing since the last one. */
+  private scheduleTick(host: string, deferred: Deferred): void {
+    deferred.tick = this.clock.setTimeout(() => {
+      if (this.behind.get(host) !== deferred) return;
+      const outlet = this.options.outlet;
+      const progress = outlet.progress?.(host) ?? deferred.seen;
+      if (outlet.queued(host) > 0 && progress === deferred.seen) deferred.ticks += 1;
+      else { deferred.ticks = 0; deferred.seen = progress; }
+      if (this.stalled(host, deferred)) this.kick();
+      this.scheduleTick(host, deferred);
+    }, Math.max(1, this.stallMs() / STALL_TICKS));
   }
 
   /**
-   * BUG-4b: stalled means the holder's own channel has had work and made no progress for `HOLDER_STALL_MS`, as Rust's
-   * send-stall timeout. Waiting for room while its channel is empty (the isolate's credits are busy elsewhere) is not
-   * a stall: that holder is never reset.
+   * BUG-4b: stalled means the holder's own channel had work and completed no RPC for `STALL_TICKS` ticks in a row
+   * (`HOLDER_STALL_MS`), as Rust's send-stall timeout. Waiting for room with an empty channel (the isolate's credits
+   * are busy elsewhere) is never a stall, and neither is time this isolate spent on its own work.
    */
-  private stalled(host: string, deferred: Deferred): boolean {
-    const outlet = this.options.outlet;
-    return outlet.stalledFor ? outlet.stalledFor(host) >= this.stallMs() : Date.now() - deferred.since >= this.stallMs();
-  }
-
-  /** Wakes the loop when the holder's channel would reach the stall bound (none while it has nothing in flight). */
-  private armStall(host: string, deferred: Deferred): void {
-    const stalledFor = this.options.outlet.stalledFor;
-    if (!stalledFor) return;
-    clearTimeout(deferred.timer);
-    delete deferred.timer;
-    if (this.options.outlet.queued(host) > 0) deferred.timer = setTimeout(() => this.kick(), Math.max(0, this.stallMs() - stalledFor.call(this.options.outlet, host)) + 1);
+  private stalled(_host: string, deferred: Deferred): boolean {
+    return deferred.ticks >= STALL_TICKS;
   }
 
   /** Its next waiting payload fits, or (none waiting) it has room for the next catch-up chunk. */
@@ -608,8 +627,9 @@ export class ReplicaDeliveryEngine {
   private undefer(host: string): void {
     const deferred = this.behind.get(host);
     if (!deferred) return;
-    clearTimeout(deferred.timer);
+    this.clock.clearTimeout(deferred.tick);
     this.behind.delete(host);
+    this.options.outlet.unclaim?.(host);
   }
 
   /** One wake when the holder drains (or, its queue being empty, when isolate credits are released). */
@@ -618,7 +638,7 @@ export class ReplicaDeliveryEngine {
     deferred.waiting = true;
     const outlet = this.options.outlet;
     const signal = outlet.queued(host) > 0 ? (deferred.attempts = 0, outlet.idle(host))
-      : new Promise<void>((resolve) => setTimeout(resolve, backoff(deferred.attempts++)));
+      : new Promise<void>((resolve) => this.clock.setTimeout(resolve, backoff(deferred.attempts++)));
     void signal.then(() => {
       deferred.waiting = false;
       if (this.behind.get(host) === deferred) this.kick();
@@ -630,7 +650,6 @@ export class ReplicaDeliveryEngine {
     for (const [host, deferred] of this.behind) {
       if (this.paused(host)) { this.undefer(host); continue; }
       if (this.ready(host, deferred) || this.stalled(host, deferred)) return host;
-      this.armStall(host, deferred);
       this.awaitRoom(host, deferred);
     }
     return undefined;
@@ -658,7 +677,6 @@ export class ReplicaDeliveryEngine {
         const { payload, revision } = deferred.outbox.shift()!;
         void this.sendOne(host, payload, revision);
       }
-      this.progressed(deferred);
       if (deferred.outbox.length) this.awaitRoom(host, deferred);
       return;
     }
@@ -686,7 +704,6 @@ export class ReplicaDeliveryEngine {
     if (!chunk) { this.undefer(host); this.requestRecovery(host); return; }
     deferred.from = chunk.to;
     for (const [, payload, revision] of chunk.payloads) this.queueDeferred(deferred, payload, revision);
-    this.progressed(deferred);
   }
 
   /** Appends `payload` to a deferred holder's outbox in parts under the RPC cap; the revision rides the last part. */
@@ -707,13 +724,13 @@ export class ReplicaDeliveryEngine {
     const outlet = this.options.outlet;
     if (outlet.admits) {
       const payload = this.socketPayload(connection, work);
-      const deadline = Date.now() + this.stallMs();
-      for (let left = deadline - Date.now(), attempt = 0; left > 0 && !this.paused(connection.host) && !outlet.admits(connection.host, payload); left = deadline - Date.now()) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
+      const clock = this.clock, deadline = clock.now() + this.stallMs();
+      for (let left = deadline - clock.now(), attempt = 0; left > 0 && !this.paused(connection.host) && !outlet.admits(connection.host, payload); left = deadline - clock.now()) {
+        let timer: unknown;
         const queued = outlet.queued(connection.host) > 0;
-        const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, queued ? left : Math.min(backoff(attempt++), left)); });
+        const bound = new Promise<void>((resolve) => { timer = clock.setTimeout(resolve, queued ? left : Math.min(backoff(attempt++), left)); });
         await (queued ? Promise.race([outlet.idle(connection.host), bound]) : bound);
-        clearTimeout(timer);
+        clock.clearTimeout(timer);
       }
     }
     this.post(connection, work);
