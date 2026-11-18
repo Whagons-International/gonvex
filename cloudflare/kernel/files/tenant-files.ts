@@ -25,7 +25,7 @@ export interface StoredObject {
   ownerId: string;
 }
 
-/** `POST /dev/internal/files/remap-tenant` (dev only, contract-changes/0090). */
+/** `POST /dev/internal/files/remap-tenant` (dev only, contract-changes/0091). */
 export interface FilesRemapResult {
   fromTenantId: string;
   tenantId: string;
@@ -263,7 +263,7 @@ export class TenantFiles {
     return { metadata: metadataOf(row), objectKey: row.object_key };
   }
 
-  // ---- dev tooling: P03 copies (contract-changes/0090) --------------------------------
+  // ---- dev tooling: P03 copies (contract-changes/0091) --------------------------------
 
   /**
    * DEV ONLY (the caller enforces the gate). Rewrites the `_gonvex_files` rows a

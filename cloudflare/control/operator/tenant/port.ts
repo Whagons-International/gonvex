@@ -107,7 +107,7 @@ export interface OperatorTenantPort {
   /** Revokes a member in a captured tenant transaction; `false` when no row matched. */
   operatorRevokeMember(memberId: string): Promise<PortResult<boolean>>;
 
-  // ------------------------------------------------ dev tooling (contract-changes/0090)
+  // ------------------------------------------------ dev tooling (contract-changes/0091)
   /**
    * DEV ONLY: rewrites the `_gonvex_files` rows a P03 copy carried over under
    * `fromTenantId` to this tenant (id, native object key, bucket). The tenant

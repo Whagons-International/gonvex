@@ -19,7 +19,7 @@ it('keeps transfer disabled without explicit dev target, exact fresh ID and corr
   expect((await handleTenantTransfer(request(tenant!, 'wipe',{},token),{...config,TENANT:env.TENANT}))?.status).toBe(404);
  }
 });
-it('shares one dev gate between /__tenant-transfer and the dev-only operator routes (contract-changes/0090)',()=>{
+it('shares one dev gate between /__tenant-transfer and the dev-only operator routes (contract-changes/0091)',()=>{
  const gate=(env:Record<string,string>)=>{const c=operatorConfig(env);return {target:c.devTransferTarget,tenants:c.devTransferTenants};};
  expect(devTransferAllowed(gate(config),'devcopy-test')).toBe(true);
  expect(devTransferAllowed(gate({}),'devcopy-test')).toBe(false);
@@ -57,7 +57,7 @@ it('imports through AssemblyTenant, checks exact storage classes, refuses incomp
   const read=await actual.operatorReadRows('board',{limit:10,offset:0,search:'',sort:'',direction:'',filters:'',columns:'',count:''});expect(read.ok).toBe(true);
   expect(state.storage.sql.exec("SELECT id,title,CAST(exact AS TEXT) exact,hex(bytes) bytes FROM board").one()).toEqual({id:'copied',title:'staging copy',exact:'9223372036854775806',bytes:'00FF'});
   expect((await transferIntoTenant(state,request('devcopy-test','wipe'),true)).status).toBe(409);
-  // X11b (contract-changes/0090): the dev file remap is admitted on this listed copy, for its own project only.
+  // X11b (contract-changes/0091): the dev file remap is admitted on this listed copy, for its own project only.
   // This composition configures no storage, so the admitted call stops at the files layer.
   expect(await actual.operatorRemapFiles('other-project','tenant_source',true)).toEqual({ok:false,status:409,error:'tenant does not belong to this project'});
   expect(await actual.operatorRemapFiles('p','tenant_source',true)).toEqual({ok:false,status:503,error:'storage is not configured'});

@@ -400,7 +400,7 @@ describe("IB1: a private file is refused to a non-owner on every route", () => {
   });
 });
 
-// X11b (contract-changes/0090): the dev-only remap of P03-copied file rows.
+// X11b (contract-changes/0091): the dev-only remap of P03-copied file rows.
 // The gate lives in the caller (AssemblyTenant and the operator route); this
 // is the rewrite itself on a real tenant object.
 describe("dev remap of P03-copied file rows (X11b)", () => {

@@ -53,7 +53,7 @@ export interface OperatorConfig {
 
 /**
  * The P03 dev-transfer gate, shared by `/__tenant-transfer` and the dev-only
- * operator routes (contract-changes/0090): a `gonvex-cf-dev-*` deployment, a
+ * operator routes (contract-changes/0091): a `gonvex-cf-dev-*` deployment, a
  * `devcopy-*` tenant name, and that exact name listed in
  * `GONVEX_DEV_TRANSFER_TENANTS`. Staging and production set neither variable.
  */

@@ -466,7 +466,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   operatorReplaceReferences(replacements: Record<string, string>, dryRun: boolean) { return this.kernel.reducers.serial(() => this.operator.replaceReferences(replacements, dryRun)); }
   async operatorActiveMembers() { return this.operator.activeMembers(); }
   operatorRevokeMember(id: string) { return this.kernel.reducers.serial(() => this.operator.revokeMember(id)); }
-  /** DEV ONLY (contract-changes/0090): the P03 dev-transfer gate is checked here too, on this object's own name. */
+  /** DEV ONLY (contract-changes/0091): the P03 dev-transfer gate is checked here too, on this object's own name. */
   operatorRemapFiles(projectId: string, fromTenantId: string, dryRun: boolean): Promise<PortResult<FilesRemapResult>> {
     const tenantId = this.ctx.id.name ?? "";
     if (!transferAllowed(this.env, tenantId)) return Promise.resolve({ ok: false, status: 404, error: "file remap is not available on this deployment" });
