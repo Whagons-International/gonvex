@@ -137,11 +137,12 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
       return c;
     },
     /** Raw frame socket (opened, not authenticated). `public: true` uses the `?public=1` transport. */
-    async raw(tag, { public: publicTransport = false, query } = {}) {
+    async raw(tag, { public: publicTransport = false, query, closeFrame = false } = {}) {
       // `query` (K21): extra URL parameters, e.g. the Go bridge's `?project=&tenant=`.
       const params = new URLSearchParams(query ?? {});
       if (publicTransport) params.set('public', '1');
-      const s = await new RawSocket(params.size ? `${backend.wsUrl}?${params}` : backend.wsUrl, tag, recorder).open();
+      // `closeFrame` (0092): record when the server's close frame arrives (RawSocket.whenCloseFrame).
+      const s = await new RawSocket(params.size ? `${backend.wsUrl}?${params}` : backend.wsUrl, tag, recorder, { closeFrame }).open();
       clients.push(s);
       return s;
     },
@@ -262,6 +263,8 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
     if (step.error) step.error = normalizeValue(aliases.mask(step.error), names);
     delete step.index;
   }
+  // Scenario-owned, step-scoped equivalences on normalized frames (each documented in contract-changes).
+  scenario.canonicalize?.(trace);
   trace.failures = trace.failures.map(f => normalizeValue(aliases.mask(f), names));
   return trace;
 }

@@ -148,11 +148,12 @@ export default {
     // Opened first, checked last: the deadline runs while the other steps do.
     let deadline, deadlineControl, deadlineSession, session;
     await ctx.step('three sockets start the 10 s auth deadline', async () => {
-      deadline = await opened('deadline');
-      deadlineControl = await opened('deadline-control');
+      // 0092: these sockets record when the server's close frame arrives; the deadline is measured on it.
+      deadline = await opened('deadline', { closeFrame: true });
+      deadlineControl = await opened('deadline-control', { closeFrame: true });
       deadlineControl.send({ type: 'auth', id: 'dc', controlOnly: true, project, clientContract: 1 });
       ctx.observe('controlOnly', (await deadlineControl.next({ id: 'dc' })).type);
-      deadlineSession = await opened('deadline-session');
+      deadlineSession = await opened('deadline-session', { closeFrame: true });
       session = await ctx.rawLogin(deadlineSession, 'alice');
       deadlineSession.send({ type: 'auth', id: 'ds', project, token: session.accessToken, tenant: ctx.tenants.a, clientContract: 1 });
       ctx.observe('session', (await deadlineSession.next({ id: 'ds' })).type);
@@ -234,7 +235,9 @@ export default {
     await ctx.step('the pending-auth deadline', async () => {
       const result = {};
       for (const [name, socket] of [['none', deadline], ['controlOnly', deadlineControl], ['session', deadlineSession]]) {
-        const event = await socket.whenClosed(Math.max(0, socket.openedAt + 13_000 - Date.now()));
+        // 0092: the server's close frame (code, reason, arrival), not the WHATWG close event, which waits for the
+        // connection teardown. Same deadline, tolerance and outcome text.
+        const event = await socket.whenCloseFrame(Math.max(0, socket.openedAt + 13_000 - Date.now()));
         result[name] = closeOutcome(event);
         if (event) ctx.expect(event.at - socket.openedAt >= 9_500 && event.at - socket.openedAt <= 12_500, `${name} closed after ${event.at - socket.openedAt} ms, expected about 10 s`);
       }
