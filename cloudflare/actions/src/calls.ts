@@ -220,21 +220,46 @@ export class ActionCalls {
   /** Starts a direct agent call. Large exact inputs are private binary chunks,
    * atomically published with the run; the inline representation stays readable. */
   async begin(input: { session: ActionSession; path: string; args: unknown; provenance?: unknown }): Promise<string> {
+    const id = this.insertRun(input, null);
+    await this.dispatchMany([{ id, dispatch_count: 0 }]);
+    await this.options.wake();
+    return id;
+  }
+
+  /**
+   * X13: starts a direct agent call that the caller runs inline, as Rust runs
+   * it on the socket loop (`execute_tenant_action`). The run is durable and
+   * already claimed by `owner` as attempt 1 in the same transaction, so no
+   * Workflow is created and no sweep hands it off while the lease holds. The
+   * caller renews and completes it like any runner; if the caller dies, the
+   * lease expires and the sweep hands the run to a Workflow (attempt 2).
+   */
+  async start(input: { session: ActionSession; path: string; args: unknown; provenance?: unknown }, owner: string): Promise<Extract<Claim, { ok: true }>> {
+    const id = this.insertRun(input, owner);
+    this.leases.set(id, this.clock() + this.leaseMs);
+    await this.options.wake();
+    return { v: 1, ok: true, id, attempt: 1, path: input.path, args: JSON.parse(JSON.stringify(input.args ?? null)), provenance: input.provenance == null ? null : JSON.stringify(input.provenance),
+      session: input.session, leaseMs: this.leaseMs, renewMs: this.renewMs };
+  }
+
+  /** Inserts a live run: pending (a hand-off follows) or claimed by `owner` as attempt 1. */
+  private insertRun(input: { session: ActionSession; path: string; args: unknown; provenance?: unknown }, owner: string | null): string {
     const id = `call-${this.randomUUID()}`;
     const value = { path:input.path, args:input.args??null, session:input.session, provenance:input.provenance??null };
     const text=JSON.stringify(value), bytes=new TextEncoder().encode(text);
     const chunked=bytes.byteLength>INLINE_INPUT_BYTES;
     this.options.storage.transactionSync(()=>{
-      this.exec(`INSERT INTO ${RUNS} (id, action_path, args, session, provenance, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        id,input.path,chunked?"null":JSON.stringify(value.args),chunked?null:JSON.stringify(value.session),chunked||value.provenance===null?null:JSON.stringify(value.provenance),this.clock());
+      const now=this.clock();
+      if(owner===null)this.exec(`INSERT INTO ${RUNS} (id, action_path, args, session, provenance, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        id,input.path,chunked?"null":JSON.stringify(value.args),chunked?null:JSON.stringify(value.session),chunked||value.provenance===null?null:JSON.stringify(value.provenance),now);
+      else this.exec(`INSERT INTO ${RUNS} (id, action_path, args, session, provenance, created_at, status, attempts, owner, locked_at) VALUES (?, ?, ?, ?, ?, ?, 'processing', 1, ?, ?)`,
+        id,input.path,chunked?"null":JSON.stringify(value.args),chunked?null:JSON.stringify(value.session),chunked||value.provenance===null?null:JSON.stringify(value.provenance),now,owner,now);
       if(chunked){
         const generation=crypto.randomUUID(),chunks=Math.ceil(bytes.byteLength/REPLY_CHUNK_BYTES);
         this.exec(`INSERT INTO ${INPUTS} (id,generation,bytes,chunks,hash) VALUES (?,?,?,?,?)`,id,generation,bytes.byteLength,chunks,sha256Hex(id+"\0"+generation+"\0"+text));
         for(let part=0;part<chunks;part++)this.exec(`INSERT INTO ${INPUT_CHUNKS} (id,generation,part,body) VALUES (?,?,?,?)`,id,generation,part,bytes.slice(part*REPLY_CHUNK_BYTES,(part+1)*REPLY_CHUNK_BYTES).buffer);
       }
     });
-    await this.dispatchMany([{ id, dispatch_count: 0 }]);
-    await this.options.wake();
     return id;
   }
 
@@ -329,7 +354,8 @@ export class ActionCalls {
     if (run?.state === "done") {
       // Preserve the original terminal duplicate receipt for every attempt.
       // Only the attempt that actually completed may retry its stored reply.
-      if (run.attempts === request.attempt) await this.deliverReply(run.id);
+      // An inline runner answers the socket itself; its stored reply stays the delayed backup.
+      if (run.attempts === request.attempt && request.inlineReply !== true) await this.deliverReply(run.id);
       return { v: 1, applied: false, duplicate: true, appliedAttempt: run.attempts };
     }
     if (!run || run.state !== "live" || run.status !== "processing" || run.attempts !== request.attempt) return { v: 1, applied: false, rejected: true };
@@ -344,19 +370,23 @@ export class ActionCalls {
          WHERE id = ? AND state = 'live' AND status = 'processing' AND attempts = ? RETURNING id`,
         this.clock(), stored, bytes, request.error === undefined ? null : request.error.slice(0, MAX_STORED_RESULT_BYTES/4), run.id, request.attempt,
       ).length === 1;
-      if (changed) { this.storeReply(outcome); this.deleteInputs(run.id); }
+      // X13: an inline runner returns the answer in the socket's own dispatch. The stored reply is
+      // then only a backup, settled one renewal interval later (the gateway answers `obsolete` once
+      // the inline answer was sent), for an answer lost on its way back.
+      if (changed) { this.storeReply(outcome, request.inlineReply === true ? this.clock() + this.renewMs : this.clock()); this.deleteInputs(run.id); }
       return changed;
     });
     if (!applied) return { v: 1, applied: false, rejected: true };
     this.leases.delete(run.id);
-    await this.deliverReply(run.id);
+    if (request.inlineReply === true) await this.options.wake();
+    else await this.deliverReply(run.id);
     return { v: 1, applied: true, appliedAttempt: request.attempt };
   }
 
-  private storeReply(outcome: CallFinished): void {
+  private storeReply(outcome: CallFinished, nextAt = this.clock()): void {
     const text=JSON.stringify(outcome),bytes = new TextEncoder().encode(text),generation=crypto.randomUUID();
     const count = Math.ceil(bytes.byteLength / REPLY_CHUNK_BYTES);
-    this.exec(`INSERT INTO ${REPLIES} (id,next_at,generation,bytes,chunks,hash) VALUES (?,?,?,?,?,?)`, outcome.id,this.clock(),generation,bytes.byteLength,count,sha256Hex(outcome.id+"\0"+generation+"\0"+text));
+    this.exec(`INSERT INTO ${REPLIES} (id,next_at,generation,bytes,chunks,hash) VALUES (?,?,?,?,?,?)`, outcome.id,nextAt,generation,bytes.byteLength,count,sha256Hex(outcome.id+"\0"+generation+"\0"+text));
     // Binary chunks preserve UTF-8 even where a surrogate/codepoint crosses a
     // boundary. No row/argument silently truncates a legal large result.
     for (let part = 0; part < count; part++) this.exec(`INSERT INTO ${REPLY_CHUNKS} (id, part, body) VALUES (?, ?, ?)`,
@@ -406,6 +436,23 @@ export class ActionCalls {
       await this.options.wake();
       throw error;
     }
+  }
+
+  /**
+   * X13: an inline runner whose run threw (it has no answer) gives the run up: the run goes back to
+   * pending and is handed to a Workflow now, which claims it as the next attempt, as a Workflow
+   * step's crash is retried at once. Only the attempt that holds the run may release it.
+   */
+  async release(request: { v: 1; id: string; attempt: number }): Promise<boolean> {
+    const released = this.exec(
+      `UPDATE ${RUNS} SET status = 'pending', owner = NULL, locked_at = NULL WHERE id = ? AND state = 'live' AND status = 'processing' AND attempts = ? RETURNING dispatch_count`,
+      request.id, request.attempt,
+    ) as unknown as Array<{ dispatch_count: number }>;
+    if (released.length !== 1) return false;
+    this.leases.delete(request.id);
+    await this.dispatchMany([{ id: request.id, dispatch_count: released[0]!.dispatch_count }]);
+    await this.options.wake();
+    return true;
   }
 
   /** Cancels a live call (the client went away): the run ends `dead`, its next renewal is refused. */

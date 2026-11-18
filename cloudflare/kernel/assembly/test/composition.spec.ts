@@ -74,10 +74,12 @@ it('N3 allowlisted internal service Actions preserve command/channel and await a
  expect(reportOf(await object.serviceCall(grant,{kind:'action',id:'retry',path:'probe.serviceAgent',args:{}}))).toMatchObject({ok:true,value:{value:42,command:'retry'}});
  expect(reportOf({ok:true,result:'null',pending:true})).toMatchObject({ok:false,transient:true});
 }));
-it('N3 Workflow runner retains trusted internal access and system root provenance',async()=>fixture(async(object,state)=>{
+it('N3 the direct-call runner retains trusted internal access and system root provenance',async()=>fixture(async(object,state)=>{
  const grant:ServiceGrant={principalId:'workflow-service',route:{projectId:'p',tenantId:state.id.name!,databaseUrl:'sqlite://test'},functions:['probe.serviceAgent'],maxDelegationSeconds:0,channel:'system'};
- const pending=await object.serviceCall(grant,{kind:'action',id:'workflow-root',path:'probe.serviceAgent',args:{},reply:{host:'fixture',connectionId:'already-abandoned-physical-owner',epoch:1,generation:1,id:'workflow-root',path:'probe.serviceAgent'}});
- expect(pending).toMatchObject({ok:true,pending:true});
+ const answered=await object.serviceCall(grant,{kind:'action',id:'workflow-root',path:'probe.serviceAgent',args:{},reply:{host:'fixture',connectionId:'already-abandoned-physical-owner',epoch:1,generation:1,id:'workflow-root',path:'probe.serviceAgent'}});
+ // X13: the run is durable but runs inline, as Rust runs it; its answer comes back in this call.
+ expect(answered.ok).toBe(true);
+ expect(JSON.parse(String((answered as {result:string}).result))).toMatchObject({value:42,channel:'system',rootChannel:'system',command:'workflow-root',root:'workflow-root'});
  let row:Record<string,SqlStorageValue>|undefined;
  for(let i=0;i<300;i++){
   row=state.storage.sql.exec("SELECT state,result,last_error,session FROM _gonvex_st_action_runs WHERE action_path='probe.serviceAgent'").toArray()[0];

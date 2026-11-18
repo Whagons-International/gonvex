@@ -201,6 +201,8 @@ export class TestTenant extends DurableObject<Env> {
   renewCall(request: RenewRequest) { return this.actions.renewCall(request); }
   completeCall(request: CompleteRequest) { return this.actions.completeCall(request); }
   beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }) { return this.actions.beginCall(request); }
+  startCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown; owner: string }) { return this.actions.startCall(request); }
+  releaseCall(request: { v: 1; id: string; attempt: number }) { return this.actions.releaseCall(request); }
   renewRun(request: Parameters<TenantActions["renewRun"]>[0]) { return this.actions.renewRun(request); }
   completeRun(request: Parameters<TenantActions["completeRun"]>[0]) { return this.actions.completeRun(request); }
   schedule(request: ScheduleRequest) { return this.actions.schedule(request); }

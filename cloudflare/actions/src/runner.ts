@@ -7,13 +7,14 @@
 // this attempt stops and reports nothing; its result, if it ever finishes, is
 // never applied.
 import type { CallJob } from "./calls.js";
-import type { TenantActionPort } from "./ports.js";
+import type { Claim, TenantActionPort } from "./ports.js";
 import { parseProvenance } from "./provenance.js";
 import type { ActionRuntime, ActionStats } from "./runtime.js";
+import type { ErrorClass } from "../../kernel/host/src/index.js";
 import { tenantRpc } from "./rpc.js";
 
 export type RunOutcome =
-  | { kind: "done"; attempt: number; ok: boolean; value?: string | undefined; error?: string | undefined; bytes: number; committedRevision?: number | undefined; renewals: RenewalStats; stats: ActionStats }
+  | { kind: "done"; attempt: number; ok: boolean; value?: string | undefined; error?: string | undefined; errorClass?: ErrorClass | undefined; bytes: number; committedRevision?: number | undefined; renewals: RenewalStats; stats: ActionStats }
   | { kind: "skipped"; reason: string; retryAfterMs?: number | undefined }
   | { kind: "lost"; attempt: number; renewals: RenewalStats };
 
@@ -31,9 +32,15 @@ export interface RunnerDeps {
 
 /** Claims `job`'s run as `owner` and runs it. The caller applies a `done` outcome with `completeCall`. */
 export async function runCall(deps: RunnerDeps, job: CallJob, owner: string): Promise<RunOutcome> {
-  const clock = deps.clock ?? (() => Date.now());
   const claim = await tenantRpc("claimCall", () => deps.tenant.claimCall({ v: 1, id: job.id, owner }));
   if (!claim.ok) return { kind: "skipped", reason: claim.reason, retryAfterMs: claim.retryAfterMs };
+  return runClaimed(deps, claim);
+}
+
+/** Runs a run this runner already holds (a claim, or X13's inline start) with its lease renewed. */
+export async function runClaimed(deps: RunnerDeps, claim: Extract<Claim, { ok: true }>): Promise<Exclude<RunOutcome, { kind: "skipped" }>> {
+  const clock = deps.clock ?? (() => Date.now());
+  const job = { id: claim.id };
   const attempt = claim.attempt;
   const renewals: RenewalStats = { renewed: 0, persisted: 0, errors: 0, gapsMs: [] };
 
@@ -64,7 +71,7 @@ export async function runCall(deps: RunnerDeps, job: CallJob, owner: string): Pr
     // A direct call is answered once, as Rust answers the socket once: its failure is its answer.
     return report.ok
       ? { kind: "done", attempt, ok: true, value: report.value, committedRevision: report.committedRevision, bytes: new TextEncoder().encode(report.value).byteLength, renewals, stats: report.stats }
-      : { kind: "done", attempt, ok: false, error: report.error, bytes: 0, renewals, stats: report.stats };
+      : { kind: "done", attempt, ok: false, error: report.error, errorClass: report.class, bytes: 0, renewals, stats: report.stats };
   } finally {
     stopped = true;
     clearInterval(timer);
