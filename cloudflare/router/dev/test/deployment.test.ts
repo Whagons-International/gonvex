@@ -4,7 +4,7 @@ import {evictDurableObject,runInDurableObject} from "cloudflare:test";
 import {expect,it,vi} from "vitest";
 import {MemoryVersionTarget,PRELUDE_SPECIFIER,ReleaseBuilderCore,type BlobStore} from "../../../control/operator/builder/core";
 import {PublicationExecutor} from "../../../control/operator/builder/publication";
-import {installDeploymentSchema} from "../../../control/operator/deployment";
+import {installDeploymentSchema,TARGET_ATTEMPT_LEASE_MS} from "../../../control/operator/deployment";
 import {SyncCoordinator,type SyncOutcome,type SyncPorts} from "../../../control/operator/sync";
 import {HttpError} from "../../../control/operator/http";
 import type {DeploymentRef,ReleaseBuilder} from "../../../control/operator/release";
@@ -304,19 +304,31 @@ it('completed settlement needs no catalog RPC and late asynchronous failure cann
  delayed.release();f.versionGate(undefined);await late;
  expect(f.coordinator.deployments.current()).toEqual(ref(c));await f.publish(c);
 }));
-it('an unrecoverable partial publication may be aborted as superseded only while no component serves its version',async()=>fixture(async f=>{
- const a=staged(await f.sync(await f.request('stranded-a')));
- f.failDeploy(true);f.retainDeploy(true);
- expect(await f.worker.deploy(ref(a))).toMatchObject({ok:false,retain:true});
- // A plain abort still needs same-ID recovery.
+it('a superseded abort needs an expired write lease and no serving component, and a late write is refused',async()=>fixture(async f=>{
+ const age=(ms:number)=>f.instance.sql.run("UPDATE gonvex_cf_target_attempts SET authorized_at=authorized_at-$1",ms);
+ // An authorized write still in flight: the superseded abort must not release the fence under it.
+ const a=staged(await f.sync(await f.request('stranded-a'))),inFlight=gate();f.deployGate(inFlight);
+ const running=f.worker.deploy(ref(a));
+ await vi.waitFor(()=>expect(f.events).toContain('deploy:'+ref(a).version));
+ f.setLive('another-catalog');
+ await expect(f.coordinator.deployments.abort(ref(a),'superseded mid-write',{superseded:true})).rejects.toThrow('same-ID recovery before abort');
+ f.failDeploy(true);f.retainDeploy(true);inFlight.release();f.deployGate(undefined);
+ expect(await running).toMatchObject({ok:false,retain:true});
+ // A plain abort still needs same-ID recovery; so does superseded inside the lease or while the version is served.
  await expect(f.coordinator.deployments.abort(ref(a),'plain')).rejects.toThrow('same-ID recovery before abort');
- // Serving the stranded version: superseded is refused too.
- f.setLive(ref(a).version);
- await expect(f.coordinator.deployments.abort(ref(a),'stranded',{superseded:true})).rejects.toThrow('same-ID recovery before abort');
+ await expect(f.coordinator.deployments.abort(ref(a),'inside lease',{superseded:true})).rejects.toThrow('same-ID recovery before abort');
+ age(TARGET_ATTEMPT_LEASE_MS+1);f.setLive(ref(a).version);
+ await expect(f.coordinator.deployments.abort(ref(a),'served',{superseded:true})).rejects.toThrow('same-ID recovery before abort');
  expect(f.coordinator.deployments.current()).toEqual(ref(a));
- // Superseded by other target writes: the fence clears and the next project can publish.
+ // Lease expired and nothing serves it: the fence clears.
  f.setLive('another-catalog');
  await f.coordinator.deployments.abort(ref(a),'stranded: catalog format changed',{superseded:true});
+ expect(f.coordinator.deployments.current()).toBeNull();
+ // A late write of the aborted publication is refused before any target write.
+ const writes=f.events.length;
+ await expect(f.worker.deploy(ref(a))).rejects.toThrow('deployment fence is no longer current');
+ expect(f.events.length).toBe(writes);
+ await expect(f.coordinator.deployments.settle(ref(a),{ok:true})).resolves.toBeUndefined();
  expect(f.coordinator.deployments.current()).toBeNull();
  f.failDeploy(false);f.retainDeploy(false);
  const b=staged(await f.sync(await f.request('stranded-b')));await f.publish(b);

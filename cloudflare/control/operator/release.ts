@@ -72,7 +72,9 @@ export interface ActiveRelease {
 }
 
 export interface DeploymentRef { id: string; fence: number; version: string }
-export type DeploymentGrant = {allowed:true;catalog:ActiveRelease[];recovery?:true} | {allowed:false;completed?:boolean;serving?:boolean};
+/** `writeDeadline`: epoch ms after which the builder must not start, and must cut off, any target write (see TARGET_ATTEMPT_LEASE_MS). */
+export type DeploymentGrant = {allowed:true;catalog:ActiveRelease[];recovery?:true;writeDeadline?:number} | {allowed:false;completed?:boolean;serving?:boolean};
+export interface TargetWriteOptions { deadline?: number }
 
 /**
  * Build calls are idempotent per (project, hash); serving writes are fenced
@@ -103,7 +105,7 @@ export interface ReleaseBuilder {
    * the response. Locally it waits for the deferred file swap; a restart-cut
    * response is resumed by the CLI with the same publication request ID.
    */
-  deploy(version: string, publication?: DeploymentRef): Promise<{ ok: true } | { ok: false; error: string; retain?:true }>;
+  deploy(version: string, publication?: DeploymentRef, options?: TargetWriteOptions): Promise<{ ok: true } | { ok: false; error: string; retain?:true }>;
   /** Serialized after target execution; only this barrier can abandon a publication. */
   abort?(publication: DeploymentRef, error: string): Promise<{ok:true}>;
 }

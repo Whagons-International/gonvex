@@ -74,7 +74,8 @@ export async function servingConfigs(name, directory, { kernelUrl, images = {} }
   return configs;
 }
 
-export async function deployConfig(args, credentials, directory) {
+/** `deadline` (epoch ms): the wrangler process is killed then and the write reported as failed. */
+export async function deployConfig(args, credentials, directory, { deadline } = {}) {
   const env = { ...process.env, CLOUDFLARE_ACCOUNT_ID: credentials.accountId, CLOUDFLARE_API_TOKEN: credentials.apiToken,
     WRANGLER_SEND_METRICS: 'false', CI: '1', TMPDIR: join(directory, 'tmp') };
   delete env.WHAGONS_CREDENTIAL_FILE;
@@ -85,7 +86,9 @@ export async function deployConfig(args, credentials, directory) {
     const capture=part=>{output+=part;if(output.length>2*1024*1024){output=output.slice(-2*1024*1024);truncated=true;}};
     child.stdout.on('data', capture); child.stderr.on('data', capture);
     child.on('error', fail);
+    const timer = deadline === undefined ? undefined : setTimeout(() => { output += '\n[killed at target write deadline]\n'; child.kill('SIGKILL'); }, Math.max(0, deadline - Date.now()));
     child.on('exit', async (code) => {
+      if (timer) clearTimeout(timer);
       // Keep raw deployment diagnostics private. API/credential failure text can include context.
       await writeFile(join(directory, `wrangler-${Date.now()}.log`), (truncated?'[earlier output truncated]\n':'')+output, { mode: 0o600 });
       const codes=[...new Set([...output.matchAll(/\[code:\s*(\d{1,8})\]/g)].map(match=>match[1]))].slice(0,8);

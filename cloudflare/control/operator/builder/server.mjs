@@ -93,12 +93,12 @@ try {
 }
 const target =
   targetKind === 'wrangler'
-    ? new WranglerTarget(generatedDir, process.env.GONVEX_KERNEL_SCRIPT ?? '', async(path,name)=>{
+    ? new WranglerTarget(generatedDir, process.env.GONVEX_KERNEL_SCRIPT ?? '', async(path,name,{deadline}={})=>{
         if(!['runtime','actions'].some(k=>name===`${process.env.GONVEX_KERNEL_SCRIPT}-${k}`))throw new Error('stable Worker deployment refused');
         const credentials=await cloudflareCredentials(),api=accountApi(credentials);
         if((await api('')).id!==credentials.accountId)throw new Error('deployment account identity differs');
         for(const kind of ['actions','runtime'])if(!await api(`/workers/scripts/${process.env.GONVEX_KERNEL_SCRIPT}-${kind}/settings`,{missing:true}))throw new Error('application companion is missing; framework setup required');
-        await deployConfig(['deploy','--config',path,'--keep-vars'],credentials,generatedDir);
+        await deployConfig(['deploy','--config',path,'--keep-vars'],credentials,generatedDir,{deadline});
       }, process.env.GONVEX_SOURCE_VERSION)
     : new LocalTarget(generatedDir, Number(process.env.GONVEX_DEPLOY_DEFER_MS ?? '1500'), stagingDir);
 
