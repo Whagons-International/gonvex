@@ -25,6 +25,8 @@ export class PublicationTenant extends AssemblyTenant {
 export class PublicationGateway extends AssemblyGateway { constructor(ctx:DurableObjectState,env:any){super(ctx,publicationEnv(env));} }
 export class CompositionGateway extends AssemblyGateway {
  async operatorDataChanged() {}
+ // CONTROL is this class in the composition fixture; accept the tenant's membership projection push.
+ async projectMemberships() { return 0; }
 }
 // Dedicated LOCAL bindings keep automatic admission out of unrelated fixtures.
 function capacityEnv(env:any){return {...env,CONTROL:env.PUB_CONTROL,GATEWAY:env.CAPACITY_GATEWAY,GATEWAY_CONTROLLER:env.CAPACITY_CONTROLLER};}

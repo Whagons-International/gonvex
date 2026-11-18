@@ -1124,6 +1124,27 @@ const deleteTenantShard: Handler = async (op, request, url, [tenantRaw]) => {
   return json({ ok: true });
 };
 
+/** Bounds on the DEV-only `role` / `permissions` overrides of the e2e member seed (contract change 0090). */
+const E2E_ROLE_MAX_BYTES = 64;
+const E2E_PERMISSIONS_MAX_BYTES = 64 * 1024;
+
+/** The optional overrides, or the 400 text. Absent fields keep the reference's admin / {"e2e":true} row. */
+function e2eGrantOverrides(p: Record<string, unknown>): { role?: string; permissions?: Record<string, unknown> } | string {
+  const out: { role?: string; permissions?: Record<string, unknown> } = {};
+  if (p.role !== undefined) {
+    const role = typeof p.role === "string" ? p.role.trim() : "";
+    if (role === "" || byteLength(role) > E2E_ROLE_MAX_BYTES) return `role must be a non-empty string of at most ${E2E_ROLE_MAX_BYTES} bytes`;
+    out.role = role;
+  }
+  if (p.permissions !== undefined) {
+    const permissions = p.permissions;
+    if (permissions === null || typeof permissions !== "object" || Array.isArray(permissions)) return "permissions must be a JSON object";
+    if (byteLength(JSON.stringify(permissions)) > E2E_PERMISSIONS_MAX_BYTES) return `permissions must be at most ${E2E_PERMISSIONS_MAX_BYTES} bytes of JSON`;
+    out.permissions = permissions as Record<string, unknown>;
+  }
+  return out;
+}
+
 const e2eMember: Handler = async (op, request) => {
   if (!op.auth.adminKeyMatches(request.headers)) return error(403, "runtime admin key is required");
   const { e2eMember: provision } = await import("../src/dev");
@@ -1136,6 +1157,11 @@ const e2eMember: Handler = async (op, request) => {
   if (projectId === "" || (!accountOnly && tenantId === "") || email === "" || byteLength(email) > 320) {
     return error(400, "projectId and email are required; tenantId is required unless accountOnly is true");
   }
+  const overrides = e2eGrantOverrides(p);
+  if (typeof overrides === "string") return error(400, overrides);
+  if (accountOnly && (overrides.role !== undefined || overrides.permissions !== undefined)) {
+    return error(400, "role and permissions apply to a tenant Member; omit accountOnly");
+  }
   try {
     return json(
       await provision(op.ctx, {
@@ -1144,11 +1170,35 @@ const e2eMember: Handler = async (op, request) => {
         password: typeof p.password === "string" ? p.password : "",
         ...(accountOnly ? { accountOnly } : { tenantId }),
         ...(typeof p.name === "string" ? { name: p.name } : {}),
+        ...overrides,
       }),
     );
   } catch (cause) {
     const message = (cause as Error).message;
     return message === "test actor account not found" ? error(404, message) : error(422, message);
+  }
+};
+
+/**
+ * DEV only (contract change 0090): one tenant Member's role and permissions, read-only, behind the same runtime
+ * admin key as the seed. `?project=&tenant=` and exactly one of `accountId`, `email` or `memberId`.
+ */
+const e2eMemberRead: Handler = async (op, request, url) => {
+  if (!op.auth.adminKeyMatches(request.headers)) return error(403, "runtime admin key is required");
+  const { e2eMemberRead: read } = await import("../src/dev");
+  const param = (name: string) => (url.searchParams.get(name) ?? "").trim();
+  const projectId = param("project");
+  const tenantId = param("tenant");
+  const selectors = { accountId: param("accountId"), email: param("email").toLowerCase(), memberId: param("memberId") };
+  const given = Object.entries(selectors).filter(([, value]) => value !== "");
+  if (projectId === "" || tenantId === "" || given.length !== 1) {
+    return error(400, "project and tenant are required, with exactly one of accountId, email or memberId");
+  }
+  try {
+    const member = await read(op.ctx, { projectId, tenantId, ...Object.fromEntries(given) });
+    return member ? json(member) : error(404, "member not found");
+  } catch (cause) {
+    return error(422, (cause as Error).message);
   }
 };
 
@@ -1523,7 +1573,7 @@ export const ROUTES: Route[] = [
   { pattern: new RegExp(`^/dev/projects/${SEG}/auth/tenants$`), methods: { GET: projectAuthTenants, POST: createProjectAuthTenant } },
   { pattern: /^\/dev\/tenants$/, methods: { GET: listTenants, POST: createTenantShard } },
   { pattern: new RegExp(`^/dev/tenants/${SEG}$`), methods: { DELETE: deleteTenantShard } },
-  { pattern: /^\/dev\/internal\/e2e\/members$/, methods: { POST: e2eMember } },
+  { pattern: /^\/dev\/internal\/e2e\/members$/, methods: { GET: e2eMemberRead, POST: e2eMember } },
   { pattern: /^\/dev\/errors\/status$/, methods: { GET: errorStatus } },
   { pattern: /^\/dev\/errors\/groups$/, methods: { GET: errorGroups } },
   { pattern: new RegExp(`^/dev/errors/groups/${SEG}$`), methods: { GET: errorGroup, PATCH: updateErrorGroup } },
