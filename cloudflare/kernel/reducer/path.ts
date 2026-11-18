@@ -201,7 +201,13 @@ export class ReducerPath {
   async reducerCall(socket: SocketView, request: ReducerCallRequest): Promise<string[]> {
     const session = socket.tenant;
     if (!session) return [reducerError(request.id, request.path, errors.unauthenticated(), request.trace)];
-    const outcome = await this.serial(() => this.execute(session, request));
+    const queued = this.clock();
+    let started = queued;
+    const outcome = await this.serial(() => { started = this.clock(); return this.execute(session, request); });
+    // X13c: split a slow call's wall time into the serial-queue wait and the run (the platform's durable-write
+    // wait is the rest of the tenant event's wall). Path only, never arguments.
+    const now = this.clock();
+    if (now - queued >= 100) console.log("reducer: slow call", { kind: "client", path: request.path, waitMs: started - queued, runMs: now - started, totalMs: now - queued });
     if (!outcome.ok) return [reducerError(request.id, request.path, outcome.failure, request.trace)];
     const out = [reducerResult(request.id, request.path, outcome.result, outcome.committedRevision, request.trace)];
     this.complete(socket, session, outcome.committedRevision, out);
