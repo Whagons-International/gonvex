@@ -459,6 +459,63 @@ describe("dev remap of P03-copied file rows (X11b)", () => {
   });
 });
 
+// BUG-7b (walkthrough 2026-11-17): Whagons `files.getFileUrls` resolves each id
+// with `getMetadata` then `generateDownloadUrl`. Rust never looks at the object
+// when it mints a URL (storage.rs:219-243), so a missing blob is per item: the
+// URL is minted and the download answers 404. Only a missing row throws, and
+// Rust throws it too (storage.rs:659). See
+// docs/cloudflare/verification/BUG-7b-getFileUrls-triage.md.
+describe("a batch with a missing blob (BUG-7b)", () => {
+  /** whagons5-client gonvex/files.ts `getFileUrls` / `resolveStorageURL`, per id, in order. */
+  const getFileUrls = async (t: ReturnType<typeof tenant>, who: FilesSession, ids: string[]) => {
+    const result: Record<string, string | null> = {};
+    for (const id of ids) {
+      const metadata = await t.as(who).call("getMetadata", { fileId: id }) as { tenantId: string; visibility: string };
+      result[id] = metadata.tenantId === who.tenantId && metadata.visibility === "tenant"
+        ? await t.as(who).call("generateDownloadUrl", { fileId: id, ttlMs: 10 * 60 * 1000 }) as string
+        : null;
+    }
+    return result;
+  };
+
+  it("mints a URL for every file of the batch, present or not, as Rust; the missing blob downloads 404", async () => {
+    const t = tenant();
+    const present = await uploaded(t, t.alice, { visibility: "tenant" });
+    const gone = await uploaded(t, t.alice, { visibility: "tenant" });
+    await env.FILES.delete(objectKey("proj", t.id, gone));
+    // A copied pending row whose bytes never arrived: finalize HEADs a 404 and leaves it pending (storage.rs:660-674).
+    const never = (await t.as(t.alice).call("generateUploadUrl", { visibility: "tenant", contentType: "image/png" }) as Upload).fileId;
+
+    const urls = await getFileUrls(t, t.bob, [gone, present, never]);
+    expect(Object.keys(urls)).toEqual([gone, present, never]);
+    for (const url of Object.values(urls)) expect(url).toMatch(new RegExp(`^https://gonvex\\.test/storage/proj/${t.id}/[0-9a-f]{32}\\?exp=\\d+&sig=[0-9a-f]{64}$`));
+    expect(await t.as(t.bob).call("getUrl", { fileId: gone })).toEqual(expect.stringContaining(`/storage/proj/${t.id}/${gone}?`));
+    expect(await t.rows("SELECT status FROM _gonvex_files WHERE id = ?", never)).toEqual([{ status: "pending" }]);
+
+    const ok = await SELF.fetch(urls[present]!);
+    expect(ok.status).toBe(200);
+    expect(new Uint8Array(await ok.arrayBuffer())).toEqual(PNG);
+    for (const id of [gone, never]) {
+      const missing = await SELF.fetch(urls[id]!);
+      expect(missing.status).toBe(404);
+      expect(await missing.text()).toBe("object not found");
+    }
+  });
+
+  it("fails the call on a row that is not this tenant's, with Rust's text (storage.rs:649-659: WHERE id AND tenant_id)", async () => {
+    const t = tenant();
+    const present = await uploaded(t, t.alice, { visibility: "tenant" });
+    // A P03 copy keeps the source tenant id in `_gonvex_files` while the object is named devcopy-*.
+    const copied = "c".repeat(32);
+    await t.rows(
+      "INSERT INTO _gonvex_files (id,tenant_id,owner_id,bucket,object_key,visibility,status) VALUES (?,?,?,?,?,'tenant','uploaded')",
+      copied, "tenant_source", "mem-alice", config.bucket, `proj/tenant_source/${copied}`,
+    );
+    expect(await t.as(t.alice).fails("getMetadata", { fileId: copied })).toBe("file not found");
+    await expect(getFileUrls(t, t.alice, [present, copied])).rejects.toThrow("file not found");
+  });
+});
+
 describe("metadata and finalize", () => {
   it("finalizes a pending file on getUrl/getMetadata, not on generateDownloadUrl, with Rust's JSON", async () => {
     const t = tenant();
