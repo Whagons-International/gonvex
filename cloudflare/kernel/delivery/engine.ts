@@ -347,13 +347,25 @@ export class ReplicaDeliveryEngine {
   }
 
   /**
-   * BUG-10: a live query's initial reply waits for room on its holder's channel, as snapshot pages do
-   * (`postWhenRoom`), instead of being refused there. During a fresh session's initial burst the channel is full;
-   * a refused reply reset the whole holder `change-feed-lagged` (every replica of the socket, 81 on -12).
+   * BUG-10: a live query's initial reply is never refused on a full holder channel (a refusal reset the whole holder
+   * `change-feed-lagged`: every replica of the socket, 81 on -12). It is computed in the serialization turn and never
+   * waits there (r4617752119: that would stall every reducer and every other holder behind one slow client). If the
+   * holder has no room, it is deferred as in BUG-4 and the reply leads its outbox, so every later commit for that
+   * holder follows it in order; the deferral sends it once the channel has room, and resets only a stalled holder.
+   * A deferred holder's reply carries no watermark: certification comes with its catch-up (BUG-4).
    */
-  private queryReplyWhenRoom(socket: SocketView, replies: readonly string[]): Promise<void> {
+  private queryReplyOrdered(socket: SocketView, replies: readonly string[]): void {
     const reply = this.queryWork(socket, replies);
-    return reply ? this.postWhenRoom(reply.connection, reply.work) : Promise.resolve();
+    if (!reply) return;
+    const { connection } = reply, host = connection.host, outlet = this.options.outlet;
+    let deferred = this.behind.get(host);
+    if (!deferred && !this.paused(host) && outlet.admits) {
+      const parts = splitPayload(this.socketPayload(connection, reply.work));
+      if (!parts.every((part) => outlet.admits!(host, part))) deferred = this.defer(host, this.delivered?.revision ?? 0);
+    }
+    if (!deferred) { this.post(connection, reply.work); return; }
+    const { watermark: _certify, ...work } = reply.work;
+    this.queueDeferred(deferred, this.socketPayload(connection, work), 0);
   }
 
   private queryWork(socket: SocketView, replies: readonly string[]): { connection: Connection; work: SocketWork } | undefined {
@@ -390,7 +402,7 @@ export class ReplicaDeliveryEngine {
       }
       const replies = await this.options.read((db) => [snapshot(db)]);
       if (recovery) return replies;
-      await this.queryReplyWhenRoom(socket, replies);
+      this.queryReplyOrdered(socket, replies);
       return [];
     })();
   }

@@ -949,6 +949,7 @@ describe("BUG-10 a live query's initial reply waits for room on a full channel",
       hold = false;
       held.splice(0).forEach((release) => release());
       expect(await subscribed).toEqual([]);
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "Q").some((f) => f.type === "query.result"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
       await h.engine.settled();
       const replies = frames(h.payloads, "Q").filter((f) => f.type === "query.result");
       expect(replies.map((f) => [f.reason, f.result.length])).toEqual([["initial", 4_000]]);
@@ -956,6 +957,55 @@ describe("BUG-10 a live query's initial reply waits for room on a full channel",
       expect(frames(h.payloads, "S1").filter((f) => f.type === "replica.reset")).toEqual([]);
       expect(h.conflicts).toEqual([]);
     }, MODULE, true, undefined, 60_000);
+  });
+
+  it("r4617752119: a slow holder's deferred reply holds no turn: another holder's reducer commit and delta go at once, then the reply leads in order", { timeout: 120_000 }, async () => {
+    let recoveries = 0, hold = false;
+    const held: Array<() => void> = [];
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 4_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 1500)]]);
+      for (let i = 0; i < insert.length; i += 1000) await h.commit(insert.slice(i, i + 1000));
+      h.receiver.deliver = async (host, payload) => {
+        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        if (host === "h1" && hold) await new Promise<void>((resolve) => held.push(resolve));
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      h.engine.dispatch(socket("S1", {}, "h1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      h.engine.dispatch(socket("S2", {}, "h2"), { type: "replica.open", id: "top", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      const ready = (id: string) => frames(h.payloads, id).some((f) => f.type === "replica.ready");
+      for (let spin = 0; spin < 4000 && !(ready("S1") && ready("S2")); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // h1 is slow: its next RPC does not complete until released.
+      hold = true;
+      await h.commit([["UPDATE items SET label = 'busy-' || label WHERE rank < 400", []]], false);
+      for (let spin = 0; spin < 2000 && !held.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(held.length).toBe(1);
+      // A live query on h1 whose result does not fit beside the in-flight payload: the subscribe returns at once.
+      const view = { ...socket("Q", {}, "h1"), queryId: "live" };
+      const started = Date.now();
+      expect(await h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }))).toEqual([]);
+      // Another holder's reducer commit is neither blocked nor delayed: it commits, and h2 gets its delta while h1 is still stuck.
+      await h.commit([["UPDATE items SET label = 'moved' WHERE id = 'i000000'", []]], false);
+      for (let spin = 0; spin < 2000 && !frames(h.payloads, "S2").some((f) => f.type === "replica.delta" && JSON.stringify(f).includes("moved")); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(frames(h.payloads, "S2").some((f) => f.type === "replica.delta" && JSON.stringify(f).includes("moved"))).toBe(true);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(held.length).toBe(1);
+      expect(frames(h.payloads, "Q")).toEqual([]);
+      expect(recoveries).toBe(0);
+      // h1 drains: the reply goes first, then the commit it owes, in order; nothing is reset.
+      hold = false;
+      held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && frames(h.payloads, "Q").filter((f) => f.type === "query.result").length < 2; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      const replies = frames(h.payloads, "Q").filter((f) => f.type === "query.result");
+      // The deferred holder's catch-up re-snapshots its live queries (BUG-4 `applyFeedSnapshot` reset): "reconnect".
+      expect(replies.map((f) => f.reason)).toEqual(["initial", "reconnect"]);
+      expect(replies[0].result.length).toBe(4_000);
+      expect(replies[1].result.find((row: { id: string }) => row.id === "i000000").label).toBe("moved");
+      expect(recoveries).toBe(0);
+      expect(h.conflicts).toEqual([]);
+    }, MODULE, true, undefined, 60_000, ["h1", "h2"]);
   });
 });
 
