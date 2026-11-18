@@ -19,10 +19,10 @@ import type { ModuleRegistry } from "../../kernel/host/src/index.js";
 import type { Fetcher } from "./fetch.js";
 import type { CallJob } from "./calls.js";
 import { runHandoff, type HandoffJob, type HandoffTenantPort } from "./handoff.js";
-import type { Completion, ControlPort, SandboxPort, ScheduleRequest, SchedulerPort, StoragePort, TenantActionPort } from "./ports.js";
+import type { Claim, Completion, ControlPort, SandboxPort, ScheduleRequest, SchedulerPort, StoragePort, TenantActionPort } from "./ports.js";
 import type { Provenance } from "./provenance.js";
-import { tenantRpc } from "./rpc.js";
-import { runCall, type RunOutcome } from "./runner.js";
+import { isTransientRpcError, tenantRpc } from "./rpc.js";
+import { runCall, runClaimed, type RunnerDeps, type RunOutcome } from "./runner.js";
 import { ActionRuntime, profileOf, type ActionReport } from "./runtime.js";
 import type { ActionSession } from "./session.js";
 import { publicLimits, type PublicLimitsEnv } from "../../kernel/public/config";
@@ -57,6 +57,8 @@ export function configureActions<Env extends ActionEnv>(value: ActionWorkerConfi
 
 type TenantStub = TenantActionPort & HandoffTenantPort & {
   beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }): Promise<string>;
+  startCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown; owner: string }): Promise<Extract<Claim, { ok: true }>>;
+  releaseCall(request: { v: 1; id: string; attempt: number }): Promise<boolean>;
   schedule(request: ScheduleRequest): Promise<string>;
 };
 
@@ -179,9 +181,69 @@ export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
     if (contract?.kind === "action" && profileOf(contract) === "agent" && input.session.account.id !== "" && input.inline !== true) {
       const { executionAccess: _oldAccess, ...identity } = input.session;
       const session: ActionSession = input.allowInternal === true ? { ...identity, executionAccess: { allowInternal: true } } : identity;
-      const id = await tenantRpc("beginCall", () => tenant.beginCall({ v: 1, session, path: input.path, args: input.args, provenance: input.provenance }));
-      return { pending: true, id };
+      const request = { v: 1 as const, session, path: input.path, args: input.args, provenance: input.provenance };
+      // X13: run it here, as Rust runs it inline on the socket loop. A Workflow create and its first
+      // step cost seconds on the platform, and the socket's next frame (a `tasks.create` after the
+      // AI rewrite, say) waits for this Action's answer, in Rust too. The run is still durable: the
+      // tenant claims it for this runner, and if this runner dies its lease expires and the sweep
+      // hands it to a Workflow, as for any dead runner.
+      let claim: Awaited<ReturnType<TenantStub["startCall"]>>;
+      try {
+        claim = await tenant.startCall({ ...request, owner: `inline:${crypto.randomUUID()}` });
+      } catch (error) {
+        // Deploy skew: an older tenant object has no `startCall`. Hand the call to a Workflow as before.
+        if (!/does not implement the method/i.test(String((error as Error)?.message ?? error))) throw error;
+        const id = await tenantRpc("beginCall", () => tenant.beginCall(request));
+        return { pending: true, id };
+      }
+      // The answer goes back in this call, so the socket sends it from the dispatch it is waiting on,
+      // as for a standard Action. Through the tenant's reply RPC instead, the gateway would defer the
+      // socket's next tenant call to its next fresh event (X02's depth rule): one alarm per Action.
+      const report = await runInline({ runtime, tenant, renewMs: (config as unknown as ActionWorkerConfig<ActionEnv> | undefined)?.renewMs }, claim);
+      return report ?? { pending: true, id: claim.id };
     }
     return runtime.execute({ session: input.session, path: input.path, args: input.args, provenance: input.provenance, allowInternal: input.allowInternal === true });
+  }
+}
+
+/** Attempts and first delay for applying an inline run's answer (a Workflow's "apply result" step retries too). */
+const INLINE_COMPLETE_ATTEMPTS = 6;
+const INLINE_COMPLETE_DELAY_MS = 250;
+
+/**
+ * X13: one direct agent call run inside `ActionWorker.call`. Its answer is applied with
+ * `completeCall` (`inlineReply`: the tenant keeps the reply only as a delayed backup) and returned,
+ * for the socket's dispatch to send. `null` when this runner has no answer to send: the run was
+ * cancelled or another attempt owns it, or the answer could not be applied; the tenant's reply
+ * path answers then. A run that throws instead of answering is released to a Workflow at once, as
+ * a Workflow step's crash is retried at once; an answer that cannot be applied is left to the
+ * sweep, which hands the run to a Workflow when its lease ends.
+ */
+export async function runInline(deps: RunnerDeps & { tenant: Pick<TenantStub, "completeCall" | "releaseCall" | "renewCall" | "claimCall" | "call"> }, claim: Extract<Claim, { ok: true }>): Promise<ActionReport | null> {
+  let outcome: Awaited<ReturnType<typeof runClaimed>>;
+  try {
+    outcome = await runClaimed(deps, claim);
+  } catch (error) {
+    console.error("actions: inline run failed; handing it to a Workflow", { path: claim.path, error: String((error as Error)?.message ?? error).slice(0, 300) });
+    await tenantRpc("releaseCall", () => deps.tenant.releaseCall({ v: 1, id: claim.id, attempt: claim.attempt })).catch(() => undefined);
+    return null;
+  }
+  if (outcome.kind !== "done") return null;
+  const request = { v: 1 as const, id: claim.id, attempt: outcome.attempt, value: outcome.value, error: outcome.error, committedRevision: outcome.committedRevision, inlineReply: true };
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const completion = await tenantRpc("completeCall", () => deps.tenant.completeCall(request));
+      // Only the attempt whose answer the tenant holds may send it; any other answer is not the call's.
+      if (!(completion.applied || (completion.duplicate && completion.appliedAttempt === outcome.attempt))) return null;
+      return outcome.ok
+        ? { ok: true, value: outcome.value ?? "null", ...(outcome.committedRevision === undefined ? {} : { committedRevision: outcome.committedRevision }), stats: outcome.stats }
+        : { ok: false, error: outcome.error ?? "action failed", class: outcome.errorClass ?? "rejected", stats: outcome.stats };
+    } catch (error) {
+      if (attempt >= INLINE_COMPLETE_ATTEMPTS || !isTransientRpcError(error)) {
+        console.error("actions: inline answer not applied; the sweep hands the run off when its lease ends", { path: claim.path, error: String((error as Error)?.message ?? error).slice(0, 300) });
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, INLINE_COMPLETE_DELAY_MS * 2 ** (attempt - 1)));
+    }
   }
 }

@@ -41,6 +41,9 @@ export class TenantActions implements TenantActionPort, HandoffTenantPort {
   renewCall(request: RenewRequest): Promise<Renewal> { return this.calls.renew(request); }
   completeCall(request: CompleteRequest): Promise<Completion> { return this.calls.complete(request); }
   beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }): Promise<string> { return this.calls.begin(request); }
+  /** X13: a direct agent call the Action Worker runs inline, claimed by `owner` as attempt 1. */
+  startCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown; owner: string }): Promise<Claim> { return this.calls.start(request, request.owner); }
+  releaseCall(request: { v: 1; id: string; attempt: number }): Promise<boolean> { return this.calls.release(request); }
 
   async renewRun(request: { v: 1; claim: HandoffClaim }): Promise<boolean> { return this.scheduler.renew(request.claim); }
   completeRun(request: { v: 1; claim: HandoffClaim; outcome: HandoffRunOutcome }): Promise<boolean> { return this.scheduler.complete(request.claim, request.outcome); }

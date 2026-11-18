@@ -21,6 +21,9 @@ export default defineConfig(async()=>{
    CONTROL:{className:'TestControl',scriptName:'gonvex-cf-dev-k22-test-stable'},GATEWAY:{className:'TestGateway',scriptName:'gonvex-cf-dev-k22-test-stable'}},
   r2Buckets:{RELEASES:'gonvex-cf-dev-k22-composition-releases',FILES:'gonvex-cf-dev-k22-composition-files'},
   serviceBindings:{ACTIONS:{name:'gonvex-cf-dev-k22-test-stable',entrypoint:'ActionWorker'},ACTIONS_CATALOG:{name:'gonvex-cf-dev-k22-test-actions',entrypoint:'TestActionCatalog'}},
+  // X13: the tenant's Workflow hand-off (the path an agent Action took before it ran inline).
+  bindings:{GONVEX_ASSEMBLY_FIXTURE_KEY:'synthetic-inspection'},
+  workflows:{ACTION_WORKFLOW:{name:'gonvex-cf-dev-k22-test-actions-workflow',className:'ActionWorkflow',scriptName:'gonvex-cf-dev-k22-test-stable'}},
  },{
   name:'gonvex-cf-dev-k22-test-stable',modules:stable,compatibilityDate:'2026-10-23',compatibilityFlags:['nodejs_compat'],
   durableObjects:{CONTROL:{className:'TestControl',useSQLite:true},GATEWAY:{className:'TestGateway',useSQLite:true},TENANT:{className:'AssemblyTenant',scriptName:'gonvex-cf-dev-k22-test-runtime'}},

@@ -60,6 +60,12 @@ export interface CompleteRequest {
   value?: string | undefined;
   /** The call's error text (a direct call is answered once, never retried). */
   error?: string | undefined;
+  /**
+   * X13: the runner (`ActionWorker.call`, inline) returns the answer in the socket's own dispatch, so
+   * the stored reply is only a backup settled one renewal interval later. An older tenant ignores the
+   * field, but an older tenant never starts an inline run (it has no `startCall`).
+   */
+  inlineReply?: boolean | undefined;
 }
 export interface Completion { v: 1; applied: boolean; duplicate?: boolean; rejected?: boolean; appliedAttempt?: number }
 

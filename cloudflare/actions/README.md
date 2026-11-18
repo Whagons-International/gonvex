@@ -26,8 +26,8 @@ The reference is the Rust runtime at `0bf3ad13`: `rust/crates/runtime/src/action
 | `src/session.ts` | The tenant session an Action runs as; the system session; the module-facing identity | `execution.rs:1458-1486,1529-1586` |
 | `src/handoff.ts` | K11's `ActionHandoff` port on a Workflow (`WorkflowHandoff`), and `runHandoff`: a run K11 claimed, run as the re-resolved Member with K11's provenance, K11's claim renewed every third of its lease, the outcome reported once | `execution.rs:1237-1344`, K11 `ports.ts` |
 | `src/calls.ts` | `ActionCalls`, the tenant side of direct agent calls: begin, claim, renew, complete, cancel, the sweep (an alarm source on K11's `TenantAlarm`), receipts | S4 `tenant.ts` |
-| `src/runner.ts` | `runCall`: one direct-call run on the Action side: claim, run with a renewal every 30 s, report | |
-| `src/worker.ts` | `ActionWorkflow` (both payloads), `ActionWorker.call` (direct `action.call`), `configureActions` | S4 `runner.ts` |
+| `src/runner.ts` | `runCall` / `runClaimed`: one direct-call run on the Action side: claim, run with a renewal every 30 s, report | |
+| `src/worker.ts` | `ActionWorkflow` (both payloads), `ActionWorker.call` (direct `action.call`; agent calls inline, `runInline`), `configureActions` | S4 `runner.ts` |
 | `src/tenant.ts` | `TenantActions`, what the tenant object exposes by RPC (over `ActionCalls`, K04's host and K11's `Scheduler`); `WorkflowDispatcher` | |
 | `src/ports.ts` | The interfaces to the tenant object, K06 (sessions, secrets), K11 (scheduler), K13 (storage), K20 (sandbox) | |
 | `src/rpc.ts` | Deploy skew: tenant RPC failures that are retried | 0016 G0-8 |
@@ -46,11 +46,26 @@ ctx.scheduler (Action or Reducer) ─► K11 job ─────────► 
                                                               │ K11: done, retry with backoff, or dead (_gonvex_action_dead)
 
 direct action.call (K05/K07) ─► ActionWorker.call ─┬─ standard / public: ActionRuntime.execute inline (15 min / 60 s)
-                                                    └─ agent: tenant.beginCall ─► ActionCalls run (_gonvex_st_action_runs)
-                                                              ▼
+                                                    └─ agent: tenant.startCall ─► ActionCalls run (_gonvex_st_action_runs), claimed
+                                                       as attempt 1 by this runner ─ run inline ─ renewCall every 30 s ─
+                                                       completeCall (fenced, inlineReply) ─► the answer, returned in the dispatch
+                                                              │ runner died: lease expires ─► sweep ─┐   threw: releaseCall ─► now ─┐
+                                                              ▼                                       ▼                              ▼
             ActionWorkflow "<id>-d<n>": claimCall (attempt+1) ─ run ─ renewCall every 30 s ─ completeCall (fenced) ─► onFinished
-                                                              (ActionCalls' sweep: lost hand-off, expired lease)
+                                                              (ActionCalls' sweep: lost hand-off, expired lease, backup replies)
 ```
+
+- **Direct agent calls run inline (X13).** Rust runs a socket's Action inline on its frame loop
+  (`lib.rs` `ClientMessage::ActionCall` awaits `execute_tenant_action`), so the socket's next frame waits for
+  the Action in Rust too. On the platform a Workflow `create()` and its first step took 2.4–4.6 s before the
+  Action began, and the reply's tenant→gateway RPC made the gateway defer the socket's next tenant call to a
+  fresh event (X02's depth rule). `ActionWorker.call` now runs the call itself: `startCall` writes the run
+  already claimed by this runner, so it stays durable; the answer is applied with `completeCall`
+  (`inlineReply`) and returned in the same dispatch, as a standard Action's is. The stored reply is a backup,
+  settled one renewal interval later (the gateway answers `obsolete` when the inline answer was sent). If the
+  runner dies, its lease expires and the sweep hands the run to a Workflow; if the run throws,
+  `releaseCall` hands it to a Workflow at once. An older tenant without `startCall` gets the Workflow
+  hand-off as before. `kernel/assembly/test/x13-latency.spec.ts` measures it.
 
 - **Outbox and scheduled Actions belong to K11.** K11's scheduler claims the row or the job, applies the durable hop and
   the attempt cap, and hands the run over. `WorkflowHandoff` accepts every run: it never runs an Action inline in the

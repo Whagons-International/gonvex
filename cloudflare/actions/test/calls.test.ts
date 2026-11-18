@@ -66,6 +66,62 @@ describe("direct agent calls (ActionCalls)", () => {
     });
   });
 
+  it("X13 start claims the run for an inline runner in one step: no hand-off while its lease holds, a Workflow after", async () => {
+    await withCalls(async (h) => {
+      const claim = await h.calls.start({ session, path: "agent.turn", args: { q: 1, drop: undefined } }, "inline:a");
+      expect(claim).toEqual({ v: 1, ok: true, id: "call-uuid-1", attempt: 1, path: "agent.turn", args: { q: 1 }, provenance: null, session, leaseMs: 300_000, renewMs: 30_000 });
+      expect(h.jobs).toEqual([]);
+      expect(h.sql.exec(`SELECT state, status, attempts, owner, locked_at, dispatched_at FROM ${RUNS}`).toArray())
+        .toEqual([{ state: "live", status: "processing", attempts: 1, owner: "inline:a", locked_at: 1_000_000, dispatched_at: null }]);
+      // Another runner cannot take it while the lease holds; the sweep waits for the lease.
+      expect(await h.calls.claim({ v: 1, id: claim.id, owner: "workflow:x" })).toEqual({ v: 1, ok: false, reason: "leased", retryAfterMs: 300_000 });
+      expect(h.calls.nextAt(h.clock.now)).toBe(1_300_000);
+      expect(await h.calls.sweep()).toBe(0);
+      // Renewals from the inline runner keep it; when it dies the lease ends and a Workflow takes over as attempt 2.
+      h.clock.now += 30_000;
+      expect(await h.calls.renew({ v: 1, id: claim.id, attempt: 1 })).toMatchObject({ ok: true });
+      h.clock.now += 300_000;
+      expect(await h.calls.sweep()).toBe(1);
+      expect(h.jobs).toEqual([{ v: 1, kind: "call", projectId: "p", tenantId: "t", id: claim.id, n: 1 }]);
+      expect(await h.calls.claim({ v: 1, id: claim.id, owner: "workflow:x" })).toMatchObject({ ok: true, attempt: 2 });
+      // The dead inline runner's late answer is refused.
+      expect(await h.calls.complete({ v: 1, id: claim.id, attempt: 1, value: "1", inlineReply: true })).toEqual({ v: 1, applied: false, rejected: true });
+    });
+  });
+
+  it("X13 an inline completion is answered by its runner; the stored reply is a backup settled one renewal later", async () => {
+    await withCalls(async (h) => {
+      const claim = await h.calls.start({ session, path: "agent.turn", args: {} }, "inline:a");
+      expect(await h.calls.complete({ v: 1, id: claim.id, attempt: 1, value: '"ok"', inlineReply: true })).toEqual({ v: 1, applied: true, appliedAttempt: 1 });
+      // Not delivered through the tenant now: the runner returns it in the socket's own dispatch.
+      expect(h.finished).toEqual([]);
+      expect(h.sql.exec("SELECT next_at FROM _gonvex_st_action_replies").one()).toEqual({ next_at: 1_030_000 });
+      expect(h.calls.nextAt(h.clock.now)).toBe(1_030_000);
+      // A retried completion is a duplicate and still does not deliver.
+      expect(await h.calls.complete({ v: 1, id: claim.id, attempt: 1, value: '"ok"', inlineReply: true })).toEqual({ v: 1, applied: false, duplicate: true, appliedAttempt: 1 });
+      expect(h.finished).toEqual([]);
+      await h.calls.sweep();
+      expect(h.finished).toEqual([]);
+      // The backup: one renewal interval later the reply is settled (the gateway answers `obsolete` when the inline answer was sent).
+      h.clock.now += 30_000;
+      await h.calls.sweep();
+      expect(h.finished).toEqual([{ id: claim.id, ok: true, value: '"ok"' }]);
+      expect(h.sql.exec("SELECT count(*) AS n FROM _gonvex_st_action_replies").one()).toEqual({ n: 0 });
+    });
+  });
+
+  it("X13 release hands an inline run that threw to a Workflow at once; only the holding attempt may release", async () => {
+    await withCalls(async (h) => {
+      const claim = await h.calls.start({ session, path: "agent.turn", args: {} }, "inline:a");
+      expect(await h.calls.release({ v: 1, id: claim.id, attempt: 2 })).toBe(false);
+      expect(await h.calls.release({ v: 1, id: claim.id, attempt: 1 })).toBe(true);
+      expect(h.jobs).toEqual([{ v: 1, kind: "call", projectId: "p", tenantId: "t", id: claim.id, n: 1 }]);
+      expect(await h.calls.release({ v: 1, id: claim.id, attempt: 1 })).toBe(false);
+      expect(await h.calls.claim({ v: 1, id: claim.id, owner: "workflow:x" })).toMatchObject({ ok: true, attempt: 2 });
+      expect(await h.calls.renew({ v: 1, id: claim.id, attempt: 1 })).toMatchObject({ ok: false });
+    });
+  });
+
   it("never touches K11's outbox", async () => {
     await withCalls(async (h) => {
       const id = await h.calls.begin({ session, path: "agent.turn", args: {} });

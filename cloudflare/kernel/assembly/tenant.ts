@@ -342,6 +342,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async renewCall(request: RenewRequest) { await this.setupScheduled(); return this.calls!.renew(request); }
   async completeCall(request: CompleteRequest) { await this.setupScheduled(); return this.calls!.complete(request); }
   async beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }) { await this.setupScheduled(); return this.calls!.begin(request); }
+  /** X13: a direct agent call the Action Worker runs inline (`ActionCalls.start`). */
+  async startCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown; owner: string }) { await this.setupScheduled(); return this.calls!.start(request, request.owner); }
+  async releaseCall(request: { v: 1; id: string; attempt: number }) { await this.setupScheduled(); return this.calls!.release(request); }
   async renewRun(request: { v: 1; claim: Parameters<Scheduler["renew"]>[0] }) { await this.setupScheduled(); return this.scheduler!.renew(request.claim); }
   async completeRun(request: { v: 1; claim: Parameters<Scheduler["complete"]>[0]; outcome: Parameters<Scheduler["complete"]>[1] }) { await this.setupScheduled(); return this.scheduler!.complete(request.claim, request.outcome); }
   async schedule(request: ScheduleRequest) { await this.setupScheduled(); return this.scheduler!.enqueue({ function: request.function, args: request.args, runAtUnixMs: request.runAtUnixMs, provenance: request.provenance, coalesce: request.coalesce, jobId: request.id }); }
@@ -506,6 +509,11 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async fixtureDeliveryState(){
     if(!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY)throw new Error('assembly fixture control disabled');
     return {...this.delivery.stats,pendingInitials:this.delivery.pendingInitialCount()};
+  }
+  /** X13 fixture: how direct agent runs were run (no arguments, sessions or results). */
+  async fixtureActionRuns(){
+    if(!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY)throw new Error('assembly fixture control disabled');
+    return this.ctx.storage.sql.exec("SELECT state,attempts,substr(owner,1,7) AS owner,dispatch_count FROM _gonvex_st_action_runs ORDER BY created_at").toArray();
   }
   async fixtureEpoch(epoch: string): Promise<void> {
     await this.kernel.reducers.serial(async () => { this.ctx.storage.sql.exec("UPDATE _gonvex_sync_clock SET epoch=? WHERE singleton=1", epoch); });
