@@ -98,11 +98,10 @@
       "script_name": "gonvex-cf-dev-k22-actions"
     }
   ],
-  // 0022 §5b / 0089: the tenant-object script stays at cpu_ms 5000. A pure-loop Reducer
-  // can only be stopped by this limit; 30000 blocked the tenant for ~35 s and surfaced
-  // as "reset because its code was updated", which the caller cannot map.
+  // 0089: pinned by deploy.mjs TENANT_CPU_LIMIT_MS. Measured 2026-11-18: migration alarms on
+  // P03-imported tenants use up to 10.6 s CPU, so 0022 §5b's 5000 is not safe until they chunk.
   "limits": {
-    "cpu_ms": 5000
+    "cpu_ms": 30000
   },
   "vars": {
     "GONVEX_RUNTIME_VERSION": "development",

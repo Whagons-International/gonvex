@@ -1797,7 +1797,7 @@ new note and waits for the lead.
 | 0085 | Owned-dispatch and T-retirement result consumers | conditional native exact-data/disposal consumers only; actual assembly/quiescence plan precedes wiring and serving activation remains separate | K22 |
 | 0086 | Private authority publication and issuer finalization | bounded known/UNKNOWN publication before dispatch; explicit durable revocation/witness is distinct from wake and remote quiescence | K22 |
 | 0087 | Private rebuild refresh and retained initials | one-use durable refresh and exact semantic carry; lifecycle closure is distinct from collection and delivery facts | K22 |
-| 0089 | Runaway Reducer on the assembled runtime | runtime script restored to `cpu_ms` 5000 (0022 §5b) and guarded; exact 2 s wall parity proposed as adapt, awaits lead | X09, K22 |
+| 0089 | Runaway Reducer on the assembled runtime | adapt accepted by lead 2026-11-18, conditional on measurement; condition not met (migration alarms up to 10.6 s CPU), so runtime `cpu_ms` stays 30000 and pinned; 5000 waits on chunking | X09, K22, K02 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

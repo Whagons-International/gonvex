@@ -136,5 +136,5 @@ Node config/transfer tests also check target selection, namespace identity, part
 reverse plans. A coordinated dev transfer and the
 unchanged original remote connected scenarios remain necessary observations after review/merge.
 Full V01, terminal/OWNER acceptance and load remain separate; no latency, cost or load result is
-inferred from these local tests. Runtime runs at CPU5000 (0022 §5b, restored by 0089); Actions and Sandbox retain their existing
+inferred from these local tests. Runtime keeps CPU30000, pinned by 0089 (5000 waits on migration/transfer chunking); Actions and Sandbox retain their existing
 CPU and role caps. The new Worker adds a separate isolate; runtime heap/cost delta is unmeasured.
