@@ -139,7 +139,9 @@ export async function waitForRelease(port: OperatorTenantPort, planId: string, p
       catch (cause) {
         // Only this platform reset is safe to resume here. The plan and ledger
         // persist; ordinary migration/SQL failures must still fail fast.
-        if (!(cause instanceof Error) || !cause.message.includes("Durable Object reset because its code was updated") || Date.now() >= deadline) throw cause;
+        // TENANT_RELEASE_PENDING: the plan is applied, but this object still runs a Worker version
+        // whose baked catalog lacks the release; it activates once the new code reaches it.
+        if (!(cause instanceof Error) || !(cause.message.includes("Durable Object reset because its code was updated") || cause.message.includes(TENANT_RELEASE_PENDING)) || Date.now() >= deadline) throw cause;
         await new Promise(resolve=>setTimeout(resolve,pollMs));
       }
     }
@@ -167,6 +169,14 @@ export function rustTenantError(error: string | null): string {
   const failure = sqliteFailure(new Error(text));
   return failure.code !== undefined ? failure.message : text;
 }
+
+/**
+ * What a tenant object throws when its plan is done but the Worker version serving it does not yet bake
+ * the release of that plan. A sync's runtime deploy reaches a running object some time after the upload
+ * (observed: about a minute). Reporting `done` from the old version let a sync or `/dev/tenants` finish
+ * while every call answered "no active TypeScript module", so `waitForRelease` retries it instead.
+ */
+export const TENANT_RELEASE_PENDING = "tenant code does not contain the release yet";
 
 /** The reason a tenant object aborts with once `operatorDeleteAll` has wiped its storage and alarm. */
 export const TENANT_DELETED_REASON = "tenant deleted";
