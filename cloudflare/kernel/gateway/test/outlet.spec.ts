@@ -192,3 +192,53 @@ it('0070 recovery offers share the existing reserve across owners and cannot use
  }finally{release();await first;await b.reset('b',recovery());await b.reset('oversized',recovery());}
  expect(deliveryPressure().recovery).toBe(0);
 });
+
+// BUG-4b review (#473): the isolate claim for an oversized payload. Ticks are explicit `claimTick` calls.
+const big = (instance: string) => payload(instance, "x".repeat(2 * 1024 * 1024)); // ~16 MiB of credits
+const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0)); };
+
+it("r4609198128: holds the claim from the admission probe until the claimant's payload is enqueued", async () => {
+  const baseline = deliveryPressure();
+  let unblock!: () => void;
+  const gate = new Promise<void>(r => { unblock = r; });
+  const ok = (_t: string, p: ReplicaDelivery) => ({ v: 1, sockets: 0, ...(p.recovery ? { recoveryAck: 1 as const } : {}) });
+  const claimant = new GatewayOutlet("claim-hold-a", () => ({ async deliverReplica(t, p) { return ok(t, p); } }), async () => ["a"]);
+  const other = new GatewayOutlet("claim-hold-b", () => ({ async deliverReplica(t, p) { if (p.instance === "busy") await gate; return ok(t, p); } }), async () => ["b"]);
+  const busy = other.send("b", payload("busy", "y".repeat(1024)));
+  try {
+    expect(claimant.admits("a", big("big"))).toBe(false); // claims: the isolate is not quiet
+    unblock(); await busy; await settle();
+    expect(deliveryPressure().normal).toBe(baseline.normal);
+    expect(claimant.admits("a", big("big"))).toBe(true); // its turn
+    // Between that probe and its enqueue (catchUp runs later, through the invocation queue) nobody may take it.
+    expect(other.admits("b", payload("small", "z"))).toBe(false);
+    await claimant.send("a", big("big")); await settle();
+    expect(other.admits("b", payload("small", "z"))).toBe(true); // enqueued and sent: the claim ended
+  } finally { unblock(); claimant.unclaim("a"); }
+});
+
+it("r4609198131: a claim never waits on a holder whose RPC stopped progressing; it proceeds after the stall bound", async () => {
+  const ok = (_t: string, p: ReplicaDelivery) => ({ v: 1, sockets: 0, ...(p.recovery ? { recoveryAck: 1 as const } : {}) });
+  const claimant = new GatewayOutlet("claim-stall-a", () => ({ async deliverReplica(t, p) { return ok(t, p); } }), async () => ["a"]);
+  // Another tenant's holder whose RPC never settles.
+  const stuck = new GatewayOutlet("claim-stall-b", () => ({ deliverReplica: () => new Promise<never>(() => {}) }), async () => ["b"]);
+  void stuck.send("b", payload("never", "y".repeat(1024)));
+  await settle();
+  try {
+    expect(claimant.admits("a", big("big"))).toBe(false);
+    for (let tick = 0; tick < 29; tick++) claimant.claimTick("a", 30);
+    expect(claimant.admits("a", big("big"))).toBe(false); // under the bound: still waiting
+    for (let tick = 0; tick < 2; tick++) claimant.claimTick("a", 30);
+    expect(claimant.admits("a", big("big"))).toBe(true); // the stalled RPC no longer holds the isolate
+    await claimant.send("a", big("big"));
+  } finally { claimant.unclaim("a"); stuck.discard("b"); }
+});
+
+it("r4609198111: progress(host) counts every completed RPC across the queue's lifetimes", async () => {
+  const outlet = new GatewayOutlet("progress", () => ({ async deliverReplica() { return { v: 1, sockets: 0 }; } }), async () => ["p"]);
+  expect(outlet.progress("p")).toBe(0);
+  await outlet.send("p", payload("one")); await settle(); // drained: the queue is dropped
+  expect(outlet.progress("p")).toBe(1);
+  await outlet.send("p", payload("two")); await settle();
+  expect(outlet.progress("p")).toBe(2);
+});
