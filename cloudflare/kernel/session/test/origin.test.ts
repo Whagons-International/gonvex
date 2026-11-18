@@ -159,7 +159,7 @@ describe("X02 CallOrigin front model", () => {
     await tick();
     expect(order).toEqual([]);
     expect(wakes).toBe(1);
-    expect(origin.stats()).toEqual({ immediate: 0, deferred: 2, waiting: 2 });
+    expect(origin.stats()).toMatchObject({ immediate: 0, deferred: 2, waiting: 2, expired: 0, oldest: { label: "call" } });
     origin.enter("fresh");
     expect(order).toEqual([1, 2]); // launched synchronously inside the fresh event's turn
     expect(await Promise.all([a, b])).toEqual([1, 2]);
@@ -199,5 +199,68 @@ describe("X02 gatedEnv", () => {
     expect(await rpc).toBe(1);
     expect(await viaNamespace).toBe(0);
     expect(env.NAME).toBe("plain");
+  });
+});
+
+describe("X07b BUG-5 on -12: a deferred gateway call never strands its socket", () => {
+  function clock() {
+    let now = 0;
+    const timers: Array<{ at: number; fn: () => void; off: boolean }> = [];
+    const later = (ms: number, fn: () => void) => { const t = { at: now + ms, fn, off: false }; timers.push(t); return () => { t.off = true; }; };
+    const advance = (ms: number) => {
+      const end = now + ms;
+      for (;;) {
+        const next = timers.filter((t) => !t.off && t.at <= end).sort((a, b) => a.at - b.at)[0];
+        if (!next) break;
+        now = next.at; next.off = true; next.fn();
+      }
+      now = end;
+    };
+    return { now: () => now, later, advance, armed: () => timers.filter((t) => !t.off).length };
+  }
+
+  it("a call made inside a tenant reply RPC launches on a re-wake when the first wake is lost", async () => {
+    const c = clock();
+    let wakes = 0;
+    // Dev 02:28:55: the reducer call after an Action reply was made while the tenant's
+    // `settleActionReply` RPC was the newest request, so it had to wait for a fresh event.
+    const origin: CallOrigin = new CallOrigin(() => {
+      wakes++;
+      if (wakes === 1) return; // the first wake alarm is lost
+      const alarm = origin.enter("fresh"); origin.exit(alarm);
+    }, { now: c.now, later: c.later });
+    const reply = origin.enter("peer");
+    let launched = 0;
+    const call = origin.run(() => { launched++; return "dispatched"; }, "dispatch");
+    origin.exit(reply);
+    await tick();
+    expect(launched).toBe(0);
+    expect(origin.stats()).toMatchObject({ waiting: 1, oldest: { label: "dispatch" } });
+    // Before X07b nothing else re-armed the wake: the call waited forever and the socket went silent.
+    c.advance(1_000);
+    await expect(call).resolves.toBe("dispatched");
+    expect(launched).toBe(1);
+    expect(origin.stats().waiting).toBe(0);
+    expect(c.armed()).toBe(0);
+  });
+
+  it("with no fresh event at all the call fails after the deadline, naming the method", async () => {
+    const c = clock();
+    let wakes = 0;
+    const origin = new CallOrigin(() => { wakes++; }, { now: c.now, later: c.later });
+    const tenant = gatedStub({ dispatch: async () => ["never"] }, origin);
+    const reply = origin.enter("peer");
+    const call = tenant.dispatch();
+    origin.exit(reply);
+    let error: unknown;
+    void call.catch((e) => { error = e; });
+    c.advance(9_999);
+    await tick();
+    expect(error).toBeUndefined();
+    expect(wakes).toBeGreaterThanOrEqual(9);
+    c.advance(1);
+    await tick();
+    expect(String((error as Error)?.message)).toMatch(/gateway call dispatch waited 10000 ms/);
+    expect(origin.stats()).toMatchObject({ waiting: 0, expired: 1 });
   });
 });
