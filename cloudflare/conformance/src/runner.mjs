@@ -19,7 +19,7 @@
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import { Recorder, sdkClient, thinClient, RawSocket, control } from './sessions.mjs';
-import { normalizeSession, normalizeValue, Names } from './normalize.mjs';
+import { normalizeSession, normalizeValue, Names, checkRuntimeVersions } from './normalize.mjs';
 import { checksumRows } from './checksum.mjs';
 import { checkDigests } from './digest-check.mjs';
 import { checkWatermarks } from './watermark-check.mjs';
@@ -233,6 +233,9 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
     for (const p of [...new Set(problems)].slice(0, 5)) trace.failures.push(`watermark self-check: ${p}`);
     if (new Set(problems).size > 5) trace.failures.push(`watermark self-check: ${new Set(problems).size - 5} more problems`);
   }
+
+  // ---- runtimeVersion self-check (0088: masked in the diff, so each backend must send a non-empty label) ----
+  for (const p of [...new Set(checkRuntimeVersions(recorder.records).problems)].slice(0, 5)) trace.failures.push(`runtimeVersion self-check: ${p}`);
 
   // ---- normalize ----------------------------------------------------------------
   if (process.env.GONVEX_CONFORMANCE_RAW_DIR) {

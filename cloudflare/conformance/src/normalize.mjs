@@ -27,6 +27,9 @@
  *  - Object keys are sorted; batched opens are sorted by path and args.
  *  - Presence Members are sorted by their (aliased) Member id.
  *  - `session.ready` loses the three capabilities of 0012 R20.
+ *  - `session.ready.capabilities.runtimeVersion`, a deployment label (CONTRACT.md A.1.3 adapt), becomes
+ *    `<runtime-version>` when it is a non-empty string (contract-changes 0088); `checkRuntimeVersions`
+ *    fails a backend that sends anything else.
  *  - Error text loses JavaScript stack frame lines (ruling 0015).
  *
  * Every rule is listed in RULES below; README.md explains how to change them.
@@ -130,11 +133,33 @@ function canonicalOrder(frame) {
  * uses them, and the kernel does not (contract-changes 0012 R20).
  */
 export const UNCOMPARED_SERVER_CAPABILITIES = ['replicaNativeRows', 'replicaSetDigest', 'replicaFieldPatches'];
+/** contract-changes 0088: the only `session.ready` value replaced by a placeholder. */
+export const RUNTIME_VERSION_PLACEHOLDER = '<runtime-version>';
+const validRuntimeVersion = (value) => typeof value === 'string' && value.trim() !== '';
 function dropUncomparedCapabilities(frame) {
   if (frame?.type !== 'session.ready' || !frame.capabilities) return frame;
   const capabilities = { ...frame.capabilities };
   for (const key of UNCOMPARED_SERVER_CAPABILITIES) delete capabilities[key];
+  // A deployment label differs by design; an absent or empty one stays visible (and fails checkRuntimeVersions).
+  if (validRuntimeVersion(capabilities.runtimeVersion)) capabilities.runtimeVersion = RUNTIME_VERSION_PLACEHOLDER;
   return { ...frame, capabilities };
+}
+
+/**
+ * Per-backend check for 0088: every `session.ready` a backend sends carries a non-empty string
+ * `capabilities.runtimeVersion`. Runs on raw records, before the value is replaced.
+ * @param {Array<{dir:'in'|'out', frame:any, tag?:string}>} records
+ * @returns {{ checked: number, problems: string[] }}
+ */
+export function checkRuntimeVersions(records) {
+  let checked = 0; const problems = [];
+  for (const r of records) {
+    if (r.dir !== 'in' || r.frame?.type !== 'session.ready') continue;
+    checked++;
+    const value = r.frame.capabilities?.runtimeVersion;
+    if (!validRuntimeVersion(value)) problems.push(`session.ready${r.tag ? ` on ${r.tag}` : ''} has runtimeVersion ${JSON.stringify(value) ?? 'undefined'}, expected a non-empty string`);
+  }
+  return { checked, problems };
 }
 
 /** Expands container frames into the frames they stand for. `state.bindings` is per socket. */

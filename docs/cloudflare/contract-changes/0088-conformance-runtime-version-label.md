@@ -1,7 +1,15 @@
-# 0088: `session.ready.capabilities.runtimeVersion` in conformance comparisons (proposal, awaits lead)
+# 0088: `session.ready.capabilities.runtimeVersion` in conformance comparisons (decided by lead 2026-11-18)
 
-Raised by X03 (criterion 5) on 2026-11-18. **Proposal only.** No harness, normalizer, assertion or deployment
-change is made until the lead decides.
+Raised by X03 (criterion 5) on 2026-11-18. **Decided by lead 2026-11-18: option 1.**
+
+## Decision
+
+`session.ready.capabilities.runtimeVersion` is an adapt value, a deployment label (§A.1.3). The conformance
+normalizer replaces it with `<runtime-version>` on both sides. Each backend must still send a non-empty
+string: a per-backend self-check (`checkRuntimeVersions`, run like the digest and watermark self-checks)
+fails that backend's run otherwise, and an absent or empty value is not replaced, so it also shows in the
+diff. **Nothing else in `session.ready` is masked.** Implemented in `cloudflare/conformance/src/normalize.mjs`
+and `src/runner.mjs`, with a normalizer unit test.
 
 ## Observation
 
@@ -33,5 +41,5 @@ publication, which is required for exact-head provenance.
 3. Start the reference with the candidate's label. This makes the comparison depend on the candidate under
    test. Not recommended.
 
-Option 1 changes a shared harness file. It needs the lead's decision and, by rule 3, must not weaken any
-other assertion.
+Option 1 changes a shared harness file. The lead approved it on 2026-11-18. By rule 3 it weakens no other
+assertion.

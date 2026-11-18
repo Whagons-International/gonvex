@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSession, normalizeValue } from '../src/normalize.mjs';
+import { normalizeSession, normalizeValue, checkRuntimeVersions, RUNTIME_VERSION_PLACEHOLDER } from '../src/normalize.mjs';
 import { diffFrames, diffTraces, diffValues, diffChecksums } from '../src/differ.mjs';
 
 const rec = (dir, frame, socket = 1, step = 's') => ({ dir, frame, socket, step });
@@ -207,6 +207,26 @@ test('0012 R20: session.ready drops replicaNativeRows, replicaSetDigest and repl
   assert.deepEqual(rust.capabilities, { presence: 1, replicaBatchFrames: 1 });
   // Other capabilities are still compared.
   assert.notDeepEqual(ready({ presence: 1 }), kernel);
+});
+
+test('0088: runtimeVersion is a deployment label; only it is masked, and each backend must send a non-empty string', () => {
+  const ready = (capabilities) => normalizeSession([rec('in', { type: 'session.ready', capabilities })])[0].frame;
+  const rust = ready({ presence: 1, protocolVersion: 2, runtimeVersion: 'development' });
+  const kernel = ready({ presence: 1, protocolVersion: 2, runtimeVersion: '858f19e0c5d1a9b2e7f3c4d6a8b0e1f2a3c4d5e6' });
+  assert.deepEqual(rust, kernel);
+  assert.equal(rust.capabilities.runtimeVersion, RUNTIME_VERSION_PLACEHOLDER);
+  // Nothing else in session.ready is masked.
+  assert.notDeepEqual(ready({ presence: 1, protocolVersion: 3, runtimeVersion: 'x' }), kernel);
+  // An absent, empty or non-string label is not replaced (it shows in the diff) and fails the self-check.
+  assert.equal(ready({ presence: 1, runtimeVersion: '' }).capabilities.runtimeVersion, '');
+  assert.equal(ready({ presence: 1, runtimeVersion: 7 }).capabilities.runtimeVersion, 7);
+  assert.equal('runtimeVersion' in ready({ presence: 1 }).capabilities, false);
+  const records = (capabilities) => [rec('out', { type: 'auth', id: 'a' }), rec('in', { type: 'session.ready', capabilities })];
+  assert.deepEqual(checkRuntimeVersions(records({ runtimeVersion: 'development' })), { checked: 1, problems: [] });
+  for (const bad of [{}, { runtimeVersion: '' }, { runtimeVersion: '   ' }, { runtimeVersion: null }, { runtimeVersion: 1 }]) {
+    const { checked, problems } = checkRuntimeVersions(records(bad));
+    assert.equal(checked, 1); assert.equal(problems.length, 1, JSON.stringify(bad));
+  }
 });
 
 test('ruling 0015: error messages stay exact, JavaScript stack lines are stripped', () => {
