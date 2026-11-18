@@ -231,3 +231,14 @@ it('X03 the tenant wipe is made durable (storage.sync) before the reset that end
   expect(state.storage.sql.exec("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name IN ('board','gonvex_migrations')").one().n).toBe(0);
  });
 });
+it('BUG-8 a row an Action writes through its nested Reducer tool is a committed, captured change like any Reducer write',async()=>fixture(async(object,state)=>{
+ // apiKeys.create is an Action whose createRecord tool inserts the row; replicas see only committed change-log rows.
+ const before=Number(state.storage.sql.exec("SELECT revision FROM _gonvex_sync_clock").one().revision);
+ const replies=await object.dispatch(view(state.id.name!),{type:'action.call',id:'create',path:'probe.nestedWrite',args:{id:'bug8-key'}});
+ expect(JSON.parse(replies[0]!)).toMatchObject({type:'action.result',result:{denied:false}});
+ const changes=[...state.storage.sql.exec("SELECT revision,operation,command_id FROM _gonvex_sync_changes WHERE table_name='board' AND row_id='bug8-key'")];
+ expect(changes).toHaveLength(1);
+ expect(changes[0]).toMatchObject({operation:'insert'});
+ expect(Number(changes[0]!.revision)).toBeGreaterThan(before);
+ expect(Number(state.storage.sql.exec("SELECT revision FROM _gonvex_sync_clock").one().revision)).toBe(Number(changes[0]!.revision));
+}));
