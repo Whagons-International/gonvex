@@ -98,7 +98,7 @@
  "vars": {
   "GONVEX_DEV_TRANSFER_TARGET": "gonvex-cf-dev-test",
   "GONVEX_DEV_TRANSFER_TOKEN": "test-only",
-  "GONVEX_DEV_TRANSFER_TENANTS": "devcopy-test,devcopy-refusal,devcopy-large,devcopy-wide,devcopy-budget",
+  "GONVEX_DEV_TRANSFER_TENANTS": "devcopy-test,devcopy-refusal,devcopy-large,devcopy-wide,devcopy-budget,devcopy-files-schema",
   "GONVEX_ASSEMBLY_FIXTURE_KEY": "capacity-local-only"
  },
  "rules": [
