@@ -14,6 +14,7 @@
  *
  * The deployed Worker exports this class as the control object.
  */
+import { resetTolerantTenantPort } from "./tenant/reset";
 import { ControlObject, type ControlEnv } from "../src/control-object";
 import type { Ctx } from "../src/context";
 import type { TenantPort } from "../src/tenant-port";
@@ -207,7 +208,8 @@ export class OperatorControlObject extends ControlObject {
       config: this.operatorConfig,
       sync: this.syncs,
       releases: (this.env as OperatorObjectEnv).RELEASES,
-      tenant: (tenantId) => this.tenantPort(tenantId),
+      // A reset tenant (CPU limit, eviction) must not answer the next operator call with a 500 (X10, run9).
+      tenant: (tenantId) => resetTolerantTenantPort(tenantId, () => this.tenantPort(tenantId)),
       controlChanged: (projectId) => this.controlChanged(projectId),
       tenantCounts: (projectId) => this.tenantCounts(projectId),
       provisionTenant: (projectId, tenantId, planId) => this.provisionTenant(projectId, tenantId, planId),

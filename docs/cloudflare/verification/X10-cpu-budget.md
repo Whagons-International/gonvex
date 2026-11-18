@@ -89,3 +89,61 @@ Do not touch `devcopy-stg1117-12`: it is a live browser-matrix tenant. Use a new
 
 Rerun locally (in `cloudflare/`): `npx vitest run kernel/migrate/test/budget.test.ts` and
 `npx vitest run --root kernel/assembly test/tenant-transfer-budget.spec.ts`.
+
+## Dev measurement 1 (2026-11-18, runtime with #471) and the first alarm
+
+`devcopy-stg1117-12x`, a new copy from the same staged snapshot as -12 (115,547 source rows, 381 tables), imported,
+registered and deleted under the lane lock (11:28:06Z–11:29:32Z), gate variables off again afterwards. All six checksum
+legs matched.
+
+| Invocation on the copy | n | max CPU | max wall |
+|---|---|---|---|
+| `alarm` | 24 | **3,609 ms** | 4,369 ms |
+| `assemblyTransfer` | 103 | 1,559 ms | 1,597 ms |
+| `operatorApplyRelease` | 1 | 25 ms | 379 ms |
+| `operatorMigrationStatus` | 1 | 450 ms | 553 ms |
+
+One alarm, the first after registration, was over 3,500 ms (-12 before #471: 6,003 ms). The other 23 took 3–8 ms.
+Workers Logs held only invocation events for the object, so no `console.warn` line (and no `unsplittable` line) was
+visible there.
+
+**Local reproduction** (wrangler dev, the real staged -12 file, a plan built from the same staging migrations, console
+visible): every migration is already in the imported ledger, the four prelude chunks take 15–49 ms, and the whole first
+alarm is the change-feed plan, 2,253 ms, which plans **zero** units: every receipt and trigger already matches. A
+profile of `planChangeFeedInstall` over the same file in Node: SQL 15 ms, JavaScript 2.3 s, all of it the A01 transform
+that turns each table's Rust-form capture script into plain SQL to compare with the installed triggers. 60 % of that is
+the limit checks (`checkStatement` tokenizes every output statement again).
+
+**Fix (X10b):** the limit checks never change the transform's output; they only throw. For a unit whose receipt digest
+matches, the plan now compares the installed triggers with the transform's output without the checks. A unit that has
+to be installed (any mismatch) is transformed again with them, so everything installed is still checked. A shared
+transform (`options.transform`) keeps its old path. Same file:
+
+| First alarm on the staged -12 file (local) | before | after |
+|---|---|---|
+| `planChangeFeedInstall` in Node | 2,255–2,530 ms | 769–838 ms |
+| the alarm in local workerd (warm / after a restart) | 2,272 ms | 934 / 843 ms |
+
+At the ratio this alarm showed on dev (3,609 / 2,272 ≈ 1.6), about 1.5 s on dev. Re-measure on a fresh -12x.
+
+## A reset must not answer the next operator call with 500 (conformance run9, reducer-errors)
+
+Run9's last `reducer-errors` read, `GET /dev/data/tables/board/rows` on the tenant that `errors.spin` had just pushed
+past the CPU limit, answered `500 {"error":"Durable Object storage is no longer accessible."}`. That read was queued
+behind the runaway call; when the object reset, every queued call failed with that text, and the operator routes turned
+an unknown error into 500.
+
+The operator's tenant port (`control/operator/tenant/reset.ts`) now handles the platform reset texts (CPU-limit reset,
+"storage is no longer accessible", code-update reset, "Network connection lost"):
+
+- a read-only call (`operatorListTables`, `operatorReadRows`, `operatorActiveMembers`, `operatorMigrationStatus`,
+  `operatorLedger`, `operatorServedModule`) is retried on a fresh stub (up to 4 attempts, 0.1/0.5/1.5 s apart) and is
+  answered by the new instance;
+- a write is never replayed: it answers `503 {"error":"tenant \"…\" was reset while handling this request (…); it was
+  not retried, retry the request","class":"transient","retryable":true}`, the documented transient failure (0089: calls
+  in flight during an overrun fail transient);
+- overload (`overloaded: true`), `tenant deleted` and application errors pass through unchanged.
+
+Provisioning (`waitForRelease`) and tenant deletion keep their own handling of the raw port. Tests:
+`control/test/tenant-reset.test.ts` and `router/dev/test/data.test.ts` ("after a tenant reset…"), which returned
+500 on the base.

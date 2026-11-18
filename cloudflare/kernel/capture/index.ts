@@ -14,7 +14,7 @@ export {
   type PlanOptions,
 } from "./install.ts";
 export { SCHEMA_OPTIONS_SQL, SYNC_INFRASTRUCTURE_SQL } from "./infrastructure.ts";
-export { DELETE_NO_OP_SQL, keepRowidReference, plainCaptureStatements, ROW_IMAGE_SPLIT_ASSIGNMENTS, ROW_IMAGE_SPLIT_SQL, type ImageCatalog } from "./images.ts";
+export { DELETE_NO_OP_SQL, keepRowidReference, plainCaptureStatements, ROW_IMAGE_SPLIT_ASSIGNMENTS, ROW_IMAGE_SPLIT_SQL, uncheckedCaptureStatements, type ImageCatalog } from "./images.ts";
 export { PRUNE_INTERVAL_MS, PRUNE_PAGE_ROWS, pruneChangeLog, pruneDue, RETENTION_MS, type PruneOptions, type PruneResult, type PruneStorage } from "./prune.ts";
 export { ChangeWake, type ChangeListener, type ChangeWakeup } from "./wake.ts";
 export { invokeCaptured, type CaptureContext, type CapturedResult, type CapturedSession, type Invoker } from "./invoke.ts";

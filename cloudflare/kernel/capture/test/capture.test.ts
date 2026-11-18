@@ -22,6 +22,8 @@ import {
   sha256Hex,
   transactionRow,
   type ChangeWakeup,
+  plainCaptureStatements,
+  uncheckedCaptureStatements,
 } from "../index.ts";
 import { numbersByValue } from "./numbers.ts";
 import { rows, StandInStorage, withObject } from "./helpers.ts";
@@ -100,6 +102,36 @@ describe("install", () => {
       expect(rows(state.storage.sql, "SELECT table_name FROM _gonvex_sync_changes").map((r) => r.table_name)).toEqual(["parents"]);
       commit(state, () => sql.run("UPDATE _gonvex_table_options SET owner_column='absent' WHERE name='edges'"));
       expect(() => planChangeFeedInstall(sql)).toThrow(new CaptureInstallError('derived table "edges" must declare its owner foreign key'));
+    });
+  });
+
+  it("matches installed units without the limit checks, and still checks every unit it installs (X10)", async () => {
+    await withObject((state) => {
+      const sql = setup(state, "CREATE TABLE parents(id TEXT PRIMARY KEY, name TEXT); CREATE TABLE edges(id TEXT PRIMARY KEY, owner TEXT REFERENCES parents(id), w REAL)");
+      expect(planChangeFeedInstall(sql)).toEqual([]);
+      // The unchecked transform gives exactly the checked output.
+      for (const table of ["parents", "edges"]) {
+        const columns = rows<{ name: string; type: string; pk: number }>(state.storage.sql, "SELECT name, type, pk FROM pragma_table_info(?)", table).map((c) => ({ name: c.name, declared: c.type, pk: c.pk }));
+        const catalog = { records: [], tables: [{ name: table, columns }] };
+        const script = entityCaptureSql(table, "id");
+        expect(uncheckedCaptureStatements(`table:${table}`, script, catalog)).toEqual(plainCaptureStatements(`table:${table}`, script, catalog));
+      }
+      // An installed trigger that differs: that unit is planned again, with the checked statements.
+      const installed = rows<{ name: string; sql: string }>(state.storage.sql, "SELECT name, sql FROM sqlite_schema WHERE type='trigger' AND tbl_name='edges' ORDER BY name");
+      commit(state, () => {
+        sql.run(`DROP TRIGGER "${installed[0]!.name}"`);
+        sql.run(`CREATE TRIGGER "${installed[0]!.name}" AFTER INSERT ON edges BEGIN SELECT 1; END`);
+      });
+      const plan = planChangeFeedInstall(sql);
+      expect(plan.map((u) => u.receipt)).toEqual(["table:edges"]);
+      const created = plan[0]!.statements.filter((s) => /^\s*CREATE\s+TRIGGER/i.test(s)).map((s) => s.trim()).sort();
+      expect(created).toEqual(installed.map((t) => t.sql.trim()).sort());
+      // A unit that must be installed is still refused when it breaks a platform limit (100 KB per statement).
+      const wide = Array.from({ length: 60 }, (_, i) => `c${i}_${"x".repeat(1000)}`);
+      commit(state, () => sql.run(`CREATE TABLE wide(id TEXT PRIMARY KEY, ${wide.map((c) => `${c} TEXT`).join(", ")})`));
+      let refused: unknown;
+      try { planChangeFeedInstall(sql); } catch (error) { refused = error; }
+      expect(String(refused)).toMatch(/TransformError: .*table:wide: _gonvex_sync_wide_insert: statement-bytes/);
     });
   });
 
