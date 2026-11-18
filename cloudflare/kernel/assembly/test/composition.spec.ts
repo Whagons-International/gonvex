@@ -280,3 +280,24 @@ it('BUG-8 a row an Action writes through its nested Reducer tool is a committed,
  expect(Number(changes[0]!.revision)).toBeGreaterThan(before);
  expect(Number(state.storage.sql.exec("SELECT revision FROM _gonvex_sync_clock").one().revision)).toBe(Number(changes[0]!.revision));
 }));
+it('X03 a tenant whose provisioning was interrupted before its schema exists still starts (no outbox query before migrations)',async()=>{
+ // provision()/operatorApplyRelease() persist the project before the migrations that create the sync
+ // infrastructure. A reset in between (a code update during provisioning) left a constructor that activated the
+ // project and queried _gonvex_action_outbox on every start, so every call and DELETE /dev/tenants failed.
+ const stub=bindings.TENANT.getByName(`assembly-unprovisioned-${crypto.randomUUID()}`);
+ await runInDurableObject(stub,async(object,state)=>{
+  const tenant=object as CompositionTenant as unknown as {activate(p:string,m:unknown,plan:string|null):Promise<unknown>;setupScheduled():Promise<void>;scheduler?:unknown;kernel:{module?:unknown}};
+  const outbox=()=>state.storage.sql.exec("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name='_gonvex_action_outbox'").one().n;
+  await tenant.activate('p',manifest,null);
+  expect(tenant.kernel.module).toBeTruthy();
+  expect(outbox()).toBe(0);
+  await expect(tenant.setupScheduled()).resolves.toBeUndefined();
+  expect(tenant.scheduler).toBeUndefined();
+  // The normal provisioning path still installs the schema and then the scheduler.
+  const release=await buildReleasePlan(await migrationsFromFiles(files));plans.add(release);
+  await (object as CompositionTenant).activate('p',manifest,release.id);
+  expect(outbox()).toBe(1);
+  await tenant.setupScheduled();
+  expect(tenant.scheduler).toBeDefined();
+ });
+});
