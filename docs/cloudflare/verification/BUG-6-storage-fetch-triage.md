@@ -68,3 +68,40 @@ reference and would fix nothing.
   thumbnail fallback then stops loading storage URLs no-cors.
 - Walkthrough: clear site data, or bypass the SW, before re-running files-download, because the opaque entries persist
   in the existing browser contexts.
+
+## BUG-6b: image-proxy parity (deploy-agent change, not applied)
+
+What the proxy is: the 678bdc80 build sets no `VITE_IMGPROXY_URL` (it is absent from the served public env).
+`src/utils/imgproxy.ts` therefore uses its default, `https://imgproxy.whagons.com`. That is one shared imgproxy
+instance (Whagons infra), and staging and dev builds use the same one. The client wraps any URL on the
+`VITE_GONVEX_URL` host or any `/storage/` path as
+`/unsafe/rs:fit:W:H:0/<b64 source>.avif`. The imgproxy allow-list (`IMGPROXY_ALLOWED_SOURCES`, mirrored in
+`gridImageCache.ts`) admits `whagons.com`, `convex.cloud`, `convex.site`, Google storage and `novastone-ca.com`
+hosts. Staging's storage origin `https://gonvex-stg.whagons.com` is allowed, so thumbnails work there. Dev's is
+`https://gonvex-cf-dev-integration-20261117.whagons-international.workers.dev`. That host is not allowed, so
+imgproxy refuses it with 404, the UI falls back to a direct no-cors `<img>`, and the SW caches the opaque
+response. The allow-list comes from the client's mirror and the observed 404. The live imgproxy env was not read.
+
+A kernel route cannot close this gap. imgproxy refuses the source by host, and the frontend may change only its
+backend URL. The parity fix is to serve the dev backend on a `whagons.com` host, as staging does:
+
+1. Cloudflare (whagons.com zone; needs lead/Gabriel approval, because the brief fences DNS and zones): attach a
+   Worker Custom Domain `gonvex-cf-dev-integration.whagons.com` → the router Worker
+   `gonvex-cf-dev-integration-20261117`. Keep `workers_dev` on.
+2. `cloudflare/kernel/assembly/deploy.mjs`, `deployAssembly` (line ~94): make the public origin overridable
+   instead of always using workers.dev:
+   `const url = publicUrl ?? \`https://${name}.${subdomain.subdomain}.workers.dev\`;` with `publicUrl` taken from the
+   deploy invocation (for example `GONVEX_CF_DEV_PUBLIC_URL=https://gonvex-cf-dev-integration.whagons.com`). It then
+   flows to `GONVEX_PUBLIC_URL` (storage URLs, OAuth callback base) and `GONVEX_KERNEL_URL` through
+   `servingConfigs`. Retain `GONVEX_STORAGE_SECRET` (no rotation).
+3. Frontend dev build (backend URL only): `VITE_GONVEX_URL=https://gonvex-cf-dev-integration.whagons.com`,
+   `VITE_GONVEX_WS_URL=wss://gonvex-cf-dev-integration.whagons.com/ws`. Leave `VITE_IMGPROXY_URL` unset, as on
+   staging.
+4. Verify: `getFileUrls` returns `https://gonvex-cf-dev-integration.whagons.com/storage/...`. The thumbnail
+   `https://imgproxy.whagons.com/unsafe/rs:fit:320:320:0/<b64>.avif` returns 200 image/avif. In a fresh browser
+   context (site data cleared), opening the note and then calling `fetch(signedUrl)` returns 200 with the exact
+   bytes. The SW task-file cache holds no `opaque` entry for the path.
+
+Risk: imgproxy and its CDN cache the transformed bytes by URL. The signed URL carries `exp`/`sig`, so each
+signature makes a distinct cache entry, which matches staging. Private files are already protected by the owner
+signature check on the source GET.
