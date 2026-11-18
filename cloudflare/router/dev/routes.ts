@@ -194,8 +194,10 @@ async function devSync(request: Request, env: DevRouterEnv, ctx: ExecutionContex
     }
     return Response.json(outcome.body);
   } catch (cause) {
-    // Preserve the actual RPC/deploy cause instead of an opaque edge HTML500.
-    return syncFailure(cause, env, "sync/deploy");
+    // Preserve the actual RPC/deploy cause instead of an opaque edge HTML500. A platform RPC failure (an object or
+    // service reset, e.g. right after a publication swapped the runtime) leaves any staged fence intact, so the
+    // same request id may simply be retried (dev 2026-11-18 08:23Z: fence 429aba75 stranded by a non-retryable 503).
+    return syncFailure(cause, env, "sync/deploy", platformFailure(cause));
   } finally {
     ctx.waitUntil(env.RELEASES.delete(incomingKey(incoming)).catch(() => undefined));
   }
@@ -242,6 +244,15 @@ async function completePublication(env:DevRouterEnv,ref:DeploymentRef,deploy:boo
     // the builder's actual target failure or an explicit abort is terminal.
     return syncFailure(cause,env,"publication",true);
   }
+}
+
+/** Workers runtime failures of an RPC/service call (not an HttpError verdict): `internal error; reference = …`, resets, overload. */
+export function platformFailure(cause: unknown): boolean {
+  if (cause == null || typeof cause !== "object") return false;
+  if (typeof (cause as {status?:unknown}).status === "number") return false; // an HttpError verdict, not a platform failure
+  if ((cause as {retryable?:unknown}).retryable === true || (cause as {overloaded?:unknown}).overloaded === true) return true;
+  const message = cause instanceof Error ? cause.message : "";
+  return /^internal error(;|$)|Durable Object reset|code was updated|Network connection lost/i.test(message);
 }
 
 function syncFailure(cause: unknown, env: DevRouterEnv, phase: string, recoverable=false, status=503): Response {
