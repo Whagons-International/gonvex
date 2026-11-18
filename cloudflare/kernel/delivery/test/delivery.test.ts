@@ -944,3 +944,75 @@ describe("BUG-8 apiKeys.list visibility is the Member's direct permission grant,
     }, APP);
   });
 });
+
+describe("BUG-4b one large commit is delivered, never reset lagged", () => {
+  // -12 on dd5a9bee, ~03:07:50 Z: right after a UI bulk reassign (one commit over many rows), one burst of 108
+  // `change-feed-lagged` resets on a holder that was not stalled. Rust writes a large transaction to the socket.
+  const bulk = async (rows: number, hosts: string[], rpcMs: number) => {
+    let recoveries = 0;
+    const deltas = new Map<string, number>();
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < rows; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+      for (let i = 0; i < insert.length; i += 2500) await h.commit(insert.slice(i, i + 2500));
+      h.receiver.deliver = async (host, payload) => {
+        await new Promise((resolve) => setTimeout(resolve, rpcMs));
+        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        for (const [id, work] of Object.entries(payload.sockets)) for (const op of work.ops) {
+          if (op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && (op[1] as string).includes("reassigned")) deltas.set(id, (deltas.get(id) ?? 0) + 1);
+        }
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      for (const [n, host] of hosts.entries()) h.engine.dispatch(socket(`S${n}`, {}, host), { type: "replica.open", id: `sub-${n}`, path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      const ready = () => new Set(h.payloads.flatMap(([, p]) => Object.entries(p.sockets).filter(([, w]) => w.ops.some((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"'))).map(([id]) => id)));
+      for (let spin = 0; spin < 4000 && ready().size < hosts.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      expect(ready().size).toBe(hosts.length);
+      // The bulk reassign: one transaction over every row, a delta far over the holder's 8 MiB credit budget.
+      await h.commit([["UPDATE items SET label = 'reassigned ' || id", []]], false);
+      for (let spin = 0; spin < 4000 && deltas.size < hosts.length && !recoveries; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      expect(h.conflicts).toEqual([]);
+    }, MODULE, false, undefined, undefined, hosts);
+    return { recoveries, delivered: deltas.size };
+  };
+
+  it("a commit over the budget waits for no stall reset while another holder keeps the isolate's credits busy", { timeout: 120_000 }, async () => {
+    // Holder h1 holds every row; h2 holds two rows and keeps receiving small commits over a slow hop, so the
+    // isolate's shared normal credits are never zero. The stall bound is shortened to 300 ms.
+    let recoveries = 0, bulkSeen = false, done = false;
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 12_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+      for (let i = 0; i < insert.length; i += 2500) await h.commit(insert.slice(i, i + 2500));
+      h.receiver.deliver = async (host, payload) => {
+        await new Promise((resolve) => setTimeout(resolve, host === "h2" ? 40 : 2));
+        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        if ((payload.sockets.S1?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && (op[1] as string).includes("reassigned i011999"))) bulkSeen = true;
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      h.engine.dispatch(socket("S1", {}, "h1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      h.engine.dispatch(socket("S2", {}, "h2"), { type: "replica.open", id: "top", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      const ready = () => new Set(h.payloads.flatMap(([, p]) => Object.entries(p.sockets).filter(([, w]) => w.ops.some((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"'))).map(([id]) => id)));
+      for (let spin = 0; spin < 4000 && ready().size < 2; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      let n = 0;
+      const writer = (async () => { while (!done) { await h.commit([[`UPDATE items SET label = 'w${++n}' WHERE id = 'i000000'`, []]], false); await new Promise((resolve) => setTimeout(resolve, 5)); } })();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await h.commit([["UPDATE items SET label = 'reassigned ' || id WHERE id <> 'i000000'", []]], false);
+      for (let spin = 0; spin < 600 && !bulkSeen && !recoveries; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      done = true;
+      await writer;
+      await h.engine.settled();
+      expect(h.conflicts).toEqual([]);
+    }, MODULE, false, undefined, 300, ["h1", "h2"]);
+    expect({ recoveries, bulkSeen }).toEqual({ recoveries: 0, bulkSeen: true });
+  });
+
+  it("one holder", { timeout: 120_000 }, async () => {
+    expect(await bulk(12_000, ["h1"], 2)).toEqual({ recoveries: 0, delivered: 1 });
+  });
+  it("three holders sharing the isolate's credits", { timeout: 120_000 }, async () => {
+    expect(await bulk(12_000, ["h1", "h2", "h3"], 20)).toEqual({ recoveries: 0, delivered: 3 });
+  });
+});

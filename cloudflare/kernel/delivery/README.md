@@ -75,7 +75,8 @@ holder (any object):  Session ─ SocketDelivery (socket.ts) ─ ReplicaBatcher 
   first. Presence rides in it (leading edge).
 - **Resets.** `change-feed-reset` when the log no longer covers what follows the delivery's cursor (pruned, or a
   database at an earlier revision); `change-feed-lagged` when a holder falls 256 payloads behind or stays
-  backlogged for `HOLDER_STALL_MS` (30 s, Rust's `GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS`) (its queue is discarded and
+  stalled for `HOLDER_STALL_MS` (30 s, Rust's `GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS`): its own channel had work and
+  finished no RPC in that time (BUG-4b; a holder waiting for room with an empty channel is never stalled) (its queue is discarded and
   its sockets resync). Outbound bytes alone never lag a holder (BUG-4), and one holder's backlog never delays
   another's commits: a holder over its budget (typically a large first load's snapshot pages) is deferred on its own,
   every other holder gets each commit at once, and when it drains it gets the commits after its last one read again
@@ -85,7 +86,10 @@ holder (any object):  Session ─ SocketDelivery (socket.ts) ─ ReplicaBatcher 
   that outbox too instead of being refused. The main feed does not run a deferred holder's live queries; each
   catch-up chunk re-runs them first, so a watermark never certifies a result the holder was not sent. An open's last work that does not fit waits with it; pages
   in the middle of a scan wait for room instead of being refused. The waits are the holder's `idle` signal, or a timer
-  backing off from 10 ms to 1 s while the isolate-wide credits are full (another object cannot signal this one). A new database epoch with the log intact is delivered as Rust delivers it: the
+  backing off from 10 ms to 1 s while the isolate-wide credits are full (another object cannot signal this one).
+  A payload over the budget (one large commit, e.g. a bulk update) is legal only alone in the isolate; its holder
+  claims the isolate while its channel is empty, and `admits` makes every other holder wait until it went (BUG-4b),
+  so it cannot be starved by steady traffic elsewhere. `send` admission is unchanged. A new database epoch with the log intact is delivered as Rust delivers it: the
   transaction carries the new epoch, collection cursors keep theirs, and resumes from the old epoch reload. A socket
   whose collections span two epochs is closed (1011), as Rust ends that socket's task.
 - **Tenant restarts.** Subscriptions live in the tenant object's memory. A holder tracks its sockets' collections and

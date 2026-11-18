@@ -121,6 +121,8 @@ export interface DeliveryOutlet {
   backlogged?(host: string): boolean;
   /** BUG-4: whether `send` would accept `payload` now, without queueing it or tripping recovery. */
   admits?(host: string, payload: ReplicaDelivery): boolean;
+  /** BUG-4b: how long the holder's channel has had work without progress (0 with none): what "stalled" means. */
+  stalledFor?(host: string): number;
   /** X01: same ordered channel, constant-size recovery reserve; an ordinary receipt is never an ack. */
   reset?(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
   /** Drops what is queued for `host` (lag), keeping order for what comes next. */
@@ -579,6 +581,25 @@ export class ReplicaDeliveryEngine {
     deferred.timer = setTimeout(() => this.kick(), this.stallMs());
   }
 
+  /**
+   * BUG-4b: stalled means the holder's own channel has had work and made no progress for `HOLDER_STALL_MS`, as Rust's
+   * send-stall timeout. Waiting for room while its channel is empty (the isolate's credits are busy elsewhere) is not
+   * a stall: that holder is never reset.
+   */
+  private stalled(host: string, deferred: Deferred): boolean {
+    const outlet = this.options.outlet;
+    return outlet.stalledFor ? outlet.stalledFor(host) >= this.stallMs() : Date.now() - deferred.since >= this.stallMs();
+  }
+
+  /** Wakes the loop when the holder's channel would reach the stall bound (none while it has nothing in flight). */
+  private armStall(host: string, deferred: Deferred): void {
+    const stalledFor = this.options.outlet.stalledFor;
+    if (!stalledFor) return;
+    clearTimeout(deferred.timer);
+    delete deferred.timer;
+    if (this.options.outlet.queued(host) > 0) deferred.timer = setTimeout(() => this.kick(), Math.max(0, this.stallMs() - stalledFor.call(this.options.outlet, host)) + 1);
+  }
+
   /** Its next waiting payload fits, or (none waiting) it has room for the next catch-up chunk. */
   private ready(host: string, deferred: Deferred): boolean {
     return this.hasRoom(host, deferred);
@@ -608,7 +629,8 @@ export class ReplicaDeliveryEngine {
   private dueHolder(): string | undefined {
     for (const [host, deferred] of this.behind) {
       if (this.paused(host)) { this.undefer(host); continue; }
-      if (this.ready(host, deferred) || Date.now() - deferred.since >= this.stallMs()) return host;
+      if (this.ready(host, deferred) || this.stalled(host, deferred)) return host;
+      this.armStall(host, deferred);
       this.awaitRoom(host, deferred);
     }
     return undefined;
@@ -625,7 +647,7 @@ export class ReplicaDeliveryEngine {
     const deferred = this.behind.get(host);
     if (!deferred || this.paused(host)) return;
     if (!this.ready(host, deferred)) {
-      if (Date.now() - deferred.since < this.stallMs()) return this.awaitRoom(host, deferred);
+      if (!this.stalled(host, deferred)) return this.awaitRoom(host, deferred);
       // Rust: a socket whose writes stop progressing is reset (GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS).
       this.undefer(host);
       this.requestRecovery(host);

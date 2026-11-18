@@ -32,6 +32,15 @@ export class DeliveryRecoveryUnsupportedError extends Error {
 // Shared by EVERY outlet/tenant in this module's Worker isolate. These are estimated byte credits,
 // including retained text plus serialization/copy allowance, not a guarantee about whole-isolate RAM.
 const credits = { normal: 0, recovery: 0, count: 0, running: 0, hosts: 0 };
+/**
+ * BUG-4b: a holder whose next payload is over the budget (legal only alone in the isolate) claims the isolate while
+ * its own channel is empty. While the claim stands, `admits` tells every other holder to wait (cooperative engines
+ * defer instead of sending), so the isolate's credits drain and the large payload goes; `send` admission itself is
+ * unchanged, so nothing is refused for it. The claimant re-checks at least every second; a claim it stops renewing
+ * lapses after `CLAIM_MS`.
+ */
+let claim: { owner: WeakRef<object>; host: string; at: number } | undefined;
+const CLAIM_MS = 2_000;
 const ready = new Set<OrderedOutlet>();
 const owners = new Set<WeakRef<OrderedOutlet>>();
 /** Bounded isolate totals, never a per-tenant/member series. Byte values are credits, not heap measurements. */
@@ -48,6 +57,8 @@ interface Pending {
 interface Queue {
   pending: Pending[];
   running: boolean;
+  /** BUG-4b: when this holder's channel last made progress (an RPC finished, or work arrived on an idle channel). */
+  progressAt: number;
   bytes: number;
   rpcMs: number;
   recoveryRequired: boolean;
@@ -88,7 +99,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       owners.add(this.owner);
       let drained!: () => void;
       const idle = new Promise<void>(resolve => { drained = resolve; });
-      this.queues.set(host, (queue = { pending: [], running: false, bytes: 0, rpcMs: 0,
+      this.queues.set(host, (queue = { pending: [], running: false, progressAt: Date.now(), bytes: 0, rpcMs: 0,
         recoveryRequired: false, recovery: undefined, idle, drained }));
     }
     return queue;
@@ -113,6 +124,10 @@ abstract class OrderedOutlet implements DeliveryOutlet {
    * A legal large singleton is allowed when it is the only retained normal delivery. Never impose
    * the pending budget as a smaller wire/frame limit. Its real isolate peak remains a V04 gate.
    */
+  /**
+   * A legal large singleton is allowed when it is the only retained normal delivery. Never impose
+   * the pending budget as a smaller wire/frame limit. Its real isolate peak remains a V04 gate.
+   */
   private static fits(queue: Queue | undefined, bytes: number): boolean {
     if (queue?.recoveryRequired || credits.count >= MAX_PENDING) return false;
     const singleton = credits.normal === 0 && credits.recovery === 0 && !queue?.running && !queue?.pending.length;
@@ -121,7 +136,23 @@ abstract class OrderedOutlet implements DeliveryOutlet {
 
   /** BUG-4: whether `send` would accept `payload` now (no side effects); the engine waits for room instead of tripping recovery. */
   admits(host: string, payload: ReplicaDelivery): boolean {
-    return OrderedOutlet.fits(this.queues.get(host), retainedBytes(payload));
+    const queue = this.queues.get(host), bytes = retainedBytes(payload);
+    const mine = claim?.owner.deref() === this && claim.host === host;
+    if (claim && !mine && (Date.now() - claim.at >= CLAIM_MS || !claim.owner.deref())) claim = undefined;
+    if (OrderedOutlet.fits(queue, bytes)) {
+      if (mine) claim = undefined; // its turn: it goes alone
+      return !claim || mine;
+    }
+    // BUG-4b: over the budget with its own channel empty, it can only wait for the isolate to be quiet: claim it.
+    const oversize = bytes > HOST_PENDING_BYTES || bytes > NORMAL_BYTES;
+    if (oversize && !queue?.recoveryRequired && !queue?.running && !queue?.pending.length && (!claim || mine)) claim = { owner: this.owner, host, at: Date.now() };
+    return false;
+  }
+
+  /** BUG-4b: how long this holder's channel has had work without making progress (0 when it has none). */
+  stalledFor(host: string): number {
+    const queue = this.queues.get(host);
+    return queue && (queue.running || queue.pending.length) ? Date.now() - queue.progressAt : 0;
   }
 
   /**
@@ -147,6 +178,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   private enqueue(host: string, queue: Queue, payload: ReplicaDelivery, bytes: number, recovery: boolean): Promise<ReplicaReceipt | undefined> {
     if (!queue.running && !queue.pending.length) {
       queue.idle = new Promise<void>(resolve => { queue.drained = resolve; });
+      queue.progressAt = Date.now();
     }
     const next = new Promise<ReplicaReceipt | undefined>((resolve, reject) => {
       queue.pending.push({ payload, bytes, recovery, enqueued: Date.now(), resolve, reject });
@@ -194,6 +226,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     } catch (error) { item.reject(error); }
     finally {
       queue.rpcMs = Date.now() - started;
+      queue.progressAt = Date.now();
       this.release(queue, item);
       if (item.recovery) queue.recovery = undefined;
       queue.running = false; credits.running--;
