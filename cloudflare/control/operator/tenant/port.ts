@@ -12,6 +12,7 @@
  */
 import type { MigrationStatus } from "../../../kernel/migrate/migrator.ts";
 import { sqliteFailure } from "../../../kernel/storage/errors.ts";
+import type { FilesRemapResult } from "../../../kernel/files/tenant-files.ts";
 
 export type PortResult<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
 
@@ -105,6 +106,14 @@ export interface OperatorTenantPort {
   operatorActiveMembers(): Promise<PortResult<ActiveMemberRow[]>>;
   /** Revokes a member in a captured tenant transaction; `false` when no row matched. */
   operatorRevokeMember(memberId: string): Promise<PortResult<boolean>>;
+
+  // ------------------------------------------------ dev tooling (contract-changes/0091)
+  /**
+   * DEV ONLY: rewrites the `_gonvex_files` rows a P03 copy carried over under
+   * `fromTenantId` to this tenant (id, native object key, bucket). The tenant
+   * object refuses it unless the P03 dev-transfer gate admits its name.
+   */
+  operatorRemapFiles(projectId: string, fromTenantId: string, dryRun: boolean): Promise<PortResult<FilesRemapResult>>;
 }
 
 /**

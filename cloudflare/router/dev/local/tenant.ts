@@ -25,6 +25,7 @@ import { R2PlanStore } from "../../../kernel/migrate/plan.ts";
 import { TenantStorage } from "../../../kernel/storage/session.ts";
 import type { ActiveMemberRow, OperatorDataSink, OperatorTenantPort, PortResult, ReplaceResult, RowsPage, RowsQuery, ServedModule, TableSummary } from "../../../control/operator/tenant/port.ts";
 import { TenantOperator } from "../../../control/operator/tenant/operator.ts";
+import type { FilesRemapResult } from "../../../kernel/files/tenant-files.ts";
 
 interface BakedRelease {
   project: string;
@@ -194,6 +195,10 @@ export class LocalKernelTenant extends DurableObject<LocalTenantEnv> implements 
   }
   async operatorRevokeMember(memberId: string): Promise<PortResult<boolean>> {
     return this.operator.revokeMember(memberId);
+  }
+  /** The local operator tenant has no files (K13 lives in the assembled tenant): never a dev-copy target. */
+  async operatorRemapFiles(): Promise<PortResult<FilesRemapResult>> {
+    return { ok: false, status: 404, error: "file remap is not available on this deployment" };
   }
 
   /** Tests: raw SQL on the object (never routed to the public). */
