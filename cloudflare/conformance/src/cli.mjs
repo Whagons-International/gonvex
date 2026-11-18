@@ -62,9 +62,12 @@ try {
     const traces = [];
     const one = async (backend) => {
       const created = [];
+      // Optional adapter hooks for state a persistent backend keeps between runs; never compared.
+      try { await backend.beforeScenario?.(scenario.name); } catch (error) { console.log(`  before ${scenario.name} on ${backend.name}: ${error?.message ?? error}`); }
       const trace = await runScenario({ scenario, backend, fixtures, verbose: values.verbose, created })
         .catch(error => ({ backend: backend.name, scenario: scenario.name, failures: [`setup failed: ${error?.message ?? error}`], steps: [], checksums: {} }));
       // After the trace is complete (checksums read); not compared and never a failure (cleanup.mjs).
+      try { await backend.afterScenario?.(scenario.name); } catch (error) { console.log(`  after ${scenario.name} on ${backend.name}: ${error?.message ?? error}`); }
       const cleanup = await cleanupProjects(backend, created);
       if (cleanup.length) trace.cleanup = cleanup.map(({ project, ...rest }) => ({ project: '<project>', ...rest }));
       for (const c of cleanup) if (c.outcome !== 'deleted') console.log(`  cleanup on ${backend.name}: project ${c.outcome}: ${c.reason}`);

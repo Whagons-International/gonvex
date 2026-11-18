@@ -15,6 +15,8 @@ export default defineConfig({
       miniflare: {
         bindings: {
           GONVEX_ADMIN_KEY: "k19-admin-key",
+          // X03: enables the dev/test fixture hooks (purge of revoked operator tokens).
+          GONVEX_ASSEMBLY_FIXTURE_KEY: "k19-fixture-key",
           GONVEX_DASHBOARD_SESSION_SECRET: "k19-session-secret",
           DASHBOARD_AUTH_ACCOUNT: "Operator@Example.test",
           DASHBOARD_AUTH_PASSWORD: "configured-password-123",
