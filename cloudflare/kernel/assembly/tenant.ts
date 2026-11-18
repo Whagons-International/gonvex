@@ -169,6 +169,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     });
   }
 
+  private syncInfrastructureInstalled(): boolean {
+    return this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='_gonvex_action_outbox'").toArray().length > 0;
+  }
   private async armEarlier(at: number): Promise<void> {
     const existing = await this.ctx.storage.getAlarm();
     if (existing === null || at < existing) await this.ctx.storage.setAlarm(at);
@@ -245,6 +248,10 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   private async setupScheduled(): Promise<void> {
     const module = this.kernel.module;
     if (!module || this.scheduler) return;
+    // provision()/operatorApplyRelease() persist the project before the migrations that create the sync
+    // infrastructure. After a reset in between, the constructor activates the project again: the scheduler
+    // (outbox, migration alarm) waits for that schema, and provisioning resumes through the normal path.
+    if (!this.syncInfrastructureInstalled()) return;
     const tenantId = this.ctx.id.name ?? "";
     const stored = () => this.ctx.storage.kv.get<StoredModule>(MODULE_KEY)!;
     const active: ActiveModule = {
