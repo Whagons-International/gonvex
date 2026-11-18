@@ -56,7 +56,7 @@ node --test test/mutation.check.mjs          # self-test: injected drift must be
 | `--serial` | Run the backends one after another. By default every scenario runs on all backends at once. |
 | `--verbose` | Print each step and its duration. |
 
-The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
+The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast. Each scenario has a deadline, `GONVEX_CONFORMANCE_SCENARIO_MS` (default 10 min). When it passes, the scenario is aborted: `ctx.signal` fires, its sockets are dropped, its `fetch` calls are aborted, and no further step runs. It then gets `GONVEX_CONFORMANCE_ABORT_GRACE_MS` (default 30 s) to settle. If it still runs after that, the run stops with `RUN INVALID` and exit code 3, because it could act on the shared backend during later scenarios. A raw socket must open within `GONVEX_CONFORMANCE_OPEN_MS` (default 15 s).
 
 On a backend whose state outlives the run (the deployed assembly), each scenario's fixture project is deleted after its trace is complete, through the ordinary `DELETE /dev/projects/{id}` path, which also deletes the project's tenants (`src/cleanup.mjs`). Cleanup is not compared and never changes a result. It is skipped, and reported, while a deployment fence is open. `GONVEX_CONFORMANCE_KEEP_PROJECTS=1` keeps the projects for debugging.
 
@@ -202,6 +202,7 @@ Two receipt checks stay in `verification/backend-receipts/`, because they inject
 | `ctx.observe(label, value)` | Records a value that every backend must reproduce. |
 | `ctx.expect(cond, msg)` | Asserts a fact that must hold on every backend. |
 | `ctx.until(check, label, ms)` | Polls until `check` returns true. The default limit is 15 s, or `GONVEX_CONFORMANCE_UNTIL_MS`. |
+| `ctx.signal` | Aborted when the scenario deadline passes. Pass it to any long wait the scenario makes itself. `ctx.delay` and `ctx.until` already honour it. |
 | `ctx.quiesce()` | Waits until no frame has arrived for 300 ms. |
 | `ctx.frames(tag, { dir, type })` | The raw frames of a session. |
 | `ctx.deploy(n)` | Deploys generation `n` of the fixture (2: upgrade, 3: client contract). |
