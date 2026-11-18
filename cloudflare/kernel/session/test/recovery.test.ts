@@ -66,6 +66,16 @@ describe("K22 session delivery scope", () => {
     release(current);
     expect(await reading).toEqual({artifactHash:"newer",clientContract:null});
   });
+  it("X03 the publication refresh never adds artifactHash to an auth.result that Rust sends without it", async () => {
+    const f=fixture({projectAuthenticated:async()=>{}});
+    f.ports.modules.module=async()=>({artifactHash:"published",clientContract:null});
+    await f.session.receive(JSON.stringify({type:"auth",id:"anon-control",project:"p",controlOnly:true}));
+    const tokenless=JSON.parse(f.sent.at(-1)!);
+    expect(tokenless).toMatchObject({type:"auth.result",id:"anon-control",result:{projectId:"p",accountId:"",tenantId:""}});
+    expect(tokenless.result).not.toHaveProperty("artifactHash");
+    await f.session.receive(JSON.stringify({type:"auth",id:"tenant",token:"alice",project:"p",tenant:"t"}));
+    expect(JSON.parse(f.sent.at(-1)!)).toMatchObject({type:"auth.result",id:"tenant",result:{artifactHash:"published"}});
+  });
   it("awaits holder publication registration before tenant and control-only auth acknowledgements", async () => {
     for (const controlOnly of [false,true]) {
       let release!:()=>void;

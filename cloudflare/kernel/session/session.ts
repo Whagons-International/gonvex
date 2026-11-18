@@ -1070,7 +1070,8 @@ export class Session {
       try {
         await withDeadline(this.hooks.projectAuthenticated(connection.projectId), deadline - this.now());
         module = await withDeadline(this.modules.refresh(connection.projectId), deadline - this.now());
-        response.result.artifactHash = module?.artifactHash ?? "";
+        // Refresh only a result that carries the hash: Rust omits it for a tokenless control-only auth.
+        if ("artifactHash" in response.result) response.result.artifactHash = module?.artifactHash ?? "";
       } catch {
         return this.close(CLOSE.failed);
       }
