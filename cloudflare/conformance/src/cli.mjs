@@ -17,6 +17,7 @@ import { parseArgs } from 'node:util';
 import { buildFixture } from './fixture.mjs';
 import { backendClass } from './backends/index.mjs';
 import { runScenario } from './runner.mjs';
+import { cleanupProjects } from './cleanup.mjs';
 import { diffTraces } from './differ.mjs';
 import { SCENARIOS } from '../scenarios/index.mjs';
 
@@ -59,8 +60,16 @@ try {
   for (const scenario of selected) {
     const at = Date.now();
     const traces = [];
-    const one = (backend) => runScenario({ scenario, backend, fixtures, verbose: values.verbose })
-      .catch(error => ({ backend: backend.name, scenario: scenario.name, failures: [`setup failed: ${error?.message ?? error}`], steps: [], checksums: {} }));
+    const one = async (backend) => {
+      const created = [];
+      const trace = await runScenario({ scenario, backend, fixtures, verbose: values.verbose, created })
+        .catch(error => ({ backend: backend.name, scenario: scenario.name, failures: [`setup failed: ${error?.message ?? error}`], steps: [], checksums: {} }));
+      // After the trace is complete (checksums read); not compared and never a failure (cleanup.mjs).
+      const cleanup = await cleanupProjects(backend, created);
+      if (cleanup.length) trace.cleanup = cleanup.map(({ project, ...rest }) => ({ project: '<project>', ...rest }));
+      for (const c of cleanup) if (c.outcome !== 'deleted') console.log(`  cleanup on ${backend.name}: project ${c.outcome}: ${c.reason}`);
+      return trace;
+    };
     if (values.serial) for (const backend of backends) traces.push(await one(backend));
     else traces.push(...await Promise.all(backends.map(one)));
     const ran = traces.filter(t => !t.skipped);

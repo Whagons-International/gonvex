@@ -98,6 +98,8 @@
       "script_name": "gonvex-cf-dev-k22-actions"
     }
   ],
+  // 0089: pinned by deploy.mjs TENANT_CPU_LIMIT_MS. Measured 2026-11-18: migration alarms on
+  // P03-imported tenants use up to 10.6 s CPU, so 0022 §5b's 5000 is not safe until they chunk.
   "limits": {
     "cpu_ms": 30000
   },

@@ -58,6 +58,8 @@ node --test test/mutation.check.mjs          # self-test: injected drift must be
 
 The runtime binary is found in this order: `GONVEX_CONFORMANCE_RUST_BINARY`, then `$CARGO_TARGET_DIR/debug/gonvex-runtime`, then `rust/target/{debug,release}/gonvex-runtime`. `GONVEX_CONFORMANCE_TMP` sets where scratch directories go. `GONVEX_CONFORMANCE_RUST_LOG` sets `RUST_LOG`; the default is `warn`. `GONVEX_CONFORMANCE_UNTIL_MS` changes the default `ctx.until` limit of 15 s; the mutation self-test lowers it so a broken backend fails fast.
 
+On a backend whose state outlives the run (the deployed assembly), each scenario's fixture project is deleted after its trace is complete, through the ordinary `DELETE /dev/projects/{id}` path, which also deletes the project's tenants (`src/cleanup.mjs`). Cleanup is not compared and never changes a result. It is skipped, and reported, while a deployment fence is open. `GONVEX_CONFORMANCE_KEEP_PROJECTS=1` keeps the projects for debugging.
+
 The command exits with 0 only when every scenario passed on every backend and the traces are equal. A full run of 22 scenarios on two debug-build backends takes a few minutes.
 
 The `cloudflare` backend runs `wrangler dev` from `cloudflare/` (install its dependencies first) with the session layer's stub routes enabled; see `src/backends/cloudflare.mjs`.
