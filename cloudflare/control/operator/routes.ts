@@ -17,6 +17,7 @@ import { OperatorAuth, credentialName, globalAdmin, has, type OperatorActor, typ
 import { devTransferAllowed, type OperatorConfig } from "./config";
 import { Body, HttpError, PlainError, byteLength, displayName, error, isoTime, isoTimeOrNull, json, normalizeEmail, plainResponse, projectHeaderOrQuery } from "./http";
 import { releaseKey, type ReleaseSummary } from "./release";
+import { bumpRetirementGeneration, topologyFrozen } from "./deployment";
 import { liveSync, type SyncCoordinator } from "./sync";
 import type { OperatorTenantPort, PortResult, RowsQuery } from "./tenant/port";
 import { internalTable, validIdent } from "./tenant/rows";
@@ -486,25 +487,27 @@ const updateProject: Handler = async (op, request, _url, [project]) => {
 
 /** Retires a deleted project's active release (caller's transaction): the next publication's Worker catalog omits it and its manifest is no longer served. */
 function retireProjectRelease(op: Op, project: string): void {
+  bumpRetirementGeneration(op.ctx.sql);
   op.ctx.sql.run("UPDATE gonvex_cf_releases SET state='retired' WHERE project_id=$1 AND state='active'", project);
   op.ctx.sql.run("DELETE FROM gonvex_cf_active_releases WHERE project_id=$1", project);
   op.ctx.sql.run("DELETE FROM gonvex_runtime_manifests WHERE project_id=$1", project);
 }
 
 /**
- * In one transaction: refuse while any live sync can still deploy a catalog (shared by every project), else run
+ * In one transaction: refuse while any live sync can still deploy a catalog (shared by every project) or a topology
+ * migration has frozen the catalog it captured, else run
  * `then`. With `fence`, also mark the deletion in progress so no /dev/sync claims a fence for the project until the
  * delete commits (SyncCoordinator.lock checks it in its own transaction).
  */
 function beginProjectDeletion(op: Op, project: string, fence: boolean, then: () => void): boolean {
   return op.ctx.sql.tx(() => {
-    if (liveSync(op.ctx.sql)) return false;
+    if (liveSync(op.ctx.sql) || topologyFrozen(op.ctx.sql)) return false;
     if (fence) op.ctx.sql.run(`INSERT INTO gonvex_cf_project_deletions(project_id,started_at) VALUES($1,${NOW}) ON CONFLICT(project_id) DO NOTHING`, project);
     then();
     return true;
   });
 }
-const SYNC_IN_FLIGHT = "a /dev/sync is still running or publishing; delete the project after it finishes or is aborted";
+const SYNC_IN_FLIGHT = "a /dev/sync or runtime topology migration is in progress; delete the project after it finishes or is aborted";
 
 const deleteProject: Handler = async (op, request, _url, [project]) => {
   await op.auth.authorizeProject(request.headers, "projects:delete", project!, true, "project owner or admin access is required");

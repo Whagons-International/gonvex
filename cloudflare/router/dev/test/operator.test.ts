@@ -167,6 +167,8 @@ describe("projects, keys, members, env", () => {
     expect((await sync(next.id, await manifest(next.id), next.key)).status).toBe(200);
     const topology = await runInDurableObject(control(), async (instance: OperatorControlObject) => instance.runtimeTopology("status"));
     expect((topology as { releases: { project: string }[] }).releases.map((r) => r.project)).not.toContain(gone.id);
+    // Leave the shared catalog as found: later tests measure per-sync cost against it.
+    for (const id of [kept.id, next.id]) expect((await call("DELETE", `/dev/projects/${id}`)).body).toEqual({ ok: true });
   });
 
   it("project delete: an expired preparation does not block it, any live sync (any project) does; a sync is fenced only while the delete runs, then delete -> recreate -> sync works", async () => {
@@ -185,11 +187,16 @@ describe("projects, keys, members, env", () => {
       instance.sql.run("UPDATE gonvex_cf_syncs SET project_id=$2,state='publishing' WHERE sync_id=$1", live, other.id);
     });
     const refused = await call("DELETE", `/dev/projects/${p.id}`);
-    expect([refused.status, refused.body]).toEqual([409, { error: "a /dev/sync is still running or publishing; delete the project after it finishes or is aborted" }]);
+    expect([refused.status, refused.body]).toEqual([409, { error: "a /dev/sync or runtime topology migration is in progress; delete the project after it finishes or is aborted" }]);
     expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 1 }]);
     await runInDurableObject(control(), async (instance: OperatorControlObject) => {
       instance.sql.run("UPDATE gonvex_cf_syncs SET sync_id=$2,project_id=$3,state='running',expires_at=$4 WHERE sync_id=$1", live, stale, p.id, Date.now() - 1);
     });
+    // A frozen topology (a migration captured the catalog) refuses it too; the thaw's version check depends on it.
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => { instance.sql.run("INSERT INTO gonvex_cf_topology(singleton,frozen) VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET frozen=1"); });
+    expect((await call("DELETE", `/dev/projects/${p.id}`)).status).toBe(409);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 1 }]);
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => { instance.sql.run("UPDATE gonvex_cf_topology SET frozen=0 WHERE singleton=1"); });
     expect((await call("DELETE", `/dev/projects/${p.id}`)).body).toEqual({ ok: true });
     expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 0 }]);
     expect((await call("GET", `/dev/manifest?project=${p.id}`)).status).toBe(404);
@@ -208,6 +215,8 @@ describe("projects, keys, members, env", () => {
     // A project created through the normal path is never blocked by a stale fence.
     const fresh = await createProject("after-recreate");
     expect((await sync(fresh.id, await manifest(fresh.id), fresh.key)).status).toBe(200);
+    expect((await call("DELETE", `/dev/projects/${fresh.id}`)).body).toEqual({ ok: true });
+    expect((await call("DELETE", `/dev/projects/${p.id}`)).body).toEqual({ ok: true, retiredOrphanRelease: true });
   });
 
   it("env: the project key reads and writes; dotenv replace; names validated", async () => {

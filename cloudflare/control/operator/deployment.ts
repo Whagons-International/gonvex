@@ -11,6 +11,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS gonvex_cf_one_deployment
   ON gonvex_cf_syncs((1)) WHERE state IN ('running','publishing');
 CREATE TABLE IF NOT EXISTS gonvex_cf_topology (singleton INTEGER PRIMARY KEY CHECK(singleton=1), frozen INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS gonvex_cf_target_attempts (sync_id TEXT PRIMARY KEY, uncertain INTEGER NOT NULL, authorized_at INTEGER);
+CREATE TABLE IF NOT EXISTS gonvex_cf_retirements (singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS gonvex_cf_publication_catalogs (
   sync_id TEXT PRIMARY KEY, catalog JSON NOT NULL
 );
@@ -31,6 +32,9 @@ export function installDeploymentSchema(sql:Sql):void {
       sql.run("ALTER TABLE gonvex_cf_target_attempts ADD COLUMN authorized_at INTEGER");
       sql.run(`UPDATE gonvex_cf_target_attempts SET authorized_at=${NOW_MS}`);
     }
+    // The retirement generation a publication's catalog snapshot was taken at (NULL for snapshots taken before it existed).
+    if(!sql.all<{name:string}>("SELECT name FROM pragma_table_info('gonvex_cf_publication_catalogs')").some(c=>c.name==='retire_generation'))
+      sql.run("ALTER TABLE gonvex_cf_publication_catalogs ADD COLUMN retire_generation INTEGER");
   });
 }
 
@@ -39,6 +43,14 @@ export const TARGET_WRITE_WINDOW_MS = 10 * 60_000;
 /** Past this, no write of an attempt can still land: the write window plus a margin covering the SIGTERM→SIGKILL grace
  * of the write's process group (DEADLINE_KILL_GRACE_MS, 15 s) and an upload already sent. */
 export const TARGET_ATTEMPT_LEASE_MS = TARGET_WRITE_WINDOW_MS + 5 * 60_000;
+
+/** Bumped whenever a project's active release is retired (project delete). */
+export function retirementGeneration(sql:Sql):number { return num(sql.value("SELECT generation FROM gonvex_cf_retirements WHERE singleton=1") ?? 0); }
+export function bumpRetirementGeneration(sql:Sql):void {
+  sql.run("INSERT INTO gonvex_cf_retirements(singleton,generation) VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET generation=generation+1");
+}
+/** A topology migration has captured the active catalog; changing it now would fail the thaw's version check. */
+export function topologyFrozen(sql:Sql):boolean { return sql.value("SELECT frozen FROM gonvex_cf_topology WHERE singleton=1")===1; }
 
 export class DeploymentCoordinator {
   constructor(private sql: Sql, private versionReady: (version: string) => boolean | Promise<boolean>, private preparationMs: number,
@@ -82,15 +94,29 @@ export class DeploymentCoordinator {
   }
   /** A conditional write combines fencing with the required catalog write. */
   catalog(id:string,fence:number,releases:ActiveRelease[]):void {
-    this.sql.run(`INSERT INTO gonvex_cf_publication_catalogs(sync_id,catalog)
-      SELECT sync_id,$3 FROM gonvex_cf_syncs WHERE sync_id=$1 AND rowid=$2 AND state='running'
-      ON CONFLICT(sync_id) DO UPDATE SET catalog=excluded.catalog`,id,fence,JSON.stringify(releases));
+    // With the retirement generation it was taken at: staged() refuses if a release was retired since.
+    this.sql.run(`INSERT INTO gonvex_cf_publication_catalogs(sync_id,catalog,retire_generation)
+      SELECT sync_id,$3,$4 FROM gonvex_cf_syncs WHERE sync_id=$1 AND rowid=$2 AND state='running'
+      ON CONFLICT(sync_id) DO UPDATE SET catalog=excluded.catalog,retire_generation=excluded.retire_generation`,id,fence,JSON.stringify(releases),retirementGeneration(this.sql));
     if(this.sql.value("SELECT changes()")!==1)throw new HttpError(409,"deployment fence is no longer current");
   }
+  /**
+   * running -> publishing. Refused once the preparation lease has expired: a project delete may have proceeded
+   * because it no longer counted as live. Also refused when its catalog snapshot carries a release that is no
+   * longer active: a delete bumped the retirement generation since the snapshot (O(1), no per-entry reads).
+   */
   staged(id:string,fence:number,_version:string):void {
-    this.sql.run("UPDATE gonvex_cf_syncs SET state='publishing' WHERE sync_id=$1 AND rowid=$2 AND state='running'",id,fence);
-    if(this.sql.value("SELECT changes()")!==1)throw new HttpError(409,"deployment fence is no longer current");
+    // One conditional write on the success path; the reads below only explain a refusal.
+    this.sql.run(`UPDATE gonvex_cf_syncs SET state='publishing' WHERE sync_id=$1 AND rowid=$2 AND state='running' AND expires_at>${NOW_MS}
+      AND COALESCE((SELECT retire_generation FROM gonvex_cf_publication_catalogs WHERE sync_id=$1),
+        COALESCE((SELECT generation FROM gonvex_cf_retirements WHERE singleton=1),0))=COALESCE((SELECT generation FROM gonvex_cf_retirements WHERE singleton=1),0)`,id,fence);
+    if(this.sql.value("SELECT changes()")===1)return;
+    const row=this.sql.get("SELECT expires_at FROM gonvex_cf_syncs WHERE sync_id=$1 AND rowid=$2 AND state='running'",id,fence);
+    if(!row)throw new HttpError(409,"deployment fence is no longer current");
+    if(num(row.expires_at)<=Date.now())throw new HttpError(409,"deployment fence is no longer current: preparation lease expired");
+    throw new HttpError(409,"deployment fence is no longer current: a project in its catalog was retired");
   }
+
   reference(id:string):DeploymentRef {
     const row=this.sql.get("SELECT s.rowid AS fence,p.version FROM gonvex_cf_syncs s JOIN gonvex_cf_publications p ON p.sync_id=s.sync_id WHERE s.sync_id=$1",id);
     if(!row?.version)throw new HttpError(409,"publication has no deployment fence");
