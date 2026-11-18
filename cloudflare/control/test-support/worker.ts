@@ -74,6 +74,8 @@ export default {
             ...(typeof input.tenantId === "string" ? { tenantId: input.tenantId } : {}),
             ...(typeof input.name === "string" ? { name: input.name } : {}),
             ...(input.accountOnly === true ? { accountOnly: true } : {}),
+            ...(typeof input.role === "string" ? { role: input.role } : {}),
+            ...(input.permissions && typeof input.permissions === "object" && !Array.isArray(input.permissions) ? { permissions: input.permissions as Record<string, unknown> } : {}),
           }),
         );
       }
