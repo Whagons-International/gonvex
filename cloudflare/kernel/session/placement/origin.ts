@@ -30,7 +30,27 @@ export type InboundKind = "fresh" | "peer";
 
 interface Entry { readonly fresh: boolean; running: boolean }
 
-interface Deferred { launch(): void }
+interface Deferred { launch(): void; fail(error: Error): void; readonly label: string; readonly since: number }
+
+/** X07b: a call that waited this long for a fresh event fails instead of stranding its caller. */
+export const ORIGIN_MAX_WAIT_MS = 10_000;
+/** X07b: while any call waits, the wake is re-armed this often (a lost wake cannot strand a call). */
+export const ORIGIN_REWAKE_MS = 1_000;
+
+/** The deferred call never launched: no fresh event arrived within `ORIGIN_MAX_WAIT_MS`. */
+export class OriginDeadlineError extends Error {
+  constructor(readonly label: string, readonly waitedMs: number) {
+    super(`gateway call ${label} waited ${waitedMs} ms for a fresh event and was not started`);
+  }
+}
+
+export interface OriginOptions {
+  now?: () => number;
+  /** Timer seam (tests); default `setTimeout`. */
+  later?: (ms: number, fn: () => void) => () => void;
+  rewakeMs?: number;
+  maxWaitMs?: number;
+}
 
 export interface OriginStats {
   /** Calls launched in the turn they were made. */
@@ -39,6 +59,10 @@ export interface OriginStats {
   deferred: number;
   /** Calls currently waiting. */
   waiting: number;
+  /** X07b: the oldest waiting call and how long it has waited. */
+  oldest?: { label: string; waitedMs: number };
+  /** X07b: calls failed by `ORIGIN_MAX_WAIT_MS`. */
+  expired: number;
 }
 
 export class CallOrigin {
@@ -47,10 +71,20 @@ export class CallOrigin {
   private readonly queue: Deferred[] = [];
   private woken = false;
   private stallListeners: Array<() => void> = [];
-  private readonly counts = { immediate: 0, deferred: 0 };
+  private readonly counts = { immediate: 0, deferred: 0, expired: 0 };
+  private watchdog: (() => void) | undefined;
+  private readonly now: () => number;
+  private readonly later: (ms: number, fn: () => void) => () => void;
+  private readonly rewakeMs: number;
+  private readonly maxWaitMs: number;
 
   /** `wake` must lead to a fresh inbound event (the gateway arms an alarm now). */
-  constructor(private readonly wake: () => void) {}
+  constructor(private readonly wake: () => void, options: OriginOptions = {}) {
+    this.now = options.now ?? Date.now;
+    this.later = options.later ?? ((ms, fn) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); });
+    this.rewakeMs = options.rewakeMs ?? ORIGIN_REWAKE_MS;
+    this.maxWaitMs = options.maxWaitMs ?? ORIGIN_MAX_WAIT_MS;
+  }
 
   /** A platform-delivered request starts. A fresh one releases waiting calls in this turn. */
   enter(kind: InboundKind): Entry {
@@ -86,16 +120,17 @@ export class CallOrigin {
    * Runs `call` now if it is safe and nothing is waiting (calls keep their order),
    * else when the next fresh event arrives. `call` must start its RPC synchronously.
    */
-  run<T>(call: () => T | PromiseLike<T>): Promise<T> {
+  run<T>(call: () => T | PromiseLike<T>, label = "call"): Promise<T> {
     if (!this.queue.length && this.safe()) {
       this.counts.immediate++;
       try { return Promise.resolve(call()); } catch (error) { return Promise.reject(error); }
     }
     this.counts.deferred++;
     return new Promise<T>((resolve, reject) => {
-      this.queue.push({ launch: () => {
+      this.queue.push({ label, since: this.now(), fail: reject, launch: () => {
         try { Promise.resolve(call()).then(resolve, reject); } catch (error) { reject(error); }
       } });
+      this.armWatchdog();
       if (!this.woken) { this.woken = true; this.wake(); }
       const listeners = this.stallListeners;
       this.stallListeners = [];
@@ -106,6 +141,36 @@ export class CallOrigin {
   /** Launches waiting calls while it is safe, in their original order, in this turn. */
   flush(): void {
     while (this.queue.length && this.safe()) this.queue.shift()!.launch();
+    if (!this.queue.length) { this.watchdog?.(); this.watchdog = undefined; }
+  }
+
+  /**
+   * X07b (BUG-5 on -12, dev 2026-11-18 02:28:55-02:30:44): a Reducer call queued behind an Action
+   * reply was made while the tenant's reply RPC was this object's newest request, so it waited here;
+   * it never reached the tenant and the socket answered nothing for 114 s. Whatever loses the wake,
+   * a waiting call now re-arms it every `rewakeMs` and fails, named, after `maxWaitMs`.
+   */
+  private armWatchdog(): void {
+    if (this.watchdog) return;
+    this.watchdog = this.later(this.rewakeMs, () => {
+      this.watchdog = undefined;
+      const now = this.now();
+      const expired = this.queue.filter((item) => now - item.since >= this.maxWaitMs);
+      if (expired.length) {
+        const keep = new Set(this.queue.filter((item) => !expired.includes(item)));
+        this.queue.splice(0, this.queue.length, ...[...keep]);
+        for (const item of expired) {
+          this.counts.expired++;
+          const error = new OriginDeadlineError(item.label, now - item.since);
+          console.error("gateway: outgoing call never started", { call: item.label, waitedMs: now - item.since });
+          item.fail(error);
+        }
+      }
+      if (!this.queue.length) return;
+      this.woken = true;
+      this.wake();
+      if (this.queue.length) this.armWatchdog();
+    });
   }
 
   /** Resolves when the next call has to wait (the alarm yields so a wake alarm can run). */
@@ -116,7 +181,10 @@ export class CallOrigin {
     return { promise, cancel: () => { this.stallListeners = this.stallListeners.filter((l) => l !== listener); } };
   }
 
-  stats(): OriginStats { return { ...this.counts, waiting: this.queue.length }; }
+  stats(): OriginStats {
+    const first = this.queue[0];
+    return { ...this.counts, waiting: this.queue.length, ...(first ? { oldest: { label: first.label, waitedMs: this.now() - first.since } } : {}) };
+  }
 }
 
 /** Stub members that are not calls. Symbols (dispose) pass through too. RPC members are
@@ -130,7 +198,7 @@ export function gatedStub<T extends object>(stub: T, origin: CallOrigin): T {
       if (prop === "then") return undefined;
       const value = Reflect.get(target, prop, target) as unknown;
       if (typeof prop === "symbol" || NOT_CALLS.has(prop) || typeof value !== "function") return value;
-      return (...args: unknown[]) => origin.run(() => Reflect.apply(value as (...a: unknown[]) => unknown, target, args));
+      return (...args: unknown[]) => origin.run(() => Reflect.apply(value as (...a: unknown[]) => unknown, target, args), prop);
     },
   });
 }

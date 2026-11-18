@@ -178,6 +178,12 @@ export class ModuleCache {
 
 class AuthTimeout extends Error {}
 /** X07 BUG-5: queued work released because the socket's queue stalled and the socket closed. */
+/** X07b: a frame's name in the stall log (type and path or paths; never arguments or tokens). */
+function frameLabel(frame: ClientFrame): string {
+  const f = frame as { type: string; path?: unknown; calls?: Array<{ path?: unknown }>; subscribes?: Array<{ path?: unknown }> };
+  const paths = typeof f.path === "string" ? [f.path] : (f.calls ?? f.subscribes ?? []).map((c) => String(c.path)).slice(0, 4);
+  return paths.length ? `${f.type} ${paths.join(",")}` : f.type;
+}
 class SessionStalled extends Error { constructor() { super("session stalled"); } }
 
 export class Session {
@@ -196,6 +202,8 @@ export class Session {
   private queueActive = false;
   /** X07 BUG-5: when the item now holding the queue started (null: idle). */
   private queueActiveSince: number | null = null;
+  /** X07b: what holds the queue (frame type and path, or the internal task), for the stall log. */
+  private activeLabel = "";
   private stallTimer: (() => void) | undefined;
   /** One release per waiting or running queue item; each is removed as its item starts or settles. */
   private readonly stallHandlers = new Set<() => void>();
@@ -326,7 +334,7 @@ export class Session {
     const run = () => (typeof message === "string" ? this.onText(message) : this.onBinary(message));
     // X07 BUG-5: a frame that finds the queue stuck closes the socket at once instead of waiting behind it.
     this.checkStall();
-    return this.serialQuiet(run);
+    return this.serialQuiet(run, "frame");
   }
 
   private async onBinary(bytes: ArrayBuffer): Promise<void> {
@@ -346,6 +354,7 @@ export class Session {
     const decoded = decodeClientFrame(text);
     if (!decoded.ok) return this.close(CLOSE.invalidFrame);
     const frame = decoded.frame;
+    this.activeLabel = frameLabel(frame);
     // K17: a service socket accepts only its narrow set; `auth` takes the normal path (lib.rs:2570-2592).
     if (this.record.service && frame.type !== "auth") return this.serviceFrame(this.record.service, frame);
     if (frame.type === "auth" && frame.public !== this.record.publicTransport) {
@@ -439,7 +448,7 @@ export class Session {
       admission.revoked = true;
       this.hooks.persist?.();
       this.admissionRevoked();
-    });
+    }, "admissionMonitored");
   }
 
   private unscopedOrAnonymous(): boolean {
@@ -779,7 +788,7 @@ export class Session {
         await this.verifyRecoveryAuth(tenantId, epoch);
         this.hooks.persist?.();
       });
-    });
+    }, "recoverReplica");
   }
 
   /** 0061: a returned epoch can authorize only this EMPTY bootstrap, never retained data. */
@@ -798,7 +807,7 @@ export class Session {
         this.requireRecoveryScope(tenantId, epoch);
         this.hooks.persist?.();
       });
-    });
+    }, "bootstrapReplica");
   }
 
   /** Facts come only from the existing accepted terminal send callback below.
@@ -871,7 +880,7 @@ export class Session {
           : frames.replicaError(ref.id, ref.path, "subscription delivery recovery failed"), { request: ref, opIndex: 0, outcome: "refused" });
         if (this.currentInitial(ref)) throw new Error("initial failure could not be admitted to the socket");
       }
-    });
+    }, "failReplicaInitials");
   }
 
   /** K06 ControlChanged; refreshes stay behind the socket's auth/call queue. */
@@ -896,7 +905,7 @@ export class Session {
       }
       this.hooks.persist?.();
     };
-    return this.serialQuiet(run);
+    return this.serialQuiet(run, "controlChanged");
   }
 
   private prepareAction(id: string, path: string): boolean {
@@ -1237,7 +1246,7 @@ export class Session {
   }
 
   /** Runs `fn` after the frames already queued, in the socket's order. */
-  private serial<T>(fn: () => T | Promise<T>): Promise<T> {
+  private serial<T>(fn: () => T | Promise<T>, label = "internal"): Promise<T> {
     this.queueDepth++;
     const waiting = this.abandonable();
     const run = async () => {
@@ -1245,6 +1254,7 @@ export class Session {
       if (this.stalledOut) { this.queueDepth--; throw new SessionStalled(); }
       this.queueActive = true;
       this.queueActiveSince = this.now();
+      this.activeLabel = label;
       this.stallTimer = this.timers.later(LIMITS.stallMs, () => { this.stallTimer = undefined; this.checkStall(); });
       const active = this.abandonable();
       try {
@@ -1275,13 +1285,13 @@ export class Session {
   pendingStallHandlers(): number { return this.stallHandlers.size; }
 
   /** `serial` for work whose callers only need it settled: a stalled, closed socket releases it quietly. */
-  private serialQuiet(fn: () => void | Promise<void>): Promise<void> {
-    return this.serial(fn).catch((error) => { if (!(error instanceof SessionStalled)) throw error; });
+  private serialQuiet(fn: () => void | Promise<void>, label?: string): Promise<void> {
+    return this.serial(fn, label).catch((error) => { if (!(error instanceof SessionStalled)) throw error; });
   }
 
   /** `serial` for recovery: a socket closed by a stall is a changed scope to the tenant's delivery. */
-  private serialRecovery<T>(fn: () => Promise<T>): Promise<T> {
-    return this.serial(fn).catch((error) => { throw error instanceof SessionStalled ? new Error("delivery recovery scope changed") : error; });
+  private serialRecovery<T>(fn: () => Promise<T>, label?: string): Promise<T> {
+    return this.serial(fn, label).catch((error) => { throw error instanceof SessionStalled ? new Error("delivery recovery scope changed") : error; });
   }
 
   /**
@@ -1293,7 +1303,7 @@ export class Session {
    */
   checkStall(now: number = this.now()): boolean {
     if (this.closed || !this.queueActive || this.queueActiveSince === null || now - this.queueActiveSince < LIMITS.stallMs) return false;
-    console.error("session: ordered queue stalled; closing the socket", { stalledMs: now - this.queueActiveSince, queued: this.queueDepth });
+    console.error("session: ordered queue stalled; closing the socket", { item: this.activeLabel, stalledMs: now - this.queueActiveSince, queued: this.queueDepth });
     this.stalledOut = true;
     this.close(CLOSE.stalled);
     const handlers = [...this.stallHandlers];
@@ -1319,7 +1329,7 @@ export class Session {
   deadline(now: number): Promise<void> {
     return this.serialQuiet(() => {
       if (!this.closed && this.record.pendingUntil !== null && now >= this.record.pendingUntil) this.close(CLOSE.authDeadline);
-    });
+    }, "deadline");
   }
 
   /** The item this socket contributes to a revalidation round, if any. */
@@ -1346,7 +1356,7 @@ export class Session {
       this.record.connection = NO_CONNECTION;
       this.hooks.persist?.();
       this.send(frames.authError("session-expired", AUTH_ERRORS.expired, "transient"));
-    });
+    }, "revalidated");
   }
 
   /** The session's own Member changed in a commit (C.4 item 5a): discard, then the commit's watermark. */
@@ -1357,7 +1367,7 @@ export class Session {
       this.hooks.persist?.();
       this.send(frames.authError("membership-changed", AUTH_ERRORS.membershipChanged, "transient"));
       this.send(frames.replicaWatermark(revision));
-    });
+    }, "membershipChanged");
   }
 
   /** `RuntimeEvent::ModuleReloaded` for this socket's project (A.1.5 c). */
@@ -1376,7 +1386,7 @@ export class Session {
       // A query-only reset has no delivery.forget() publication callback.
       // Persist it even when this event has no deduplication identity.
       this.hooks.persist?.();
-    });
+    }, "moduleReloaded");
   }
 
   /** Frames from the tenant for this socket (delivery); `revision` covers them. */
@@ -1386,7 +1396,7 @@ export class Session {
       for (const text of texts) this.send(text);
       if (revision > this.record.sentRevision) this.record.sentRevision = revision;
       if (revision > (this.record.watermark ?? 0)) this.record.watermark = revision;
-    });
+    }, "deliver");
   }
 
   /**
@@ -1405,7 +1415,7 @@ export class Session {
         : frames.replicaWatermark(revision));
       this.record.livenessAt = now;
       this.hooks.persist?.();
-    });
+    }, "liveness");
   }
 
   /** One ordered presence delivery from the tenant object (K14), in the socket's order. */
@@ -1415,7 +1425,7 @@ export class Session {
       for (const s of delivery.snapshots ?? []) if (s.connectionId === this.record.connectionId) this.presence.snapshot(s.id, s.frame);
       if (delivery.resync) this.presence.resync(id => resyncFrame(id, delivery.resync!));
       else if (delivery.patch !== undefined) this.presence.patch(delivery.patch);
-    });
+    }, "presenceDelivery");
   }
 
   /** Next time this session needs the host's alarm. */
