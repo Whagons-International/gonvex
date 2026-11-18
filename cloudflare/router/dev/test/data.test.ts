@@ -113,6 +113,37 @@ async function socket(path: string, headers: Record<string, string> = {}): Promi
 // GONVEX_DEV_TRANSFER_* variables, like staging and production, so it refuses.
 describe("dev-only file remap (X11b)", () => {
   const path = "/dev/internal/files/remap-tenant";
+  it("after a tenant reset, a data read recovers and an interrupted write answers 503 transient, never 500 (X10, run9)", async () => {
+    const before = await call("GET", `/dev/data/tables/notes/rows?${q({})}`, { token: project.key });
+    expect(before.status).toBe(200);
+    // The first call on the old stub fails as calls queued behind a CPU reset do (run9 reducer-errors).
+    const resetOnce = async () => runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      const target = instance as unknown as { tenantPort(id: string): unknown };
+      const real = target.tenantPort.bind(instance);
+      let broken = true;
+      target.tenantPort = (id: string) => {
+        const port = real(id) as Record<string, (...a: unknown[]) => Promise<unknown>>;
+        if (!broken) return port;
+        broken = false;
+        return new Proxy({}, { get: () => async () => { throw new Error("Durable Object storage is no longer accessible."); } });
+      };
+    });
+    await resetOnce();
+    const after = await call("GET", `/dev/data/tables/notes/rows?${q({})}`, { token: project.key });
+    expect([after.status, after.body]).toEqual([200, before.body]);
+    await resetOnce();
+    const write = await call("POST", `/dev/data/tables/notes/rows?${q({})}`, { token: project.key, body: { id: "n-reset", title: "x", done: "f", created_at: 9 } });
+    expect(write.status).toBe(503);
+    expect(write.body).toMatchObject({ class: "transient", retryable: true });
+    expect(String(write.body.error)).toMatch(/^tenant "data-tenant" was reset while handling this request/);
+    // Not replayed: the row is absent.
+    const rows = await call("GET", `/dev/data/tables/notes/rows?${q({ search: "n-reset" })}`, { token: project.key });
+    expect(JSON.stringify(rows.body)).not.toContain("n-reset");
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      delete (instance as unknown as { tenantPort?: unknown }).tenantPort;
+    });
+  });
+
   it("needs the admin key, a complete body, and refuses on a non-dev deployment", async () => {
     const body = { projectId: project.id, tenantId: TENANT, fromTenantId: "tenant_source" };
     expect(await call("POST", path, { token: project.key, body })).toMatchObject({ status: 403, body: { error: "runtime admin key is required" } });

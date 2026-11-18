@@ -49,6 +49,12 @@ export interface TransformOptions {
   fillGroupBranches?: number;
   /** At most this many bytes of branch-view SQL behind one fill trigger (keeps each trigger program small). */
   fillGroupBytes?: number;
+  /**
+   * Check every output statement against the platform limits (default true). Validation never changes
+   * the output; it only throws. K03 turns it off to compare capture triggers that are already installed
+   * (the platform accepted them) and validates again only what it will install (X10).
+   */
+  validate?: boolean;
 }
 
 export interface CatalogInput {
@@ -126,6 +132,7 @@ const fail = (ctx: { migration: string }, object: string, limit: TransformFailur
 export class SchemaTransform {
   readonly version = TRANSFORM_VERSION;
   private readonly limits: Readonly<Limits>;
+  private readonly validateLimits: boolean;
   private readonly chunkOptions: ChunkOptions;
   private readonly referenceMinBranches: number;
   private readonly fillGroupBranches: number;
@@ -147,6 +154,7 @@ export class SchemaTransform {
 
   constructor(options: TransformOptions = {}) {
     this.limits = { ...LIMITS, ...options.limits };
+    this.validateLimits = options.validate ?? true;
     this.chunkOptions = { ...CHUNK_DEFAULTS, ...options.chunk };
     this.referenceMinBranches = options.referenceMinBranches ?? 2;
     this.fillGroupBranches = options.fillGroupBranches ?? 4;
@@ -197,7 +205,7 @@ export class SchemaTransform {
     const ctx: Context = { migration: name, rewrites: [], temp: new Map(), tempGroups: [], keep: [], out: [] };
     for (const statement of statements) {
       const produced = this.statement(statement, ctx);
-      for (const s of produced) this.validate(s, ctx);
+      if (this.validateLimits) for (const s of produced) this.validate(s, ctx);
       if (produced.length > 1 && classify(stripLeadingComments(statement)).kind === "other") ctx.keep.push([ctx.out.length, ctx.out.length + produced.length - 1]);
       ctx.out.push(...produced);
     }

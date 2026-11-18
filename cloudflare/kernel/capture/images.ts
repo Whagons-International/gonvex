@@ -29,6 +29,15 @@ export function plainCaptureStatements(name: string, script: string, catalog: Im
 }
 
 /**
+ * The same statements without the limit checks (about 60 % of the cost: they tokenize every statement
+ * again). Only for comparing with triggers that are already installed; what will be installed goes
+ * through `plainCaptureStatements`, which checks. A fresh transform each call, so the result is the same.
+ */
+export function uncheckedCaptureStatements(name: string, script: string, catalog: ImageCatalog): string[] {
+  return new SchemaTransform({ validate: false }).runtime(name, script, { records: catalog.records, tables: catalog.tables }).statements;
+}
+
+/**
  * Rust's entity capture passes `NEW.rowid`/`OLD.rowid` to gonvex_capture. On a
  * WITHOUT ROWID table that column does not exist, so in Rust every write that
  * reaches the table fails with "no such column: NEW.rowid" (note 0026). T5

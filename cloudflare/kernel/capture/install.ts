@@ -21,7 +21,7 @@
 import type { SchemaTransform } from "../schema-transform/index.ts";
 import { splitStatements } from "../schema-transform/index.ts";
 import { sha256Hex } from "./digest.ts";
-import { keepRowidReference, plainCaptureStatements } from "./images.ts";
+import { keepRowidReference, plainCaptureStatements, uncheckedCaptureStatements } from "./images.ts";
 import { SCHEMA_OPTIONS_SQL, SYNC_INFRASTRUCTURE_SQL } from "./infrastructure.ts";
 import { objects, quoteIdentifier, scalar, type CaptureSql } from "./sql.ts";
 import {
@@ -205,8 +205,23 @@ export function planChangeFeedInstall(sql: CaptureSql, options: PlanOptions = {}
   const integerOwnerKey = (owner: RecordRow) =>
     (columns.get(owner.storage_table) ?? []).some((c) => c.name === owner.key_column && c.declared.toUpperCase() === "INTEGER") && publicKeyIsText(owner.schema);
   const asOwner = (r: RecordRow): RecordOwner => ({ name: r.name, storageTable: r.storage_table, keyColumn: r.key_column });
+  const catalogOf = (shapes: Array<{ name: string; columns: Column[] }>) => ({ records: recordRows, tables: shapes.map((s) => ({ name: s.name, columns: s.columns.map((c) => ({ name: c.name, declared: c.declared, pk: c.pk })) })) });
   const plain = (name: string, script: string, shapes: Array<{ name: string; columns: Column[] }>) =>
-    plainCaptureStatements(name, script, { records: recordRows, tables: shapes.map((s) => ({ name: s.name, columns: s.columns.map((c) => ({ name: c.name, declared: c.declared, pk: c.pk })) })) }, options.transform);
+    plainCaptureStatements(name, script, catalogOf(shapes), options.transform);
+  /**
+   * The unit's statements when it must be installed, or null when its receipt and installed triggers
+   * already match (X10). The match is decided on the transform's output without its limit checks, which
+   * never change the output; a unit that will be installed is transformed again with them. A shared
+   * transform (`options.transform`) keeps state across calls, so it is always used as before.
+   */
+  const planned = (receipt: string, digest: string, table: string, script: string, shapes: Array<{ name: string; columns: Column[] }>, names: readonly string[]) => {
+    if (receipts.get(receipt) === digest) {
+      const output = options.transform ? plain(receipt, script, shapes) : uncheckedCaptureStatements(receipt, script, catalogOf(shapes));
+      if (matches(table, output, names)) return null;
+      if (options.transform) return output;
+    }
+    return plain(receipt, script, shapes);
+  };
   const matches = (table: string, statements: readonly string[], names: readonly string[]) => {
     const created = statements.filter((s) => /^\s*CREATE\s+TRIGGER\b/i.test(s));
     return created.length === names.length && names.every((name, i) => installed.get(`${table}\u0000${name}`)?.trim() === created[i]!.trim());
@@ -250,8 +265,8 @@ export function planChangeFeedInstall(sql: CaptureSql, options: PlanOptions = {}
     }
     const receipt = `table:${table}`;
     const digest = bootstrapDigest(script);
-    const statements = plain(receipt, applied ?? script, shapes);
-    if (receipts.get(receipt) === digest && matches(table, statements, captureTriggerNames(table))) continue;
+    const statements = planned(receipt, digest, table, applied ?? script, shapes, captureTriggerNames(table));
+    if (statements === null) continue;
     units.push({ kind: "table", receipt, digest, statements });
   }
 
@@ -282,8 +297,8 @@ export function planChangeFeedInstall(sql: CaptureSql, options: PlanOptions = {}
     const receipt = `dependency:${namespace}`;
     expectedReceipts.add(receipt);
     const digest = bootstrapDigest(script);
-    const statements = plain(receipt, script, []);
-    if (receipts.get(receipt) === digest && matches(source, statements, names)) continue;
+    const statements = planned(receipt, digest, source, script, [], names);
+    if (statements === null) continue;
     units.push({ kind: "dependency", receipt, digest, statements });
   }
   const retired: string[] = [];
