@@ -380,7 +380,11 @@ export class ReplicaDeliveryEngine {
     }
     if (!deferred) { this.post(connection, reply.work); return; }
     const key = `${connection.id}\u0000${(socket as SocketView & { queryId?: string }).queryId ?? ""}`;
-    this.dropDeferredQuery(deferred, key, connection);
+    // r4618171096: a newer successful reply supersedes a pending one for the same query, and settles the earlier
+    // generations' initial requests with its own result (each still gets its terminal completion, so no admission
+    // reservation is left held). A failed newer reply supersedes nothing: the earlier result still goes, then the error.
+    const succeeded = !reply.work.initialCompletions?.length || reply.work.initialCompletions.every((c) => c.outcome === "accepted");
+    const settled = succeeded ? this.takeDeferredQuery(deferred, key, reply.work.initialScope?.generation) : [];
     // The certificate never travels ahead of commits the holder still owes (BUG-4): it is sent when the deferral ends.
     const { watermark: _ahead, ...work } = reply.work;
     if (reply.certificate !== undefined) {
@@ -395,9 +399,29 @@ export class ReplicaDeliveryEngine {
       this.requestRecovery(host);
       return;
     }
+    // Settling works reference the same reply texts (no copy, so no bytes counted), each under its own initial scope.
+    for (const ref of settled) {
+      const initialCompletions = work.ops.flatMap((op, index) => { const c = initialCompletion(ref, op, index); return c ? [c] : []; });
+      deferred.outbox.push({ payload: this.socketPayload(connection, { ops: work.ops, initialScope: ref, initialCompletions }), revision: 0, query: key, chars: 0 });
+    }
     const parts = splitPayload(payload);
     parts.forEach((part, index) => deferred!.outbox.push({ payload: part, revision: 0, query: key, chars: index === 0 ? chars : 0 }));
     deferred.queryChars += chars;
+  }
+
+  /** Removes a query's pending entries (superseded by a newer reply) and returns their still-open initial requests. */
+  private takeDeferredQuery(deferred: Deferred, key: string, newer: number | undefined): InitialRequestRef[] {
+    const refs = new Map<number, InitialRequestRef>();
+    deferred.outbox = deferred.outbox.filter((entry) => {
+      if (entry.query !== key) return true;
+      deferred.queryChars -= entry.chars ?? 0;
+      for (const work of Object.values(entry.payload.sockets)) {
+        const scope = work.initialScope;
+        if (scope && scope.kind === "query" && scope.generation !== newer) refs.set(scope.generation, scope);
+      }
+      return false;
+    });
+    return [...refs.values()].sort((a, b) => a.generation - b.generation);
   }
 
   /** A pending reply for this query that has not gone yet is superseded (a newer reply or an unsubscribe): drop it and its initial refs. */

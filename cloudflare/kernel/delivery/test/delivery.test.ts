@@ -1081,6 +1081,42 @@ describe("BUG-10 a live query's initial reply waits for room on a full channel",
       expect(state.recoveries).toEqual([]);
     }, MODULE, true, undefined, 60_000);
   });
+
+  it("r4618171096: a reused query id settles every superseded generation's initial request; a failed newer reply supersedes nothing", { timeout: 120_000 }, async () => {
+    const state = {
+      hold: false, held: [] as Array<() => void>, recoveries: [] as string[],
+      receipt: (payload: ReplicaDelivery) => ({ v: 1, sockets: Object.keys(payload.sockets).length,
+        ...(payload.sockets.Q?.initialCompletions?.length ? { initialCompletions: { Q: payload.sockets.Q.initialCompletions.map((c) => ({ generation: c.request.generation, status: "enqueued" as const })) } } : {}) }) as ReplicaReceipt,
+    };
+    await withEngine(async (h) => {
+      await stuckH1(h, state);
+      const ref = (generation: number) => ({ kind: "query" as const, id: "live", path: "items.live", epoch: 0, generation });
+      const view = (generation: number) => ({ ...socket("Q", {}, "h1"), queryId: "live", initialRequests: [ref(generation)] }) as SocketView;
+      const live = (generation: number) => { const v = view(generation); return h.engine.querySubscribe(v, (db) => h.live.subscribeSnapshot(db, v.connectionId, v.tenant, { id: "live", path: "items.live", args: {} })); };
+      const initials = () => [...(h.engine as unknown as { connections: Map<string, { initials: Map<number, unknown> }> }).connections.get("Q")!.initials.keys()].sort();
+      await live(1);
+      const one = deferredOf(h, "h1")!.queryChars;
+      await live(2);
+      // Superseded, not dropped: gen 1 is settled by gen 2's result (same text, no extra bytes); both stay open until sent.
+      expect(deferredOf(h, "h1")!.queryChars).toBe(one);
+      expect(initials()).toEqual([1, 2]);
+      // A failed newer reply supersedes nothing: the earlier results still go, then its error.
+      const failing = view(3);
+      await h.engine.querySubscribe(failing, () => JSON.stringify({ type: "query.error", id: "live", path: "items.live", error: { code: "query_failed", message: "boom" } }));
+      expect(initials()).toEqual([1, 2, 3]);
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && initials().length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      const sent = h.payloads.filter(([host, p]) => host === "h1" && p.sockets.Q?.initialCompletions?.length).map(([, p]) => p.sockets.Q!);
+      expect(sent.map((work) => [work.initialScope?.generation, work.initialCompletions!.map((c) => [c.request.generation, c.outcome])])).toEqual([
+        [1, [[1, "accepted"]]], [2, [[2, "accepted"]]], [3, [[3, "refused"]]],
+      ]);
+      expect(sent[0]!.ops[0]).toBe(sent[1]!.ops[0]); // gen 1 carries gen 2's result
+      expect(initials()).toEqual([]);
+      expect(state.recoveries).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
+  });
 });
 
 describe("BUG-8 apiKeys.list visibility is the Member's direct permission grant, as in Rust", () => {
