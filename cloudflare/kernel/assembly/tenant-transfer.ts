@@ -63,6 +63,11 @@ export async function transferIntoTenant(ctx: DurableObjectState, request: Reque
     return Response.json({ wiped: true });
   }
   if (!state) return Response.json({ error: 'begin with wipe on a fresh tenant' }, { status: 409 });
+  // A resumable checksum or check is exact only over a quiescent tenant: they run only while it is being
+  // imported, when nothing but this serialized transfer path writes it (no module, no migrations).
+  if ((op === 'checksum' || op === 'check' || op === 'verify') && state.phase !== 'copying') {
+    return Response.json({ error: `${op} runs only while the import is in progress` }, { status: 409 });
+  }
   if (op === 'verify') {
     if (state.phase !== 'copying') return Response.json({ error: 'import already completed' }, { status: 409 });
 
@@ -79,6 +84,7 @@ export async function transferIntoTenant(ctx: DurableObjectState, request: Reque
       return Response.json({ pending: true, verified: 0 });
     }
     delete state.verifying;
+    if (response.status === 409) { ctx.storage.kv.put(IMPORT_KEY, state); return Response.json({ error: 'the tenant was written during verify; verify again' }, { status: 409 }); }
     const done = { ...job.done, ...result.checksums };
     if (!response.ok || Object.entries(expected).some(([table, value]) => done[table]?.rows !== value.rows || done[table]?.sha256 !== value.sha256)) {
       ctx.storage.kv.put(IMPORT_KEY, state);

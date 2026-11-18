@@ -89,7 +89,8 @@ it('imports, checks and verifies 115k rows with every request inside the CPU bud
     } while (cursor);
   }
   expect(paged).toEqual(expected);
-  expect(continued).toBeGreaterThan(0);
+  // Whether a page continued depends on the machine's speed; the cursor itself is tested below at budget 0.
+  void continued;
 
   // Integrity checks: the cursor stays in the object; the import is complete only after the last page.
   let checks: { next?: unknown; quickCheck?: string; foreignKeyViolations?: number; fts?: Record<string, string> };
@@ -145,4 +146,47 @@ it('a catalog read while a schema request yields cannot leave plans of the old s
     const { plans } = await post('catalog', {});
     expect(plans.filter((p: { name: string }) => p.name.startsWith('s'))).toHaveLength(300);
   });
+});
+
+it('a resumable checksum is exact over a quiescent tenant and refuses to continue after any write', async () => {
+  await runInDurableObject(env.TENANT.getByName('devcopy-quiescent'), async (_instance, state) => {
+    const call = (t: InstanceType<typeof TenantTransfer>, op: string, body: unknown) => t.fetch(new Request(`http://t/${op}`, { method: 'POST', body: JSON.stringify(body) }));
+    const json = async (r: Response) => ({ status: r.status, body: await r.json() as Record<string, any> });
+    const once = new TenantTransfer(state, { budgetMs: 1e9 }), stepwise = new TenantTransfer(state, { budgetMs: 0 });
+    expect((await call(once, 'schema', { statements: [{ name: 'q', sql: 'CREATE TABLE q (id INTEGER PRIMARY KEY, v TEXT)' }] })).status).toBe(200);
+    const rows = (from: number, n: number) => Array.from({ length: n }, (_, i) => [from + i, `v${from + i}`]);
+    expect((await call(once, 'insert', { parts: [{ table: 'q', columns: ['id', 'v'], rows: rows(10, 9_000) }] })).status).toBe(200);
+    const reference = (await json(await call(once, 'checksum', { tables: ['q'] }))).body.checksums.q;
+    // At budget 0 every page continues; the digest equals the one-pass digest.
+    let cursor: unknown = null, pages = 0, result: Record<string, any>;
+    do { result = (await json(await call(stepwise, 'checksum', { tables: ['q'], cursor }))).body; cursor = result.next ?? null; pages += 1; } while (cursor);
+    expect(pages).toBeGreaterThan(3);
+    expect(result.checksums.q).toEqual(reference);
+    // A write between two pages: the cursor is refused (a low key behind it would otherwise be missed).
+    const first = (await json(await call(stepwise, 'checksum', { tables: ['q'], cursor: null }))).body;
+    expect(first.next).toBeTruthy();
+    expect((await call(once, 'insert', { parts: [{ table: 'q', columns: ['id', 'v'], rows: rows(1, 1) }] })).status).toBe(200);
+    expect(await json(await call(stepwise, 'checksum', { tables: ['q'], cursor: first.next }))).toMatchObject({ status: 409, body: { stale: true } });
+    // A write while a checksum request yields between pages: the request is refused, not answered.
+    const running = call(new TenantTransfer(state, { budgetMs: 1e9 }), 'checksum', { tables: ['q'] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((await call(once, 'insert', { parts: [{ table: 'q', columns: ['id', 'v'], rows: rows(2, 1) }] })).status).toBe(200);
+    expect(await json(await running)).toMatchObject({ status: 409, body: { stale: true } });
+    // The same for a check cursor.
+    const check = (await json(await call(stepwise, 'check', { fts: [] }))).body;
+    expect(check.next).toBeTruthy();
+    await call(once, 'insert', { parts: [{ table: 'q', columns: ['id', 'v'], rows: rows(3, 1) }] });
+    expect(await json(await call(stepwise, 'check', { fts: [], cursor: check.next }))).toMatchObject({ status: 409, body: { stale: true } });
+  });
+});
+
+it('the assembled path runs checksum, check and verify only while the import is in progress', async () => {
+  const tenant = 'devcopy-budget';
+  const post = async (op: string, body: unknown = {}) => {
+    const request = new Request(`https://dev/__tenant-transfer/t/${tenant}/${op}`, { method: 'POST', headers: { authorization: 'Bearer test-only' }, body: JSON.stringify(body) });
+    const response = (await handleTenantTransfer(request, { ...config, TENANT: env.TENANT }))!;
+    return { status: response.status, body: await response.json() as Record<string, unknown> };
+  };
+  // devcopy-budget completed its import in the first test.
+  for (const op of ['checksum', 'check', 'verify']) expect(await post(op, op === 'verify' ? { checksums: {} } : { tables: [name(0)] })).toMatchObject({ status: 409, body: { error: `${op} runs only while the import is in progress` } });
 });

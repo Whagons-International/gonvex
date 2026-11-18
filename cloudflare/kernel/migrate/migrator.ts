@@ -8,15 +8,14 @@
 // spread over events, so no event approaches the object's CPU limit
 // (0022 §3b: cpu_ms 5000, no chunk over 2 s):
 //
-// - A plan chunk runs in one or more storage transactions of `batch`
-//   statements each. `batch` adapts to the measured cost of the last
-//   transaction (`transactionMs`): on the Whagons-sized schema one DDL
-//   statement costs ~9 ms, so a whole 200-statement chunk is ~2 s (X10).
-// - The platform clock does not advance during synchronous work, so time is
-//   read only after a macrotask yield (`settle`), when it includes the CPU of
-//   the transaction just run. An event stops starting transactions once
-//   `maxMsPerEvent` has passed, and runs at most `maxChunksPerEvent` of them
-//   even if the clock never moved.
+// - X10: the platform clock does not advance during synchronous work, so the
+//   event's time is read only after a macrotask yield (`settle`), when it
+//   includes the CPU of the transaction just run. A second transaction runs in
+//   the same event only when the clock visibly moved and the last one's cost
+//   still fits `maxMsPerEvent`; otherwise the event ends after one. Plan chunks
+//   are never split: a chunk is one storage transaction, as before. A chunk
+//   that alone costs more than the event budget is logged as
+//   `gonvex.migrate.unsplittable` with its time.
 //
 // - Progress lives in the object's KV storage and commits in the same
 //   transaction as each chunk, so an object reset (CPU limit, eviction, deploy)
@@ -33,7 +32,7 @@
 // (Rust holds its schema lock for the whole provision).
 
 import type { CaptureHooks, CaptureSql, CommitNotice, InstallUnit } from "./capture-port.ts";
-import { unitKey, type PlanManifest, type PlanStore, type PlannedMigration, type PlannedPrelude, type PlannedUnit } from "./plan.ts";
+import { unitKey, type PlanManifest, type PlanStore, type PlannedMigration, type PlannedPrelude } from "./plan.ts";
 
 export const PROGRESS_KEY = "gonvex/migrate/progress";
 export const APPLIED_PREFIX = "gonvex/migrate/applied/";
@@ -41,16 +40,13 @@ export const APPLIED_PREFIX = "gonvex/migrate/applied/";
 export const RECORD_STASH = "_gonvex_st_migrate_record_stash";
 
 export interface Budget {
-  /** Storage transactions per event at most, whatever the clock says. */
+  /** Chunks (storage transactions) per event at most. */
   maxChunksPerEvent: number;
-  /** Stop starting new transactions once this much time (read after a yield) has passed in the event. */
+  /**
+   * The event's CPU budget, read after a yield. Another transaction starts only if the time so far plus
+   * the last transaction's time stays inside it, and never when the clock did not move.
+   */
   maxMsPerEvent: number;
-  /** Target time of one storage transaction; the statements per transaction adapt to it. */
-  transactionMs: number;
-  /** Statements per storage transaction at most (a plan chunk is split into several when larger). */
-  maxStatementsPerTransaction: number;
-  /** Statements in the first transaction of an instance, before any cost is measured. */
-  initialStatementsPerTransaction: number;
   /** Change-feed install statements per storage transaction. */
   captureStatementsPerTransaction: number;
   /** Tries of one chunk that end in an object reset before the migration fails. */
@@ -61,12 +57,12 @@ export interface Budget {
   foreignKeyTablesPerStep: number;
 }
 
+/** A macrotask turn: on the platform, `Date.now()` afterwards includes the CPU spent before it. */
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 export const DEFAULT_BUDGET: Budget = {
   maxChunksPerEvent: 4,
   maxMsPerEvent: 1000,
-  transactionMs: 300,
-  maxStatementsPerTransaction: 50,
-  initialStatementsPerTransaction: 8,
   captureStatementsPerTransaction: 50,
   maxAttempts: 3,
   watchdogMs: 10_000,
@@ -85,8 +81,6 @@ export interface Progress {
   unit: number;
   /** Next chunk of the unit. */
   chunk: number;
-  /** Statements of chunk `chunk` already committed (a chunk may take several transactions). Absent before X10. */
-  statement?: number;
   unitState: UnitState;
   bookmark: string | null;
   /** Active milliseconds spent on the current migration (its ledger `duration_ms`). */
@@ -105,8 +99,10 @@ export interface Progress {
   restorePending: boolean;
   /** First receipt of the last change-feed batch: the install must make progress. */
   lastReceipt: string | null;
-  /** Receipts installed since the change-feed install was last planned: a new plan must not repeat one. */
+  /** Receipts installed since the change-feed install was last planned: a new plan must not repeat one (X10). */
   installedSincePlan?: string[];
+  /** Events that ended right after planning the change feed; at 1 the next plan is applied in its own event. */
+  planOnly?: number;
   /** Foreign-key rebuild: next table to check, or -1 when not checking. */
   fkTable: number;
 }
@@ -154,6 +150,8 @@ export interface MigratorOptions {
   budget?: Partial<Budget>;
   /** Called after each committed storage transaction (measurement and logs). */
   observe?: (event: TransactionEvent) => void;
+  /** The clock (tests only: a frozen clock is the platform's during synchronous work). */
+  now?: () => number;
 }
 
 export interface TransactionEvent {
@@ -161,86 +159,8 @@ export interface TransactionEvent {
   unit: string;
   chunk: number;
   statements: number;
-  /** Time of the transaction, read after a yield so it includes its CPU on the platform too. */
+  /** Time of the transaction, read after a yield so that on the platform it includes its CPU. */
   ms: number;
-}
-
-/** A macrotask turn: on the platform, `Date.now()` afterwards includes the CPU spent before it. */
-const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-/** `PRAGMA defer_foreign_keys` holds for one transaction only: a chunk that sets it is applied whole. */
-const DEFER_PRAGMA = /^\s*PRAGMA\s+(\w+\.)?defer_foreign_keys\b/i;
-const DEFERRED_KEY = /\bDEFERRABLE\s+INITIALLY\s+DEFERRED\b/i;
-
-/** An identifier at the start of `rest` (quoted or bare), lower-case, without a schema prefix. */
-const NAME = String.raw`(?:(?:"(?:[^"]|"")+"|\[[^\]]+\]|\x60[^\x60]+\x60|[\w$]+)\s*\.\s*)?("(?:[^"]|"")+"|\[[^\]]+\]|\x60[^\x60]+\x60|[\w$]+)`;
-const unquote = (name: string) => (/^["[\x60]/.test(name) ? name.slice(1, -1).replace(/""/g, '"') : name).toLowerCase();
-const statementPatterns = {
-  insert: new RegExp(String.raw`^\s*(?:INSERT(?:\s+OR\s+\w+)?|REPLACE)\s+INTO\s+${NAME}`, "i"),
-  delete: new RegExp(String.raw`^\s*DELETE\s+FROM\s+${NAME}`, "i"),
-  createTable: new RegExp(String.raw`^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`, "i"),
-  rename: new RegExp(String.raw`^\s*ALTER\s+TABLE\s+${NAME}\s+RENAME\s+TO\s+`, "i"),
-  drop: new RegExp(String.raw`^\s*DROP\s+(INDEX|VIEW|TRIGGER)\s+(?:IF\s+EXISTS\s+)?${NAME}`, "i"),
-  create: new RegExp(String.raw`^\s*CREATE\s+(?:UNIQUE\s+|TEMP(?:ORARY)?\s+)?(INDEX|VIEW|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`, "i"),
-};
-const stripComments = (sql: string) => sql.replace(/^(?:\s*--[^\n]*\n|\s*\/\*[\s\S]*?\*\/)*/, "");
-
-/**
- * Ranges of statements in one chunk that depend on each other and must commit together (see
- * `TenantMigrator.units`). `deferred(table)` says whether a table not created in the chunk declares a
- * deferred foreign key. Exported for tests.
- */
-export function dependentStatements(all: readonly string[], deferred: (table: string) => boolean): Array<[number, number]> {
-  const out: Array<[number, number]> = [];
-  const createdDeferred = new Map<string, boolean>();
-  const openInsert = new Map<string, number>();
-  const createdAt = new Map<string, number>();
-  const dropped = new Map<string, number>();
-  all.forEach((raw, i) => {
-    const sql = stripComments(raw);
-    let m: RegExpExecArray | null;
-    if ((m = statementPatterns.createTable.exec(sql))) {
-      const table = unquote(m[1]!);
-      createdAt.set(table, i);
-      createdDeferred.set(table, DEFERRED_KEY.test(sql));
-    } else if ((m = statementPatterns.insert.exec(sql))) {
-      const table = unquote(m[1]!);
-      if (!openInsert.has(table) && (createdDeferred.get(table) ?? deferred(table))) openInsert.set(table, i);
-    } else if ((m = statementPatterns.delete.exec(sql))) {
-      const table = unquote(m[1]!);
-      const at = openInsert.get(table);
-      if (at !== undefined) {
-        out.push([at, i]);
-        openInsert.delete(table);
-      }
-    } else if ((m = statementPatterns.rename.exec(sql))) {
-      const at = createdAt.get(unquote(m[1]!));
-      if (at !== undefined) out.push([at, i]);
-    } else if ((m = statementPatterns.drop.exec(sql))) {
-      dropped.set(`${m[1]!.toUpperCase()} ${unquote(m[2]!)}`, i);
-    } else if ((m = statementPatterns.create.exec(sql))) {
-      const key = `${m[1]!.toUpperCase()} ${unquote(m[2]!)}`;
-      const at = dropped.get(key);
-      if (at !== undefined) {
-        out.push([at, i]);
-        dropped.delete(key);
-      }
-    }
-  });
-  // An INSERT whose DELETE is not in this chunk: keep it with the rest of the chunk.
-  for (const at of openInsert.values()) out.push([at, all.length - 1]);
-  return mergeUnits(out);
-}
-
-function mergeUnits(ranges: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
-  const sorted = ranges.map(([a, b]): [number, number] => [a, b]).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0] || x[1] - y[1]);
-  const out: Array<[number, number]> = [];
-  for (const r of sorted) {
-    const last = out[out.length - 1];
-    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
-    else out.push(r);
-  }
-  return out;
 }
 
 class StepFailure extends Error {
@@ -273,14 +193,11 @@ export class TenantMigrator {
   private readonly manifests = new Map<string, PlanManifest>();
   private running: Promise<unknown> = Promise.resolve();
   private sessionForeignKeysOff = false;
-  /** Statements in the next transaction; adapts to the measured cost (see `measured`). */
-  private batch: number;
-  /** The dependent-statement units of the chunk being applied (see `units`). */
-  private unitCache: { key: string; units: ReadonlyArray<readonly [number, number]> } | null = null;
-  /** The last plan chunk read, reused while it is applied in several transactions. */
-  private chunkCache: { key: string; statements: string[] } | null = null;
-  /** The change-feed units still to apply, valid while sqlite_schema is unchanged. */
-  private capturePlan: { planId: string; schemaVersion: string; units: InstallUnit[] } | null = null;
+  private readonly now: () => number;
+  /** Time of the last transaction (see `measured`). */
+  private lastMs = 0;
+  /** The change-feed units still to apply, valid while sqlite_schema is as this migrator left it. */
+  private capturePlan: { planId: string; schema: string; units: InstallUnit[] } | null = null;
   /** Transactions committed so far in the current event. */
   private eventTransactions = 0;
 
@@ -291,7 +208,7 @@ export class TenantMigrator {
     this.storage = options.storage;
     this.sql = options.storage.sql;
     this.budget = { ...DEFAULT_BUDGET, ...options.budget };
-    this.batch = Math.max(1, Math.min(this.budget.initialStatementsPerTransaction, this.budget.maxStatementsPerTransaction));
+    this.now = options.now ?? Date.now;
   }
 
   private load(): Progress | undefined {
@@ -308,7 +225,7 @@ export class TenantMigrator {
     const p = this.load();
     if (!p || p.phase === "done") return false;
     if (p.phase === "failed") return p.restorePending;
-    return p.unitState === "running" || p.chunk > 0 || (p.statement ?? 0) > 0 || p.foreignKeysOff;
+    return p.unitState === "running" || p.chunk > 0 || p.foreignKeysOff;
   }
 
   status(): MigrationStatus {
@@ -353,7 +270,7 @@ export class TenantMigrator {
         await this.manifest(planId);
         const now = Date.now();
         this.save({
-          planId, phase: "prelude", unit: 0, chunk: 0, statement: 0, unitState: "pending", bookmark: null, unitMs: 0, attempts: 0,
+          planId, phase: "prelude", unit: 0, chunk: 0, unitState: "pending", bookmark: null, unitMs: 0, attempts: 0,
           foreignKeysOff: false, applied: [], revisions: [], events: 0, activeMs: 0, startedAt: now, updatedAt: now, error: null, restorePending: false, lastReceipt: null, installedSincePlan: [], fkTable: -1,
         });
       }
@@ -404,14 +321,13 @@ export class TenantMigrator {
       p.phase = "failed";
       p.unitState = "pending";
       p.chunk = 0;
-      p.statement = 0;
       p.error = p.error ?? "the migration failed and was rolled back to its restore point; sync again to retry";
       this.save(p);
       await this.storage.deleteAlarm();
       return this.status();
     }
     const manifest = await this.manifest(p.planId);
-    const started = Date.now();
+    const started = this.now();
     // Watchdog: resumes the work if this event dies (CPU limit, deferred-FK reset, eviction).
     await this.storage.setAlarm(started + this.budget.watchdogMs);
     if (p.foreignKeysOff && !this.sessionForeignKeysOff) {
@@ -424,11 +340,16 @@ export class TenantMigrator {
     this.eventTransactions = 0;
     let retryAt = 0;
     try {
-      while (transactions < this.budget.maxChunksPerEvent && Date.now() - started < this.budget.maxMsPerEvent) {
-        const progressed = await this.step(manifest, started);
-        // "yield": the next step needs an event of its own (it would not fit what is left of this one).
+      for (;;) {
+        const progressed = await this.step(manifest);
+        // "yield": the next step needs an event of its own.
         if (progressed === "done" || progressed === "yield") break;
-        if (progressed === "transaction") this.eventTransactions = transactions += 1;
+        if (progressed !== "transaction") continue;
+        this.eventTransactions = transactions += 1;
+        // The time after the yield in `measured` includes this transaction's CPU. A frozen clock proves
+        // nothing about the budget, so the event then ends after one transaction.
+        const elapsed = this.now() - started;
+        if (transactions >= this.budget.maxChunksPerEvent || elapsed <= 0 || elapsed + this.lastMs > this.budget.maxMsPerEvent) break;
       }
     } catch (error) {
       if (error instanceof StepFailure) await this.failed(error, manifest);
@@ -442,7 +363,7 @@ export class TenantMigrator {
       }
     }
     const after = this.load()!;
-    after.activeMs += Date.now() - started;
+    after.activeMs += this.now() - started;
     if (after.phase !== "failed" && retryAt === 0 && after.error?.startsWith("retrying: ")) after.error = null;
     this.save(after);
     if (after.phase === "done" || (after.phase === "failed" && !after.restorePending)) await this.storage.deleteAlarm();
@@ -451,7 +372,7 @@ export class TenantMigrator {
   }
 
   /** One unit of progress: a skip, a transaction, or the end of the plan. */
-  private async step(manifest: PlanManifest, started: number): Promise<"skip" | "transaction" | "yield" | "done"> {
+  private async step(manifest: PlanManifest): Promise<"skip" | "transaction" | "yield" | "done"> {
     const p = this.load()!;
     switch (p.phase) {
       case "prelude": {
@@ -465,7 +386,7 @@ export class TenantMigrator {
         return this.migration(p, unit, manifest);
       }
       case "capture":
-        return this.changeFeed(p, started);
+        return this.changeFeed(p);
       default:
         return "done";
     }
@@ -475,7 +396,6 @@ export class TenantMigrator {
     p.phase = phase;
     p.unit = 0;
     p.chunk = 0;
-    p.statement = 0;
     p.unitState = "pending";
     p.bookmark = null;
     this.save(p);
@@ -486,7 +406,6 @@ export class TenantMigrator {
     p.fkTable = -1;
     p.unit += 1;
     p.chunk = 0;
-    p.statement = 0;
     p.unitMs = 0;
     p.attempts = 0;
     p.unitState = "pending";
@@ -530,96 +449,34 @@ export class TenantMigrator {
     for (const statement of statements) this.sql.exec(statement);
   }
 
-  /** A plan chunk; cached while its statements are applied over several transactions. */
-  private async chunkStatements(planId: string, unit: string, index: number): Promise<string[]> {
-    const key = `${planId}\u0000${unit}\u0000${index}`;
-    if (this.chunkCache?.key !== key) this.chunkCache = { key, statements: await this.options.plans.chunk(planId, unit, index) };
-    return this.chunkCache.statements;
-  }
-
   /**
-   * The end (exclusive) of the next transaction of a chunk, starting at `from` with about `batch`
-   * statements. It never falls inside a unit of statements that depend on each other (`units`). A unit
-   * longer than the batch is kept whole and logged as `gonvex.migrate.unsplittable`.
+   * The time since `t0` once the transaction's CPU is visible (after a yield). A single transaction
+   * longer than the event budget cannot be split here: it is logged with its time.
    */
-  private cut(unit: PlannedUnit, chunk: number, all: readonly string[], from: number): number {
-    let end = Math.min(all.length, from + this.batch);
-    for (const [a, b] of this.units(unit, chunk, all)) {
-      if (a >= end || b < end || b < from) continue;
-      // `end` falls inside [a, b]: stop before the unit, or take all of it when it starts here.
-      end = a > from ? a : b + 1;
-      break;
-    }
-    if (end - from > this.batch) {
-      console.warn(JSON.stringify({ event: "gonvex.migrate.unsplittable", what: `${unitKey(unit)} chunk ${chunk} statements ${from}-${end - 1} must commit together`, statements: end - from, batch: this.batch }));
-    }
-    return end;
-  }
-
-  /**
-   * [first, last] statement ranges of a chunk (sorted, disjoint) that must commit in one transaction:
-   * - A01's atomic ranges from the plan: a TEMP table's lifetime (T4), a statement the transform expanded
-   *   into several, a deferred-foreign-key span (T7);
-   * - found here as well, so they hold whatever the plan knew: an INSERT into a table with a
-   *   `DEFERRABLE INITIALLY DEFERRED` foreign key up to the next DELETE from it (the commit checks deferred
-   *   keys); a table rebuild from `CREATE TABLE n` to `ALTER TABLE n RENAME TO o`; an index, view or
-   *   trigger dropped and created again under the same name;
-   * - the whole chunk when the plan predates A01's ranges, or when the chunk sets
-   *   `PRAGMA defer_foreign_keys` (it lasts one transaction).
-   */
-  private units(unit: PlannedUnit, chunk: number, all: readonly string[]): ReadonlyArray<readonly [number, number]> {
-    const key = `${unitKey(unit)}\u0000${chunk}`;
-    if (this.unitCache?.key === key) return this.unitCache.units;
-    let units: Array<[number, number]>;
-    if (!unit.atomic || all.some((s) => DEFER_PRAGMA.test(s))) units = all.length ? [[0, all.length - 1]] : [];
-    else units = mergeUnits([...(unit.atomic[chunk] ?? []), ...dependentStatements(all, (table) => this.declaresDeferredKey(table))]);
-    this.unitCache = { key, units };
-    return units;
-  }
-
-  /** Whether the live schema declares a deferred foreign key on `table` (lower-case name). */
-  private declaresDeferredKey(table: string): boolean {
-    const sql = this.sql.exec<{ sql: string | null }>("SELECT sql FROM sqlite_schema WHERE type='table' AND lower(name)=?", table).toArray()[0]?.sql;
-    return !!sql && DEFERRED_KEY.test(sql);
-  }
-
-  /**
-   * Time since `t0` once the transaction's CPU is visible (after a yield), and the next
-   * transaction's size: scaled toward `transactionMs`, at most doubling per step. A single
-   * statement that costs more than the whole event budget cannot be split; it is logged.
-   */
-  private async measured(t0: number, statements: number, what: string): Promise<number> {
+  private async measured(t0: number, what: string, statements: number): Promise<number> {
     await settle();
-    const ms = Date.now() - t0;
-    const target = this.budget.transactionMs;
-    const scaled = ms <= 0 ? this.batch * 2 : Math.floor((statements * target) / ms);
-    this.batch = Math.max(1, Math.min(this.budget.maxStatementsPerTransaction, this.batch * 2, scaled));
-    if (statements === 1 && ms > this.budget.maxMsPerEvent) {
-      console.warn(JSON.stringify({ event: "gonvex.migrate.unsplittable", what, ms, budgetMs: this.budget.maxMsPerEvent }));
+    const ms = this.now() - t0;
+    this.lastMs = ms;
+    if (ms > this.budget.maxMsPerEvent) {
+      console.warn(JSON.stringify({ event: "gonvex.migrate.unsplittable", what, statements, ms, budgetMs: this.budget.maxMsPerEvent }));
     }
     return ms;
   }
 
   private async prelude(p: Progress, unit: PlannedPrelude, manifest: PlanManifest): Promise<"transaction"> {
-    if (unit.name === "tenant-identity" && p.chunk === 0 && (p.statement ?? 0) === 0) {
+    if (unit.name === "tenant-identity" && p.chunk === 0) {
       // provision.rs install_tenant_identity: refuse a pre-identity-v2 members table.
       const legacy = this.sql.exec("SELECT 1 FROM pragma_table_info('members') WHERE name='user_id'").toArray().length > 0;
       if (legacy) throw new StepFailure("identity-v2 migration required: tenant members still use user_id", false);
     }
     await this.attempt(p, `prelude ${unit.name} chunk ${p.chunk}`);
-    const all = await this.chunkStatements(manifest.id, unitKey(unit), p.chunk);
-    const from = p.statement ?? 0;
-    const statements = all.slice(from, this.cut(unit, p.chunk, all, from));
+    const statements = await this.options.plans.chunk(manifest.id, unitKey(unit), p.chunk);
     const chunk = p.chunk;
-    const t0 = Date.now();
+    const t0 = this.now();
     try {
       this.storage.transactionSync(() => {
         this.run(statements);
-        p.statement = from + statements.length;
-        if (p.statement >= all.length) {
-          p.chunk += 1;
-          p.statement = 0;
-        }
+        p.chunk += 1;
         p.attempts = 0;
         if (p.chunk >= unit.chunks) this.nextUnit(p);
         this.save(p);
@@ -628,7 +485,7 @@ export class TenantMigrator {
       throw new StepFailure(message(error), false);
     }
     this.options.schemaChanged?.();
-    const ms = await this.measured(t0, statements.length, `prelude ${unit.name} chunk ${chunk}`);
+    const ms = await this.measured(t0, `prelude ${unit.name} chunk ${chunk}`, statements.length);
     this.options.observe?.({ planId: manifest.id, unit: unitKey(unit), chunk, statements: statements.length, ms });
     return "transaction";
   }
@@ -663,15 +520,11 @@ export class TenantMigrator {
       }
       return this.finish(p, m, manifest, []);
     }
-    const lastChunk = p.chunk === m.chunks - 1 && !m.foreignKeyRebuild;
+    const last = p.chunk === m.chunks - 1 && !m.foreignKeyRebuild;
     await this.attempt(p, `migration ${m.name} chunk ${p.chunk + 1}/${m.chunks}`);
-    const all = await this.chunkStatements(manifest.id, unitKey(m), p.chunk);
-    const from = p.statement ?? 0;
-    const end = this.cut(m, p.chunk, all, from);
-    // The migration's last statements commit with its finalize and ledger row, as before.
-    if (lastChunk && end === all.length) return this.finish(p, m, manifest, all.slice(from));
-    const statements = all.slice(from, end);
-    const started = Date.now();
+    const statements = await this.options.plans.chunk(manifest.id, unitKey(m), p.chunk);
+    if (last) return this.finish(p, m, manifest, statements);
+    const started = this.now();
     const chunk = p.chunk;
     try {
       if (m.noTransaction) this.run(statements);
@@ -681,22 +534,18 @@ export class TenantMigrator {
           this.run(statements);
           this.stash();
         }
-        p.statement = from + statements.length;
-        if (p.statement >= all.length) {
-          p.chunk += 1;
-          p.statement = 0;
-        }
-        p.unitMs += Date.now() - started;
+        p.unitMs += this.now() - started;
+        p.chunk += 1;
         p.attempts = 0;
         if (m.foreignKeyRebuild && p.chunk === m.chunks) p.fkTable = 0;
         this.save(p);
       });
     } catch (error) {
-      // A failure in the first transaction changed nothing; later ones roll back to the restore point.
-      throw new StepFailure(message(error), !m.noTransaction && (chunk > 0 || from > 0));
+      // A failure in the first chunk changed nothing; later ones roll back to the restore point.
+      throw new StepFailure(message(error), !m.noTransaction && chunk > 0);
     }
     this.options.schemaChanged?.();
-    const ms = await this.measured(started, statements.length, `migration ${m.name} chunk ${chunk} from ${from}`);
+    const ms = await this.measured(started, `migration ${m.name} chunk ${chunk + 1}/${m.chunks}`, statements.length);
     this.options.observe?.({ planId: manifest.id, unit: unitKey(m), chunk, statements: statements.length, ms });
     return "transaction";
   }
@@ -712,31 +561,32 @@ export class TenantMigrator {
       .exec<{ name: string }>("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND sql NOT LIKE 'CREATE VIRTUAL%' ORDER BY rowid")
       .toArray()
       .map((r) => r.name);
-    const started = Date.now();
+    const started = this.now();
     let checked = 0;
-    // One table per turn, so the time read after each yield includes its CPU on the platform too.
-    while (p.fkTable < tables.length && checked < this.budget.foreignKeyTablesPerStep && Date.now() - started < this.budget.transactionMs) {
+    // At least one table per step, so the check always progresses.
+    while (p.fkTable < tables.length && checked < this.budget.foreignKeyTablesPerStep && (checked === 0 || this.now() - started < this.budget.maxMsPerEvent / 2)) {
       const table = tables[p.fkTable]!;
       const invalid = this.sql.exec<{ table: string; parent: string; fkid: number }>('SELECT "table",rowid,parent,fkid FROM pragma_foreign_key_check(?) LIMIT 1', table).toArray()[0];
       if (invalid) throw new StepFailure(`foreign-key rebuild rejected: ${invalid.table} -> ${invalid.parent} (constraint ${invalid.fkid})`, true);
       p.fkTable += 1;
       checked += 1;
+      // Read-only checks: a yield between tables makes the time include their CPU (X10).
       await settle();
+      if (this.now() - started <= 0) break;
     }
     if (p.fkTable >= tables.length) p.fkTable = -1;
     p.attempts = 0;
-    p.unitMs += Date.now() - started;
+    p.unitMs += this.now() - started;
     this.save(p);
-    this.options.observe?.({ planId: p.planId, unit: `fk-check/${m.name}`, chunk: p.fkTable, statements: checked, ms: Date.now() - started });
+    this.options.observe?.({ planId: p.planId, unit: `fk-check/${m.name}`, chunk: p.fkTable, statements: checked, ms: this.now() - started });
+    this.lastMs = this.now() - started;
     return "transaction";
   }
 
   /** The migration's last transaction: its last statements, then Rust's after_migration, finalize and ledger row. */
   private async finish(p: Progress, m: PlannedMigration, manifest: PlanManifest, statements: string[]): Promise<"transaction"> {
     if (m.foreignKeyRebuild) await this.attempt(p, `migration ${m.name} ledger`);
-    const started = Date.now();
-    const committedBefore = p.chunk > 0 || (p.statement ?? 0) > 0 || m.foreignKeyRebuild;
-    const lastChunk = Math.max(0, m.chunks - 1);
+    const started = this.now();
     let notice: CommitNotice | undefined;
     try {
       // `-- gonvex:no-transaction`: each statement on its own, the ledger row only after all of them.
@@ -746,7 +596,7 @@ export class TenantMigrator {
           this.unstash();
           this.run(statements);
         }
-        p.unitMs += Date.now() - started;
+        p.unitMs += this.now() - started;
         notice = this.finishMigration(m, p.unitMs, manifest);
         p.applied.push(m.name);
         if (notice) p.revisions.push(notice.revision);
@@ -755,10 +605,10 @@ export class TenantMigrator {
       });
     } catch (error) {
       if (error instanceof StepFailure) throw error;
-      throw new StepFailure(message(error), !m.noTransaction && committedBefore);
+      throw new StepFailure(message(error), !m.noTransaction && (p.chunk > 0 || m.foreignKeyRebuild));
     }
-    const ms = await this.measured(started, Math.max(1, statements.length), `migration ${m.name} last transaction (finalize and ledger)`);
-    this.options.observe?.({ planId: manifest.id, unit: unitKey(m), chunk: lastChunk, statements: statements.length, ms });
+    const ms = await this.measured(started, `migration ${m.name} last chunk (finalize and ledger)`, statements.length);
+    this.options.observe?.({ planId: manifest.id, unit: unitKey(m), chunk: m.chunks - 1, statements: statements.length, ms });
     if (m.foreignKeyRebuild) {
       await this.foreignKeys(true);
       const after = this.load()!;
@@ -799,41 +649,39 @@ export class TenantMigrator {
     this.sql.exec(`DROP TABLE ${RECORD_STASH}`);
   }
 
-  /** `PRAGMA schema_version` is not authorized in a Durable Object; a cheap fingerprint of sqlite_schema instead. */
-  private schemaVersion(): string {
+  /** `PRAGMA schema_version` is not authorized in a Durable Object: a cheap fingerprint of sqlite_schema. */
+  private schemaFingerprint(): string {
     const r = this.sql.exec<{ n: number; b: number | null; m: number | null }>("SELECT count(*) AS n, sum(length(sql)) AS b, max(rowid) AS m FROM sqlite_schema").one();
     return `${r.n}:${r.b ?? 0}:${r.m ?? 0}`;
   }
 
   /**
-   * The change-feed install. Planning reads the whole catalog and re-derives every table's
-   * trigger SQL (about a second of CPU on the Whagons schema), so a plan is reused for the
-   * transactions that apply it while sqlite_schema is as this migrator left it. It is
-   * planned again after the infrastructure unit (the table units depend on it), in a new
-   * instance, and at the end, where an empty plan completes the install.
+   * The change-feed install, one batch of whole receipt units per transaction (units are the steps the
+   * migrator always committed separately; a unit is never split). Planning reads the whole catalog
+   * (about a second on the Whagons schema), so a plan is reused for the batches that apply it while
+   * sqlite_schema is as this migrator left it; it is planned again after the infrastructure unit (which
+   * goes alone: the table units depend on it), in a new instance, and at the end. A fresh plan starts
+   * an event of its own.
    */
-  private async changeFeed(p: Progress, started: number): Promise<"skip" | "transaction" | "yield" | "done"> {
+  private async changeFeed(p: Progress): Promise<"skip" | "transaction" | "yield" | "done"> {
     if (p.unitState === "pending") await this.restorePoint(p);
     const capture = this.options.capture;
     const direct = capture.directSql(this.sql);
     const cached = this.capturePlan;
     let units: InstallUnit[];
-    if (cached && cached.planId === p.planId && cached.units.length > 0 && cached.schemaVersion === this.schemaVersion()) {
+    if (cached && cached.planId === p.planId && cached.units.length > 0 && cached.schema === this.schemaFingerprint()) {
       units = cached.units;
     } else {
       this.capturePlan = null;
-      // Planning costs about a second on the Whagons schema: it starts an event of its own.
       if (this.eventTransactions > 0) return "yield";
-      const planned = Date.now();
+      const planned = this.now();
       try {
         units = capture.planChangeFeedInstall(direct);
       } catch (error) {
         throw new StepFailure(message(error), true);
       }
-      await settle();
-      const planMs = Date.now() - planned;
-      this.options.observe?.({ planId: p.planId, unit: "change-feed-plan", chunk: p.chunk, statements: units.reduce((n, u) => n + u.statements.length, 0), ms: planMs });
-      if (planMs > this.budget.maxMsPerEvent) console.warn(JSON.stringify({ event: "gonvex.migrate.unsplittable", what: "change-feed install plan", ms: planMs, budgetMs: this.budget.maxMsPerEvent }));
+      const ms = await this.measured(planned, "change-feed install plan", 0);
+      this.options.observe?.({ planId: p.planId, unit: "change-feed-plan", chunk: p.chunk, statements: units.reduce((n, u) => n + u.statements.length, 0), ms });
       if (units.length === 0) {
         p.phase = "done";
         p.unitState = "pending";
@@ -842,7 +690,7 @@ export class TenantMigrator {
         this.save(p);
         return "done";
       }
-      // A fresh plan must not ask again for a receipt installed since the last one.
+      // A new plan must not ask again for a receipt installed since the last one.
       const installed = new Set(p.installedSincePlan ?? []);
       if (p.lastReceipt !== null) installed.add(p.lastReceipt);
       if (installed.has(units[0]!.receipt)) {
@@ -850,22 +698,25 @@ export class TenantMigrator {
       }
       p.installedSincePlan = [];
       p.lastReceipt = null;
+      this.capturePlan = { planId: p.planId, schema: this.schemaFingerprint(), units };
+      // The batch gets an event of its own, unless the last plan was lost with its instance: then apply
+      // now, so an object replaced every event still makes progress.
+      if ((p.planOnly ?? 0) === 0) {
+        p.planOnly = 1;
+        this.save(p);
+        return "yield";
+      }
       this.save(p);
-      this.capturePlan = { planId: p.planId, schemaVersion: this.schemaVersion(), units };
-      // Planning has its own cost: let the next event apply the plan when this one is spent.
-      if (Date.now() - started >= this.budget.maxMsPerEvent / 2) return "skip";
     }
     const batch: InstallUnit[] = [];
     let statements = 0;
-    const limit = Math.min(this.batch, this.budget.captureStatementsPerTransaction);
     for (const unit of units) {
-      // The infrastructure unit goes alone: the plan is read again after it.
-      if (batch.length && (statements + unit.statements.length > limit || batch[0]!.kind === "infrastructure")) break;
+      if (batch.length && (statements + unit.statements.length > this.budget.captureStatementsPerTransaction || batch[0]!.kind === "infrastructure")) break;
       batch.push(unit);
       statements += unit.statements.length;
     }
     await this.attempt(p, `change-feed install (${batch.length} receipts, ${statements} statements)`);
-    const t0 = Date.now();
+    const t0 = this.now();
     try {
       this.storage.transactionSync(() => {
         for (const unit of batch) capture.applyInstallUnit(direct, unit);
@@ -873,6 +724,7 @@ export class TenantMigrator {
         p.installedSincePlan = [...(p.installedSincePlan ?? []), ...batch.map((u) => u.receipt).filter((r) => r !== "")];
         p.chunk += 1;
         p.attempts = 0;
+        p.planOnly = 0;
         this.save(p);
       });
     } catch (error) {
@@ -880,10 +732,9 @@ export class TenantMigrator {
       throw new StepFailure(message(error), true);
     }
     const remaining = units.slice(batch.length);
-    // The infrastructure unit changes what the table units read: plan again after it.
-    this.capturePlan = batch.some((u) => u.kind === "infrastructure") || remaining.length === 0 ? null : { planId: p.planId, schemaVersion: this.schemaVersion(), units: remaining };
+    this.capturePlan = batch[0]!.kind === "infrastructure" || remaining.length === 0 ? null : { planId: p.planId, schema: this.schemaFingerprint(), units: remaining };
     this.options.schemaChanged?.();
-    const ms = await this.measured(t0, Math.max(1, statements), `change-feed install of ${batch.length} receipts`);
+    const ms = await this.measured(t0, `change-feed install of ${batch.length} receipts`, statements);
     this.options.observe?.({ planId: p.planId, unit: "change-feed", chunk: p.chunk - 1, statements, ms });
     return "transaction";
   }
@@ -915,7 +766,6 @@ export class TenantMigrator {
       p.restorePending = true;
     } else {
       p.chunk = 0;
-      p.statement = 0;
       p.unitState = "pending";
       p.bookmark = null;
     }

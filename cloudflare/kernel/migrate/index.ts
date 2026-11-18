@@ -25,7 +25,6 @@ export {
   directSql,
   PROGRESS_KEY,
   RECORD_STASH,
-  dependentStatements,
   refuseDeclaredReferences,
   TenantMigrator,
   type Budget,

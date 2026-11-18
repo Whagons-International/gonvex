@@ -4,11 +4,11 @@
 
 import { SchemaTransform, TRANSFORM_VERSION, type TransformOptions } from "../schema-transform/index.ts";
 import { sha256Hex, type SqlMigration } from "./migrations.ts";
-import { unitKey, type AtomicSpans, type PlannedMigration, type PlannedPrelude, type ReleasePlan } from "./plan.ts";
+import { unitKey, type PlannedMigration, type PlannedPrelude, type ReleasePlan } from "./plan.ts";
 import { LEDGER_SQL, REFERENCE_SCHEMA_SQL, SCHEMA_OPTIONS_SQL, TENANT_IDENTITY_SQL } from "./runtime-sql.ts";
 
 /** Bumped when the plan layout or the apply rules change. Part of every plan id. */
-export const PLAN_FORMAT = "k02.2";
+export const PLAN_FORMAT = "k02.1";
 
 /**
  * The runtime DDL Rust runs before the tenant migrations on every provision, in
@@ -29,18 +29,6 @@ export async function planId(migrations: readonly Pick<SqlMigration, "name" | "c
 
 const VACUUM = /^\s*VACUUM\b/i;
 
-/** The transform's atomic ranges, cut per chunk and made chunk-relative (a range spanning chunks is clipped). */
-export function chunkAtomicSpans(chunks: readonly (readonly string[])[], atomic: ReadonlyArray<readonly [number, number]>): AtomicSpans {
-  const out: AtomicSpans = [];
-  let offset = 0;
-  for (const chunk of chunks) {
-    const end = offset + chunk.length - 1;
-    out.push(atomic.filter(([a, b]) => b >= offset && a <= end).map(([a, b]): [number, number] => [Math.max(a, offset) - offset, Math.min(b, end) - offset]).filter(([a, b]) => b > a));
-    offset += chunk.length;
-  }
-  return out;
-}
-
 /**
  * Builds the tenant plan of a release. `migrations` are every migration of the
  * module (any scope, as `migrationsFromFiles` returns them); only tenant-scope
@@ -53,7 +41,7 @@ export async function buildReleasePlan(migrations: readonly SqlMigration[], opti
   const chunks: Record<string, string[][]> = {};
   const prelude: PlannedPrelude[] = PRELUDE.map(({ name, sql }) => {
     const out = transform.runtime(name, sql);
-    const unit: PlannedPrelude = { kind: "prelude", name, chunks: out.chunks.length, atomic: chunkAtomicSpans(out.chunks, out.atomic) };
+    const unit: PlannedPrelude = { kind: "prelude", name, chunks: out.chunks.length };
     chunks[unitKey(unit)] = out.chunks;
     return unit;
   });
@@ -74,7 +62,6 @@ export async function buildReleasePlan(migrations: readonly SqlMigration[], opti
       refusal,
       statements: out.statements.length,
       chunks: out.chunks.length,
-      atomic: chunkAtomicSpans(out.chunks, out.atomic),
     };
     chunks[unitKey(unit)] = out.chunks;
     return unit;

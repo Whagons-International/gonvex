@@ -7,7 +7,6 @@ import {
   MemoryPlanStore,
   migrationsFromFiles,
   parseMigration,
-  dependentStatements,
   PROGRESS_KEY,
   RECORD_STASH,
   TenantMigrator,
@@ -18,7 +17,7 @@ import {
 } from "../index.ts";
 import { APP, fakeCapture } from "./fixtures.ts";
 
-// Every transaction ends with a macrotask yield (X10), so a run of many small chunks takes longer than vitest's 5 s default.
+// Every transaction ends with a macrotask yield (X10); several of these tests were already near 5 s on the base.
 vi.setConfig({ testTimeout: 60_000 });
 
 let objects = 0;
@@ -238,43 +237,6 @@ describe("resume after interruption", () => {
     });
   });
 
-  it("a plan chunk applies over several budgeted transactions, resumes mid-chunk, and keeps one finalize and ledger row (X10)", async () => {
-    // Whole migrations in one plan chunk; the object splits each into transactions of two statements.
-    const release = await plan(APP, { chunk: { maxStatements: 200 } });
-    expect(release.migrations.every((m) => m.chunks === 1)).toBe(true);
-    const reference = await withObject(async (state) => {
-      const { m } = migrator(state, new MemoryPlanStore(release), { budget: { maxChunksPerEvent: 100, maxMsPerEvent: 60_000 } });
-      await m.applyRelease(release.id);
-      await drain(m);
-      return { schema: schema(state.storage.sql), ledger: m.ledger().map((r) => [r.name, r.checksum]) };
-    });
-    await withObject(async (state) => {
-      const store = new MemoryPlanStore(release);
-      const budget = { maxChunksPerEvent: 1, maxStatementsPerTransaction: 2, initialStatementsPerTransaction: 2 };
-      const events: Array<{ unit: string; statements: number }> = [];
-      const first = migrator(state, store, { budget, observe: (e) => events.push(e) });
-      await first.m.applyRelease(release.id);
-      // Stop inside 0001's only chunk, after some of its statements committed: a reset between transactions.
-      for (let i = 0; i < 200; i += 1) {
-        const p = state.storage.kv.get<Progress>(PROGRESS_KEY)!;
-        if (p.phase === "migrations" && p.unit === 0 && (p.statement ?? 0) >= 4) break;
-        await first.m.alarm();
-      }
-      const mid = state.storage.kv.get<Progress>(PROGRESS_KEY)!;
-      expect(mid).toMatchObject({ phase: "migrations", unit: 0, chunk: 0, statement: 4, unitState: "running" });
-      expect(first.m.gateClosed()).toBe(true);
-      expect(events.filter((e) => e.unit === "migration/0001_init.sql").every((e) => e.statements <= 2)).toBe(true);
-      const second = migrator(state, store, { budget });
-      const done = await drain(second.m);
-      expect(done).toMatchObject({ state: "done", error: null });
-      expect(schema(state.storage.sql)).toEqual(reference.schema);
-      expect(second.m.ledger().map((r) => [r.name, r.checksum])).toEqual(reference.ledger);
-      // Still one finalize per migration, with Rust's provenance.
-      expect(second.capture.finalizeCalls.map((c) => c.commandId)).toEqual(["migration:0001_init.sql", "migration:0002_comments.sql", "migration:0003_rebuild_tasks.sql"]);
-      expect(state.storage.sql.exec("SELECT count(*) AS n FROM tasks").one().n).toBe(3);
-    });
-  });
-
   it("a chunk that keeps resetting the object fails the migration instead of looping", async () => {
     const release = await plan();
     await withObject(async (state) => {
@@ -313,223 +275,6 @@ describe("resume after interruption", () => {
       // Syncing again starts over and finishes.
       await m.applyRelease(release.id);
       expect(await drain(m)).toMatchObject({ state: "done" });
-    });
-  });
-});
-
-describe("split chunks keep each migration atomic (X10)", () => {
-  const tenant = (body: string) => ({ "migrations/0001_split.sql": `-- gonvex:scope tenant\n${body}` });
-  // Non-idempotent DDL and writes: re-running any committed statement would fail or double a row.
-  const EIGHT = `CREATE TABLE a (id INTEGER PRIMARY KEY);
-INSERT INTO a VALUES (1);
-CREATE TABLE b (id INTEGER PRIMARY KEY);
-INSERT INTO b VALUES (1);
-CREATE TABLE c (id INTEGER PRIMARY KEY);
-INSERT INTO c VALUES (1);
-CREATE TABLE d (id INTEGER PRIMARY KEY);
-INSERT INTO d VALUES (1);`;
-  const twoPerTransaction = { maxChunksPerEvent: 1, maxStatementsPerTransaction: 2, initialStatementsPerTransaction: 2 };
-  /** The test storage, plus the order of bookmarks taken and transactions observed. */
-  function logged(state: DurableObjectState, store: PlanStore, onTransaction?: (fn: () => unknown, real: DurableObjectStorage) => unknown) {
-    const log: string[] = [];
-    const base = testStorage(state);
-    const storage = new Proxy(base.storage, {
-      get(target, key) {
-        if (key === "getCurrentBookmark") return async () => { const b = await state.storage.getCurrentBookmark(); log.push(`bookmark ${b}`); return b; };
-        if (key === "transactionSync" && onTransaction) return (fn: () => unknown) => onTransaction(fn, state.storage);
-        const value = Reflect.get(target, key);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-    const capture = fakeCapture();
-    const aborts: string[] = [];
-    const m = new TenantMigrator({ storage, plans: store, capture, abort: (r) => aborts.push(r), budget: twoPerTransaction,
-      observe: (e) => log.push(`tx ${e.unit} chunk ${e.chunk} statements ${e.statements}`) });
-    return { m, log, restores: base.restores, aborts, capture };
-  }
-
-  it("a statement that throws after earlier transactions of the chunk committed restores the migration's restore point; nothing reaches the ledger", async () => {
-    const release = await plan(tenant(`${EIGHT}\nINSERT INTO a VALUES (1);\nCREATE TABLE e (id INTEGER PRIMARY KEY);`), { chunk: { maxStatements: 200 } });
-    expect(release.migrations[0]!.chunks).toBe(1);
-    await withObject(async (state) => {
-      const { m, log, restores, aborts } = logged(state, new MemoryPlanStore(release));
-      await m.applyRelease(release.id);
-      let s = await m.alarm();
-      for (let i = 0; i < 100 && s.state === "running"; i += 1) s = await m.alarm();
-      expect(s.state).toBe("failed");
-      expect(s.error).toMatch(/^migration 0001_split.sql: UNIQUE constraint failed: a\.id/);
-      // The restore point was taken once, before the migration's first transaction; four committed before the failure.
-      const mine = log.filter((l) => l.startsWith("tx migration/0001_split.sql"));
-      expect(mine).toEqual(Array(4).fill("tx migration/0001_split.sql chunk 0 statements 2"));
-      const bookmarkAt = log.findLastIndex((l, i) => l.startsWith("bookmark ") && i < log.indexOf(mine[0]!));
-      expect(bookmarkAt).toBeGreaterThanOrEqual(0);
-      expect(log.slice(bookmarkAt + 1).some((l) => l.startsWith("bookmark "))).toBe(false);
-      // That restore point covers all four committed transactions: it is the one scheduled.
-      expect(restores).toEqual([log[bookmarkAt]!.slice("bookmark ".length)]);
-      expect(state.storage.kv.get<Progress>(PROGRESS_KEY)).toMatchObject({ phase: "failed", restorePending: true, statement: 8 });
-      expect(m.ledger().map((r) => r.name)).not.toContain("0001_split.sql");
-      expect(state.storage.kv.get("gonvex/migrate/applied/0001_split.sql")).toBeUndefined();
-      expect(s.applied).toEqual([]);
-      expect(s.gateClosed).toBe(true);
-      await m.alarm();
-      expect(aborts).toHaveLength(1);
-    });
-  });
-
-  it("a reset inside a split transaction resumes at the saved statement without re-running committed DDL", async () => {
-    const release = await plan(tenant(EIGHT), { chunk: { maxStatements: 200 } });
-    const reference = await withObject(async (state) => {
-      const { m } = logged(state, new MemoryPlanStore(release));
-      await m.applyRelease(release.id);
-      await drain(m);
-      return { schema: schema(state.storage.sql), ledger: m.ledger().map((r) => [r.name, r.checksum]) };
-    });
-    await withObject(async (state) => {
-      const store = new MemoryPlanStore(release);
-      // Emulate an object reset in the transaction at statement 4: its writes roll back, and nothing
-      // after it runs. Storage then holds what `attempt()` synced before the transaction.
-      let atReset: Progress | undefined;
-      const RESET = new Error("emulated reset");
-      const first = logged(state, store, (fn, real) => {
-        const p = real.kv.get<Progress>(PROGRESS_KEY);
-        if (!atReset && p?.phase === "migrations" && p.statement === 4) {
-          atReset = structuredClone(p);
-          try { real.transactionSync(() => { fn(); throw RESET; }); } catch { /* rolled back */ }
-          throw RESET;
-        }
-        return real.transactionSync(fn);
-      });
-      await first.m.applyRelease(release.id);
-      for (let i = 0; i < 100 && !atReset; i += 1) await first.m.alarm();
-      expect(atReset).toMatchObject({ phase: "migrations", unit: 0, chunk: 0, statement: 4, attempts: 1, unitState: "running" });
-      // Drop everything the dying instance did after the reset point.
-      state.storage.kv.put(PROGRESS_KEY, atReset);
-      expect(state.storage.sql.exec("SELECT name FROM sqlite_schema WHERE type='table' AND name IN ('a','b','c','d') ORDER BY name").toArray().map((r) => r.name)).toEqual(["a", "b"]);
-      expect(first.m.ledger().map((r) => r.name)).not.toContain("0001_split.sql");
-
-      const second = logged(state, store);
-      expect(second.m.gateClosed()).toBe(true);
-      const done = await drain(second.m);
-      expect(done).toMatchObject({ state: "done", error: null, applied: ["0001_split.sql"] });
-      // Resumed at statement 4: no "already exists" and no doubled row.
-      expect(second.log.filter((l) => l.startsWith("tx migration/0001_split.sql"))).toEqual([
-        "tx migration/0001_split.sql chunk 0 statements 2",
-        "tx migration/0001_split.sql chunk 0 statements 2",
-      ]);
-      for (const t of ["a", "b", "c", "d"]) expect(state.storage.sql.exec(`SELECT count(*) AS n FROM ${t}`).one().n).toBe(1);
-      expect(schema(state.storage.sql)).toEqual(reference.schema);
-      expect(second.m.ledger().map((r) => [r.name, r.checksum])).toEqual(reference.ledger);
-      expect(second.capture.finalizeCalls.map((c) => c.commandId)).toEqual(["migration:0001_split.sql"]);
-    });
-  });
-
-  it("never splits a range the transform marks atomic (a TEMP table's lifetime); a long one is logged unsplittable", async () => {
-    const release = await plan(tenant(`CREATE TEMP TABLE g (id INTEGER);
-INSERT INTO g VALUES (1);
-INSERT INTO g VALUES (2);
-CREATE TABLE kept (x INTEGER);
-INSERT INTO kept SELECT id FROM g;`), { chunk: { maxStatements: 200 } });
-    const unit = release.migrations[0]!;
-    expect(unit.atomic).toEqual([[[0, unit.statements - 1]]]);
-    const warnings: string[] = [];
-    const warn = console.warn;
-    console.warn = (line: string) => void warnings.push(line);
-    try {
-      await withObject(async (state) => {
-        const { m, log } = logged(state, new MemoryPlanStore(release));
-        await m.applyRelease(release.id);
-        expect((await drain(m)).state).toBe("done");
-        expect(log.filter((l) => l.startsWith("tx migration/0001_split.sql"))).toEqual([`tx migration/0001_split.sql chunk 0 statements ${unit.statements}`]);
-        expect(state.storage.sql.exec("SELECT count(*) AS n FROM kept").one().n).toBe(2);
-      });
-    } finally {
-      console.warn = warn;
-    }
-    expect(warnings.map((w) => JSON.parse(w))).toContainEqual(expect.objectContaining({ event: "gonvex.migrate.unsplittable", statements: unit.statements }));
-  });
-
-  /** Transactions of 0002, as statement counts, with A01's ranges as planned or removed (the migrator's own grouping). */
-  async function transactionsOf(files: Record<string, string>, withPlanRanges: boolean) {
-    const built = await plan(files, { chunk: { maxStatements: 200 } });
-    const release: ReleasePlan = withPlanRanges ? built : { ...built, migrations: built.migrations.map((m) => ({ ...m, atomic: Array.from({ length: m.chunks }, () => []) })) };
-    return withObject(async (state) => {
-      const { m, log } = logged(state, new MemoryPlanStore(release));
-      await m.applyRelease(release.id);
-      const done = await drain(m);
-      return { done, sizes: log.filter((l) => l.startsWith("tx migration/0002_")).map((l) => Number(l.split(" ").at(-1))), sql: state.storage.sql };
-    });
-  }
-  const twoMigrations = (first: string, second: string) => ({
-    "migrations/0001_base.sql": `-- gonvex:scope tenant\n${first}`,
-    "migrations/0002_change.sql": `-- gonvex:scope tenant\n${second}`,
-  });
-
-  for (const withPlanRanges of [true, false]) {
-    const label = withPlanRanges ? "with the plan's ranges" : "from the migrator's own grouping";
-    it(`keeps a deferred-foreign-key INSERT and its DELETE in one transaction (${label})`, async () => {
-      const files = twoMigrations(
-        `CREATE TABLE parent (id TEXT PRIMARY KEY);
-CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);`,
-        `INSERT INTO child VALUES ('scope', 'missing');
-CREATE TABLE f1 (x INTEGER);
-CREATE TABLE f2 (x INTEGER);
-DELETE FROM child WHERE id = 'scope';
-CREATE TABLE f3 (x INTEGER);
-CREATE TABLE f4 (x INTEGER);`);
-      const { done, sizes } = await transactionsOf(files, withPlanRanges);
-      expect(done).toMatchObject({ state: "done", error: null });
-      // Split at 2 statements, the INSERT would commit alone and fail the deferred key at commit.
-      expect(sizes[0]).toBe(4);
-      expect(sizes.reduce((a, b) => a + b, 0)).toBe(6);
-    });
-  }
-
-  it("keeps a table rebuild (create, copy, drop, rename) and a dropped-and-recreated index each in one transaction", async () => {
-    const files = twoMigrations(
-      `CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);
-CREATE INDEX t_name ON t(name);
-INSERT INTO t VALUES (1, 'a'), (2, 'b');`,
-      `CREATE TABLE t_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT '');
-INSERT INTO t_new (id, name) SELECT id, coalesce(name, '') FROM t;
-DROP TABLE t;
-ALTER TABLE t_new RENAME TO t;
-DROP INDEX IF EXISTS t_name;
-CREATE TABLE side (x INTEGER);
-CREATE UNIQUE INDEX t_name ON t(name);
-CREATE TABLE tail (x INTEGER);`);
-    const warnings: string[] = [];
-    const warn = console.warn;
-    console.warn = (line: string) => void warnings.push(line);
-    try {
-      const { done, sizes } = await transactionsOf(files, false);
-      expect(done).toMatchObject({ state: "done", error: null });
-      expect(sizes).toEqual([4, 3, 1]);
-    } finally {
-      console.warn = warn;
-    }
-    expect(warnings.map((w) => JSON.parse(w)).filter((w) => w.event === "gonvex.migrate.unsplittable" && String(w.what).startsWith("migration/0002_")).map((w) => w.statements)).toEqual([4, 3]);
-  });
-
-  it("groups dependent statements by name, quoted or not, and leaves independent ones splittable", () => {
-    const deferred = (t: string) => t === "child";
-    expect(dependentStatements([
-      'INSERT INTO "child" VALUES (1)', "CREATE TABLE a (x)", "DELETE FROM main.child WHERE x = 1",
-      "CREATE TABLE b (x)", 'CREATE TABLE "B_new" (x)', "INSERT INTO B_new SELECT * FROM b", "DROP TABLE b", "ALTER TABLE b_new RENAME TO b",
-      "INSERT INTO a VALUES (1)", "DELETE FROM a",
-      "DROP VIEW v", "CREATE VIEW v AS SELECT 1", "DROP TRIGGER IF EXISTS g", "CREATE TABLE c (x)",
-    ], deferred)).toEqual([[0, 2], [4, 7], [10, 11]]);
-    // An INSERT whose DELETE is in a later chunk stays with the rest of this one.
-    expect(dependentStatements(["CREATE TABLE a (x)", "INSERT INTO child VALUES (1)", "CREATE TABLE b (x)"], deferred)).toEqual([[1, 2]]);
-  });
-
-  it("a plan built before X10 (no atomic ranges) applies each chunk whole, as before", async () => {
-    const release = await plan(tenant(EIGHT), { chunk: { maxStatements: 200 } });
-    const legacy: ReleasePlan = { ...release, migrations: release.migrations.map(({ atomic: _a, ...m }) => m), prelude: release.prelude.map(({ atomic: _a, ...p }) => p) };
-    await withObject(async (state) => {
-      const { m, log } = logged(state, new MemoryPlanStore(legacy));
-      await m.applyRelease(legacy.id);
-      expect((await drain(m)).state).toBe("done");
-      expect(log.filter((l) => l.startsWith("tx migration/0001_split.sql"))).toEqual(["tx migration/0001_split.sql chunk 0 statements 8"]);
     });
   });
 });
@@ -635,6 +380,93 @@ CREATE TRIGGER items_stage BEFORE UPDATE ON items BEGIN INSERT INTO _gonvex_reco
       expect(call.pendingRecords).toEqual([{ table_name: "items", row_id: "a", old_value: '{"n":1}' }]);
       expect(state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_schema WHERE name=?", RECORD_STASH).one().n).toBe(0);
     });
+  });
+});
+
+describe("CPU budget per event (X10)", () => {
+  /** Transactions per event, from `observe`, driving the release with fresh alarms. */
+  async function perEvent(state: DurableObjectState, release: ReleasePlan, extra: Partial<MigratorOptions> = {}, fresh = false) {
+    const counts: number[] = [];
+    let n = 0;
+    const make = () => migrator(state, new MemoryPlanStore(release), { budget: {}, observe: () => void (n += 1), ...extra }).m;
+    let m = make();
+    let s = await m.applyRelease(release.id);
+    counts.push(n);
+    for (let i = 0; i < 500 && s.state === "running"; i += 1) {
+      if (fresh) m = make();
+      n = 0;
+      s = await m.alarm();
+      counts.push(n);
+    }
+    return { counts, status: s, ledger: m.ledger() };
+  }
+
+  it("with the platform's frozen clock an event runs one transaction, not maxChunksPerEvent (fails before X10)", async () => {
+    const release = await plan();
+    await withObject(async (state) => {
+      const frozen = 1_800_000_000_000;
+      const { counts, status } = await perEvent(state, release, { now: () => frozen });
+      expect(status).toMatchObject({ state: "done", error: null });
+      expect(Math.max(...counts)).toBe(1);
+      expect(counts.filter((c) => c === 1).length).toBeGreaterThan(10);
+    });
+  });
+
+  it("a plan chunk is one transaction; one over the budget ends the event and is logged unsplittable with its time", async () => {
+    const release = await plan(APP, { chunk: { maxStatements: 200 } });
+    const sizes: number[] = [];
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (line: string) => void warnings.push(line);
+    let t = 0;
+    try {
+      await withObject(async (state) => {
+        // Every read of the clock is 1.5 s later: every transaction exceeds the 1 s event budget. (A foreign-key
+        // rebuild ends with its existing separate ledger transaction, which has no statements.)
+        const { counts, status } = await perEvent(state, release, { now: () => (t += 1_500), observe: (e) => void (e.unit.startsWith("migration/") && e.statements > 0 && sizes.push(e.statements)) });
+        expect(status).toMatchObject({ state: "done", error: null });
+        expect(Math.max(...counts)).toBeLessThanOrEqual(1);
+      });
+    } finally {
+      console.warn = warn;
+    }
+    expect(sizes).toEqual(release.migrations.map((m) => m.statements));
+    const logged = warnings.map((w) => JSON.parse(w)).filter((w) => w.event === "gonvex.migrate.unsplittable");
+    expect(logged.length).toBeGreaterThan(0);
+    expect(logged[0]).toMatchObject({ budgetMs: 1000 });
+    expect(logged[0].ms).toBeGreaterThan(1000);
+  });
+
+  it("with a moving clock, cheap transactions share an event up to maxChunksPerEvent", async () => {
+    const release = await plan();
+    await withObject(async (state) => {
+      let t = 0;
+      const { counts, status } = await perEvent(state, release, { now: () => (t += 1) });
+      expect(status).toMatchObject({ state: "done", error: null });
+      expect(Math.max(...counts)).toBe(4);
+    });
+  });
+
+  it("the change feed is planned once per pass, not per transaction, and an object replaced every event still finishes", async () => {
+    const release = await plan();
+    const reference = await withObject(async (state) => {
+      const { status, ledger } = await perEvent(state, release);
+      return { status, ledger: ledger.map((r) => r.name), schema: schema(state.storage.sql) };
+    });
+    for (const fresh of [false, true]) {
+      await withObject(async (state) => {
+        const capture = fakeCapture();
+        let plans = 0;
+        const counted = { ...capture, planChangeFeedInstall: (sql: Parameters<typeof capture.planChangeFeedInstall>[0]) => { plans += 1; return capture.planChangeFeedInstall(sql); } };
+        const { status, ledger } = await perEvent(state, release, { capture: counted, budget: { captureStatementsPerTransaction: 2 } }, fresh);
+        expect(status).toMatchObject({ state: "done", error: null });
+        expect(ledger.map((r) => r.name)).toEqual(reference.ledger);
+        expect(schema(state.storage.sql)).toEqual(reference.schema);
+        // Infrastructure, then the tables (one plan for all their batches), then the empty plan that ends it.
+        if (!fresh) expect(plans).toBe(3);
+        expect(capture.installed.filter((r) => r === "infrastructure")).toHaveLength(1);
+      });
+    }
   });
 });
 

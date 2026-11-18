@@ -40,27 +40,18 @@ statements per chunk (`<unit>/<index>`). An object reads the manifest once and o
 
 ## Chunks, resume and restore points
 
-- Each chunk (A01 T7: ≤ 200 statements, ≤ 1 MB) runs in one or more `transactionSync` calls of `batch` statements.
-  Progress (chunk and statement offset) lives in `ctx.storage.kv` (`gonvex/migrate/progress`) and commits in the same
-  transaction, so a reset loses at most the transaction in flight. A migration's last statements still commit with its
-  finalize and ledger row, and a failure after any committed transaction still restores the migration's bookmark.
-  A transaction never ends inside a range A01 marks atomic (a TEMP table's lifetime, an expanded statement, a
-  deferred-foreign-key span; `atomic` per chunk in the plan, format `k02.2`). A plan without those ranges, or a chunk
-  that sets `PRAGMA defer_foreign_keys`, is applied one whole chunk per transaction, as before.
-- CPU budget (0022 §5b, X10): on a schema of thousands of objects one DDL statement costs about 9 ms (local workerd),
-  so a whole 200-statement chunk took about 1.8 s locally and 2.5 s on the platform. `batch` starts at
-  `initialStatementsPerTransaction` (8) and adapts to `transactionMs` (300 ms), at most doubling per transaction and
-  capped by `maxStatementsPerTransaction` (50). The platform clock does not advance during synchronous work, so the
-  migrator reads it only after a macrotask yield (`settle`), when it includes the CPU of the transaction just run.
-- Each event runs at most `maxChunksPerEvent` (4) transactions and stops starting new ones after `maxMsPerEvent`
-  (1000 ms) measured that way. A watchdog alarm is set at the start of every event; when work remains the next alarm
-  is set for now.
-- The change-feed install is planned (a whole-catalog read, about a second on the Whagons schema) once and applied over
-  several transactions while `sqlite_schema` is as the migrator left it (`PRAGMA schema_version` is not authorized); it is planned again after the
-  infrastructure unit, in a new instance, and at the end. A new plan that repeats a receipt installed since the last one
-  fails as "does not converge", as before.
-- A single statement cannot be split. One that alone takes longer than `maxMsPerEvent` is logged as
-  `gonvex.migrate.unsplittable` (Workers Logs) with its migration and chunk.
+- Each chunk (A01 T7: ≤ 200 statements, ≤ 1 MB) is one `transactionSync`. Progress lives in `ctx.storage.kv`
+  (`gonvex/migrate/progress`) and commits in the same transaction, so a reset loses at most the chunk in flight.
+- Each event runs at most `maxChunksPerEvent` transactions. A chunk is never split. CPU budget (0022 §5b, X10): the
+  platform clock does not advance during synchronous work, so the migrator reads it only after a macrotask yield, when
+  it includes the CPU of the transaction just run. Another transaction starts in the same event only if the clock
+  visibly moved and the time so far plus the last transaction's time fits `maxMsPerEvent` (1000 ms); with a frozen
+  clock an event runs one. A transaction that alone exceeds the budget is logged `gonvex.migrate.unsplittable` with its
+  time. A watchdog alarm is set at the start of every event; when work remains the next alarm is set for now.
+- The change-feed install commits whole receipt units, at most `captureStatementsPerTransaction` (50) statements per
+  transaction. Its plan (a whole-catalog read, about a second on the Whagons schema) is reused for the batches while
+  `sqlite_schema` is as the migrator left it (`PRAGMA schema_version` is not authorized), planned again after the
+  infrastructure unit (applied alone), in a new instance and at the end, and gets an event of its own.
 - Before each transactional migration, and before the change-feed install, the object takes a point-in-time bookmark.
   A migration that fails after one of its chunks committed is restored to it: `onNextSessionRestoreBookmark`, then the
   next event aborts the object. Rust's semantics follow: the failing migration rolls back, earlier ones stay.

@@ -43,6 +43,15 @@ export const REQUEST_BUDGET_MS = 1_000;
 /** A macrotask turn: on the platform, `Date.now()` afterwards includes the CPU spent before it. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** Renewed by every write (`schema`, `insert`, `sequence`): a checksum or check cursor is valid only while it is unchanged. */
+const WRITE_TOKEN = 'p03/write-token';
+
+/**
+ * A resumable checksum or check is exact only over a quiescent tenant. One that sees a write since it
+ * started (in this request or between requests) is refused; the caller starts again.
+ */
+export class StaleCursorError extends Error {}
+
 export class TenantTransfer {
   constructor(ctx, { budgetMs = REQUEST_BUDGET_MS } = {}) {
     this.ctx = ctx;
@@ -50,6 +59,19 @@ export class TenantTransfer {
   }
   get sql() {
     return this.ctx.storage.sql;
+  }
+
+  writeToken() {
+    return this.ctx.storage.kv.get(WRITE_TOKEN) ?? 'initial';
+  }
+
+  wrote() {
+    this.ctx.storage.kv.put(WRITE_TOKEN, crypto.randomUUID());
+  }
+
+  /** Throws unless nothing was written since `token` was read. */
+  quiescent(token) {
+    if (token !== this.writeToken()) throw new StaleCursorError('the tenant was written since this checksum or check started; start it again');
   }
 
   // Table plans are derived from the schema; cached until the next DDL.
@@ -67,6 +89,7 @@ export class TenantTransfer {
       if (result === undefined) return Response.json({ error: `unknown op ${op}` }, { status: 404 });
       return Response.json({ ...result, ms: Date.now() - started });
     } catch (error) {
+      if (error instanceof StaleCursorError) return Response.json({ error: error.message, op, stale: true }, { status: 409 });
       return Response.json({ error: String(error?.message ?? error), op }, { status: 500 });
     }
   }
@@ -111,6 +134,7 @@ export class TenantTransfer {
         }
       }
       consumed += batch.length;
+      this.wrote();
       // A catalog, read or checksum may run while this request yields: it must not keep plans of the old schema.
       this.cachedPlans = null;
       await settle();
@@ -135,6 +159,7 @@ export class TenantTransfer {
     let statementCount = 0;
     let rowCount = 0;
     this.ctx.storage.transactionSync(() => {
+      this.wrote();
       for (const { table, columns, rows } of parts) {
         for (const { sql, params } of buildInserts(table, columns, rows)) {
           written += this.sql.exec(sql, ...params).rowsWritten;
@@ -148,6 +173,7 @@ export class TenantTransfer {
 
   op_sequence({ sequences }) {
     this.ctx.storage.transactionSync(() => {
+      this.wrote();
       for (const [name, seq] of Object.entries(sequences)) {
         const { sql, param } = fromWire(seq);
         const params = param === undefined ? [] : [param];
@@ -197,6 +223,8 @@ export class TenantTransfer {
   // several requests: `next` carries the key of the last row hashed and the
   // running hash state; send it back as `cursor` to continue.
   async op_checksum({ tables = null, cursor = null }) {
+    const token = cursor ? cursor.token : this.writeToken();
+    this.quiescent(token);
     const plans = this.plans().filter((p) => !tables || tables.includes(p.name));
     const started = Date.now();
     const out = {};
@@ -224,12 +252,14 @@ export class TenantTransfer {
         if (n < CHECKSUM_PAGE_ROWS) break;
         after = keys.map((i) => toWire(last[2 * i], last[2 * i + 1]));
         await settle();
-        if (Date.now() - started >= this.budgetMs) return { checksums: out, next: { table: plan.name, after, state: hasher.save() } };
+        this.quiescent(token);
+        if (Date.now() - started >= this.budgetMs) return { checksums: out, next: { table: plan.name, after, state: hasher.save(), token } };
       }
       out[plan.name] = hasher.digest();
       await settle();
+      this.quiescent(token);
       if (index + 1 < plans.length && Date.now() - started >= this.budgetMs) {
-        return { checksums: out, next: { table: plans[index + 1].name, after: null, state: null } };
+        return { checksums: out, next: { table: plans[index + 1].name, after: null, state: null, token } };
       }
     }
     return { checksums: out };
@@ -248,7 +278,8 @@ export class TenantTransfer {
       .exec("SELECT name FROM sqlite_schema WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY rowid")
       .toArray()
       .map(({ name }) => name);
-    const at = cursor ?? { step: 0, quick: [], foreignKeys: 0, fts: {} };
+    const at = cursor ?? { step: 0, quick: [], foreignKeys: 0, fts: {}, token: this.writeToken() };
+    this.quiescent(at.token);
     if (!Number.isSafeInteger(at.step) || at.step < 0 || !Array.isArray(at.quick) || !Number.isSafeInteger(at.foreignKeys)) throw new Error('invalid check cursor');
     const steps = tables.length * 2 + fts.length;
     while (at.step < steps) {
@@ -272,6 +303,7 @@ export class TenantTransfer {
       }
       at.step++;
       await settle();
+      this.quiescent(at.token);
       if (at.step < steps && Date.now() - started >= this.budgetMs) return { next: at };
     }
     return { quickCheck: at.quick.length ? at.quick.join('; ') : 'ok', foreignKeyViolations: at.foreignKeys, fts: at.fts };
@@ -296,6 +328,7 @@ export class TenantTransfer {
   async op_wipe() {
     await this.ctx.storage.deleteAll();
     this.cachedPlans = null;
+    this.wrote();
     return { wiped: true };
   }
 }
