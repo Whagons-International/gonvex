@@ -59,6 +59,8 @@ const backoff = (attempt: number) => Math.min(ROOM_BACKOFF_MS[1], ROOM_BACKOFF_M
  */
 export const MAX_PAYLOAD_CHARS = 8 << 20;
 
+/** The live query id a subscribe socket view carries (the session sets it per request). */
+const queryIdOf = (socket: SocketView): string => (socket as SocketView & { queryId?: string }).queryId ?? "";
 const opChars = (op: SocketOp): number => op.reduce<number>((n, part) => n + (typeof part === "string" ? part.length : 8), 0);
 
 /**
@@ -342,16 +344,74 @@ export class ReplicaDeliveryEngine {
 
   /** Called while the assembled tenant still owns the snapshot's invocation turn. */
   queryReply(socket: SocketView, replies: readonly string[]): void {
-    if (!socket.tenant) return;
+    const reply = this.queryWork(socket, replies);
+    if (reply) this.post(reply.connection, reply.work);
+  }
+
+  /**
+   * BUG-10: a live query's initial reply is never refused on a full holder channel (a refusal reset the whole holder
+   * `change-feed-lagged`: every replica of the socket, 81 on -12), and nothing waits for room in the serialization turn
+   * (r4617752119). The query is deferred, not its reply: a holder without room keeps only the semantic request
+   * (`deferredQueries`, as a paused holder's), and the query runs again when the holder has caught up (`replayQueries`).
+   * Its reply then goes through the ordinary immediate path, so its certificate and initial completions are the
+   * ordinary ones, and no materialized snapshot is retained. A reply computed here that does not fit is dropped and its
+   * live query uninstalled (no catch-up may answer for it); the request is kept for the replay. False: not sent.
+   */
+  private async runQuery(socket: SocketView, snapshot: (db: StorageSession) => string): Promise<boolean> {
+    const replies = await this.options.read((db) => [snapshot(db)]);
+    const reply = this.queryWork(socket, replies);
+    if (!reply) return true;
+    const { connection } = reply, host = connection.host, outlet = this.options.outlet;
+    if (outlet.admits && !splitPayload(this.socketPayload(connection, reply.work)).every((part) => outlet.admits!(host, part))) {
+      this.options.live?.unsubscribe(connection.id, queryIdOf(socket));
+      if (!this.behind.has(host)) this.defer(host, this.delivered?.revision ?? 0);
+      return false;
+    }
+    this.post(connection, reply.work);
+    return true;
+  }
+
+  /** Keeps a subscribe request (never its result) for `host`'s replay, after any already kept for the connection. */
+  private keepQuery(socket: SocketView, snapshot: (db: StorageSession) => string, front = false): void {
+    const pending = this.deferredQueries.get(socket.connectionId) ?? [];
+    const query = { socket, id: queryIdOf(socket), snapshot };
+    if (front) pending.unshift(query); else pending.push(query);
+    this.deferredQueries.set(socket.connectionId, pending);
+  }
+
+  /**
+   * The holder caught up: its kept queries run in request order, each answered as an immediate subscribe. One that
+   * still finds no room defers the holder again and keeps its place (and the rest stay behind it).
+   */
+  private async replayQueries(host: string): Promise<void> {
+    for (const [id, queries] of [...this.deferredQueries]) {
+      const own = queries.filter((query) => query.socket.host === host);
+      if (!own.length) continue;
+      this.deferredQueries.set(id, queries.filter((query) => query.socket.host !== host));
+      for (let index = 0; index < own.length; index++) {
+        const query = own[index]!;
+        if ((query.socket.subscriptionEpoch ?? 0) !== (this.epochs.get(id) ?? 0) || !this.connections.has(id)) continue;
+        if (this.behind.has(host) || this.paused(host) || !(await this.runQuery(query.socket, query.snapshot))) {
+          for (const rest of own.slice(index).reverse()) this.keepQuery(rest.socket, rest.snapshot, true);
+          break;
+        }
+      }
+      if (!this.deferredQueries.get(id)?.length) this.deferredQueries.delete(id);
+      this.options.activity?.();
+    }
+  }
+
+  private queryWork(socket: SocketView, replies: readonly string[]): { connection: Connection; work: SocketWork } | undefined {
+    if (!socket.tenant) return undefined;
     const connection = this.connection(socket, socket.tenant);
-    if (!connection) return;
+    if (!connection) return undefined;
     const computed = this.options.live?.computedRevisions(connection.id) ?? [];
     const initial = socket.initialRequests?.find(ref => ref.kind === "query" && ref.epoch === connection.epoch);
     const ops = replies.map((text): SocketOp => ["f", text]);
     const initialCompletions = initial ? ops.flatMap((op, index) => { const c = initialCompletion(initial, op, index); return c ? [c] : []; }) : [];
     // BUG-4: a deferred holder's watermark comes with its catch-up, never ahead of the replica commits it owes.
     const certify = computed.length && initialCompletions.some(c=>c.outcome==="accepted") && !this.behind.has(connection.host);
-    this.post(connection, { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(certify ? { watermark: Math.min(...computed) } : {}) });
+    return { connection, work: { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(certify ? { watermark: Math.min(...computed) } : {}) } };
   }
 
   /** Initial LQ snapshots and their enqueue share the reducer/commit serialization turn. */
@@ -373,9 +433,11 @@ export class ReplicaDeliveryEngine {
         this.deferredQueries.set(socket.connectionId, pending);
         return [];
       }
-      const replies = await this.options.read((db) => [snapshot(db)]);
-      if (recovery) return replies;
-      this.queryReply(socket, replies);
+      if (recovery) return this.options.read((db) => [snapshot(db)]);
+      // The snapshot joins at the delivered clock (as an open's does): no commit before it is owed to this socket.
+      await this.deliverCommits();
+      // A holder without room keeps the request, in order behind any it already keeps (BUG-10).
+      if (this.behind.has(socket.host) || !(await this.runQuery(socket, snapshot))) this.keepQuery(socket, snapshot);
       return [];
     })();
   }
@@ -697,7 +759,7 @@ export class ReplicaDeliveryEngine {
       return;
     }
     const through = this.delivered?.revision ?? deferred.from;
-    if (deferred.from >= through) { this.undefer(host); return; }
+    if (deferred.from >= through) { this.undefer(host); await this.replayQueries(host); return; }
     const ids = new Set([...this.connections.values()].filter((c) => c.host === host).map((c) => c.id));
     const chunk = await this.options.read((db) => {
       const clock = readClock(sqlOf(db));

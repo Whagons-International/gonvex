@@ -93,9 +93,10 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     const receiver: Harness["receiver"] = {};
     const delivered: number[] = [];
     const liveModule = moduleFromManifest("p", {
-      functions: { "items.live": { kind: "query", delivery: "live", dependencies: { liveQueryPlan: {
-        table: "items", key: "id", columns: ["id", "rank", "label"],
-      } } } },
+      functions: {
+        "items.live": { kind: "query", delivery: "live", dependencies: { liveQueryPlan: { table: "items", key: "id", columns: ["id", "rank", "label"] } } },
+        "items.ranks": { kind: "query", delivery: "live", dependencies: { liveQueryPlan: { table: "items", key: "id", columns: ["id", "rank"] } } },
+      },
       visibility: { items: { table: "items", key: "id", where: { operator: "public" } } },
     });
     // One invocation queue for the engine and the reducers, as the tenant object has (`kernel.reducers.serial`).
@@ -913,6 +914,265 @@ describe("BUG-4 a large tenant's first load converges under ordinary commits", (
     expect(recoveries).toBeGreaterThanOrEqual(1);
     expect(recoveries).toBeLessThanOrEqual(2);
     expect(ready).toBe(4);
+  });
+});
+
+describe("BUG-10 a live query's initial reply waits for room on a full channel", () => {
+  // -12 on 6e76ce42, 09:08:52 Z: a fresh session's live-query reply met a full holder channel; `queryReply` posted it
+  // without waiting, the outlet refused it (DeliveryCapacityError) and the whole holder was reset change-feed-lagged:
+  // 81 replicas, templates.list and priorities.list among them, so the create dialog showed no templates.
+  it("holds the reply until the in-flight payload completes, then sends it; no reset", { timeout: 120_000 }, async () => {
+    let recoveries = 0, hold = false;
+    const held: Array<() => void> = [];
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 4_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 1500)]]);
+      for (let i = 0; i < insert.length; i += 1000) await h.commit(insert.slice(i, i + 1000));
+      h.receiver.deliver = async (_host, payload) => {
+        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        if (hold) await new Promise<void>((resolve) => held.push(resolve));
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      h.engine.dispatch(socket("S1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "S1").some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // A commit's delta (400 rows) is in flight on h1 and stays there.
+      hold = true;
+      await h.commit([["UPDATE items SET label = 'busy-' || label WHERE rank < 400", []]], false);
+      for (let spin = 0; spin < 2000 && !held.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(held.length).toBe(1);
+      // A live query on the same holder: its initial result (every row, over the holder's budget) can go only alone.
+      const view = { ...socket("Q"), queryId: "live" };
+      const subscribed = h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }));
+      for (let i = 0; i < 40; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(recoveries).toBe(0);
+      expect(frames(h.payloads, "Q")).toEqual([]);
+      hold = false;
+      held.splice(0).forEach((release) => release());
+      expect(await subscribed).toEqual([]);
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "Q").some((f) => f.type === "query.result"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      const replies = frames(h.payloads, "Q").filter((f) => f.type === "query.result");
+      expect(replies.map((f) => [f.reason, f.result.length])).toEqual([["initial", 4_000]]);
+      expect(recoveries).toBe(0);
+      expect(frames(h.payloads, "S1").filter((f) => f.type === "replica.reset")).toEqual([]);
+      expect(h.conflicts).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
+  });
+
+  it("r4617752119: a slow holder's deferred reply holds no turn: another holder's reducer commit and delta go at once, then the reply leads in order", { timeout: 120_000 }, async () => {
+    let recoveries = 0, hold = false;
+    const held: Array<() => void> = [];
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 4_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 1500)]]);
+      for (let i = 0; i < insert.length; i += 1000) await h.commit(insert.slice(i, i + 1000));
+      h.receiver.deliver = async (host, payload) => {
+        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        if (host === "h1" && hold) await new Promise<void>((resolve) => held.push(resolve));
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      h.engine.dispatch(socket("S1", {}, "h1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      h.engine.dispatch(socket("S2", {}, "h2"), { type: "replica.open", id: "top", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      const ready = (id: string) => frames(h.payloads, id).some((f) => f.type === "replica.ready");
+      for (let spin = 0; spin < 4000 && !(ready("S1") && ready("S2")); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // h1 is slow: its next RPC does not complete until released.
+      hold = true;
+      await h.commit([["UPDATE items SET label = 'busy-' || label WHERE rank < 400", []]], false);
+      for (let spin = 0; spin < 2000 && !held.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(held.length).toBe(1);
+      // A live query on h1 whose result does not fit beside the in-flight payload: the subscribe returns at once.
+      const view = { ...socket("Q", {}, "h1"), queryId: "live" };
+      const started = Date.now();
+      expect(await h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }))).toEqual([]);
+      // Another holder's reducer commit is neither blocked nor delayed: it commits, and h2 gets its delta while h1 is still stuck.
+      await h.commit([["UPDATE items SET label = 'moved' WHERE id = 'i000000'", []]], false);
+      for (let spin = 0; spin < 2000 && !frames(h.payloads, "S2").some((f) => f.type === "replica.delta" && JSON.stringify(f).includes("moved")); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(frames(h.payloads, "S2").some((f) => f.type === "replica.delta" && JSON.stringify(f).includes("moved"))).toBe(true);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(held.length).toBe(1);
+      expect(frames(h.payloads, "Q")).toEqual([]);
+      expect(recoveries).toBe(0);
+      // h1 drains: its owed commits go first, then the kept query runs and answers once, after them; nothing is reset.
+      hold = false;
+      held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "Q").some((f) => f.type === "query.result"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      const replies = frames(h.payloads, "Q").filter((f) => f.type === "query.result");
+      // The query was deferred, not its reply: one fresh "initial" that already holds the later commit (no "reconnect").
+      expect(replies.map((f) => f.reason)).toEqual(["initial"]);
+      expect(replies[0].result.length).toBe(4_000);
+      expect(replies[0].result.find((row: { id: string }) => row.id === "i000000").label).toBe("moved");
+      expect(recoveries).toBe(0);
+      expect(h.conflicts).toEqual([]);
+    }, MODULE, true, undefined, 60_000, ["h1", "h2"]);
+  });
+
+  /** h1 holds every row on S1, then one RPC stays in flight on h1 until `release`. */
+  const stuckH1 = async (h: Harness, state: { hold: boolean; held: Array<() => void>; recoveries: string[]; receipt?: (payload: ReplicaDelivery) => ReplicaReceipt }) => {
+    const insert: Array<[string, unknown[]]> = [];
+    for (let i = 0; i < 4_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 1500)]]);
+    for (let i = 0; i < insert.length; i += 1000) await h.commit(insert.slice(i, i + 1000));
+    h.receiver.deliver = async (host, payload) => {
+      if (payload.recovery) { state.recoveries.push(host); return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+      if (host === "h1" && state.hold) await new Promise<void>((resolve) => state.held.push(resolve));
+      return state.receipt?.(payload) ?? { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+    };
+    h.engine.dispatch(socket("S1", {}, "h1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 4000 && !frames(h.payloads, "S1").some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    await h.engine.settled();
+    state.hold = true;
+    const revision = await h.commit([["UPDATE items SET label = 'busy-' || label WHERE rank < 400", []]], false);
+    for (let spin = 0; spin < 2000 && !state.held.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(state.held.length).toBe(1);
+    return revision;
+  };
+  const deferredOf = (h: Harness, host: string) => (h.engine as unknown as { behind: Map<string, { outbox: Array<{ payload: ReplicaDelivery }> }> }).behind.get(host);
+  /** The subscribe requests kept for a connection (never results). */
+  const kept = (h: Harness, id: string) => ((h.engine as unknown as { deferredQueries: Map<string, Array<{ id: string; socket: SocketView }>> }).deferredQueries.get(id) ?? []).map((query) => query.id);
+
+  it("r4617948599: a stuck holder keeps subscribe requests, never results; an unsubscribe drops them; large queries reset nothing", { timeout: 120_000 }, async () => {
+    const state = { hold: false, held: [] as Array<() => void>, recoveries: [] as string[] };
+    await withEngine(async (h) => {
+      await stuckH1(h, state);
+      const view = { ...socket("Q", {}, "h1"), queryId: "live" };
+      const subscribe = (id: string) => h.engine.querySubscribe({ ...view, queryId: id } as SocketView, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id, path: "items.live", args: {} }));
+      for (let i = 0; i < 5; i++) await subscribe("live");
+      // No materialized result is retained: only the requests, and no reply in the holder's outbox.
+      expect(kept(h, "Q")).toEqual(["live", "live", "live", "live", "live"]);
+      expect(deferredOf(h, "h1")!.outbox.filter((entry) => entry.payload.sockets.Q)).toEqual([]);
+      expect(h.live.subscriptionIds("Q")).toEqual([]);
+      // An unsubscribe drops the kept requests for that id.
+      h.engine.queryUnsubscribe(view, "live");
+      expect(kept(h, "Q")).toEqual([]);
+      // Two queries of every row (each over the holder's budget): kept, nothing reset; each answers once h1 drains.
+      await subscribe("a");
+      await subscribe("b");
+      expect(kept(h, "Q")).toEqual(["a", "b"]);
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && frames(h.payloads, "Q").filter((f) => f.type === "query.result").length < 2; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      expect(frames(h.payloads, "Q").filter((f) => f.type === "query.result").map((f) => [f.id, f.reason, f.result.length])).toEqual([["a", "initial", 4_000], ["b", "initial", 4_000]]);
+      expect(kept(h, "Q")).toEqual([]);
+      expect(state.recoveries).toEqual([]);
+    }, MODULE, true, undefined, 60_000, ["h1", "h2"]);
+  });
+
+  it("r4617948603: a live-query-only socket's deferred initial reply advances its floor and completes its initial request as an immediate send does", { timeout: 120_000 }, async () => {
+    const state = {
+      hold: false, held: [] as Array<() => void>, recoveries: [] as string[],
+      receipt: (payload: ReplicaDelivery) => ({ v: 1, sockets: Object.keys(payload.sockets).length,
+        ...(payload.sockets.Q?.initialCompletions?.length ? { initialCompletions: { Q: payload.sockets.Q.initialCompletions.map((c) => ({ generation: c.request.generation, status: "enqueued" as const })) } } : {}) }) as ReplicaReceipt,
+    };
+    await withEngine(async (h) => {
+      const revision = await stuckH1(h, state);
+      const view = { ...socket("Q", {}, "h1"), queryId: "live", initialRequests: [{ kind: "query" as const, id: "live", path: "items.live", epoch: 0, generation: 1 }] };
+      await h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }));
+      expect(deferredOf(h, "h1")).toBeDefined();
+      expect(h.engine.subscriptionFloor(view)).toBe(0); // not yet sent
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "Q").some((f) => f.type === "query.result"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      for (let spin = 0; spin < 4000 && deferredOf(h, "h1"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // No commit came after the snapshot, so the deferral ends without a catch-up: the reply's own certificate counts.
+      expect(frames(h.payloads, "Q").filter((f) => f.type === "query.result").map((f) => f.reason)).toEqual(["initial"]);
+      expect(h.engine.subscriptionFloor(view)).toBe(revision);
+      expect((h.engine as unknown as { connections: Map<string, { initials: Map<number, unknown> }> }).connections.get("Q")!.initials.size).toBe(0);
+      expect(state.recoveries).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
+  });
+
+  it("r4618344019: a deferred initial reply whose receipt is obsolete certifies nothing", { timeout: 120_000 }, async () => {
+    const state = {
+      hold: false, held: [] as Array<() => void>, recoveries: [] as string[],
+      receipt: (payload: ReplicaDelivery) => ({ v: 1, sockets: Object.keys(payload.sockets).length,
+        ...(payload.sockets.Q?.initialCompletions?.length ? { initialCompletions: { Q: payload.sockets.Q.initialCompletions.map((c) => ({ generation: c.request.generation, status: "obsolete" as const })) } } : {}) }) as ReplicaReceipt,
+    };
+    await withEngine(async (h) => {
+      await stuckH1(h, state);
+      const view = { ...socket("Q", {}, "h1"), queryId: "live", initialRequests: [{ kind: "query" as const, id: "live", path: "items.live", epoch: 0, generation: 1 }] };
+      await h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }));
+      expect(deferredOf(h, "h1")).toBeDefined();
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "Q").some((f) => f.type === "query.result"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      for (let spin = 0; spin < 4000 && deferredOf(h, "h1"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // The holder said obsolete: no watermark may follow for Q, and its floor does not move.
+      expect(h.payloads.filter(([, p]) => p.sockets.Q && !p.sockets.Q.ops.length && p.sockets.Q.watermark !== undefined)).toEqual([]);
+      expect(h.engine.subscriptionFloor(view)).toBe(0);
+      expect(state.recoveries).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
+  });
+
+  it("r4618171096: a reused query id answers every generation's initial request in order, a failed one included", { timeout: 120_000 }, async () => {
+    const state = {
+      hold: false, held: [] as Array<() => void>, recoveries: [] as string[],
+      receipt: (payload: ReplicaDelivery) => ({ v: 1, sockets: Object.keys(payload.sockets).length,
+        ...(payload.sockets.Q?.initialCompletions?.length ? { initialCompletions: { Q: payload.sockets.Q.initialCompletions.map((c) => ({ generation: c.request.generation, status: "enqueued" as const })) } } : {}) }) as ReplicaReceipt,
+    };
+    await withEngine(async (h) => {
+      await stuckH1(h, state);
+      const ref = (generation: number) => ({ kind: "query" as const, id: "live", path: "items.live", epoch: 0, generation });
+      const view = (generation: number) => ({ ...socket("Q", {}, "h1"), queryId: "live", initialRequests: [ref(generation)] }) as SocketView;
+      const live = (generation: number) => { const v = view(generation); return h.engine.querySubscribe(v, (db) => h.live.subscribeSnapshot(db, v.connectionId, v.tenant, { id: "live", path: "items.live", args: {} })); };
+      const initials = () => [...(h.engine as unknown as { connections: Map<string, { initials: Map<number, unknown> }> }).connections.get("Q")!.initials.keys()].sort();
+      await live(1);
+      await live(2);
+      // Each generation's request is kept, and each stays open until its own reply is sent.
+      expect(kept(h, "Q")).toEqual(["live", "live"]);
+      expect(initials()).toEqual([1, 2]);
+      // A failed newer reply supersedes nothing: the earlier results still go, then its error.
+      const failing = view(3);
+      await h.engine.querySubscribe(failing, () => JSON.stringify({ type: "query.error", id: "live", path: "items.live", error: { code: "query_failed", message: "boom" } }));
+      expect(initials()).toEqual([1, 2, 3]);
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && initials().length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      const sent = h.payloads.filter(([host, p]) => host === "h1" && p.sockets.Q?.initialCompletions?.length).map(([, p]) => p.sockets.Q!);
+      expect(sent.map((work) => [work.initialScope?.generation, work.initialCompletions!.map((c) => [c.request.generation, c.outcome])])).toEqual([
+        [1, [[1, "accepted"]]], [2, [[2, "accepted"]]], [3, [[3, "refused"]]],
+      ]);
+      expect(sent.slice(0, 2).map((work) => JSON.parse(work.ops[0]![1] as string).result.length)).toEqual([4_000, 4_000]); // each its own fresh result
+      expect(initials()).toEqual([]);
+      expect(state.recoveries).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
+  });
+
+  it("r4618518429: a query id reused for a different path while deferred answers each request with its own path, as Rust replaces the subscription; no reset", { timeout: 120_000 }, async () => {
+    const state = {
+      hold: false, held: [] as Array<() => void>, recoveries: [] as string[],
+      receipt: (payload: ReplicaDelivery) => ({ v: 1, sockets: Object.keys(payload.sockets).length,
+        ...(payload.sockets.Q?.initialCompletions?.length ? { initialCompletions: { Q: payload.sockets.Q.initialCompletions.map((c) => ({ generation: c.request.generation, status: "enqueued" as const })) } } : {}) }) as ReplicaReceipt,
+    };
+    await withEngine(async (h) => {
+      await stuckH1(h, state);
+      const subscribe = (generation: number, path: string) => {
+        const v = { ...socket("Q", {}, "h1"), queryId: "x", initialRequests: [{ kind: "query" as const, id: "x", path, epoch: 0, generation }] } as SocketView;
+        return h.engine.querySubscribe(v, (db) => h.live.subscribeSnapshot(db, v.connectionId, v.tenant, { id: "x", path, args: {} }));
+      };
+      await subscribe(1, "items.live");
+      await subscribe(2, "items.ranks");
+      expect(kept(h, "Q")).toEqual(["x", "x"]);
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      const initials = () => (h.engine as unknown as { connections: Map<string, { initials: Map<number, unknown> }> }).connections.get("Q")!.initials.size;
+      for (let spin = 0; spin < 4000 && initials(); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      const sent = h.payloads.filter(([host, p]) => host === "h1" && p.sockets.Q?.initialCompletions?.length).map(([, p]) => p.sockets.Q!);
+      // Each generation under its own scope with its own path's result; the later one is the live subscription.
+      expect(sent.map((work) => [work.initialScope?.generation, work.initialScope?.path, JSON.parse(work.ops[0]![1] as string).path, work.initialCompletions!.map((c) => c.outcome)])).toEqual([
+        [1, "items.live", "items.live", ["accepted"]], [2, "items.ranks", "items.ranks", ["accepted"]],
+      ]);
+      expect(Object.keys(JSON.parse(sent[1]!.ops[0]![1] as string).result[0]).sort()).toEqual(["id", "rank"]);
+      expect(h.live.subscriptionIds("Q")).toEqual(["x"]);
+      expect(state.recoveries).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
   });
 });
 
