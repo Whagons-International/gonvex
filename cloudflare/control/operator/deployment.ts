@@ -36,7 +36,8 @@ export function installDeploymentSchema(sql:Sql):void {
 
 /** Builders start no target write after the grant's deadline and kill one still running at it. */
 export const TARGET_WRITE_WINDOW_MS = 10 * 60_000;
-/** Past this, no write of an attempt can still land: the write window plus a margin for an upload already sent. */
+/** Past this, no write of an attempt can still land: the write window plus a margin covering the SIGTERM→SIGKILL grace
+ * of the write's process group (DEADLINE_KILL_GRACE_MS, 15 s) and an upload already sent. */
 export const TARGET_ATTEMPT_LEASE_MS = TARGET_WRITE_WINDOW_MS + 5 * 60_000;
 
 export class DeploymentCoordinator {

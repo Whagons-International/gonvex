@@ -74,27 +74,47 @@ export async function servingConfigs(name, directory, { kernelUrl, images = {} }
   return configs;
 }
 
-/** `deadline` (epoch ms): the wrangler process is killed then and the write reported as failed. */
+/** Grace between SIGTERM and SIGKILL of a write's process group at its deadline (inside TARGET_ATTEMPT_LEASE_MS's margin). */
+export const DEADLINE_KILL_GRACE_MS = 15_000;
+
+/**
+ * Runs a command in its own process group. At `deadline` the whole group gets SIGTERM, then SIGKILL after
+ * `graceMs`. The result settles only once every process holding the child's stdio has gone, so nothing the
+ * command started can still write after the caller sees the failure.
+ */
+export function runBounded(command, args, { cwd, env, deadline, graceMs = DEADLINE_KILL_GRACE_MS, maxOutput = 2 * 1024 * 1024 } = {}) {
+  return new Promise((ok, fail) => {
+    const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    let output = '', truncated = false, killed = false, hard;
+    const capture = (part) => { output += part; if (output.length > maxOutput) { output = output.slice(-maxOutput); truncated = true; } };
+    child.stdout.on('data', capture); child.stderr.on('data', capture);
+    const group = (signal) => { try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; } };
+    const timer = deadline === undefined ? undefined : setTimeout(() => {
+      killed = true; output += '\n[deadline: SIGTERM to process group]\n'; group('SIGTERM');
+      hard = setTimeout(() => { output += '[deadline grace over: SIGKILL to process group]\n'; group('SIGKILL'); }, graceMs);
+    }, Math.max(0, deadline - Date.now()));
+    child.on('error', (error) => { clearTimeout(timer); clearTimeout(hard); fail(error); });
+    // 'close' waits for every holder of the pipes (the whole group unless something detached further).
+    child.on('close', (code, signal) => {
+      clearTimeout(timer); clearTimeout(hard);
+      if (killed) group('SIGKILL');
+      ok({ code, signal, killed, output: (truncated ? '[earlier output truncated]\n' : '') + output });
+    });
+  });
+}
+
+/** `deadline` (epoch ms): the wrangler process group is stopped then (runBounded) and the write reported as failed. */
 export async function deployConfig(args, credentials, directory, { deadline } = {}) {
   const env = { ...process.env, CLOUDFLARE_ACCOUNT_ID: credentials.accountId, CLOUDFLARE_API_TOKEN: credentials.apiToken,
     WRANGLER_SEND_METRICS: 'false', CI: '1', TMPDIR: join(directory, 'tmp') };
   delete env.WHAGONS_CREDENTIAL_FILE;
   await mkdir(env.TMPDIR, { recursive: true });
-  return new Promise((ok, fail) => {
-    const child = spawn(join(root, 'node_modules/.bin/wrangler'), args, { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '',truncated=false;
-    const capture=part=>{output+=part;if(output.length>2*1024*1024){output=output.slice(-2*1024*1024);truncated=true;}};
-    child.stdout.on('data', capture); child.stderr.on('data', capture);
-    child.on('error', fail);
-    const timer = deadline === undefined ? undefined : setTimeout(() => { output += '\n[killed at target write deadline]\n'; child.kill('SIGKILL'); }, Math.max(0, deadline - Date.now()));
-    child.on('exit', async (code) => {
-      if (timer) clearTimeout(timer);
-      // Keep raw deployment diagnostics private. API/credential failure text can include context.
-      await writeFile(join(directory, `wrangler-${Date.now()}.log`), (truncated?'[earlier output truncated]\n':'')+output, { mode: 0o600 });
-      const codes=[...new Set([...output.matchAll(/\[code:\s*(\d{1,8})\]/g)].map(match=>match[1]))].slice(0,8);
-      code === 0 ? ok(output) : fail(new Error(`wrangler ${args[0]} exited ${code}${codes.length?`; provider codes ${codes.join(',')}`:''}; private diagnostics in ${directory}`));
-    });
-  });
+  const { code, signal, killed, output } = await runBounded(join(root, 'node_modules/.bin/wrangler'), args, { cwd: root, env, deadline });
+  // Keep raw deployment diagnostics private. API/credential failure text can include context.
+  await writeFile(join(directory, `wrangler-${Date.now()}.log`), output, { mode: 0o600 });
+  const codes=[...new Set([...output.matchAll(/\[code:\s*(\d{1,8})\]/g)].map(match=>match[1]))].slice(0,8);
+  if (code === 0 && !killed) return output;
+  throw new Error(`wrangler ${args[0]} ${killed ? 'stopped at its target write deadline' : `exited ${code ?? signal}`}${codes.length?`; provider codes ${codes.join(',')}`:''}; private diagnostics in ${directory}`);
 }
 
 export async function deployAssembly({ name, directory, images, secrets = {} }) {
