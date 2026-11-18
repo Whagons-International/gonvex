@@ -39,6 +39,15 @@ export const OPEN_REQUEST_MAX_BYTES = 32 * 1024 * 1024;
 /** Payloads queued to one holder before its sockets are reset `change-feed-lagged`. */
 export const MAX_QUEUED_PAYLOADS = 256;
 /**
+ * BUG-4: how long the feed waits for a backlogged holder to drain before its sockets are reset `change-feed-lagged`
+ * (Rust's `GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS`, default 30 s: a socket whose writes stop progressing). Rust defers
+ * the feed while a socket is backlogged (lib.rs `defer_feed`) and a lagging receiver resumes from the log
+ * (change_feed/backlog.rs), so outbound bytes alone never reset a subscription.
+ */
+export const HOLDER_STALL_MS = 30_000;
+/** While the isolate's shared byte credits (not this holder's queue) are what is full. */
+const ROOM_POLL_MS = 10;
+/**
  * Characters of text in one payload (at most 3 UTF-8 bytes each, so 24 MiB): Workers RPC refuses an argument over
  * 32 MiB (0020 §6, 0022 §4.4). A larger delivery goes as several payloads, in order.
  */
@@ -104,6 +113,8 @@ export interface DeliveryOutlet {
   queued(host: string): number;
   /** X01: holder-specific byte/count pressure; the reset still uses this engine's ordered channel. */
   backlogged?(host: string): boolean;
+  /** BUG-4: whether `send` would accept `payload` now, without queueing it or tripping recovery. */
+  admits?(host: string, payload: ReplicaDelivery): boolean;
   /** X01: same ordered channel, constant-size recovery reserve; an ordinary receipt is never an ack. */
   reset?(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
   /** Drops what is queued for `host` (lag), keeping order for what comes next. */
@@ -149,6 +160,8 @@ export interface DeliveryOptions {
   readonly live?: LiveQueries | undefined;
   /** BUG-2: every socket event or commit that reaches the engine (the tenant keeps itself from hibernating). */
   readonly activity?: () => void;
+  /** BUG-4: `HOLDER_STALL_MS` (tests shorten it). */
+  readonly stallMs?: number;
 }
 
 export interface DeliveryStats {
@@ -492,15 +505,59 @@ export class ReplicaDeliveryEngine {
   private async run(): Promise<void> {
     for (;;) {
       if (this.delivered === undefined || this.wanted > this.delivered.revision) {
+        await this.drainBacklogged();
         const more = await this.options.serial(() => this.deliverCommits());
         if (more) continue;
       }
       const next = this.nextOpen();
       if (next) {
+        await this.drainBacklogged();
         await this.options.serial(() => this.processOpen(next.connection, next.request));
         continue;
       }
       if (this.delivered !== undefined && this.wanted <= this.delivered.revision) return;
+    }
+  }
+
+  /**
+   * BUG-4: the feed waits (outside the invocation queue, so writers go on) while a holder of a connection is
+   * backlogged, typically by the last snapshot pages of a large first load. Commits that land meanwhile stay in the
+   * change log and go out together once it drained, as Rust's deferred feed events do. Only a holder still backlogged
+   * after `HOLDER_STALL_MS` without relief is reset lagged (`deliverTransaction`).
+   */
+  private async drainBacklogged(): Promise<void> {
+    const outlet = this.options.outlet;
+    if (!outlet.backlogged) return;
+    const deadline = Date.now() + (this.options.stallMs ?? HOLDER_STALL_MS);
+    for (const host of new Set([...this.connections.values()].map((c) => c.host))) {
+      await this.roomOn(host, () => !outlet.backlogged!(host), deadline);
+    }
+  }
+
+  /**
+   * BUG-4: snapshot work waits for room on its holder's channel instead of being refused there (a refusal resets the
+   * whole holder, and the client's reopen would be refused the same way). Inside the open's turn, like `drain`.
+   */
+  private async postWhenRoom(connection: Connection, work: SocketWork): Promise<void> {
+    const outlet = this.options.outlet;
+    if (outlet.admits) {
+      const payload = this.payload([], { [connection.id]: { ...work, subscriptionEpoch: connection.epoch } as ScopedSocketWork });
+      await this.roomOn(connection.host, () => outlet.admits!(connection.host, payload), Date.now() + (this.options.stallMs ?? HOLDER_STALL_MS));
+    }
+    this.post(connection, work);
+  }
+
+  /**
+   * Waits until `room()` or `deadline`: for this holder's queue to drain while it has one, else (the byte credits are
+   * shared by every outlet in the isolate) for other deliveries to finish, polled. A barrier ends the wait.
+   */
+  private async roomOn(host: string, room: () => boolean, deadline: number): Promise<void> {
+    const outlet = this.options.outlet;
+    for (let left = deadline - Date.now(); left > 0 && !this.paused(host) && !room(); left = deadline - Date.now()) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const delay = new Promise<void>((resolve) => { timer = setTimeout(resolve, outlet.queued(host) > 0 ? left : Math.min(ROOM_POLL_MS, left)); });
+      await (outlet.queued(host) > 0 ? Promise.race([outlet.idle(host), delay]) : delay);
+      clearTimeout(timer);
     }
   }
 
@@ -522,9 +579,9 @@ export class ReplicaDeliveryEngine {
     await this.deliverCommits();
     const ops: SocketOp[] = [];
     const current = () => this.connections.get(connection.id) === connection && (!request.initial || connection.initials.has(request.initial.generation));
-    const flush = () => {
+    const flush = async () => {
       if (!ops.length || !current()) return;
-      this.post(connection, { ops: ops.splice(0), ...(request.initial?{initialScope:request.initial}:{}) });
+      await this.postWhenRoom(connection, { ops: ops.splice(0), ...(request.initial?{initialScope:request.initial}:{}) });
     };
     const progress: ScanProgress = { statements: 0, rowsRead: 0 };
     const subscription = await openReplica(request, {
@@ -537,7 +594,7 @@ export class ReplicaDeliveryEngine {
       registry: this.registry,
       read: this.options.read,
       emit: (frames) => { for (const text of frames) ops.push(["f", text]); },
-      drain: async () => { flush(); await this.options.outlet.idle(connection.host); },
+      drain: async () => { await flush(); await this.options.outlet.idle(connection.host); },
       progress,
     });
     this.stats.opens += 1;
@@ -574,7 +631,7 @@ export class ReplicaDeliveryEngine {
       }
     }
     const initialCompletions = request.initial ? ops.flatMap((op, index) => { const c = initialCompletion(request.initial!, op, index); return c ? [c] : []; }) : [];
-    this.post(connection, { ops: ops.splice(0), initialCompletions, ...(request.initial?{initialScope:request.initial}:{}), ...(subscription ? { opened } : { removed: [request.id] }) });
+    await this.postWhenRoom(connection, { ops: ops.splice(0), initialCompletions, ...(request.initial?{initialScope:request.initial}:{}), ...(subscription ? { opened } : { removed: [request.id] }) });
   }
 
   /** Reads and delivers every committed transaction after the delivery's cursor. True when more arrived meanwhile. */

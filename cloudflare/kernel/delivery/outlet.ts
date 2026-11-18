@@ -101,16 +101,27 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     let queue: Queue;
     try { queue = this.queue(host); } catch (error) { return Promise.reject(error); }
     const bytes = retainedBytes(payload);
-    // A legal large singleton is allowed when it is the only retained normal delivery. Never impose
-    // the pending budget as a smaller wire/frame limit. Its real isolate peak remains a V04 gate.
-    const singleton = credits.normal === 0 && credits.recovery === 0 && !queue.running && !queue.pending.length;
-    if (queue.recoveryRequired || credits.count >= MAX_PENDING || (!singleton
-      && (queue.bytes + bytes > HOST_PENDING_BYTES || credits.normal + bytes > NORMAL_BYTES))) {
+    if (!OrderedOutlet.fits(queue, bytes)) {
       queue.recoveryRequired = true;
       this.settleEmpty(host, queue);
       return Promise.reject(new DeliveryCapacityError());
     }
     return this.enqueue(host, queue, payload, bytes, false);
+  }
+
+  /**
+   * A legal large singleton is allowed when it is the only retained normal delivery. Never impose
+   * the pending budget as a smaller wire/frame limit. Its real isolate peak remains a V04 gate.
+   */
+  private static fits(queue: Queue | undefined, bytes: number): boolean {
+    if (queue?.recoveryRequired || credits.count >= MAX_PENDING) return false;
+    const singleton = credits.normal === 0 && credits.recovery === 0 && !queue?.running && !queue?.pending.length;
+    return singleton || ((queue?.bytes ?? 0) + bytes <= HOST_PENDING_BYTES && credits.normal + bytes <= NORMAL_BYTES);
+  }
+
+  /** BUG-4: whether `send` would accept `payload` now (no side effects); the engine waits for room instead of tripping recovery. */
+  admits(host: string, payload: ReplicaDelivery): boolean {
+    return OrderedOutlet.fits(this.queues.get(host), retainedBytes(payload));
   }
 
   /**

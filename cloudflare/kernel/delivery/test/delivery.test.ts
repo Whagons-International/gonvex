@@ -61,10 +61,11 @@ interface Harness {
   payloads: Array<[string, ReplicaDelivery]>;
   receiver: { deliver?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt> };
   delivered: number[];
-  commit(statements: Array<[string, unknown[]]>): Promise<number>;
+  /** `settle: false` returns once the commit is published, while delivery may still be running (a concurrent writer). */
+  commit(statements: Array<[string, unknown[]]>, settle?: boolean): Promise<number>;
 }
 
-async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void): Promise<T> {
+async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void, stallMs?: number): Promise<T> {
   const stub = env.HELLO.getByName(`k10-${++objects}-${Math.random()}`);
   return runInDurableObject(stub, async (_instance, state) => {
     const sql = directSql(state.storage.sql);
@@ -102,18 +103,19 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       module: () => module,
       outlet: new LocalOutlet(receive, () => ["h1"], undefined, receive),
       ...(activity ? { activity } : {}),
+      ...(stallMs !== undefined ? { stallMs } : {}),
     });
     let commands = 0;
     return body({
       engine, live, payloads, receiver, delivered,
-      async commit(statements) {
+      async commit(statements, settle = true) {
         const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (s) => {
           for (const [text, parameters] of statements) s.run(text, parameters);
         }, context);
         if (!result.ok) throw result.error;
         const revision = result.notice?.revision ?? 0;
         engine.wake(revision);
-        await engine.settled();
+        if (settle) await engine.settled();
         return revision;
       },
     });
@@ -674,5 +676,70 @@ describe("BUG-2 a subscribed tenant stays in memory between a session's events",
     expect(keepAliveGrace("30000")).toBe(30_000);
     expect(keepAliveGrace("-1")).toBe(KEEPALIVE_GRACE_MS);
     expect(keepAliveGrace("forever")).toBe(KEEPALIVE_GRACE_MS);
+  });
+});
+
+describe("BUG-4 a large tenant's first load converges under ordinary commits", () => {
+  // devcopy-stg1117-12 (115,547 rows): 83 replicas opened at once over a gateway RPC hop while the session's own
+  // writes committed every few seconds. Each commit found the holder's queue still holding snapshot pages over its
+  // 8 MiB credit budget and reset every replica `change-feed-lagged`; the client reopened all of them, and the next
+  // commit reset them again (903 resets in 40 s, the workspace never loaded). Rust defers the feed while a socket is
+  // backlogged and resets only a socket whose writes stall (lib.rs `defer_feed`, change_feed/backlog.rs).
+  const RESET_CAP = 20;
+  const load = async (rows: number, replicas: number, options: { hold?: number; stallMs?: number } = {}) => {
+    let recoveries = 0, done = false, held = false;
+    const ready = new Set<string>();
+    const ids = Array.from({ length: replicas }, (_, i) => `sub-${i}`);
+    let commits = 0;
+    await withEngine(async ({ engine, receiver, commit }) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < rows; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+      for (let i = 0; i < insert.length; i += 2000) await commit(insert.slice(i, i + 2000));
+      const open = () => engine.dispatch(socket("s1"), { type: "replica.openMany", opens: ids.map((id) => ({ id, path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false })) } as never);
+      receiver.deliver = async (_host, payload) => {
+        // The gateway RPC hop; optionally one delivery hangs (a holder that stops making progress).
+        const hang = options.hold !== undefined && !held && Object.keys(payload.sockets).length > 0;
+        if (hang) held = true;
+        await new Promise((resolve) => setTimeout(resolve, hang ? options.hold : 2));
+        if (payload.recovery) {
+          // The holder resets every tracked replica; the client reopens them all, as the SDK does on replica.reset.
+          recoveries += 1; ready.clear();
+          if (recoveries <= RESET_CAP) queueMicrotask(open);
+          return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt;
+        }
+        for (const op of payload.sockets.s1?.ops ?? []) {
+          if (op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"')) ready.add(JSON.parse(op[1] as string).id);
+        }
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      open();
+      // The session keeps writing while the workspace loads (published commits; delivery runs concurrently).
+      const writer = (async () => {
+        while (!done) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          await commit([[`UPDATE items SET label = 'w${++commits}' WHERE id = 'i000000'`, []]], false);
+        }
+      })();
+      for (let spin = 0; spin < 8000 && ready.size < replicas && recoveries <= RESET_CAP; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      done = true;
+      await writer;
+      await engine.settled();
+    }, MODULE, false, undefined, options.stallMs);
+    expect(commits).toBeGreaterThan(replicas / 4);
+    return { recoveries, ready: ready.size };
+  };
+
+  it("loads every replica of a window over the holder's byte budget with no lagged reset, at two sizes", { timeout: 180_000 }, async () => {
+    // ~2.4 MiB of row text per replica (19 MiB of credits): each snapshot alone is over the 8 MiB budget.
+    expect(await load(12_000, 24)).toEqual({ recoveries: 0, ready: 24 });
+    // Twice the rows (two scan chunks per open) and more replicas: nothing in the commit path scales with size.
+    expect(await load(24_000, 32)).toEqual({ recoveries: 0, ready: 32 });
+  });
+
+  it("still resets a holder that stops making progress, after the stall bound, and then converges", { timeout: 120_000 }, async () => {
+    const { recoveries, ready } = await load(2_000, 4, { hold: 400, stallMs: 50 });
+    expect(recoveries).toBeGreaterThanOrEqual(1);
+    expect(recoveries).toBeLessThanOrEqual(2);
+    expect(ready).toBe(4);
   });
 });

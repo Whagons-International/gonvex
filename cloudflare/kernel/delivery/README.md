@@ -74,8 +74,12 @@ holder (any object):  Session ─ SocketDelivery (socket.ts) ─ ReplicaBatcher 
   socket; bindings are forgotten on every `auth`), the watermark in the tail. Any other frame flushes the open batch
   first. Presence rides in it (leading edge).
 - **Resets.** `change-feed-reset` when the log no longer covers what follows the delivery's cursor (pruned, or a
-  database at an earlier revision); `change-feed-lagged` when a holder falls 256 payloads behind (its queue is
-  discarded and its sockets resync). A new database epoch with the log intact is delivered as Rust delivers it: the
+  database at an earlier revision); `change-feed-lagged` when a holder falls 256 payloads behind or stays
+  backlogged for `HOLDER_STALL_MS` (30 s, Rust's `GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS`) (its queue is discarded and
+  its sockets resync). Outbound bytes alone never lag a holder (BUG-4): while a holder is over its byte budget the
+  feed waits for it to drain, outside the invocation queue, and the commits that landed meanwhile go out together, as
+  Rust defers its feed while a socket is backlogged (lib.rs `defer_feed`). Snapshot work likewise waits for room on
+  the holder's channel instead of being refused there. A new database epoch with the log intact is delivered as Rust delivers it: the
   transaction carries the new epoch, collection cursors keep theirs, and resumes from the old epoch reload. A socket
   whose collections span two epochs is closed (1011), as Rust ends that socket's task.
 - **Tenant restarts.** Subscriptions live in the tenant object's memory. A holder tracks its sockets' collections and
