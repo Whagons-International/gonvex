@@ -61,10 +61,16 @@ interface Harness {
   payloads: Array<[string, ReplicaDelivery]>;
   receiver: { deliver?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt> };
   delivered: number[];
-  commit(statements: Array<[string, unknown[]]>): Promise<number>;
+  /**
+   * Tenant invocations that overlapped another (`an invocation is already running`) and engine reads outside the
+   * invocation queue. Production's `serial` is the reducers' queue (delivery/object.ts), so both must stay empty.
+   */
+  conflicts: string[];
+  /** `settle: false` returns once the commit is published, while delivery may still be running (a concurrent writer). */
+  commit(statements: Array<[string, unknown[]]>, settle?: boolean): Promise<number>;
 }
 
-async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void): Promise<T> {
+async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void, stallMs?: number, hosts: string[] = ["h1"]): Promise<T> {
   const stub = env.HELLO.getByName(`k10-${++objects}-${Math.random()}`);
   return runInDurableObject(stub, async (_instance, state) => {
     const sql = directSql(state.storage.sql);
@@ -91,29 +97,46 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       } } } },
       visibility: { items: { table: "items", key: "id", where: { operator: "public" } } },
     });
-    const live = new LiveQueries({ run: snapshotRunner(storage), module: () => liveModule, visibility: kernelVisibility(new VisibilityRegistry()) });
+    // One invocation queue for the engine and the reducers, as the tenant object has (`kernel.reducers.serial`).
+    const conflicts: string[] = [];
+    let inQueue = false;
+    const serial = <R>(fn: () => Promise<R>): Promise<R> => {
+      const run = async () => { inQueue = true; try { return await fn(); } finally { inQueue = false; } };
+      const next = queue.then(run, run); queue = next.catch(() => undefined); return next;
+    };
+    const invoke = async <R>(fn: () => Promise<R>): Promise<R> => {
+      try { return await fn(); } catch (error) { if (String(error).includes("already running")) conflicts.push(String(error)); throw error; }
+    };
+    const live = new LiveQueries({ run: (body) => serial(() => snapshotRunner(storage)(body)), module: () => liveModule, visibility: kernelVisibility(new VisibilityRegistry()) });
     const receive = (host:string,payload:ReplicaDelivery) => { payloads.push([host,payload]); return (receiver.deliver?.(host,payload) ?? {v:1,sockets:Object.keys(payload.sockets).length}) as ReplicaReceipt; };
     const engine = new ReplicaDeliveryEngine({
       ...(composeLive ? { live } : {}),
       tenantId: "t",
       delivered: (revision) => delivered.push(revision),
-      serial: <R>(fn: () => Promise<R>) => { const next = queue.then(fn, fn); queue = next.catch(() => undefined); return next; },
-      read: async (fn) => { const r = await storage.invoke("query", async (s) => fn(s)); if (!r.ok) throw r.error; return r.value; },
+      serial,
+      read: async (fn) => {
+        if (!inQueue) conflicts.push(`engine read outside the invocation queue: ${new Error().stack}`);
+        const r = await invoke(() => storage.invoke("query", async (s) => fn(s)));
+        if (!r.ok) throw r.error;
+        return r.value;
+      },
       module: () => module,
-      outlet: new LocalOutlet(receive, () => ["h1"], undefined, receive),
+      outlet: new LocalOutlet(receive, () => hosts, undefined, receive),
       ...(activity ? { activity } : {}),
+      ...(stallMs !== undefined ? { stallMs } : {}),
     });
     let commands = 0;
     return body({
-      engine, live, payloads, receiver, delivered,
-      async commit(statements) {
-        const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (s) => {
+      engine, live, payloads, receiver, delivered, conflicts,
+      async commit(statements, settle = true) {
+        const commandId = `c${++commands}`;
+        const result = await serial(() => invoke(() => invokeCaptured(storage, "reducer", { commandId }, async (s) => {
           for (const [text, parameters] of statements) s.run(text, parameters);
-        }, context);
+        }, context)));
         if (!result.ok) throw result.error;
         const revision = result.notice?.revision ?? 0;
         engine.wake(revision);
-        await engine.settled();
+        if (settle) await engine.settled();
         return revision;
       },
     });
@@ -674,5 +697,191 @@ describe("BUG-2 a subscribed tenant stays in memory between a session's events",
     expect(keepAliveGrace("30000")).toBe(30_000);
     expect(keepAliveGrace("-1")).toBe(KEEPALIVE_GRACE_MS);
     expect(keepAliveGrace("forever")).toBe(KEEPALIVE_GRACE_MS);
+  });
+});
+
+describe("BUG-4 a large tenant's first load converges under ordinary commits", () => {
+  // devcopy-stg1117-12 (115,547 rows): 83 replicas opened at once over a gateway RPC hop while the session's own
+  // writes committed every few seconds. Each commit found the holder's queue still holding snapshot pages over its
+  // 8 MiB credit budget and reset every replica `change-feed-lagged`; the client reopened all of them, and the next
+  // commit reset them again (903 resets in 40 s, the workspace never loaded). Rust defers the feed while a socket is
+  // backlogged and resets only a socket whose writes stall (lib.rs `defer_feed`, change_feed/backlog.rs).
+  const RESET_CAP = 20;
+  const load = async (rows: number, replicas: number, options: { hold?: number; stallMs?: number } = {}) => {
+    let recoveries = 0, done = false, held = false;
+    const ready = new Set<string>();
+    const ids = Array.from({ length: replicas }, (_, i) => `sub-${i}`);
+    let commits = 0;
+    await withEngine(async ({ engine, receiver, commit }) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < rows; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+      for (let i = 0; i < insert.length; i += 2000) await commit(insert.slice(i, i + 2000));
+      const open = () => engine.dispatch(socket("s1"), { type: "replica.openMany", opens: ids.map((id) => ({ id, path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false })) } as never);
+      receiver.deliver = async (_host, payload) => {
+        // The gateway RPC hop; optionally one delivery hangs (a holder that stops making progress).
+        const hang = options.hold !== undefined && !held && Object.keys(payload.sockets).length > 0;
+        if (hang) held = true;
+        await new Promise((resolve) => setTimeout(resolve, hang ? options.hold : 2));
+        if (payload.recovery) {
+          // The holder resets every tracked replica; the client reopens them all, as the SDK does on replica.reset.
+          recoveries += 1; ready.clear();
+          if (recoveries <= RESET_CAP) queueMicrotask(open);
+          return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt;
+        }
+        for (const op of payload.sockets.s1?.ops ?? []) {
+          if (op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"')) ready.add(JSON.parse(op[1] as string).id);
+        }
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      open();
+      // The session keeps writing while the workspace loads (published commits; delivery runs concurrently).
+      const writer = (async () => {
+        while (!done) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          await commit([[`UPDATE items SET label = 'w${++commits}' WHERE id = 'i000000'`, []]], false);
+        }
+      })();
+      for (let spin = 0; spin < 8000 && ready.size < replicas && recoveries <= RESET_CAP; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      done = true;
+      await writer;
+      await engine.settled();
+    }, MODULE, false, undefined, options.stallMs);
+    expect(commits).toBeGreaterThan(replicas / 4);
+    return { recoveries, ready: ready.size };
+  };
+
+  it("loads every replica of a window over the holder's byte budget with no lagged reset, at two sizes", { timeout: 180_000 }, async () => {
+    // ~2.4 MiB of row text per replica (19 MiB of credits): each snapshot alone is over the 8 MiB budget.
+    expect(await load(12_000, 24)).toEqual({ recoveries: 0, ready: 24 });
+    // Twice the rows (two scan chunks per open) and more replicas: nothing in the commit path scales with size.
+    expect(await load(24_000, 32)).toEqual({ recoveries: 0, ready: 32 });
+  });
+
+  it("defers only the backlogged holder: another holder gets a commit at once, the backlogged one catches up in order", { timeout: 60_000 }, async () => {
+    await withEngine(async ({ engine, receiver, commit }) => {
+      // ~1.8 Mi chars in one final snapshot post (one scan chunk): ~14 MiB of credits, over the 8 MiB holder budget.
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 7_500; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+      for (let i = 0; i < insert.length; i += 2500) await commit(insert.slice(i, i + 2500));
+      const log: Array<{ host: string; at: number; payload: ReplicaDelivery }> = [];
+      let release!: () => void, held = false, recoveries = 0;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      receiver.deliver = async (host, payload) => {
+        log.push({ host, at: Date.now(), payload });
+        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        // Holder A's RPC carrying its snapshot's end is slow (a large first load over the gateway hop).
+        if (host === "h1" && !held && (payload.sockets.A?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"'))) {
+          held = true; await gate;
+        }
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      engine.dispatch(socket("B", {}, "h2"), { type: "replica.open", id: "sub-B", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      engine.dispatch(socket("A", {}, "h1"), { type: "replica.open", id: "sub-A", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      for (let spin = 0; spin < 2000 && !held; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(held).toBe(true);
+
+      const started = Date.now();
+      const revision = await commit([["UPDATE items SET label = 'live' WHERE id = 'i000000'", []]], false);
+      const deltaFor = (id: string, sub: string) => log.find((entry) => (entry.payload.sockets[id]?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && (op[1] as string).includes(`"id":"${sub}"`)));
+      for (let spin = 0; spin < 400 && !deltaFor("B", "sub-B"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      const toB = deltaFor("B", "sub-B");
+      expect(toB, "holder B gets the commit while A is still draining").toBeDefined();
+      expect(toB!.at - started).toBeLessThan(1_000); // the realtime row: a second client within 1 s
+      expect(deltaFor("A", "sub-A")).toBeUndefined(); // A is deferred, not reset
+      expect(toB!.payload.sockets.B!.watermark).toBe(revision);
+
+      release();
+      for (let spin = 0; spin < 2000 && !deltaFor("A", "sub-A"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await engine.settled();
+      // A: its snapshot, then the deferred commit from the log, then the watermark; nothing reset either holder.
+      const framesA = log.filter((entry) => entry.host === "h1").flatMap((entry) => (entry.payload.sockets.A?.ops ?? []).filter((op) => op[0] === "f").map((op) => JSON.parse(op[1] as string).type as string));
+      expect(framesA.indexOf("replica.delta")).toBeGreaterThan(framesA.indexOf("replica.ready"));
+      const marks = log.filter((entry) => entry.host === "h1").map((entry) => entry.payload.sockets.A?.watermark ?? entry.payload.watermark).filter((mark): mark is number => mark !== undefined);
+      expect(marks).toEqual([...marks].sort((a, b) => a - b));
+      expect(marks[marks.length - 1]).toBe(revision);
+      expect(recoveries).toBe(0);
+      expect(engine.stats.resets).toBe(0);
+      expect(log.some((entry) => (entry.payload.sockets.B?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).includes('"replica.reset"')))).toBe(false);
+    }, MODULE, false, undefined, undefined, ["h1", "h2"]);
+  });
+
+  /** Holder h1's socket A is held by its large first snapshot (its RPC waits on `release`). */
+  const heldLoad = async (h: Harness, extra?: (view: SocketView) => Promise<void>) => {
+    const insert: Array<[string, unknown[]]> = [];
+    for (let i = 0; i < 7_500; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+    for (let i = 0; i < insert.length; i += 2500) await h.commit(insert.slice(i, i + 2500));
+    const log: Array<{ host: string; payload: ReplicaDelivery }> = [];
+    const state = { held: false, recoveries: 0, release: () => {} };
+    const gate = new Promise<void>((resolve) => { state.release = resolve; });
+    h.receiver.deliver = async (host, payload) => {
+      log.push({ host, payload });
+      if (payload.recovery) { state.recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+      if (host === "h1" && !state.held && (payload.sockets.A?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"'))) {
+        state.held = true; await gate;
+      }
+      return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+    };
+    const view = socket("A", {}, "h1");
+    await extra?.(view);
+    h.engine.dispatch(view, { type: "replica.open", id: "sub-A", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 2000 && !state.held; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(state.held).toBe(true);
+    const marks = () => log.filter((e) => e.host === "h1").map((e) => e.payload.sockets.A?.watermark ?? e.payload.watermark).filter((m): m is number => m !== undefined);
+    const until = async (done: () => boolean) => { for (let spin = 0; spin < 4000 && !done() && !state.recoveries; spin++) await new Promise((resolve) => setTimeout(resolve, 5)); };
+    return { log, state, marks, until };
+  };
+
+  it("never certifies a deferred holder's live query with a watermark before its result was sent", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      const { log, state, marks, until } = await heldLoad(h, async (view) => {
+        h.engine.observe(view);
+        expect(JSON.parse(await h.live.subscribe("A", view.tenant!, { id: "live", path: "items.live", args: {} })).type).toBe("query.result");
+      });
+      const revision = await h.commit([["UPDATE items SET label = 'changed-while-deferred' WHERE id = 'i000000'", []]], false);
+      for (let spin = 0; spin < 40; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(marks().some((m) => m >= revision), "A is deferred while its snapshot drains").toBe(false);
+      state.release();
+      await until(() => marks().some((m) => m >= revision));
+      await h.engine.settled();
+      expect(state.recoveries).toBe(0);
+      // Every op to A in order; the first watermark at or past the commit must come after the changed live result.
+      const ordered = log.filter((e) => e.host === "h1" && e.payload.sockets.A).flatMap((e) => [
+        ...e.payload.sockets.A!.ops.filter((op) => op[0] === "f").map((op) => op[1] as string),
+        ...(e.payload.sockets.A!.watermark !== undefined ? [`mark:${e.payload.sockets.A!.watermark}`] : []),
+      ]);
+      const certified = ordered.findIndex((text) => text.startsWith("mark:") && Number(text.slice(5)) >= revision);
+      const result = ordered.findIndex((text) => text.includes('"type":"query.result"') && text.includes("changed-while-deferred"));
+      expect(certified).toBeGreaterThanOrEqual(0);
+      expect(result, "the changed live result reaches A").toBeGreaterThanOrEqual(0);
+      expect(result).toBeLessThan(certified);
+    }, MODULE, true, undefined, undefined, ["h1"]);
+  });
+
+  it("replays a long deferral in payloads that fit: 300 commits, no reset, in order, watermark to the last", { timeout: 120_000 }, async () => {
+    await withEngine(async (h) => {
+      const { log, state, marks, until } = await heldLoad(h);
+      let last = 0;
+      for (let n = 0; n < 300; n++) last = await h.commit([[`UPDATE items SET label = 'c${n}' WHERE id = 'i000001'`, []]], false);
+      state.release();
+      await until(() => marks().includes(last));
+      await h.engine.settled();
+      expect(state.recoveries).toBe(0);
+      expect(h.engine.stats.resets).toBe(0);
+      const seen = marks();
+      expect(seen).toEqual([...seen].sort((a, b) => a - b));
+      expect(seen[seen.length - 1]).toBe(last);
+      const labels = log.filter((e) => e.host === "h1").flatMap((e) => (e.payload.sockets.A?.ops ?? []).filter((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"')).map((op) => /"label":"(c\d+)"/.exec(op[1] as string)?.[1]));
+      expect(labels.length).toBeGreaterThan(0);
+      expect(labels[labels.length - 1]).toBe("c299");
+      expect(h.conflicts, "catch-up, commits and opens share one invocation queue").toEqual([]);
+    }, MODULE, false, undefined, undefined, ["h1"]);
+  });
+
+  it("still resets a holder that stops making progress, after the stall bound, and then converges", { timeout: 120_000 }, async () => {
+    const { recoveries, ready } = await load(2_000, 4, { hold: 400, stallMs: 50 });
+    expect(recoveries).toBeGreaterThanOrEqual(1);
+    expect(recoveries).toBeLessThanOrEqual(2);
+    expect(ready).toBe(4);
   });
 });

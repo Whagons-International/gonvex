@@ -39,6 +39,21 @@ export const OPEN_REQUEST_MAX_BYTES = 32 * 1024 * 1024;
 /** Payloads queued to one holder before its sockets are reset `change-feed-lagged`. */
 export const MAX_QUEUED_PAYLOADS = 256;
 /**
+ * BUG-4: how long a backlogged holder may make no progress before its sockets are reset `change-feed-lagged`
+ * (Rust's `GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS`, default 30 s: a socket whose writes stop progressing). Rust defers
+ * the feed per socket while it is backlogged (lib.rs `defer_feed`) and a lagging receiver resumes from the log
+ * (change_feed/backlog.rs), so outbound bytes alone never reset a subscription.
+ */
+export const HOLDER_STALL_MS = 30_000;
+/**
+ * Backoff while the isolate's shared byte credits (not this holder's queue) are what is full: another tenant's
+ * outlet cannot signal this object (workerd forbids I/O across objects), so it is a timer, 10 ms doubling to 1 s.
+ */
+const ROOM_BACKOFF_MS = [10, 1_000] as const;
+/** Revisions one catch-up chunk reads (Rust's `FILL_REVISIONS`, the most one log refill re-reads). */
+export const CATCHUP_REVISIONS = 16;
+const backoff = (attempt: number) => Math.min(ROOM_BACKOFF_MS[1], ROOM_BACKOFF_MS[0] * 2 ** attempt);
+/**
  * Characters of text in one payload (at most 3 UTF-8 bytes each, so 24 MiB): Workers RPC refuses an argument over
  * 32 MiB (0020 §6, 0022 §4.4). A larger delivery goes as several payloads, in order.
  */
@@ -104,6 +119,8 @@ export interface DeliveryOutlet {
   queued(host: string): number;
   /** X01: holder-specific byte/count pressure; the reset still uses this engine's ordered channel. */
   backlogged?(host: string): boolean;
+  /** BUG-4: whether `send` would accept `payload` now, without queueing it or tripping recovery. */
+  admits?(host: string, payload: ReplicaDelivery): boolean;
   /** X01: same ordered channel, constant-size recovery reserve; an ordinary receipt is never an ack. */
   reset?(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
   /** Drops what is queued for `host` (lag), keeping order for what comes next. */
@@ -149,6 +166,8 @@ export interface DeliveryOptions {
   readonly live?: LiveQueries | undefined;
   /** BUG-2: every socket event or commit that reaches the engine (the tenant keeps itself from hibernating). */
   readonly activity?: () => void;
+  /** BUG-4: `HOLDER_STALL_MS` (tests shorten it). */
+  readonly stallMs?: number;
 }
 
 export interface DeliveryStats {
@@ -169,6 +188,12 @@ export interface DeliveryStats {
 
 const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 interface HostBarrier { pending: boolean; retryAt: number; catchup: boolean; owed?: boolean }
+/**
+ * BUG-4: a holder whose commits are deferred. It has been sent every commit through `from`; later ones stay in the
+ * change log until its channel has room. `outbox` holds payloads waiting for admission, in order: an open's last work
+ * that did not fit, then catch-up chunks.
+ */
+interface Deferred { from: number; since: number; outbox: Array<{ payload: ReplicaDelivery; revision: number }>; waiting: boolean; attempts: number; timer?: ReturnType<typeof setTimeout> }
 interface DeferredQuery { readonly socket: SocketView; readonly id: string; readonly snapshot: (db: StorageSession) => string }
 
 /** FNV-1a 64 of path and arguments: the stream identity (any per-socket-unique token works, A.4 row 2). */
@@ -197,6 +222,7 @@ export class ReplicaDeliveryEngine {
   private readonly recovering = new Map<string, HostBarrier>();
   private readonly fencing = new Map<string, HostBarrier>();
   private readonly deferredQueries = new Map<string, DeferredQuery[]>();
+  private readonly behind = new Map<string, Deferred>();
   private waitingOpens = 0;
   private lastOpened: string | undefined;
 
@@ -292,7 +318,9 @@ export class ReplicaDeliveryEngine {
     const initial = socket.initialRequests?.find(ref => ref.kind === "query" && ref.epoch === connection.epoch);
     const ops = replies.map((text): SocketOp => ["f", text]);
     const initialCompletions = initial ? ops.flatMap((op, index) => { const c = initialCompletion(initial, op, index); return c ? [c] : []; }) : [];
-    this.post(connection, { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(computed.length&&initialCompletions.some(c=>c.outcome==="accepted") ? { watermark: Math.min(...computed) } : {}) });
+    // BUG-4: a deferred holder's watermark comes with its catch-up, never ahead of the replica commits it owes.
+    const certify = computed.length && initialCompletions.some(c=>c.outcome==="accepted") && !this.behind.has(connection.host);
+    this.post(connection, { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(certify ? { watermark: Math.min(...computed) } : {}) });
   }
 
   /** Initial LQ snapshots and their enqueue share the reducer/commit serialization turn. */
@@ -484,13 +512,25 @@ export class ReplicaDeliveryEngine {
 
   // ---- the task loop ---------------------------------------------------------------------
 
+  /** A wake that arrived while the loop was finishing; the loop runs once more (BUG-4: a holder's room signal). */
+  private again = false;
+
   private kick(): void {
-    if (this.running) return;
-    this.running = this.run().finally(() => { this.running = undefined; });
+    if (this.running) { this.again = true; return; }
+    this.again = false;
+    this.running = this.run().finally(() => {
+      this.running = undefined;
+      if (this.again) this.kick();
+    });
   }
 
   private async run(): Promise<void> {
     for (;;) {
+      const due = this.dueHolder();
+      if (due) {
+        await this.options.serial(() => this.catchUp(due));
+        continue;
+      }
       if (this.delivered === undefined || this.wanted > this.delivered.revision) {
         const more = await this.options.serial(() => this.deliverCommits());
         if (more) continue;
@@ -504,9 +544,162 @@ export class ReplicaDeliveryEngine {
     }
   }
 
+  // ---- BUG-4: per-holder deferral -------------------------------------------------------
+
+  private stallMs(): number { return this.options.stallMs ?? HOLDER_STALL_MS; }
+
+  /** Whether `host` can take more now: not backlogged, and its next deferred open work fits. */
+  private hasRoom(host: string, deferred?: Deferred): boolean {
+    const outlet = this.options.outlet;
+    if (outlet.queued(host) >= MAX_QUEUED_PAYLOADS || outlet.backlogged?.(host)) return false;
+    const first = deferred?.outbox[0];
+    return !first || !outlet.admits || outlet.admits(host, first.payload);
+  }
+
+  /**
+   * Stops commit delivery to `host` after revision `from` (its channel is full, typically with a large first load's
+   * snapshot pages). Every other holder keeps getting commits at once; this one catches up from the log when it has
+   * room, or is reset lagged after `HOLDER_STALL_MS` without progress.
+   */
+  private defer(host: string, from: number): Deferred {
+    let deferred = this.behind.get(host);
+    if (!deferred) {
+      deferred = { from, since: 0, outbox: [], waiting: false, attempts: 0 };
+      this.behind.set(host, deferred);
+      this.progressed(deferred);
+    }
+    this.awaitRoom(host, deferred);
+    return deferred;
+  }
+
+  /** The holder accepted something: the stall bound starts again (and wakes the loop if it passes). */
+  private progressed(deferred: Deferred): void {
+    deferred.since = Date.now();
+    clearTimeout(deferred.timer);
+    deferred.timer = setTimeout(() => this.kick(), this.stallMs());
+  }
+
+  /** Its next waiting payload fits, or (none waiting) it has room for the next catch-up chunk. */
+  private ready(host: string, deferred: Deferred): boolean {
+    return this.hasRoom(host, deferred);
+  }
+
+  private undefer(host: string): void {
+    const deferred = this.behind.get(host);
+    if (!deferred) return;
+    clearTimeout(deferred.timer);
+    this.behind.delete(host);
+  }
+
+  /** One wake when the holder drains (or, its queue being empty, when isolate credits are released). */
+  private awaitRoom(host: string, deferred: Deferred): void {
+    if (deferred.waiting) return;
+    deferred.waiting = true;
+    const outlet = this.options.outlet;
+    const signal = outlet.queued(host) > 0 ? (deferred.attempts = 0, outlet.idle(host))
+      : new Promise<void>((resolve) => setTimeout(resolve, backoff(deferred.attempts++)));
+    void signal.then(() => {
+      deferred.waiting = false;
+      if (this.behind.get(host) === deferred) this.kick();
+    });
+  }
+
+  /** A deferred holder that now has room, or that stalled past the bound. */
+  private dueHolder(): string | undefined {
+    for (const [host, deferred] of this.behind) {
+      if (this.paused(host)) { this.undefer(host); continue; }
+      if (this.ready(host, deferred) || Date.now() - deferred.since >= this.stallMs()) return host;
+      this.awaitRoom(host, deferred);
+    }
+    return undefined;
+  }
+
+  /**
+   * One step of a deferred holder's catch-up, in order: payloads waiting in its outbox go out while each is admitted;
+   * with none left, the next `CATCHUP_REVISIONS` commits after `from` are read again from the change log for its
+   * connections only (each with its watermark) into the outbox. Its live queries are re-snapshotted at the head of
+   * each chunk: the main feed does not evaluate them while it is deferred, so every result changed since the last one
+   * it was sent precedes any watermark that certifies it. The holder leaves the deferred state once nothing remains.
+   */
+  private async catchUp(host: string): Promise<void> {
+    const deferred = this.behind.get(host);
+    if (!deferred || this.paused(host)) return;
+    if (!this.ready(host, deferred)) {
+      if (Date.now() - deferred.since < this.stallMs()) return this.awaitRoom(host, deferred);
+      // Rust: a socket whose writes stop progressing is reset (GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS).
+      this.undefer(host);
+      this.requestRecovery(host);
+      return;
+    }
+    if (deferred.outbox.length) {
+      while (deferred.outbox.length && this.hasRoom(host, deferred)) {
+        const { payload, revision } = deferred.outbox.shift()!;
+        void this.sendOne(host, payload, revision);
+      }
+      this.progressed(deferred);
+      if (deferred.outbox.length) this.awaitRoom(host, deferred);
+      return;
+    }
+    const through = this.delivered?.revision ?? deferred.from;
+    if (deferred.from >= through) { this.undefer(host); return; }
+    const ids = new Set([...this.connections.values()].filter((c) => c.host === host).map((c) => c.id));
+    const chunk = await this.options.read((db) => {
+      const clock = readClock(sqlOf(db));
+      if (clock.retained > deferred.from) return undefined; // the log no longer covers it
+      const to = Math.min(through, deferred.from + CATCHUP_REVISIONS);
+      const live = ids.size ? this.options.live?.applyFeedSnapshot(db, { kind: "reset" }, undefined, ids) : undefined;
+      const payloads: Array<[string, ReplicaDelivery, number]> = [];
+      if (live?.size) {
+        const sockets: Record<string, SocketWork> = {};
+        for (const [id, frames] of live) {
+          const connection = this.connections.get(id);
+          if (connection) sockets[id] = { ops: frames.map((text): SocketOp => ["f", text]), subscriptionEpoch: connection.epoch } as ScopedSocketWork;
+        }
+        payloads.push([host, this.payload([], sockets), 0]);
+      }
+      for (const transaction of readTransactions(sqlOf(db), clock.epoch, deferred.from, to)) payloads.push(...this.deliverTransaction(db, transaction, host));
+      return { payloads, to };
+    });
+    if (this.behind.get(host) !== deferred) return;
+    if (!chunk) { this.undefer(host); this.requestRecovery(host); return; }
+    deferred.from = chunk.to;
+    for (const [, payload, revision] of chunk.payloads) this.queueDeferred(deferred, payload, revision);
+    this.progressed(deferred);
+  }
+
+  /** Appends `payload` to a deferred holder's outbox in parts under the RPC cap; the revision rides the last part. */
+  private queueDeferred(deferred: Deferred, payload: ReplicaDelivery, revision: number): void {
+    const parts = splitPayload(payload);
+    parts.forEach((part, index) => deferred.outbox.push({ payload: part, revision: index === parts.length - 1 ? revision : 0 }));
+  }
+
+  private socketPayload(connection: Connection, work: SocketWork): ReplicaDelivery {
+    return this.payload([], { [connection.id]: { ...work, subscriptionEpoch: connection.epoch } as ScopedSocketWork });
+  }
+
+  /**
+   * Snapshot pages in the middle of an open wait for room on their holder's channel instead of being refused there
+   * (a refusal resets the whole holder); the scan already waits for the channel between chunks (`drain`).
+   */
+  private async postWhenRoom(connection: Connection, work: SocketWork): Promise<void> {
+    const outlet = this.options.outlet;
+    if (outlet.admits) {
+      const payload = this.socketPayload(connection, work);
+      const deadline = Date.now() + this.stallMs();
+      for (let left = deadline - Date.now(), attempt = 0; left > 0 && !this.paused(connection.host) && !outlet.admits(connection.host, payload); left = deadline - Date.now()) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const queued = outlet.queued(connection.host) > 0;
+        const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, queued ? left : Math.min(backoff(attempt++), left)); });
+        await (queued ? Promise.race([outlet.idle(connection.host), bound]) : bound);
+        clearTimeout(timer);
+      }
+    }
+    this.post(connection, work);
+  }
+
   /** Round robin over connections with pending opens (one open per turn, as Rust pages one subscription per turn). */
   private nextOpen(): { connection: Connection; request: OpenRequest } | undefined {
-    const ids = [...this.connections.keys()].filter((id) => { const c = this.connections.get(id)!; return c.pending.length && !this.paused(c.host); }).sort(byId);
+    const ids = [...this.connections.keys()].filter((id) => { const c = this.connections.get(id)!; return c.pending.length && !this.paused(c.host) && !this.behind.has(c.host); }).sort(byId);
     if (!ids.length) return undefined;
     const id = ids.find((candidate) => this.lastOpened === undefined || candidate > this.lastOpened) ?? ids[0]!;
     this.lastOpened = id;
@@ -520,11 +713,17 @@ export class ReplicaDeliveryEngine {
     if (this.connections.get(connection.id) !== connection) return;
     // Every commit up to now is delivered before the snapshot is read, so the subscription joins at the clock.
     await this.deliverCommits();
+    if (this.behind.has(connection.host) && this.connections.get(connection.id) === connection) {
+      // Its holder's commits are deferred: the open waits for the catch-up so its subscription joins at the clock.
+      connection.pending.unshift(request);
+      this.waitingOpens += 1;
+      return;
+    }
     const ops: SocketOp[] = [];
     const current = () => this.connections.get(connection.id) === connection && (!request.initial || connection.initials.has(request.initial.generation));
-    const flush = () => {
+    const flush = async () => {
       if (!ops.length || !current()) return;
-      this.post(connection, { ops: ops.splice(0), ...(request.initial?{initialScope:request.initial}:{}) });
+      await this.postWhenRoom(connection, { ops: ops.splice(0), ...(request.initial?{initialScope:request.initial}:{}) });
     };
     const progress: ScanProgress = { statements: 0, rowsRead: 0 };
     const subscription = await openReplica(request, {
@@ -537,7 +736,7 @@ export class ReplicaDeliveryEngine {
       registry: this.registry,
       read: this.options.read,
       emit: (frames) => { for (const text of frames) ops.push(["f", text]); },
-      drain: async () => { flush(); await this.options.outlet.idle(connection.host); },
+      drain: async () => { await flush(); await this.options.outlet.idle(connection.host); },
       progress,
     });
     this.stats.opens += 1;
@@ -574,7 +773,15 @@ export class ReplicaDeliveryEngine {
       }
     }
     const initialCompletions = request.initial ? ops.flatMap((op, index) => { const c = initialCompletion(request.initial!, op, index); return c ? [c] : []; }) : [];
-    this.post(connection, { ops: ops.splice(0), initialCompletions, ...(request.initial?{initialScope:request.initial}:{}), ...(subscription ? { opened } : { removed: [request.id] }) });
+    const last: SocketWork = { ops: ops.splice(0), initialCompletions, ...(request.initial?{initialScope:request.initial}:{}), ...(subscription ? { opened } : { removed: [request.id] }) };
+    const outlet = this.options.outlet;
+    if (outlet.admits && !this.paused(connection.host) && (this.behind.has(connection.host) || !outlet.admits(connection.host, this.socketPayload(connection, last)))) {
+      // BUG-4: no room on this holder's channel. Its commits wait with this work (it was read at `delivered`); the
+      // invocation queue is released, so every other holder keeps getting commits.
+      this.queueDeferred(this.defer(connection.host, this.delivered?.revision ?? 0), this.socketPayload(connection, last), 0);
+      return;
+    }
+    this.post(connection, last);
   }
 
   /** Reads and delivers every committed transaction after the delivery's cursor. True when more arrived meanwhile. */
@@ -614,6 +821,10 @@ export class ReplicaDeliveryEngine {
       // A new epoch with the log intact (an import that kept the revisions) is delivered as Rust's feed delivers it:
       // transactions carry the new epoch, subscriptions keep their cursor's (lib.rs, feed task).
       const payloads: Array<[string, ReplicaDelivery, number]> = [];
+      for (const host of new Set([...this.connections.values()].map((c) => c.host))) {
+        if (this.behind.has(host) || this.paused(host)) continue;
+        if (this.options.outlet.queued(host) >= MAX_QUEUED_PAYLOADS || this.options.outlet.backlogged?.(host)) this.defer(host, this.delivered.revision);
+      }
       const transactions = readTransactions(sqlOf(db), clock.epoch, this.delivered.revision, clock.revision);
       let previous = this.delivered.revision;
       for (const transaction of transactions) {
@@ -629,6 +840,7 @@ export class ReplicaDeliveryEngine {
   /** Every subscription of every connection gets `replica.reset` (lib.rs 2367-2386, replica.rs 1340-1355). */
   private resetAll(reason: string, live?: ReadonlyMap<string, string[]>): Array<[string, ReplicaDelivery, number]> {
     const byHost = new Map<string, Record<string, SocketWork>>();
+    for (const host of [...this.behind.keys()]) this.undefer(host); // every subscription resets; deferred work is moot
     for (const connection of this.connections.values()) {
       const ops: SocketOp[] = [...(live?.get(connection.id) ?? []).map((text): SocketOp => ["f", text]), ...[...connection.subscriptions.values()].sort((a, b) => byId(a.id, b.id)).map((s) => ["f", resetFrame(s.id, s.path, reason)] as const)];
       const removed = [...connection.subscriptions.keys()];
@@ -644,16 +856,18 @@ export class ReplicaDeliveryEngine {
   }
 
   /** One committed transaction for every connection: frames per socket, shared texts once. */
-  private deliverTransaction(db: StorageSession, transaction: FeedTransaction): Array<[string, ReplicaDelivery, number]> {
-    this.stats.commits += 1;
-    // Ruling 0048(a): evaluate first, then prepend frames to each socket's replica work.
-    const live = this.options.live?.applyFeedSnapshot(db, {
+  private deliverTransaction(db: StorageSession, transaction: FeedTransaction, only?: string): Array<[string, ReplicaDelivery, number]> {
+    if (!only) this.stats.commits += 1;
+    // Ruling 0048(a): evaluate first, then prepend frames to each socket's replica work. A catch-up (`only`) sends
+    // its own re-snapshot of the holder's live queries ahead of the chunk instead.
+    const deferred = only ? new Set<string>() : new Set([...this.connections.values()].filter((c) => this.behind.has(c.host)).map((c) => c.id));
+    const live = only ? undefined : this.options.live?.applyFeedSnapshot(db, {
       kind: "transaction", epoch: transaction.epoch, revision: transaction.revision,
       changes: transaction.changes.map((change) => ({ ...change,
         oldValue: change.oldValue && typeof change.oldValue === "object" && !Array.isArray(change.oldValue) ? change.oldValue : null,
         newValue: change.newValue && typeof change.newValue === "object" && !Array.isArray(change.newValue) ? change.newValue : null,
       })),
-    });
+    }, undefined, undefined, deferred.size ? deferred : undefined); // BUG-4: a deferred holder's are re-run in its catch-up
     const collapsed = new CollapsedChanges(transaction.changes);
     const shared: string[] = [];
     const index = new Map<string, number>();
@@ -671,11 +885,8 @@ export class ReplicaDeliveryEngine {
     });
     const eventShare = new EventShare(new EvalMemo());
     const byHost = new Map<string, Record<string, SocketWork>>();
-    const lagged = new Set<string>();
-    for (const host of new Set([...this.connections.values()].map((c) => c.host))) {
-      if (this.options.outlet.queued(host) >= MAX_QUEUED_PAYLOADS || this.options.outlet.backlogged?.(host)) lagged.add(host);
-    }
     for (const connection of [...this.connections.values()].sort((a, b) => byId(a.id, b.id))) {
+      if (only !== undefined && connection.host !== only) continue;
       const session = connection.session;
       if (membership && transaction.revision > session.admissionRevision
         && (membership.members.includes(session.member.id) || membership.accounts.includes(session.identity.account.id))) {
@@ -684,10 +895,8 @@ export class ReplicaDeliveryEngine {
         this.connections.delete(connection.id);
         continue;
       }
-      if (lagged.has(connection.host)) {
-        this.requestRecovery(connection.host);
-        continue;
-      }
+      // BUG-4: a deferred holder gets this commit (and its watermark) from the log in its catch-up.
+      if (only === undefined && this.behind.has(connection.host)) continue;
       const queryFrames = live?.get(connection.id) ?? [];
       const { frames, removed } = applyTransaction(connection.subscriptions, transaction, collapsed, reads, eventShare, this.options.tenantId);
       for (const subscription of removed) {
@@ -704,7 +913,7 @@ export class ReplicaDeliveryEngine {
 
     // A commit's watermark reaches every holder, including those with no work this time; each gets only its texts.
     const out: Array<[string, ReplicaDelivery, number]> = [];
-    const hosts = new Set([...byHost.keys(), ...this.knownHosts]);
+    const hosts = only !== undefined ? new Set([only]) : new Set([...byHost.keys(), ...this.knownHosts].filter((host) => !this.behind.has(host)));
     for (const host of hosts) {
       const sockets = byHost.get(host) ?? {};
       out.push([host, this.payload(Object.keys(sockets).length ? shared : [], sockets, transaction.revision, membership && { revision: transaction.revision, ...membership }), transaction.revision]);
@@ -750,8 +959,25 @@ export class ReplicaDeliveryEngine {
     void this.send(connection.host, this.payload([], { [connection.id]: { ...work, subscriptionEpoch: connection.epoch } as ScopedSocketWork }), 0);
   }
 
+  /**
+   * A batch's payloads, in order. BUG-4: a holder that has no room for the next one (many commits coalesced into one
+   * batch, or a full channel) is deferred with it: it and the rest of the batch for that holder wait in its outbox,
+   * already computed and in order, instead of being refused (a refusal resets the whole holder).
+   */
   private async sendAll(payloads: Array<[string, ReplicaDelivery, number]>): Promise<void> {
-    for (const [host, payload, revision] of payloads) void this.send(host, payload, revision);
+    const outlet = this.options.outlet;
+    for (const [host, payload, revision] of payloads) {
+      if (this.paused(host)) { void this.send(host, payload, revision); continue; }
+      let deferred = this.behind.get(host);
+      if (!deferred && outlet.admits) {
+        const parts = splitPayload(payload);
+        let fits = true;
+        for (const part of parts) if (!outlet.admits(host, part)) { fits = false; break; }
+        if (!fits) deferred = this.defer(host, this.delivered?.revision ?? 0);
+      }
+      if (deferred) this.queueDeferred(deferred, payload, revision);
+      else void this.send(host, payload, revision);
+    }
   }
 
   private send(host: string, payload: ReplicaDelivery, revision: number): Promise<void> {
@@ -828,6 +1054,7 @@ export class ReplicaDeliveryEngine {
   }
 
   private dropHost(host: string): void {
+    this.undefer(host);
     for (const connection of this.connections.values()) if (connection.host === host) {
       this.stats.resets += connection.subscriptions.size;
       this.drop(connection);
