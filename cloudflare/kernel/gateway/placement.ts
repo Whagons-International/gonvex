@@ -9,6 +9,15 @@ export const MAX_SOCKETS = 125; // S3 starting point, not measured full-app capa
 export const SAMPLE_MS = 5_000;
 export const SCALE_IN_MS = 120_000;
 export const COOLDOWN_MS = 60_000;
+/**
+ * BUG-9 / 0054: normal scale-in waits for natural disconnect before any reconnect cohort. A quiet holder stops
+ * taking admissions at once and retires when empty; only after this grace may its remaining sockets get 1012.
+ * Pressure (hot-holder) drains keep their 30 s start.
+ */
+export const SCALE_IN_GRACE_MS = 6 * 60 * 60_000;
+export const PRESSURE_DRAIN_START_MS = 30_000;
+/** How often a waiting scale-in holder is probed for emptiness (an empty report probes it at once). */
+export const SCALE_IN_CHECK_MS = 300_000;
 
 export interface GatewayAssignment {
   v: 1;

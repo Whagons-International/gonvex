@@ -46,6 +46,10 @@ export class SessionControlObject extends OperatorControlObject {
   protected override publicationVersionReady(version: string): Promise<boolean> {
     return this.catalog().ready(version);
   }
+  protected override async publicationVersionAbsent(version: string): Promise<boolean> {
+    const serving = await this.catalog().serving(version);
+    return !serving.runtime && !serving.actions;
+  }
   private catalog(): import("./catalog-port").CatalogPort {
     const catalog=(this.env as unknown as {RUNTIME_CATALOG?:import("./catalog-port").CatalogPort}).RUNTIME_CATALOG;
     if(!catalog)throw new Error("runtime catalog service is not bound");

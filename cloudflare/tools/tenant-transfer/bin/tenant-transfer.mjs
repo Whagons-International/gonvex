@@ -23,6 +23,7 @@ import {
   compareSchemas,
   fileChecksums,
   fileSchema,
+  objectChecks,
   objectChecksums,
   pullFile,
   pushFile,
@@ -89,7 +90,7 @@ async function verifyObject(c, path, { fts = [] } = {}) {
   const catalog = await c.call('catalog');
   const schema = compareSchemas(catalog.schema, fileSchema(path));
   const extraTables = catalog.plans.map((p) => p.name).filter((n) => !(n in fileSums));
-  const checks = await c.call('check', { fts });
+  const checks = await objectChecks(c, fts);
   return { checksums: compareChecksums(fileSums, objectSums), schema, extraTables, checks, fileSums, objectSums };
 }
 
@@ -181,7 +182,11 @@ async function runOne(source) {
     } else {
       try {
         const entries = Object.entries(stagedSums);
-        for (let i = 0; i < entries.length; i += 60) await c.call('verify', { checksums: Object.fromEntries(entries.slice(i, i + 60)) });
+        for (let i = 0; i < entries.length; i += 60) {
+          // The object checks a page within its CPU budget and answers `pending` until done (X10).
+          const checksums = Object.fromEntries(entries.slice(i, i + 60));
+          while ((await c.call('verify', { checksums })).pending);
+        }
         result.assemblyImport = await c.call('complete');
       } catch (error) {
         result.findings.push(`assembly import completion: ${error.message}`);

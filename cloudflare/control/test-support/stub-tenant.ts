@@ -22,6 +22,7 @@ import type {
   MembershipWriteResult,
   TenantPort,
 } from "../src/tenant-port";
+import { E2E_MEMBER_PERMISSIONS, E2E_MEMBER_ROLE } from "../src/tenant-port";
 import type { Member } from "../src/types";
 import { uuidSimple } from "../src/util";
 
@@ -295,15 +296,17 @@ export class StubTenantObject extends DurableObject<StubEnv> implements TenantPo
           const revision = num(
             this.sql.value(
               `INSERT INTO members(id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
-               VALUES($1,$2,'active',$3,$4,'admin','{"e2e":true}',${NOW_MS})
+               VALUES($1,$2,'active',$3,$4,$5,$6,${NOW_MS})
                ON CONFLICT(id) DO UPDATE SET status='active',display_name=EXCLUDED.display_name,
-                 avatar_url=EXCLUDED.avatar_url,role='admin',permissions='{"e2e":true}',
+                 avatar_url=EXCLUDED.avatar_url,role=EXCLUDED.role,permissions=EXCLUDED.permissions,
                  membership_revision=members.membership_revision+1,updated_at=${NOW_MS}
                RETURNING membership_revision`,
               memberId,
               write.accountId,
               write.displayName,
               write.avatarUrl,
+              write.role ?? E2E_MEMBER_ROLE,
+              write.permissions === undefined ? E2E_MEMBER_PERMISSIONS : JSON.stringify(write.permissions),
             ),
           );
           return { memberId, revision, updated: true };

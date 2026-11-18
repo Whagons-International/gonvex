@@ -1,5 +1,6 @@
 // Development-only P03 transport into the serving tenant's SQLite, never a second object.
 import { rpc } from '../session/rpc';
+import { devTransferAllowed } from '../../control/operator/config';
 import { timingSafeEqual } from 'node:crypto';
 import { TenantTransfer } from '../../tools/tenant-transfer/src/transport.mjs';
 
@@ -11,9 +12,7 @@ export interface TransferEnv {
   GONVEX_DEV_TRANSFER_TENANTS?: string;
 }
 export function transferAllowed(env: TransferEnv, tenant: string): boolean {
-  return !!env.GONVEX_DEV_TRANSFER_TARGET?.startsWith('gonvex-cf-dev-') &&
-    /^devcopy-[A-Za-z0-9_-]{1,100}$/.test(tenant) &&
-    (env.GONVEX_DEV_TRANSFER_TENANTS ?? '').split(',').includes(tenant);
+  return devTransferAllowed({ target: env.GONVEX_DEV_TRANSFER_TARGET, tenants: env.GONVEX_DEV_TRANSFER_TENANTS }, tenant);
 }
 const operations = new Set(['status', 'schema', 'insert', 'sequence', 'catalog', 'read', 'checksum', 'check', 'pragma', 'wipe', 'verify', 'complete']);
 export async function handleTenantTransfer(request: Request, env: TransferEnv & { TENANT: DurableObjectNamespace<any> }): Promise<Response | null> {
@@ -32,7 +31,14 @@ export async function handleTenantTransfer(request: Request, env: TransferEnv & 
   return rpc<{ assemblyTransfer(request: Request): Promise<Response> }>(env.TENANT, match[1]!).assemblyTransfer(new Request(request, { body: bytes }));
 }
 
-type ImportState = { phase: 'copying' | 'ready'; schemaFailures: number; checked: boolean; verified: Record<string, { rows: number; sha256: string }> };
+type Checksum = { rows: number; sha256: string };
+/**
+ * `verifying` and `checking` hold the object's own cursors between requests: each request stops at the
+ * transport's CPU budget (X10) and the next one continues where it stopped. A write clears both.
+ */
+type ImportState = { phase: 'copying' | 'ready'; schemaFailures: number; checked: boolean; verified: Record<string, Checksum>;
+  verifying?: { expected: Record<string, Checksum>; done: Record<string, Checksum>; cursor: unknown };
+  checking?: { fts: string[]; cursor: unknown } };
 /** Caller serializes with the kernel's ordinary reducer/migration queue. */
 export async function transferIntoTenant(ctx: DurableObjectState, request: Request, active: boolean): Promise<Response> {
   const op = new URL(request.url).pathname.split('/').at(-1)!;
@@ -56,6 +62,11 @@ export async function transferIntoTenant(ctx: DurableObjectState, request: Reque
     return Response.json({ wiped: true });
   }
   if (!state) return Response.json({ error: 'begin with wipe on a fresh tenant' }, { status: 409 });
+  // A resumable checksum or check is exact only over a quiescent tenant: they run only while it is being
+  // imported, when nothing but this serialized transfer path writes it (no module, no migrations).
+  if ((op === 'checksum' || op === 'check' || op === 'verify') && state.phase !== 'copying') {
+    return Response.json({ error: `${op} runs only while the import is in progress` }, { status: 409 });
+  }
   if (op === 'verify') {
     if (state.phase !== 'copying') return Response.json({ error: 'import already completed' }, { status: 409 });
 
@@ -63,11 +74,40 @@ export async function transferIntoTenant(ctx: DurableObjectState, request: Reque
     const expected = body.checksums;
     if (!expected || typeof expected !== 'object' || Array.isArray(expected) || Object.keys(expected).length > 60 ||
         Object.values(expected).some(v => !v || !Number.isSafeInteger(v.rows) || v.rows < 0 || !/^[a-f0-9]{64}$/.test(v.sha256))) return Response.json({ error: 'invalid checksum page' }, { status: 400 });
-    const response = await new TenantTransfer(ctx).fetch(new Request('http://transfer/checksum', {method:'POST', body:JSON.stringify({tables:Object.keys(expected)})}));
-    const result = await response.json() as { checksums: typeof expected };
-    if (!response.ok || Object.entries(expected).some(([table, value]) => result.checksums?.[table]?.rows !== value.rows || result.checksums?.[table]?.sha256 !== value.sha256)) return Response.json({ error: 'P03 table checksum mismatch' }, { status: 409 });
+    const key = JSON.stringify(expected);
+    const job = state.verifying && JSON.stringify(state.verifying.expected) === key ? state.verifying : { expected, done: {}, cursor: null };
+    const response = await new TenantTransfer(ctx).fetch(new Request('http://transfer/checksum', {method:'POST', body:JSON.stringify({tables:Object.keys(expected), cursor: job.cursor})}));
+    const result = await response.json() as { checksums?: typeof expected; next?: unknown };
+    if (response.ok && result.next) {
+      job.done = { ...job.done, ...result.checksums }; job.cursor = result.next; state.verifying = job; ctx.storage.kv.put(IMPORT_KEY, state);
+      return Response.json({ pending: true, verified: 0 });
+    }
+    delete state.verifying;
+    if (response.status === 409) { ctx.storage.kv.put(IMPORT_KEY, state); return Response.json({ error: 'the tenant was written during verify; verify again' }, { status: 409 }); }
+    const done = { ...job.done, ...result.checksums };
+    if (!response.ok || Object.entries(expected).some(([table, value]) => done[table]?.rows !== value.rows || done[table]?.sha256 !== value.sha256)) {
+      ctx.storage.kv.put(IMPORT_KEY, state);
+      return Response.json({ error: 'P03 table checksum mismatch' }, { status: 409 });
+    }
     state.verified = { ...state.verified, ...expected }; ctx.storage.kv.put(IMPORT_KEY, state);
     return Response.json({ verified: Object.keys(expected).length });
+  }
+  if (op === 'check') {
+    // The cursor stays in the object: a client cannot skip tables of the integrity check.
+    const body = await request.json<{ fts?: unknown }>().catch(() => ({} as { fts?: unknown }));
+    const fts = Array.isArray(body?.fts) && body.fts.every((name) => typeof name === 'string') ? body.fts as string[] : [];
+    const job = state.checking && JSON.stringify(state.checking.fts) === JSON.stringify(fts) ? state.checking : { fts, cursor: null };
+    const response = await new TenantTransfer(ctx).fetch(new Request('http://transfer/check', {method:'POST', body:JSON.stringify({fts, cursor: job.cursor})}));
+    const result = await response.clone().json() as { next?: { step?: number }; quickCheck?: string; foreignKeyViolations?: number; fts?: Record<string, string> };
+    state.checked = false;
+    if (response.ok && result.next) {
+      job.cursor = result.next; state.checking = job; ctx.storage.kv.put(IMPORT_KEY, state);
+      return Response.json({ next: { pending: true, step: result.next.step ?? 0 } });
+    }
+    delete state.checking;
+    state.checked = response.ok && result.quickCheck === 'ok' && result.foreignKeyViolations === 0 && Object.values(result.fts ?? {}).every(value => value === 'ok');
+    ctx.storage.kv.put(IMPORT_KEY, state);
+    return response;
   }
   if (op === 'complete') {
     if (state.phase !== 'copying' || !state.checked || state.schemaFailures) return Response.json({ error: 'P03 integrity checks and zero schema refusals required' }, { status: 409 });
@@ -82,11 +122,10 @@ export async function transferIntoTenant(ctx: DurableObjectState, request: Reque
   const writes = ['schema', 'insert', 'sequence', 'pragma'].includes(op);
   if (state.phase === 'ready' && writes) return Response.json({ error: 'import already completed' }, { status: 409 });
   const response = await new TenantTransfer(ctx).fetch(request);
-  if (writes || op === 'check') {
-    const result = await response.clone().json() as { failed?: unknown[]; quickCheck?: string; foreignKeyViolations?: number; fts?: Record<string, string> };
-    if (writes) { state.checked = false; state.verified = {}; }
+  if (writes) {
+    const result = await response.clone().json() as { failed?: unknown[] };
+    state.checked = false; state.verified = {}; delete state.verifying; delete state.checking;
     if (op === 'schema') state.schemaFailures += result.failed?.length ?? 0;
-    if (op === 'check') state.checked = response.ok && result.quickCheck === 'ok' && result.foreignKeyViolations === 0 && Object.values(result.fts ?? {}).every(value => value === 'ok');
     ctx.storage.kv.put(IMPORT_KEY, state);
   }
   return response;

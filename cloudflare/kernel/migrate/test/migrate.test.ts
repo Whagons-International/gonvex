@@ -1,7 +1,7 @@
 // K02 against real Durable Object SQLite in workerd: release plans, chunked
 // apply with resume, the ledger, directives, restore points.
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildReleasePlan,
   MemoryPlanStore,
@@ -16,6 +16,9 @@ import {
   type ReleasePlan,
 } from "../index.ts";
 import { APP, fakeCapture } from "./fixtures.ts";
+
+// Every transaction ends with a macrotask yield (X10); several of these tests were already near 5 s on the base.
+vi.setConfig({ testTimeout: 60_000 });
 
 let objects = 0;
 async function withObject<T>(fn: (state: DurableObjectState) => Promise<T>): Promise<T> {
@@ -377,6 +380,93 @@ CREATE TRIGGER items_stage BEFORE UPDATE ON items BEGIN INSERT INTO _gonvex_reco
       expect(call.pendingRecords).toEqual([{ table_name: "items", row_id: "a", old_value: '{"n":1}' }]);
       expect(state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_schema WHERE name=?", RECORD_STASH).one().n).toBe(0);
     });
+  });
+});
+
+describe("CPU budget per event (X10)", () => {
+  /** Transactions per event, from `observe`, driving the release with fresh alarms. */
+  async function perEvent(state: DurableObjectState, release: ReleasePlan, extra: Partial<MigratorOptions> = {}, fresh = false) {
+    const counts: number[] = [];
+    let n = 0;
+    const make = () => migrator(state, new MemoryPlanStore(release), { budget: {}, observe: () => void (n += 1), ...extra }).m;
+    let m = make();
+    let s = await m.applyRelease(release.id);
+    counts.push(n);
+    for (let i = 0; i < 500 && s.state === "running"; i += 1) {
+      if (fresh) m = make();
+      n = 0;
+      s = await m.alarm();
+      counts.push(n);
+    }
+    return { counts, status: s, ledger: m.ledger() };
+  }
+
+  it("with the platform's frozen clock an event runs one transaction, not maxChunksPerEvent (fails before X10)", async () => {
+    const release = await plan();
+    await withObject(async (state) => {
+      const frozen = 1_800_000_000_000;
+      const { counts, status } = await perEvent(state, release, { now: () => frozen });
+      expect(status).toMatchObject({ state: "done", error: null });
+      expect(Math.max(...counts)).toBe(1);
+      expect(counts.filter((c) => c === 1).length).toBeGreaterThan(10);
+    });
+  });
+
+  it("a plan chunk is one transaction; one over the budget ends the event and is logged unsplittable with its time", async () => {
+    const release = await plan(APP, { chunk: { maxStatements: 200 } });
+    const sizes: number[] = [];
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (line: string) => void warnings.push(line);
+    let t = 0;
+    try {
+      await withObject(async (state) => {
+        // Every read of the clock is 1.5 s later: every transaction exceeds the 1 s event budget. (A foreign-key
+        // rebuild ends with its existing separate ledger transaction, which has no statements.)
+        const { counts, status } = await perEvent(state, release, { now: () => (t += 1_500), observe: (e) => void (e.unit.startsWith("migration/") && e.statements > 0 && sizes.push(e.statements)) });
+        expect(status).toMatchObject({ state: "done", error: null });
+        expect(Math.max(...counts)).toBeLessThanOrEqual(1);
+      });
+    } finally {
+      console.warn = warn;
+    }
+    expect(sizes).toEqual(release.migrations.map((m) => m.statements));
+    const logged = warnings.map((w) => JSON.parse(w)).filter((w) => w.event === "gonvex.migrate.unsplittable");
+    expect(logged.length).toBeGreaterThan(0);
+    expect(logged[0]).toMatchObject({ budgetMs: 1000 });
+    expect(logged[0].ms).toBeGreaterThan(1000);
+  });
+
+  it("with a moving clock, cheap transactions share an event up to maxChunksPerEvent", async () => {
+    const release = await plan();
+    await withObject(async (state) => {
+      let t = 0;
+      const { counts, status } = await perEvent(state, release, { now: () => (t += 1) });
+      expect(status).toMatchObject({ state: "done", error: null });
+      expect(Math.max(...counts)).toBe(4);
+    });
+  });
+
+  it("the change feed is planned once per pass, not per transaction, and an object replaced every event still finishes", async () => {
+    const release = await plan();
+    const reference = await withObject(async (state) => {
+      const { status, ledger } = await perEvent(state, release);
+      return { status, ledger: ledger.map((r) => r.name), schema: schema(state.storage.sql) };
+    });
+    for (const fresh of [false, true]) {
+      await withObject(async (state) => {
+        const capture = fakeCapture();
+        let plans = 0;
+        const counted = { ...capture, planChangeFeedInstall: (sql: Parameters<typeof capture.planChangeFeedInstall>[0]) => { plans += 1; return capture.planChangeFeedInstall(sql); } };
+        const { status, ledger } = await perEvent(state, release, { capture: counted, budget: { captureStatementsPerTransaction: 2 } }, fresh);
+        expect(status).toMatchObject({ state: "done", error: null });
+        expect(ledger.map((r) => r.name)).toEqual(reference.ledger);
+        expect(schema(state.storage.sql)).toEqual(reference.schema);
+        // Infrastructure, then the tables (one plan for all their batches), then the empty plan that ends it.
+        if (!fresh) expect(plans).toBe(3);
+        expect(capture.installed.filter((r) => r === "infrastructure")).toHaveLength(1);
+      });
+    }
   });
 });
 

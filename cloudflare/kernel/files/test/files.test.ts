@@ -400,6 +400,65 @@ describe("IB1: a private file is refused to a non-owner on every route", () => {
   });
 });
 
+// X11b (contract-changes/0091): the dev-only remap of P03-copied file rows.
+// The gate lives in the caller (AssemblyTenant and the operator route); this
+// is the rewrite itself on a real tenant object.
+describe("dev remap of P03-copied file rows (X11b)", () => {
+  const STAGING = "tenant_source";
+  const seed = (t: ReturnType<typeof tenant>, id: string, tenantId: string, status = "uploaded", project = "01f19dd6-122c-61f8-86fa-36f692a428d4") => t.rows(
+    "INSERT INTO _gonvex_files (id,tenant_id,owner_id,bucket,object_key,visibility,status,size_bytes) VALUES (?,?,?,?,?,'tenant',?,3)",
+    id, tenantId, "mem-alice", "whagons-staging", `${project}/${tenantId}/${id}`, status,
+  );
+  const remap = (t: ReturnType<typeof tenant>, fromTenantId: string, dryRun = false, projectId = "proj") =>
+    t.within((instance) => instance.files.remapTenant({ fromTenantId, tenantId: t.id, projectId, dryRun }));
+
+  it("rewrites tenant_id, object_key and bucket as a native upload would, once, and the batch then resolves", async () => {
+    const t = tenant();
+    const native = await uploaded(t, t.alice, { visibility: "tenant" });
+    const [a, b, other] = ["a".repeat(32), "b".repeat(32), "d".repeat(32)];
+    await seed(t, a, STAGING);
+    await seed(t, b, STAGING, "pending");
+    await t.rows("INSERT INTO _gonvex_storage_uploads (object_key,project_id,file_id) VALUES (?,?,?)", `stg/${STAGING}/${b}`, "stg", b);
+    await seed(t, other, "tenant_third");
+    expect(await t.as(t.alice).fails("getMetadata", { fileId: a })).toBe("file not found");
+
+    const counts = { fromTenantId: STAGING, tenantId: t.id, projectId: "proj", bucket: "gonvex-cf-dev-files-test" };
+    expect(await remap(t, STAGING, true)).toEqual({ ...counts, dryRun: true, matched: 2, remapped: 0, remaining: 2, native: 1, otherTenants: 1, total: 4 });
+    expect(await t.rows("SELECT count(*) AS n FROM _gonvex_files WHERE tenant_id = ?", STAGING)).toEqual([{ n: 2 }]);
+
+    expect(await remap(t, STAGING)).toEqual({ ...counts, dryRun: false, matched: 2, remapped: 2, remaining: 0, native: 3, otherTenants: 1, total: 4 });
+    expect(await t.rows("SELECT id,tenant_id,object_key,bucket,status,size_bytes FROM _gonvex_files WHERE id IN (?,?) ORDER BY id", a, b)).toEqual([
+      { id: a, tenant_id: t.id, object_key: objectKey("proj", t.id, a), bucket: "gonvex-cf-dev-files-test", status: "uploaded", size_bytes: 3 },
+      { id: b, tenant_id: t.id, object_key: objectKey("proj", t.id, b), bucket: "gonvex-cf-dev-files-test", status: "pending", size_bytes: 3 },
+    ]);
+    expect(await t.rows("SELECT object_key,project_id FROM _gonvex_storage_uploads WHERE file_id = ?", b)).toEqual([{ object_key: objectKey("proj", t.id, b), project_id: "proj" }]);
+    expect(await t.rows("SELECT tenant_id,bucket FROM _gonvex_files WHERE id = ?", other)).toEqual([{ tenant_id: "tenant_third", bucket: "whagons-staging" }]);
+
+    // Idempotent: nothing left under the old id.
+    expect(await remap(t, STAGING)).toEqual({ ...counts, dryRun: false, matched: 0, remapped: 0, remaining: 0, native: 3, otherTenants: 1, total: 4 });
+
+    // The BUG-7b batch now resolves per item: a URL for every id; bytes where the blob exists, 404 where it does not.
+    await env.FILES.put(objectKey("proj", t.id, a), bytes("abc"));
+    const urls: Record<string, string> = {};
+    for (const id of [native, a, b]) {
+      expect(await t.as(t.bob).call("getMetadata", { fileId: id })).toMatchObject({ tenantId: t.id, visibility: "tenant" });
+      urls[id] = await t.as(t.bob).call("generateDownloadUrl", { fileId: id, ttlMs: 600_000 }) as string;
+    }
+    expect(await (await SELF.fetch(urls[a]!)).text()).toBe("abc");
+    expect((await SELF.fetch(urls[native]!)).status).toBe(200);
+    expect((await SELF.fetch(urls[b]!)).status).toBe(404);
+  });
+
+  it("refuses an empty or identical source id and an unknown project, and writes nothing", async () => {
+    const t = tenant();
+    await uploaded(t, t.alice, { visibility: "tenant" });
+    await expect(remap(t, "  ")).rejects.toThrow("fromTenantId is required");
+    await expect(remap(t, t.id)).rejects.toThrow("fromTenantId must differ from the tenant's own id");
+    await expect(remap(t, STAGING, false, "")).rejects.toThrow("tenant has no project");
+    expect(await remap(t, STAGING)).toMatchObject({ matched: 0, remapped: 0, native: 1, total: 1 });
+  });
+});
+
 // BUG-7b (walkthrough 2026-11-17): Whagons `files.getFileUrls` resolves each id
 // with `getMetadata` then `generateDownloadUrl`. Rust never looks at the object
 // when it mints a URL (storage.rs:219-243), so a missing blob is per item: the

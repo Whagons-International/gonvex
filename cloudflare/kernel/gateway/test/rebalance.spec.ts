@@ -302,3 +302,158 @@ it("keeps the 120-KiB routing-state guard and rolls back a refused admission's p
   const status=await controller.status();expect(status.pending).toBe(0);
   expect(status.slots).toHaveLength(1);expect(status.slots[0]!.name).toBe(assignment.gateway);
 });
+
+it("BUG-9 quiet scale-in reconnects no ordinary session within its natural-disconnect grace, and admits nothing new", async () => {
+  const { SCALE_IN_GRACE_MS } = await import("../placement");
+  const controller = bindings.GATEWAY_CONTROLLER.getByName("gateway-cell-29");
+  const assignment = await controller.acquire(key(29));
+  const holder = bindings.GATEWAY.getByName(assignment.gateway);
+  const response = await holder.fetch(new Request("https://test/ws", {headers:{upgrade:"websocket",
+    "x-gonvex-connection-id":assignment.connectionId,[ASSIGNMENT_HEADER]:JSON.stringify(assignment)}}));
+  expect(response.status).toBe(101); response.webSocket!.accept();
+  let closed: number | undefined;
+  response.webSocket!.addEventListener("close", (event) => { closed = event.code; });
+  // An ordinary idle, already-authenticated session (fixture data only, as in the test above).
+  await runInDurableObject(holder, object => {
+    for (const [socket, session] of (object as any).host.sessions) {
+      session.record.pendingUntil = null;
+      socket.serializeAttachment({...socket.deserializeAttachment(), session: session.record});
+    }
+  });
+  try {
+    const leases = [];
+    for (let n = 0; n < 10_000; n++) {
+      const id = `quiet-grace-${n}`; if (controllerCell(id) !== 29) continue;
+      const next = await controller.acquire(id); leases.push(next);
+      if (next.gateway !== assignment.gateway) break;
+    }
+    for (const lease of leases) await controller.release(lease);
+    const commands: any[] = [];
+    const startedAt = Date.now();
+    await runInDurableObject(controller, async (_object, state) => {
+      const stored = (await state.storage.get<any>("placement"))!; stored.leases = [];
+      for (const slot of stored.slots) {slot.quietSince = Date.now() - 121_000;slot.changedAt = Date.now() - 121_000;}
+      await state.storage.put("placement",stored);
+      const actual = _object as any, originalEnv = actual.env;
+      Object.defineProperty(actual,"env",{configurable:true,value:{...originalEnv,GATEWAY:{getByName(name:string){
+        const rpc=bindings.GATEWAY.getByName(name) as any;return {
+          capacity:(epoch:number)=>rpc.capacity(epoch),
+          drain:(command:any)=>{commands.push(command);return rpc.drain(command);},
+        };}}}});
+      try { await actual.alarm(); } finally { Object.defineProperty(actual,"env",{configurable:true,value:originalEnv}); }
+    });
+    const slot = (await controller.status()).slots.find(s=>s.name===assignment.gateway)!;
+    expect(slot.mode).toBe("draining");
+    expect(commands).toHaveLength(1);
+    // 0054: normal scale-in waits for natural disconnect; the bounded 1012 cohort may start only after the grace.
+    expect(commands[0].notBefore).toBeGreaterThanOrEqual(startedAt + SCALE_IN_GRACE_MS - 1_000);
+    // The holder's drain tick a minute later (past the old 30 s start) closes nobody.
+    const inHolder = runInDurableObject as unknown as (stub: unknown, fn: (object: any) => Promise<unknown>) => Promise<unknown>;
+    const tick = await inHolder(holder as unknown, async (object: any) => {
+      const { vi } = await import("vitest");
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+      try { await object.alarm(); return { sessions: object.host.sessions.size, result: await object.drainStatus() }; }
+      finally { clock.mockRestore(); }
+    }) as { sessions: number; result: { closed: number } };
+    expect(tick.sessions).toBe(1);
+    expect(tick.result.closed).toBe(0);
+    await new Promise(r => setTimeout(r, 50));
+    expect(closed).toBeUndefined();
+    // No new admission goes to the draining holder.
+    for (let n = 0; n < 10_000; n++) {
+      const id = `quiet-grace-after-${n}`; if (controllerCell(id) !== 29) continue;
+      const next = await controller.acquire(id);
+      expect(next.gateway).not.toBe(assignment.gateway);
+      await controller.release(next);
+      break;
+    }
+  } finally {response.webSocket!.close();}
+});
+
+/** BUG-9 review fixtures: a cell whose slots are written directly, probed through real holders reporting live sockets. */
+async function drainingCell(cell: number, slots: (now: number, epochs: number[]) => any[]) {
+  const controller = bindings.GATEWAY_CONTROLLER.getByName(`gateway-cell-${cell}`);
+  const commands: any[] = [];
+  const now = Date.now();
+  await runInDurableObject(controller, async (_object, state) => {
+    const epochs = [101, 102, 103];
+    await state.storage.put("placement", { v: 1, epoch: 103, slots: slots(now, epochs), leases: [] });
+    const actual = _object as any, originalEnv = actual.env;
+    Object.defineProperty(actual, "env", { configurable: true, value: { ...originalEnv, GATEWAY: { getByName(name: string) {
+      const rpc = bindings.GATEWAY.getByName(name) as any;
+      return {
+        async capacity(epoch: number) { return { ...(await rpc.capacity(epoch)), sockets: 1 }; },
+        drain: (command: any) => { commands.push({ name, ...command }); return Promise.resolve({ closed: 0, blocked: {}, remaining: 1 }); },
+      };
+    } } } });
+    try { await actual.alarm(); } finally { Object.defineProperty(actual, "env", { configurable: true, value: originalEnv }); }
+  });
+  return { controller, commands, now };
+}
+const slot = (name: string, epoch: number, mode: string, extra: Record<string, unknown> = {}) => ({
+  name, epoch, mode, changedAt: Date.now() - 200_000, quietSince: null, pressuredSince: null, replacement: null, sample: null, ...extra });
+
+it("BUG-9 review: a waiting scale-in drain is re-pointed when pressure drains its replacement, so it can finish", async () => {
+  const { controller, commands } = await drainingCell(28, (now, [a, b, c]) => [
+    slot("auto-gw-28-0", a!, "draining", { drainKind: "scale-in", changedAt: now - 1_000, replacement: "auto-gw-28-1", nextCheck: now + 300_000 }),
+    slot("auto-gw-28-1", b!, "draining", { drainKind: "pressure", replacement: "auto-gw-28-2", nextCheck: now + 30_000 }),
+    slot("auto-gw-28-2", c!, "active"),
+  ]);
+  const status = await controller.status();
+  const waiting = status.slots.find(s => s.name === "auto-gw-28-0")!;
+  expect(waiting.mode).toBe("draining");
+  expect(waiting.replacement).toBe("auto-gw-28-2"); // the end of B's drain chain, an active holder
+  const command = commands.find(c => c.name === "auto-gw-28-0")!;
+  expect(command).toMatchObject({ replacement: "auto-gw-28-2", replacementEpoch: 103 });
+  expect(await controller.drainReady("auto-gw-28-0", 101, "auto-gw-28-2")).toBe(true);
+});
+
+it("BUG-9 review: an overdue waiting drain's schedule advances even while a pressure drain is being probed", async () => {
+  const { controller, now } = await drainingCell(27, (now, [a, b, c]) => [
+    slot("auto-gw-27-0", a!, "draining", { drainKind: "scale-in", changedAt: now - 1_000, replacement: "auto-gw-27-2", nextCheck: now - 60_000 }),
+    slot("auto-gw-27-1", b!, "draining", { drainKind: "pressure", replacement: "auto-gw-27-2", nextCheck: now - 1_000 }),
+    slot("auto-gw-27-2", c!, "active"),
+  ]);
+  const status = await controller.status();
+  expect(status.slots.find(s => s.name === "auto-gw-27-1")!.mode).toBe("draining"); // the pressure drain was probed (1 socket)
+  // The waiting slot was not probed this round, but its deadline is no longer in the past.
+  expect(status.slots.find(s => s.name === "auto-gw-27-0")!.nextCheck!).toBeGreaterThan(now);
+});
+
+it("BUG-9 review: a holder adopts a re-pointed replacement for the drain it already holds", async () => {
+  const holder = bindings.GATEWAY.getByName("auto-gw-26-5");
+  const stored = await (runInDurableObject as unknown as (stub: unknown, fn: (o: any, s: DurableObjectState) => Promise<unknown>) => Promise<unknown>)(holder, async (object, state) => {
+    await state.storage.put("autoscale-placement", { epoch: 7, cell: 26 });
+    const later = Date.now() + 6 * 60 * 60_000; // a waiting scale-in: nothing closes during this test
+    await object.drain({ v: 1, epoch: 7, replacement: "auto-gw-26-1", replacementEpoch: 3, notBefore: later });
+    await object.drain({ v: 1, epoch: 7, replacement: "auto-gw-26-2", replacementEpoch: 4, notBefore: later });
+    return state.storage.get("autoscale-drain");
+  }) as { replacement: string; replacementEpoch: number; nextAt: number };
+  expect(stored).toMatchObject({ replacement: "auto-gw-26-2", replacementEpoch: 4 });
+  expect(stored.nextAt).toBeGreaterThan(Date.now() + 5 * 60 * 60_000); // the grace is kept
+});
+
+it("BUG-9 review: a drain tick awaiting an RPC does not overwrite a replacement re-pointed meanwhile", async () => {
+  const holder = bindings.GATEWAY.getByName("auto-gw-26-9");
+  const inHolder = runInDurableObject as unknown as (stub: unknown, fn: (o: any, s: DurableObjectState) => Promise<unknown>) => Promise<unknown>;
+  const stored = await inHolder(holder, async (object, state) => {
+    await state.storage.put("autoscale-placement", { epoch: 9, cell: 26 });
+    // A drain that is due now (its grace is over), still pointing at the old replacement.
+    await state.storage.put("autoscale-drain", { v: 1, epoch: 9, replacement: "auto-gw-26-1", replacementEpoch: 3, notBefore: 0, nextAt: 0 });
+    await object.loadPlacement();
+    expect(object.draining?.replacement).toBe("auto-gw-26-1");
+    // The tick needs a held socket to keep the drain; model one without a client.
+    object.host.sessions.set({} as WebSocket, { record: {}, closed: false } as any);
+    const originalEnv = object.env;
+    Object.defineProperty(object, "env", { configurable: true, value: { ...originalEnv, GATEWAY_CONTROLLER: { getByName() { return {
+      // While the tick awaits the controller, the controller re-points this drain (its replacement drained).
+      async drainReady() { await object.drain({ v: 1, epoch: 9, replacement: "auto-gw-26-2", replacementEpoch: 4, notBefore: 0 }); return false; },
+      async observe() {},
+    }; } } } });
+    try { await object.drainTick(); }
+    finally { Object.defineProperty(object, "env", { configurable: true, value: originalEnv }); object.host.sessions.clear(); }
+    return { stored: await state.storage.get("autoscale-drain"), memory: object.draining };
+  }) as { stored: { replacement: string; replacementEpoch: number }; memory: { replacement: string } };
+  expect(stored.memory.replacement).toBe("auto-gw-26-2");
+  expect(stored.stored).toMatchObject({ replacement: "auto-gw-26-2", replacementEpoch: 4 });
+});

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
-  COOLDOWN_MS, LEASE_MS, MAX_GATEWAYS_PER_CELL, MAX_PENDING, MAX_SOCKETS, SCALE_IN_MS,
+  COOLDOWN_MS, LEASE_MS, MAX_GATEWAYS_PER_CELL, MAX_PENDING, MAX_SOCKETS, SCALE_IN_MS, SCALE_IN_GRACE_MS, SCALE_IN_CHECK_MS, PRESSURE_DRAIN_START_MS,
   controllerCell, pressured, quiet, withDeadline, checkedCapacitySample, completedWindow, windowPressured, freshWindow, WINDOW_FIELDS,
   type CapacitySample, type GatewayAssignment, type GatewayCapacityRpc,
 } from "./placement";
@@ -16,6 +16,8 @@ interface Slot {
   replacement: string | null;
   nextCheck?: number;
   sample: CapacitySample | null;
+  /** BUG-9: why the slot drains. Absent (older state): a pressure drain, the previous behavior. */
+  drainKind?: "pressure" | "scale-in";
 }
 interface Lease { assignment: GatewayAssignment; claimed: boolean }
 interface ScaleEvent { at: number; action: "allocate" | "drain" | "retire"; gateway: string; epoch: number }
@@ -200,14 +202,30 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
     for (const s of this.state.slots) {
       if (!this.trustedPressure(s, now)) { s.pressuredSince = null; delete s.pressureEvidence; }
     }
-    // One draining holder per cell, and at most TWO holder probes per control event.
-    const draining = this.state.slots.find(s => s.mode === "draining");
-    if (draining) {
-      if (!this.pending(draining)) {
-        draining.nextCheck = now + 30_000;
-        try { if ((await this.probe(draining)).sockets === 0) this.retire(draining); }
+    // One reconnecting drain per cell, and at most TWO holder probes per control event. A scale-in holder
+    // still inside its natural-disconnect grace reconnects nobody, so it does not block pressure decisions.
+    const draining = this.state.slots.filter(s => s.mode === "draining");
+    // Review r4609054691: a drain's replacement may itself drain (pressure B -> C) or retire. Re-point each
+    // draining holder at a live active target, so drainReady accepts it and every waiting drain can finish.
+    for (const slot of draining) this.repoint(slot, now);
+    // Review r4609054682: every overdue schedule advances this round, whichever slot is probed, so save()
+    // never re-arms an alarm at an expired deadline.
+    const overdue = new Set(draining.filter(s => (s.nextCheck ?? 0) <= now));
+    for (const slot of overdue) slot.nextCheck = now + (this.waitingScaleIn(slot, now) ? SCALE_IN_CHECK_MS : 30_000);
+    const reconnecting = draining.find(s => !this.waitingScaleIn(s, now));
+    if (reconnecting) {
+      if (!this.pending(reconnecting)) {
+        reconnecting.nextCheck = now + 30_000;
+        try { if ((await this.probe(reconnecting)).sockets === 0) this.retire(reconnecting); }
         catch { /* Failure is not proof of empty ownership. */ }
       }
+      return;
+    }
+    const due = draining.find(s => !this.pending(s) && (overdue.has(s) || s.sample?.sockets === 0));
+    if (due) {
+      due.nextCheck = now + SCALE_IN_CHECK_MS;
+      try { if ((await this.probe(due)).sockets === 0) this.retire(due); }
+      catch { /* Failure is not proof of empty ownership. */ }
       return;
     }
     const hot = this.state.slots.find(s => s.mode === "active" && this.mature(s, now)
@@ -223,10 +241,12 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
         if (!this.state.slots.some(s => s.mode === "retired") && this.state.slots.length >= MAX_GATEWAYS_PER_CELL) return;
         replacement = this.allocate(now);
       }
-      try { if (!pressured(await this.probe(replacement))) this.beginDrain(hot, replacement, now); }
+      try { if (!pressured(await this.probe(replacement))) this.beginDrain(hot, replacement, now, "pressure"); }
       catch { /* Replacement failure never authorizes a reconnect. */ }
       return;
     }
+    // One scale-in at a time: a waiting holder already keeps its quiet sockets.
+    if (draining.length) return;
     const active = this.state.slots.filter(s => s.mode === "active");
     if (active.length === 1) { active[0]!.quietSince = null; return; }
     const low = active.find(s => s.quietSince !== null && now - s.quietSince >= SCALE_IN_MS
@@ -237,18 +257,39 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       if (!quiet(current)) return;
       const replacement = active.find(s => s !== low)!;
       if (!pressured(await this.probe(replacement))) {
-        this.beginDrain(low, replacement, now);
+        this.beginDrain(low, replacement, now, "scale-in");
         // Fresh empty probe + no lease: no third probe or pointless reconnect is needed.
         if (current.sockets === 0) this.retire(low);
       } else low.quietSince = now;
     } catch { low.quietSince = now; }
   }
-  private beginDrain(slot: Slot, replacement: Slot, now: number): void {
-    slot.mode = "draining"; slot.nextCheck = now + 30_000; slot.changedAt = now;
+  private beginDrain(slot: Slot, replacement: Slot, now: number, kind: "pressure" | "scale-in"): void {
+    slot.mode = "draining"; slot.drainKind = kind; slot.changedAt = now;
+    slot.nextCheck = now + (kind === "scale-in" ? SCALE_IN_CHECK_MS : 30_000);
     slot.quietSince = null; slot.replacement = replacement.name; this.event("drain", slot);
   }
+  /** The live active target of a draining slot: its replacement, else the end of that slot's own drain chain,
+   * else any other active slot, else a new allocation (bounded by the cell's ceiling). */
+  private repoint(slot: Slot, now: number): void {
+    const byName = (name: string | null) => (name === null ? undefined : this.state.slots.find(s => s.name === name));
+    let target = byName(slot.replacement);
+    for (let hops = 0; target && target.mode === "draining" && target !== slot && hops < this.state.slots.length; hops++) target = byName(target.replacement);
+    if (!target || target === slot || target.mode !== "active") {
+      target = this.state.slots.find(s => s !== slot && s.mode === "active");
+      if (!target && (this.state.slots.some(s => s.mode === "retired") || this.state.slots.length < MAX_GATEWAYS_PER_CELL)) target = this.allocate(now);
+    }
+    if (target && target.name !== slot.replacement) slot.replacement = target.name;
+  }
+  /** A scale-in drain inside its grace: no admissions, no reconnects; it retires when its sockets close. */
+  private waitingScaleIn(slot: Slot, now: number): boolean {
+    return slot.mode === "draining" && slot.drainKind === "scale-in" && now < slot.changedAt + SCALE_IN_GRACE_MS;
+  }
+  /** When the holder may start its bounded 1012 cohort (0054): 30 s for pressure, after the grace for scale-in. */
+  private drainStart(slot: Slot): number {
+    return slot.changedAt + (slot.drainKind === "scale-in" ? SCALE_IN_GRACE_MS : PRESSURE_DRAIN_START_MS);
+  }
   private retire(slot: Slot): void {
-    slot.mode = "retired"; slot.sample = null; slot.quietSince = null;
+    slot.mode = "retired"; slot.sample = null; slot.quietSince = null; delete slot.drainKind;
     slot.pressuredSince = null; delete slot.pressureEvidence; slot.replacement = null; this.event("retire", slot);
   }
   private dispatchDrains(): void {
@@ -257,7 +298,7 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       const rpc = this.env.GATEWAY.getByName(s.name) as unknown as GatewayCapacityRpc;
       // Publication is durable before dispatch. A lost command is retried by a later active report.
       this.ctx.waitUntil(withDeadline(rpc.drain({ v: 1, epoch: s.epoch, replacement: s.replacement,
-        replacementEpoch: this.state.slots.find(slot => slot.name === s.replacement)!.epoch, notBefore: s.changedAt + 30_000 })).catch(() => undefined));
+        replacementEpoch: this.state.slots.find(slot => slot.name === s.replacement)!.epoch, notBefore: this.drainStart(s) })).catch(() => undefined));
     }
   }
 

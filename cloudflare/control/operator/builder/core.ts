@@ -27,8 +27,8 @@ export interface BlobStore extends R2Like {
 export interface VersionTarget {
   /** Stages the version's files; returns its id. Nothing is live yet. */
   stage(files: Map<string, string>, version: string): Promise<void>;
-  /** Puts a staged version live. */
-  deploy(version: string): Promise<void>;
+  /** Puts a staged version live. No write may start, or keep running, past `options.deadline`. */
+  deploy(version: string, options?: { deadline?: number }): Promise<void>;
 }
 
 /** Memoizes one release's module, functions and manifest per isolate; evaluated on first access only. */
@@ -259,9 +259,9 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
     }
   }
 
-  async deploy(version: string): Promise<{ ok: true } | { ok: false; error: string; retain?:true }> {
+  async deploy(version: string, _publication?: unknown, options?: { deadline?: number }): Promise<{ ok: true } | { ok: false; error: string; retain?:true }> {
     try {
-      await this.options.target.deploy(version);
+      await this.options.target.deploy(version, options);
       return { ok: true };
     } catch (cause) {
       return { ok: false, error: `worker version deploy failed: ${(cause as Error).message}`, ...((cause as {retainPublication?:boolean}).retainPublication?{retain:true as const}:{}) };
