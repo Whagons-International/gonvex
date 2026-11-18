@@ -30,7 +30,8 @@ export function installDeploymentSchema(sql:Sql):void {
 }
 
 export class DeploymentCoordinator {
-  constructor(private sql: Sql, private versionReady: (version: string) => boolean | Promise<boolean>, private preparationMs: number) {}
+  constructor(private sql: Sql, private versionReady: (version: string) => boolean | Promise<boolean>, private preparationMs: number,
+    private versionAbsent: (version: string) => boolean | Promise<boolean> = () => false) {}
 
   private owner():Row|undefined {
     return this.sql.get(`SELECT s.rowid AS fence,s.sync_id,s.project_id,s.state,s.expires_at,p.version
@@ -136,16 +137,25 @@ export class DeploymentCoordinator {
       this.sql.run("UPDATE gonvex_cf_syncs SET error=$2 WHERE sync_id=$1",ref.id,(result.error??'component deployment uncertain').slice(0,1500));return;
     }
     this.sql.run("DELETE FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id);
-    this.abort(ref,result.error??'deployment failed');
+    await this.abort(ref,result.error??'deployment failed');
   }
-  /** Only invoked from the real builder's serialized target barrier. */
-  abort(ref:DeploymentRef,error:string):void {
+  /**
+   * Only invoked from the real builder's serialized target barrier. An uncertain component attempt normally
+   * needs same-ID recovery. Recovery can be impossible: e.g. a later builder emits a different catalog format,
+   * so the publication's exact version can never be reproduced. A caller may then abort it as `superseded`,
+   * which is accepted only when neither runtime nor Actions serves that version.
+   */
+  async abort(ref:DeploymentRef,error:string,{superseded=false}:{superseded?:boolean}={}):Promise<void> {
+    const uncertain=()=>this.sql.value("SELECT 1 FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id)!==undefined;
+    const absent=superseded&&uncertain()?await this.versionAbsent(ref.version):false;
     this.sql.tx(()=>{
       const row=this.publication(ref);
       if(num(row.completed)||row.state==='failed')return;
       if(row.state!=='publishing')throw new HttpError(409,"deployment fence is no longer current");
-      if(this.sql.value("SELECT 1 FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id)!==undefined)
-        throw new HttpError(409,"component deployment requires same-ID recovery before abort");
+      if(uncertain()){
+        if(!absent)throw new HttpError(409,"component deployment requires same-ID recovery before abort");
+        this.sql.run("DELETE FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id);
+      }
       this.sql.run(`UPDATE gonvex_cf_syncs SET state='failed',error=$2,finished_at=${NOW_MS} WHERE sync_id=$1`,ref.id,error.slice(0,1500));
     });
   }

@@ -88,10 +88,10 @@ async function devRequest(request: Request, env: DevRouterEnv, ctx: ExecutionCon
     if (!match || !Number.isSafeInteger(Number(match[2]))) return new Response(null,{status:400});
     const text=await request.text();
     if (text.length>4096) return new Response(null,{status:413});
-    const body=JSON.parse(text) as {version?:unknown;ok?:unknown;error?:unknown;retain?:unknown};
+    const body=JSON.parse(text) as {version?:unknown;ok?:unknown;error?:unknown;retain?:unknown;superseded?:unknown};
     if (typeof body.version !== "string" || !body.version || body.version.length>128 || (body.error!==undefined&&typeof body.error!=="string")) return new Response(null,{status:400});
     const result=await env.CONTROL.getByName(CONTROL_NAME).deploymentRequest(match[3] as "authorize"|"settle"|"abort",{id:match[1]!,fence:Number(match[2]),version:body.version},
-      {ok:body.ok===true,retain:body.retain===true,...(typeof body.error==="string"?{error:body.error.slice(0,1500)}:{})});
+      {ok:body.ok===true,retain:body.retain===true,superseded:match[3]==="abort"&&body.superseded===true,...(typeof body.error==="string"?{error:body.error.slice(0,1500)}:{})});
     return result.ok ? Response.json(result) : jsonError(result.status,result.error);
   }
   if (url.pathname.startsWith("/_gonvex/k19/publications/")) {

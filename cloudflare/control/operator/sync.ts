@@ -62,6 +62,8 @@ export interface SyncPorts {
   enqueue(message: RolloutMessage): Promise<void>;
   /** Only the serving composition can acknowledge its baked Worker version. */
   versionReady(version: string): boolean | Promise<boolean>;
+  /** True when neither runtime nor Actions serves the version (a superseded, stranded publication). */
+  versionAbsent?(version: string): boolean | Promise<boolean>;
   activateTenants(project: string, tenants: string[], hash: string, generation: number): Promise<boolean>;
   moduleReloaded(project: string, tenants: string[], hash: string, generation: number, clientContract: number | null, publicationId: string): Promise<void>;
   /** K11: re-plan the project's crons for the new module. A no-op until K11 provides it. */
@@ -119,7 +121,7 @@ export class SyncCoordinator {
 
   readonly deployments: DeploymentCoordinator;
   constructor(private readonly ports: SyncPorts) {
-    this.deployments = new DeploymentCoordinator(ports.sql, ports.versionReady, ports.deadlineMs + 60_000);
+    this.deployments = new DeploymentCoordinator(ports.sql, ports.versionReady, ports.deadlineMs + 60_000, ports.versionAbsent);
   }
 
   private get sql(): Sql {

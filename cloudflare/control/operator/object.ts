@@ -70,6 +70,7 @@ export class OperatorControlObject extends ControlObject {
         await queue.send(message, { contentType: "json" });
       },
       versionReady: (version) => this.publicationVersionReady(version),
+      versionAbsent: (version) => this.publicationVersionAbsent(version),
       activateTenants: async (projectId, tenants, hash, generation) => {
         for (const tenant of tenants) if (!await this.activatePublicationTenant(tenant, { projectId, hash, generation })) return false;
         return true;
@@ -101,6 +102,8 @@ export class OperatorControlObject extends ControlObject {
 
   /** Generic K19 fixtures have no baked catalog; the serving assembly overrides this. */
   protected publicationVersionReady(_version: string): boolean | Promise<boolean> { return true; }
+  /** True only when no component serves the version; without a serving composition nothing can prove it. */
+  protected publicationVersionAbsent(_version: string): boolean | Promise<boolean> { return false; }
   protected activatePublicationTenant(tenant: string, release: {projectId:string;hash:string;generation:number}): Promise<boolean> {
     return this.tenantPort(tenant).operatorActivateRelease(release);
   }
@@ -126,11 +129,11 @@ export class OperatorControlObject extends ControlObject {
   }
   async publicationReference(id:string):Promise<DeploymentRef> { return this.syncs.deployments.reference(id); }
   async currentDeployment():Promise<DeploymentRef|null> {return this.syncs.deployments.current();}
-  async deploymentRequest(action:"authorize"|"settle"|"abort", ref:DeploymentRef, result:{ok?:boolean;error?:string;retain?:boolean}):Promise<{ok:true;grant?:DeploymentGrant}|{ok:false;status:number;error:string}> {
+  async deploymentRequest(action:"authorize"|"settle"|"abort", ref:DeploymentRef, result:{ok?:boolean;error?:string;retain?:boolean;superseded?:boolean}):Promise<{ok:true;grant?:DeploymentGrant}|{ok:false;status:number;error:string}> {
     try {
       if (action === "authorize") return {ok:true,grant:await this.syncs.deployments.authorize(ref)};
       if (action === "settle") await this.syncs.deployments.settle(ref,{ok:result.ok===true,retain:result.retain===true,...(result.error?{error:result.error}:{})});
-      else this.syncs.deployments.abort(ref,result.error ?? "publication aborted");
+      else await this.syncs.deployments.abort(ref,result.error ?? "publication aborted",{superseded:result.superseded===true});
       return {ok:true};
     } catch (cause) {
       if (cause instanceof HttpError) return {ok:false,status:cause.status,error:cause.message};

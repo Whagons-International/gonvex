@@ -29,10 +29,10 @@ async function setup(instance:OperatorControlObject,state:DurableObjectState){
  const core=()=>new ReleaseBuilderCore({blobs:testEnv.RELEASES as unknown as BlobStore,target,preludeSpecifier:PRELUDE_SPECIFIER});
  let builder=core();
  const wrapped:ReleaseBuilder={inspect:(...a)=>builder.inspect(...a),prepare:async(...a)=>{events.push('prepare:'+a[1]);await prepareGate?.promise;if(failPrepare)throw Error('prepare failed');return builder.prepare(...a);},activate:async(...a)=>{const held=stageGate,entered=stageEntered,result=await builder.activate(...a);entered?.release();await held?.promise;return result;},deploy:version=>builder.deploy(version)};
- const ports:SyncPorts={sql:instance.sql,builder:wrapped,enqueue:async()=>{throw Error('unexpected tenant rollout');},versionReady:async version=>{await versionGate?.promise;return live===version;},
+ const ports:SyncPorts={sql:instance.sql,builder:wrapped,enqueue:async()=>{throw Error('unexpected tenant rollout');},versionReady:async version=>{await versionGate?.promise;return live===version;},versionAbsent:async version=>live!==version,
   activateTenants:async()=>true,moduleReloaded:async()=>{await notifyGate?.promise;if(failNotify)throw notifyStatus?new HttpError(notifyStatus,'holder unavailable'):Error('holder unavailable');},syncCrons:async()=>{},deadlineMs:1000,devSyncKey:'synthetic',acceptsKey:(_p,key)=>key==='synthetic'};
  let coordinator=new SyncCoordinator(ports);
- const authority={authorize:async(r:DeploymentRef)=>coordinator.deployments.authorize(r),settle:async(r:DeploymentRef,outcome:{ok:boolean;error?:string})=>{await coordinator.deployments.settle(r,outcome);},abort:async(r:DeploymentRef,error:string)=>{coordinator.deployments.abort(r,error);}};
+ const authority={authorize:async(r:DeploymentRef)=>coordinator.deployments.authorize(r),settle:async(r:DeploymentRef,outcome:{ok:boolean;error?:string})=>{await coordinator.deployments.settle(r,outcome);},abort:async(r:DeploymentRef,error:string)=>{await coordinator.deployments.abort(r,error);}};
  const executor=()=>new PublicationExecutor(wrapped,authority,async(r,catalog)=>{
   if(target.staged.has(r.version))return;
   const result=await wrapped.activate(catalog);expect(result).toEqual({ok:true,version:r.version});
@@ -52,7 +52,7 @@ async function setup(instance:OperatorControlObject,state:DurableObjectState){
   versionGate:(g:ReturnType<typeof gate>|undefined)=>{versionGate=g;},
   prepareGate:(g:ReturnType<typeof gate>|undefined)=>{prepareGate=g;},deployGate:(g:ReturnType<typeof gate>|undefined)=>{deployGate=g;},notifyGate:(g:ReturnType<typeof gate>|undefined)=>{notifyGate=g;},
   stageGate:(g:ReturnType<typeof gate>|undefined,entered?:ReturnType<typeof gate>)=>{stageGate=g;stageEntered=entered;},
-  failDeploy:(v:boolean)=>{failDeploy=v;},retainDeploy:(v:boolean)=>{retainDeploy=v;},failPrepare:(v:boolean)=>{failPrepare=v;},failNotify:(v:boolean)=>{failNotify=v;},
+  setLive:(v:string)=>{live=v;},failDeploy:(v:boolean)=>{failDeploy=v;},retainDeploy:(v:boolean)=>{retainDeploy=v;},failPrepare:(v:boolean)=>{failPrepare=v;},failNotify:(v:boolean)=>{failNotify=v;},
   notifyStatus:(status:number)=>{notifyStatus=status;},
   reset:()=>{coordinator=new SyncCoordinator(ports);builder=core();target.staged.clear();worker=executor();},
   async http(r:Awaited<ReturnType<typeof request>>,publicIngress=false,transition=false,key='synthetic'){
@@ -238,7 +238,7 @@ it('a pending whole-deployment owner survives actual Control eviction until publ
 it('completed deployment history does not turn acquisition/expiry into a table scan',async()=>fixture(async f=>{
  const a=await f.request('history-a');let mark=f.instance.sql.mark();const first=staged(await f.sync(a));
  const before=f.instance.sql.mark().read-mark.read;
- f.coordinator.deployments.abort(ref(first),'test completed before target execution');
+ await f.coordinator.deployments.abort(ref(first),'test completed before target execution');
  for(let n=0;n<200;n++)f.instance.sql.run("INSERT INTO gonvex_cf_syncs(sync_id,project_id,state,expires_at) VALUES($1,'history','finished',0)",'history-'+n);
  const b=await f.request('history-b');mark=f.instance.sql.mark();const next=staged(await f.sync(b));
  const after=f.instance.sql.mark().read-mark.read;
@@ -273,7 +273,7 @@ it('durable topology freeze refuses new publication across coordinator reset, wi
 it('asynchronous serving-version observation cannot authorize a fence that ended while its RPC was in flight',async()=>fixture(async f=>{
  const pending=staged(await f.sync(await f.request('catalog-a'))),held=gate();f.versionGate(held);
  const grant=f.coordinator.deployments.authorize(ref(pending));
- f.coordinator.deployments.abort(ref(pending),'target failed before read returned');
+ await f.coordinator.deployments.abort(ref(pending),'target failed before read returned');
  const newer=staged(await f.sync(await f.request('catalog-b')));held.release();f.versionGate(undefined);
  await expect(grant).rejects.toThrow('fence is no longer current');await f.publish(newer);
 }));
@@ -303,6 +303,24 @@ it('completed settlement needs no catalog RPC and late asynchronous failure cann
  const c=staged(await f.sync(await f.request('settle-c')));
  delayed.release();f.versionGate(undefined);await late;
  expect(f.coordinator.deployments.current()).toEqual(ref(c));await f.publish(c);
+}));
+it('an unrecoverable partial publication may be aborted as superseded only while no component serves its version',async()=>fixture(async f=>{
+ const a=staged(await f.sync(await f.request('stranded-a')));
+ f.failDeploy(true);f.retainDeploy(true);
+ expect(await f.worker.deploy(ref(a))).toMatchObject({ok:false,retain:true});
+ // A plain abort still needs same-ID recovery.
+ await expect(f.coordinator.deployments.abort(ref(a),'plain')).rejects.toThrow('same-ID recovery before abort');
+ // Serving the stranded version: superseded is refused too.
+ f.setLive(ref(a).version);
+ await expect(f.coordinator.deployments.abort(ref(a),'stranded',{superseded:true})).rejects.toThrow('same-ID recovery before abort');
+ expect(f.coordinator.deployments.current()).toEqual(ref(a));
+ // Superseded by other target writes: the fence clears and the next project can publish.
+ f.setLive('another-catalog');
+ await f.coordinator.deployments.abort(ref(a),'stranded: catalog format changed',{superseded:true});
+ expect(f.coordinator.deployments.current()).toBeNull();
+ f.failDeploy(false);f.retainDeploy(false);
+ const b=staged(await f.sync(await f.request('stranded-b')));await f.publish(b);
+ expect(f.serving()).toContain('stranded-b');
 }));
 it('a partial target retains its durable fence across restart and same-ID recovery, refusing abort and the next project',async()=>fixture(async f=>{
  const request=await f.request('partial-a'),a=staged(await f.sync(request));
