@@ -13,11 +13,13 @@ import { ASSIGNMENT_HEADER, automaticPlacement, withDeadline, type GatewayAssign
  *   upgrade, and an exhausted budget is HTTP 429 with Rust's text.
  */
 import { ADMISSION_REASON_HEADER, gatewayFor, type GatewayEnv, UPGRADE_HEADERS } from "./placement/gateway";
-import { clientAddress } from "../public/address";
+import { clientAddress, FIXTURE_ADDRESS_HEADERS } from "../public/address";
 import { admitUpgrade, type PublicGuardEnv, publicGuard } from "../public/guard";
 
 export interface WebSocketRouteEnv extends GatewayEnv, PublicGuardEnv {
   GATEWAY: DurableObjectNamespace;
+  /** Dev/test only: enables the fixture client-address override (public/address.ts). */
+  GONVEX_ASSEMBLY_FIXTURE_KEY?: string;
 }
 
 /** Router stages of an upgrade, for content-free refusal diagnostics (X02). */
@@ -51,7 +53,7 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   const url = new URL(request.url);
   const connectionId = crypto.randomUUID();
   const publicTransport = url.searchParams.get("public") === "1";
-  const address = clientAddress(request.headers);
+  const address = clientAddress(request.headers, env.GONVEX_ASSEMBLY_FIXTURE_KEY);
   const placement = automaticPlacement(env);
   let assignment: GatewayAssignment | undefined;
   let slots = "";
@@ -74,6 +76,8 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     stage = "gateway";
     const headers = new Headers(request.headers);
     headers.delete(ASSIGNMENT_HEADER);
+    headers.delete(FIXTURE_ADDRESS_HEADERS.key);
+    headers.delete(FIXTURE_ADDRESS_HEADERS.address);
     if (assignment) headers.set(ASSIGNMENT_HEADER, JSON.stringify(assignment));
     headers.set(UPGRADE_HEADERS.connectionId, connectionId);
     headers.set(UPGRADE_HEADERS.publicTransport, publicTransport ? "1" : "0");

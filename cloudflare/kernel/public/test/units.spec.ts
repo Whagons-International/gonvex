@@ -4,7 +4,7 @@
  * Vectors follow Rust's own unit tests in public_functions.rs (286-470).
  */
 import { describe, expect, it } from "vitest";
-import { addressBucket, clientAddress, UNKNOWN_ADDRESS } from "../address";
+import { addressBucket, clientAddress, FIXTURE_ADDRESS_HEADERS, UNKNOWN_ADDRESS } from "../address";
 import { DEFAULT_PUBLIC_LIMITS, PublicConfigError, publicLimits } from "../config";
 import { frameCost, publicAdmissionErrors, publicLimitErrors, runsTenantCode } from "../frames";
 import { ADMISSION_EXPIRED_ERROR, AddressBudget, AUDIT_GRACE_MS, AUDIT_INTERVAL_MS, type AdmitRequest, MemorySlotStore, PENDING_LIMIT_ERROR, PUBLIC_LIMIT_ERROR } from "../limiter";
@@ -38,6 +38,20 @@ describe("client address", () => {
     repeated.append("cf-connecting-ip", "192.0.2.1");
     expect(clientAddress(repeated)).toBe(UNKNOWN_ADDRESS);
     expect(clientAddress(new Headers({ "cf-connecting-ip": "unknown" }))).toBe(UNKNOWN_ADDRESS);
+  });
+
+  it("X03: the fixture address header counts only with the deployment's exact fixture key", () => {
+    const fixture = (key: string, address: string) => new Headers({ [FIXTURE_ADDRESS_HEADERS.key]: key, [FIXTURE_ADDRESS_HEADERS.address]: address, "cf-connecting-ip": "198.51.100.23" });
+    // With the key configured and matched, the fixture address replaces the edge address (same parsing and buckets).
+    expect(clientAddress(fixture("dev-fixture", "203.0.113.7"), "dev-fixture")).toBe("203.0.113.7");
+    expect(clientAddress(fixture("dev-fixture", "2001:db8:1:2::9"), "dev-fixture")).toBe(addressBucket("2001:db8:1:2::1"));
+    expect(clientAddress(fixture("dev-fixture", "not-an-ip"), "dev-fixture")).toBe(UNKNOWN_ADDRESS);
+    // Wrong key, no configured key (production), or an empty configured key: the edge address only.
+    expect(clientAddress(fixture("guess", "203.0.113.7"), "dev-fixture")).toBe("198.51.100.23");
+    expect(clientAddress(fixture("dev-fixture", "203.0.113.7"))).toBe("198.51.100.23");
+    expect(clientAddress(fixture("", "203.0.113.7"), "")).toBe("198.51.100.23");
+    // The fixture address header alone is ignored.
+    expect(clientAddress(new Headers({ [FIXTURE_ADDRESS_HEADERS.address]: "203.0.113.7" }), "dev-fixture")).toBe(UNKNOWN_ADDRESS);
   });
 });
 

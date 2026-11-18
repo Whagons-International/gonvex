@@ -16,9 +16,19 @@
 
 export const UNKNOWN_ADDRESS = "0.0.0.0";
 
+/**
+ * Dev/test fixture override (X03). Cloudflare's edge refuses a client-supplied `CF-Connecting-IP`
+ * (HTTP 403, `error code: 1000`), so a conformance run against a deployed Worker cannot choose its
+ * per-step address that way. Only when the request carries the deployment's own
+ * `GONVEX_ASSEMBLY_FIXTURE_KEY` (the secret that already gates `/__assembly` fixture routes, absent
+ * outside dev and test) is `x-gonvex-fixture-client-ip` used instead. The router strips both headers.
+ */
+export const FIXTURE_ADDRESS_HEADERS = { key: "x-gonvex-fixture-key", address: "x-gonvex-fixture-client-ip" } as const;
+
 /** The address bucket of a request (the router's input to every limiter). */
-export function clientAddress(headers: Headers): string {
-  const value = headers.get("cf-connecting-ip");
+export function clientAddress(headers: Headers, fixtureKey?: string): string {
+  const fixture = fixtureKey && headers.get(FIXTURE_ADDRESS_HEADERS.key) === fixtureKey;
+  const value = headers.get(fixture ? FIXTURE_ADDRESS_HEADERS.address : "cf-connecting-ip");
   // `Headers.get` joins repeated fields with ", ": ambiguous, so it fails closed (Rust: one field only).
   if (value === null || value.includes(",")) return UNKNOWN_ADDRESS;
   return addressBucket(value.trim()) ?? UNKNOWN_ADDRESS;

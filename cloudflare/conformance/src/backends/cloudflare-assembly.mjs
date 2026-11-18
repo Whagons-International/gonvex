@@ -8,6 +8,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { postDevSync } from '../../../../packages/gonvex/src/sync-request.ts';
+import { registerAddressHeaders } from '../client-address.mjs';
 export class CloudflareAssemblyBackend extends RustBackend {
   constructor(options) { super({ ...options, binary: process.execPath }); }
   get capabilities() { return { ...super.capabilities, orphanReveal: true, tenantRestart: true, receiptExpiry: true }; }
@@ -25,6 +26,9 @@ export class CloudflareAssemblyBackend extends RustBackend {
       this.port = Number(new URL(this.httpUrl).port);
     }
     this.wsUrl = this.httpUrl.replace(/^http/, 'ws') + '/ws';
+    // The edge refuses a client-supplied CF-Connecting-IP; the fixture key gates the dev/test override.
+    const fixtureKey = process.env.GONVEX_ASSEMBLY_URL ? (process.env.GONVEX_ASSEMBLY_FIXTURE_KEY || this.adminKey) : this.adminKey;
+    registerAddressHeaders(this.wsUrl, (address) => ({ 'x-gonvex-fixture-key': fixtureKey, 'x-gonvex-fixture-client-ip': address }));
   }
   async stop() { await this.runtime?.stop(); this.runtime = undefined; }
   inspectHolders(project) { return this.request('GET', `/__assembly/holders?${new URLSearchParams({project})}`); }
