@@ -94,7 +94,21 @@ export async function deployConfig(args, credentials, directory) {
   });
 }
 
-export async function deployAssembly({ name, directory, images, secrets = {} }) {
+/**
+ * The public origin the composition signs storage URLs with and the builder calls back.
+ * Defaults to the workers.dev URL. An override (e.g. a Worker custom domain that an image proxy
+ * accepts as a source) must be a bare https origin.
+ */
+export function publicOrigin(name, workersSubdomain, override) {
+  if (override === undefined || override === null || override === '') return `https://${name}.${workersSubdomain}.workers.dev`;
+  let url;
+  try { url = new URL(override); } catch { throw new Error('public URL override must be an absolute URL'); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== ''))
+    throw new Error('public URL override must be a bare https origin');
+  return url.origin;
+}
+
+export async function deployAssembly({ name, directory, images, secrets = {}, publicUrl }) {
   developmentName(name); directory = resolve(directory);
   const credentials = await cloudflareCredentials(), api = accountApi(credentials);
   // Require explicit immutable Container identities. Build is a separate admitted phase.
@@ -103,7 +117,7 @@ export async function deployAssembly({ name, directory, images, secrets = {} }) 
   if(prior && prior.bindings?.find(b=>b.name==='TENANT')?.script_name!==`${name}-runtime`)throw new Error('existing monolith requires the reviewed topology transfer; refuse new tenant namespace');
   if(prior&&(!secrets.GONVEX_STORAGE_SECRET||!secrets.GONVEX_RELEASE_BUILDER_TOKEN))throw new Error('existing composition requires retained storage and builder secrets; implicit rotation refused');
   const subdomain = await api('/workers/subdomain');
-  const url = `https://${name}.${subdomain.subdomain}.workers.dev`;
+  const url = publicOrigin(name, subdomain.subdomain, publicUrl);
   const configs = await servingConfigs(name, directory, { images, kernelUrl: url });
   const resources = [];
   for (const suffix of ['releases', 'files']) {
