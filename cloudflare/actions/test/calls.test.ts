@@ -4,7 +4,7 @@
 // `_gonvex_action_outbox` is K11's (0037): nothing here touches it.
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { ACTION_OBJECTS, ActionCalls, RECEIPT_RETENTION_MS, RUNS, type CallFinished, type CallJob } from "../src/calls.js";
+import { ACTION_OBJECTS, ActionCalls, INLINE_LAPSED, RECEIPT_RETENTION_MS, RUNS, type CallFinished, type CallJob } from "../src/calls.js";
 
 const session = { projectId: "p", tenantId: "t", account: { id: "acct-1", email: "a@x" }, member: { id: "m-1" } };
 
@@ -66,7 +66,7 @@ describe("direct agent calls (ActionCalls)", () => {
     });
   });
 
-  it("X13 start claims the run for an inline runner in one step: no hand-off while its lease holds, a Workflow after", async () => {
+  it("X13 start claims the run for an inline runner in one step: no hand-off while its lease holds", async () => {
     await withCalls(async (h) => {
       const claim = await h.calls.start({ session, path: "agent.turn", args: { q: 1, drop: undefined } }, "inline:a");
       expect(claim).toEqual({ v: 1, ok: true, id: "call-uuid-1", attempt: 1, path: "agent.turn", args: { q: 1 }, provenance: null, session, leaseMs: 300_000, renewMs: 30_000 });
@@ -77,15 +77,70 @@ describe("direct agent calls (ActionCalls)", () => {
       expect(await h.calls.claim({ v: 1, id: claim.id, owner: "workflow:x" })).toEqual({ v: 1, ok: false, reason: "leased", retryAfterMs: 300_000 });
       expect(h.calls.nextAt(h.clock.now)).toBe(1_300_000);
       expect(await h.calls.sweep()).toBe(0);
-      // Renewals from the inline runner keep it; when it dies the lease ends and a Workflow takes over as attempt 2.
       h.clock.now += 30_000;
       expect(await h.calls.renew({ v: 1, id: claim.id, attempt: 1 })).toMatchObject({ ok: true });
-      h.clock.now += 300_000;
+      expect(await h.calls.sweep()).toBe(0);
+    });
+  });
+
+  it("X13b a runner that answered and died before recording the completion: the run ends dead, never runs again, answers once", async () => {
+    await withCalls(async (h) => {
+      // The inline runner ran the Action, sent its answer in the dispatch, then died before completeCall.
+      const claim = await h.calls.start({ session, path: "agent.turn", args: {} }, "inline:a");
+      h.clock.now += 300_001;
+      expect(h.calls.nextAt(h.clock.now)).toBe(h.clock.now);
       expect(await h.calls.sweep()).toBe(1);
-      expect(h.jobs).toEqual([{ v: 1, kind: "call", projectId: "p", tenantId: "t", id: claim.id, n: 1 }]);
-      expect(await h.calls.claim({ v: 1, id: claim.id, owner: "workflow:x" })).toMatchObject({ ok: true, attempt: 2 });
-      // The dead inline runner's late answer is refused.
+      // Not handed to a Workflow: the Action's effects never happen twice.
+      expect(h.jobs).toEqual([]);
+      expect(await h.calls.claim({ v: 1, id: claim.id, owner: "workflow:x" })).toEqual({ v: 1, ok: false, reason: "dead" });
+      expect(h.sql.exec(`SELECT state, attempts, last_error FROM ${RUNS}`).one()).toEqual({ state: "dead", attempts: 1, last_error: INLINE_LAPSED });
+      // One error reply is settled (the gateway answers `obsolete` when the inline answer was already sent).
+      expect(h.finished).toEqual([{ id: claim.id, ok: false, error: INLINE_LAPSED }]);
+      // The runner's late completion changes nothing and delivers nothing.
       expect(await h.calls.complete({ v: 1, id: claim.id, attempt: 1, value: "1", inlineReply: true })).toEqual({ v: 1, applied: false, rejected: true });
+      await h.calls.sweep();
+      expect(h.finished).toHaveLength(1);
+      expect(h.jobs).toEqual([]);
+    });
+  });
+
+  it("X13b review r4617881959: a run renewed while the sweep settles an earlier one is not ended", async () => {
+    await withCalls(async (h, state) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const finished: CallFinished[] = [];
+      const calls = new ActionCalls({ storage: state.storage, projectId: "p", tenantId: "t",
+        dispatcher: { dispatch: async (job) => { h.jobs.push(job); } }, wake: () => undefined, clock: () => h.clock.now,
+        randomUUID: (() => { let n = 0; return () => `race-${++n}`; })(),
+        onFinished: async (f) => { await gate; finished.push(f); } });
+      const first = await calls.start({ session, path: "agent.turn", args: {} }, "inline:a");
+      const second = await calls.start({ session, path: "agent.turn", args: {} }, "inline:b");
+      h.clock.now += 300_001;
+      // Both are due. Ending the first waits on its reply settlement; the second's runner renews meanwhile.
+      const sweeping = calls.sweep();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await calls.renew({ v: 1, id: second.id, attempt: 1 })).toMatchObject({ ok: true });
+      release();
+      expect(await sweeping).toBe(1);
+      const states = Object.fromEntries(h.sql.exec<{ id: string; state: string }>(`SELECT id, state FROM ${RUNS}`).toArray().map((r) => [r.id, r.state]));
+      expect(states).toEqual({ [first.id]: "dead", [second.id]: "live" });
+      expect(finished.map((f) => f.id)).toEqual([first.id]);
+      // Its runner still owns it and completes it normally.
+      expect(await calls.complete({ v: 1, id: second.id, attempt: 1, value: '"ok"', inlineReply: true })).toMatchObject({ applied: true });
+      expect(h.jobs).toEqual([]);
+    });
+  });
+
+  it("X13b a completion recorded after the answer is idempotent; the run is done and never lapses", async () => {
+    await withCalls(async (h) => {
+      const claim = await h.calls.start({ session, path: "agent.turn", args: {} }, "inline:a");
+      expect(await h.calls.complete({ v: 1, id: claim.id, attempt: 1, value: '"ok"', inlineReply: true })).toMatchObject({ applied: true });
+      expect(await h.calls.complete({ v: 1, id: claim.id, attempt: 1, value: '"ok"', inlineReply: true })).toMatchObject({ duplicate: true, appliedAttempt: 1 });
+      h.clock.now += 300_001;
+      await h.calls.sweep();
+      expect(h.jobs).toEqual([]);
+      expect(h.sql.exec(`SELECT state FROM ${RUNS}`).one()).toEqual({ state: "done" });
+      expect(h.finished).toEqual([{ id: claim.id, ok: true, value: '"ok"' }]);
     });
   });
 

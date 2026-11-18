@@ -6,7 +6,7 @@
 // table, the artifact hash and the client contract; the code comes from the
 // bundle the Worker was built with, looked up by artifact hash.
 
-import type { FunctionContract, ModuleArtifact, ModuleExports } from "../host/src/index.js";
+import type { FunctionContract, ModuleArtifact, ModuleExportsSource } from "../host/src/index.js";
 import { grantSourceOf, type PermissionGrantSource } from "./permissions.ts";
 
 export interface FunctionDefinition {
@@ -94,7 +94,7 @@ export function projectModuleFromManifest(projectId: string, manifest: Record<st
 }
 
 /** The K04 artifact of a module generation: Query and Reducer contracts over the bundle's exports. */
-export function moduleArtifact(module: ProjectModule, generation: number, exports: ModuleExports): ModuleArtifact {
+export function moduleArtifact(module: ProjectModule, generation: number, exports: ModuleExportsSource): ModuleArtifact {
   const functions: FunctionContract[] = [];
   for (const definition of module.functions.values()) {
     if (definition.kind !== "query" && definition.kind !== "reducer" && definition.kind !== "action") continue;

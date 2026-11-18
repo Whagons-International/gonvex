@@ -237,8 +237,11 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
         files.set(`${base}/manifest.json`, JSON.stringify(facts.storedManifest));
         // Lazy: esbuild wraps a require()d module in an init function, so V8 only pre-parses it and runs it
         // on that project's first use (once per isolate). Startup cost no longer scales with app count.
-        actionImports.push(`const load${index} = lazy(() => ({ exports: require("./${base}/actions.js"), manifest: require("./${base}/manifest.json") }));`);
-        actionEntries.push(`  ${JSON.stringify(release.project)}: { get manifest() { return load${index}().manifest; }, get exports() { return load${index}().exports; } },`);
+        // X13b: the manifest and the code load separately. The Action Worker reads a project's contracts (to
+        // route a call and start its run) without evaluating its bundle, so a cold isolate can overlap the
+        // evaluation (Whagons: ~350-450 ms CPU) with the tenant's run start.
+        actionImports.push(`const manifest${index} = lazy(() => require("./${base}/manifest.json"));\nconst exports${index} = lazy(() => require("./${base}/actions.js"));`);
+        actionEntries.push(`  ${JSON.stringify(release.project)}: { get manifest() { return manifest${index}(); }, get exports() { return exports${index}(); } },`);
         files.set(`${base}/app.js`, await app.text());
         files.set(`${base}/functions.json`, await functions.text());
         imports.push(`const load${index} = lazy(() => ({ exports: require("./${base}/app.js"), functions: require("./${base}/functions.json"), manifest: require("./${base}/manifest.json") }));`);

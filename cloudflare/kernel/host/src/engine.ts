@@ -104,6 +104,13 @@ export interface ModuleHost {
 /** Bundle namespace: export name -> binding. */
 export type ModuleExports = Readonly<Record<string, unknown>>;
 
+/**
+ * A bundle namespace, or a loader that evaluates it on first use. The Action
+ * Worker passes a loader: an agent Action's checks and hand-off need only the
+ * manifest, so the isolate that dispatches it never evaluates the app (X13).
+ */
+export type ModuleExportsSource = ModuleExports | (() => ModuleExports);
+
 interface ActiveSlot {
   open: boolean;
   calls: number;
@@ -115,7 +122,7 @@ interface ActiveSlot {
 export class ModuleEngine {
   readonly functions: ReadonlyMap<string, FunctionContract>;
   readonly config: EngineConfig;
-  private readonly exports: ModuleExports;
+  private source: ModuleExportsSource;
   private readonly resolver: ExportResolver;
 
   /**
@@ -124,9 +131,9 @@ export class ModuleEngine {
    * `ModuleError` InvalidArtifact otherwise. An export that does not resolve
    * fails its calls at dispatch, as in Rust (`unresolved()` lists them).
    */
-  constructor(contracts: readonly FunctionContract[], exports: ModuleExports, config: Partial<EngineConfig> = {}) {
+  constructor(contracts: readonly FunctionContract[], exports: ModuleExportsSource, config: Partial<EngineConfig> = {}) {
     this.config = { ...defaultEngineConfig, ...config };
-    this.exports = exports;
+    this.source = exports;
     const functions = new Map<string, FunctionContract>();
     for (const contract of contracts) {
       if (functions.has(contract.path)) throw new ModuleError("InvalidArtifact", `function ${contract.path} is declared more than once`);
@@ -147,8 +154,20 @@ export class ModuleEngine {
     return [...this.functions.values()].filter((contract) => resolveHandler(this.binding(contract), contract.path) === null).map((contract) => contract.path);
   }
 
+  /** Whether the bundle has been evaluated (always true for an eager namespace). */
+  get loaded(): boolean { return typeof this.source !== "function"; }
+
+  /** Evaluates the bundle now (X13b: a cold Action isolate overlaps it with the tenant's run start). */
+  load(): void { this.exports(); }
+
+  /** The namespace, evaluated once on first use; an evaluation error propagates to the caller. */
+  private exports(): ModuleExports {
+    if (typeof this.source === "function") this.source = this.source();
+    return this.source;
+  }
+
   private binding(contract: FunctionContract): unknown {
-    return this.resolver.find(this.exports, contract);
+    return this.resolver.find(this.exports(), contract);
   }
 
   private budget(contract: FunctionContract, context: InvocationContext, started: number): { deadline: number | undefined; timeoutMs: number | undefined; sliced: boolean } {

@@ -189,7 +189,7 @@ export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
       // hands it to a Workflow, as for any dead runner.
       let claim: Awaited<ReturnType<TenantStub["startCall"]>>;
       try {
-        claim = await tenant.startCall({ ...request, owner: `inline:${crypto.randomUUID()}` });
+        claim = await startInline(tenant, { ...request, owner: `inline:${crypto.randomUUID()}` }, active?.engine);
       } catch (error) {
         // Deploy skew: an older tenant object has no `startCall`. Hand the call to a Workflow as before.
         if (!/does not implement the method/i.test(String((error as Error)?.message ?? error))) throw error;
@@ -199,11 +199,29 @@ export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
       // The answer goes back in this call, so the socket sends it from the dispatch it is waiting on,
       // as for a standard Action. Through the tenant's reply RPC instead, the gateway would defer the
       // socket's next tenant call to its next fresh event (X02's depth rule): one alarm per Action.
-      const report = await runInline({ runtime, tenant, renewMs: (config as unknown as ActionWorkerConfig<ActionEnv> | undefined)?.renewMs }, claim);
+      const { report, completion } = await runInline({ runtime, tenant, renewMs: (config as unknown as ActionWorkerConfig<ActionEnv> | undefined)?.renewMs }, claim);
+      // X13b: the completion is persisted after the answer leaves, never on the reply path.
+      this.ctx.waitUntil(completion);
       return report ?? { pending: true, id: claim.id };
     }
     return runtime.execute({ session: input.session, path: input.path, args: input.args, provenance: input.provenance, allowInternal: input.allowInternal === true });
   }
+}
+
+/**
+ * X13b: starts an inline run in the tenant. On a cold isolate the app bundle has not been evaluated yet
+ * (Whagons: ~350-450 ms CPU); it is evaluated while the tenant writes the run instead of after it. One
+ * turn of the event loop lets the request leave before the CPU-bound evaluation. A bundle that fails to
+ * evaluate fails the call in `execute`, as before.
+ */
+export async function startInline<T>(tenant: { startCall(request: Parameters<TenantStub["startCall"]>[0]): Promise<T> }, request: Parameters<TenantStub["startCall"]>[0], engine: { readonly loaded: boolean; load(): void } | undefined): Promise<T> {
+  const started = tenant.startCall(request);
+  if (engine && !engine.loaded) {
+    void started.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    try { engine.load(); } catch { /* reported by execute */ }
+  }
+  return started;
 }
 
 /** Attempts and first delay for applying an inline run's answer (a Workflow's "apply result" step retries too). */
@@ -211,39 +229,43 @@ const INLINE_COMPLETE_ATTEMPTS = 6;
 const INLINE_COMPLETE_DELAY_MS = 250;
 
 /**
- * X13: one direct agent call run inside `ActionWorker.call`. Its answer is applied with
- * `completeCall` (`inlineReply`: the tenant keeps the reply only as a delayed backup) and returned,
- * for the socket's dispatch to send. `null` when this runner has no answer to send: the run was
- * cancelled or another attempt owns it, or the answer could not be applied; the tenant's reply
- * path answers then. A run that throws instead of answering is released to a Workflow at once, as
- * a Workflow step's crash is retried at once; an answer that cannot be applied is left to the
- * sweep, which hands the run to a Workflow when its lease ends.
+ * X13: one direct agent call run inside `ActionWorker.call`. X13b (lead decision): the answer goes back
+ * first and the completion is persisted after it (`completion`, which the caller hands to
+ * `ctx.waitUntil`), so the durable completion write is off the reply path, as Rust persists nothing for
+ * a socket's Action. The completion is idempotent (`completeCall` answers a replay as a duplicate). If
+ * this runner dies between the answer and the completion, the sweep never runs an inline run again: it
+ * ends it as dead (`ActionCalls`), so the Action's effects never happen twice. `report` is null when
+ * this runner has no answer to send: the run was cancelled or another attempt owns it. A run that throws
+ * instead of answering sent nothing, so it is released to a Workflow at once, as before.
  */
-export async function runInline(deps: RunnerDeps & { tenant: Pick<TenantStub, "completeCall" | "releaseCall" | "renewCall" | "claimCall" | "call"> }, claim: Extract<Claim, { ok: true }>): Promise<ActionReport | null> {
+export async function runInline(deps: RunnerDeps & { tenant: Pick<TenantStub, "completeCall" | "releaseCall" | "renewCall" | "claimCall" | "call"> }, claim: Extract<Claim, { ok: true }>): Promise<{ report: ActionReport | null; completion: Promise<void> }> {
   let outcome: Awaited<ReturnType<typeof runClaimed>>;
   try {
     outcome = await runClaimed(deps, claim);
   } catch (error) {
     console.error("actions: inline run failed; handing it to a Workflow", { path: claim.path, error: String((error as Error)?.message ?? error).slice(0, 300) });
     await tenantRpc("releaseCall", () => deps.tenant.releaseCall({ v: 1, id: claim.id, attempt: claim.attempt })).catch(() => undefined);
-    return null;
+    return { report: null, completion: Promise.resolve() };
   }
-  if (outcome.kind !== "done") return null;
-  const request = { v: 1 as const, id: claim.id, attempt: outcome.attempt, value: outcome.value, error: outcome.error, committedRevision: outcome.committedRevision, inlineReply: true };
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const completion = await tenantRpc("completeCall", () => deps.tenant.completeCall(request));
-      // Only the attempt whose answer the tenant holds may send it; any other answer is not the call's.
-      if (!(completion.applied || (completion.duplicate && completion.appliedAttempt === outcome.attempt))) return null;
-      return outcome.ok
-        ? { ok: true, value: outcome.value ?? "null", ...(outcome.committedRevision === undefined ? {} : { committedRevision: outcome.committedRevision }), stats: outcome.stats }
-        : { ok: false, error: outcome.error ?? "action failed", class: outcome.errorClass ?? "rejected", stats: outcome.stats };
-    } catch (error) {
-      if (attempt >= INLINE_COMPLETE_ATTEMPTS || !isTransientRpcError(error)) {
-        console.error("actions: inline answer not applied; the sweep hands the run off when its lease ends", { path: claim.path, error: String((error as Error)?.message ?? error).slice(0, 300) });
-        return null;
+  if (outcome.kind !== "done") return { report: null, completion: Promise.resolve() };
+  const done = outcome;
+  const request = { v: 1 as const, id: claim.id, attempt: done.attempt, value: done.value, error: done.error, committedRevision: done.committedRevision, inlineReply: true };
+  const completion = (async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await tenantRpc("completeCall", () => deps.tenant.completeCall(request));
+        return;
+      } catch (error) {
+        if (attempt >= INLINE_COMPLETE_ATTEMPTS || !isTransientRpcError(error)) {
+          console.error("actions: inline completion not recorded; the sweep ends the run when its lease ends", { path: claim.path, error: String((error as Error)?.message ?? error).slice(0, 300) });
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, INLINE_COMPLETE_DELAY_MS * 2 ** (attempt - 1)));
       }
-      await new Promise((resolve) => setTimeout(resolve, INLINE_COMPLETE_DELAY_MS * 2 ** (attempt - 1)));
     }
-  }
+  })();
+  const report: ActionReport = done.ok
+    ? { ok: true, value: done.value ?? "null", ...(done.committedRevision === undefined ? {} : { committedRevision: done.committedRevision }), stats: done.stats }
+    : { ok: false, error: done.error ?? "action failed", class: done.errorClass ?? "rejected", stats: done.stats };
+  return { report, completion };
 }

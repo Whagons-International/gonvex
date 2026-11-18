@@ -81,7 +81,9 @@ it('X13 a create behind an agent Action waits only for the Action itself, as in 
   expect(result.actionOverheadMs).toBeLessThan(500);
   expect(result.rewriteAddsToCreateMs).toBeLessThan(REWRITE_MS+500);
   // No Workflow ran: every direct run was claimed by an inline runner as attempt 1 and is done.
-  const runs=await bindings.PUB_TENANT.getByName(tenant).fixtureActionRuns();
+  // X13b: each completion is recorded after its answer left, so let the last one land.
+  let runs=await bindings.PUB_TENANT.getByName(tenant).fixtureActionRuns();
+  for(let i=0;i<200&&runs.some(run=>run.state!=='done');i++){await new Promise(resolve=>setTimeout(resolve,10));runs=await bindings.PUB_TENANT.getByName(tenant).fixtureActionRuns();}
   expect(runs).toHaveLength(ROUNDS+1);
   expect(new Set(runs.map(run=>JSON.stringify(run)))).toEqual(new Set([JSON.stringify({state:'done',attempts:1,owner:null,dispatch_count:0})]));
  }finally{
