@@ -53,9 +53,10 @@ class Aliases {
 class ExpectationError extends Error {}
 
 /**
- * @param {{ scenario: any, backend: import('./backend.mjs').Backend, fixtures: Record<number, any>, verbose?: boolean }} options
+ * @param {{ scenario: any, backend: import('./backend.mjs').Backend, fixtures: Record<number, any>, verbose?: boolean, created?: string[] }} options
+ *   `created` receives every project id the run creates, even when setup then fails (see cleanup.mjs).
  */
-export async function runScenario({ scenario, backend, fixtures, verbose = false }) {
+export async function runScenario({ scenario, backend, fixtures, verbose = false, created = [] }) {
   const trace = { backend: backend.name, scenario: scenario.name, failures: [], steps: [], checksums: {} };
   const missing = (scenario.requires ?? []).filter(c => !backend.capabilities[c]);
   if (missing.length) { trace.skipped = `backend lacks ${missing.join(', ')}`; return trace; }
@@ -68,6 +69,7 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
 
   // ---- seed ---------------------------------------------------------------
   const { projectId } = await backend.createProject(`conformance-${scenario.name}`);
+  created.push(projectId);
   aliases.add(projectId, '<project>');
   const deployed = await backend.deploy(projectId, fixtures[1].manifest);
   if (!deployed.ok) throw new Error(`${backend.name}: deploy of fixture generation 1 failed`);
