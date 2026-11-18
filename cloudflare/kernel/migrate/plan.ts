@@ -8,10 +8,18 @@
 
 import type { AddedObject } from "../schema-transform/index.ts";
 
+/**
+ * Per chunk, [first, last] statement ranges (chunk-relative, sorted, disjoint) that must commit in one
+ * storage transaction (A01's atomic ranges). Absent in plans built before X10: each chunk is then applied
+ * whole, in one transaction, as before.
+ */
+export type AtomicSpans = Array<Array<[number, number]>>;
+
 export interface PlannedPrelude {
   kind: "prelude";
   name: string;
   chunks: number;
+  atomic?: AtomicSpans;
 }
 
 export interface PlannedMigration {
@@ -24,6 +32,7 @@ export interface PlannedMigration {
   refusal: string | null;
   statements: number;
   chunks: number;
+  atomic?: AtomicSpans;
 }
 
 export type PlannedUnit = PlannedPrelude | PlannedMigration;

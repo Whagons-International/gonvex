@@ -7,6 +7,7 @@ import {
   MemoryPlanStore,
   migrationsFromFiles,
   parseMigration,
+  dependentStatements,
   PROGRESS_KEY,
   RECORD_STASH,
   TenantMigrator,
@@ -312,6 +313,223 @@ describe("resume after interruption", () => {
       // Syncing again starts over and finishes.
       await m.applyRelease(release.id);
       expect(await drain(m)).toMatchObject({ state: "done" });
+    });
+  });
+});
+
+describe("split chunks keep each migration atomic (X10)", () => {
+  const tenant = (body: string) => ({ "migrations/0001_split.sql": `-- gonvex:scope tenant\n${body}` });
+  // Non-idempotent DDL and writes: re-running any committed statement would fail or double a row.
+  const EIGHT = `CREATE TABLE a (id INTEGER PRIMARY KEY);
+INSERT INTO a VALUES (1);
+CREATE TABLE b (id INTEGER PRIMARY KEY);
+INSERT INTO b VALUES (1);
+CREATE TABLE c (id INTEGER PRIMARY KEY);
+INSERT INTO c VALUES (1);
+CREATE TABLE d (id INTEGER PRIMARY KEY);
+INSERT INTO d VALUES (1);`;
+  const twoPerTransaction = { maxChunksPerEvent: 1, maxStatementsPerTransaction: 2, initialStatementsPerTransaction: 2 };
+  /** The test storage, plus the order of bookmarks taken and transactions observed. */
+  function logged(state: DurableObjectState, store: PlanStore, onTransaction?: (fn: () => unknown, real: DurableObjectStorage) => unknown) {
+    const log: string[] = [];
+    const base = testStorage(state);
+    const storage = new Proxy(base.storage, {
+      get(target, key) {
+        if (key === "getCurrentBookmark") return async () => { const b = await state.storage.getCurrentBookmark(); log.push(`bookmark ${b}`); return b; };
+        if (key === "transactionSync" && onTransaction) return (fn: () => unknown) => onTransaction(fn, state.storage);
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const capture = fakeCapture();
+    const aborts: string[] = [];
+    const m = new TenantMigrator({ storage, plans: store, capture, abort: (r) => aborts.push(r), budget: twoPerTransaction,
+      observe: (e) => log.push(`tx ${e.unit} chunk ${e.chunk} statements ${e.statements}`) });
+    return { m, log, restores: base.restores, aborts, capture };
+  }
+
+  it("a statement that throws after earlier transactions of the chunk committed restores the migration's restore point; nothing reaches the ledger", async () => {
+    const release = await plan(tenant(`${EIGHT}\nINSERT INTO a VALUES (1);\nCREATE TABLE e (id INTEGER PRIMARY KEY);`), { chunk: { maxStatements: 200 } });
+    expect(release.migrations[0]!.chunks).toBe(1);
+    await withObject(async (state) => {
+      const { m, log, restores, aborts } = logged(state, new MemoryPlanStore(release));
+      await m.applyRelease(release.id);
+      let s = await m.alarm();
+      for (let i = 0; i < 100 && s.state === "running"; i += 1) s = await m.alarm();
+      expect(s.state).toBe("failed");
+      expect(s.error).toMatch(/^migration 0001_split.sql: UNIQUE constraint failed: a\.id/);
+      // The restore point was taken once, before the migration's first transaction; four committed before the failure.
+      const mine = log.filter((l) => l.startsWith("tx migration/0001_split.sql"));
+      expect(mine).toEqual(Array(4).fill("tx migration/0001_split.sql chunk 0 statements 2"));
+      const bookmarkAt = log.findLastIndex((l, i) => l.startsWith("bookmark ") && i < log.indexOf(mine[0]!));
+      expect(bookmarkAt).toBeGreaterThanOrEqual(0);
+      expect(log.slice(bookmarkAt + 1).some((l) => l.startsWith("bookmark "))).toBe(false);
+      // That restore point covers all four committed transactions: it is the one scheduled.
+      expect(restores).toEqual([log[bookmarkAt]!.slice("bookmark ".length)]);
+      expect(state.storage.kv.get<Progress>(PROGRESS_KEY)).toMatchObject({ phase: "failed", restorePending: true, statement: 8 });
+      expect(m.ledger().map((r) => r.name)).not.toContain("0001_split.sql");
+      expect(state.storage.kv.get("gonvex/migrate/applied/0001_split.sql")).toBeUndefined();
+      expect(s.applied).toEqual([]);
+      expect(s.gateClosed).toBe(true);
+      await m.alarm();
+      expect(aborts).toHaveLength(1);
+    });
+  });
+
+  it("a reset inside a split transaction resumes at the saved statement without re-running committed DDL", async () => {
+    const release = await plan(tenant(EIGHT), { chunk: { maxStatements: 200 } });
+    const reference = await withObject(async (state) => {
+      const { m } = logged(state, new MemoryPlanStore(release));
+      await m.applyRelease(release.id);
+      await drain(m);
+      return { schema: schema(state.storage.sql), ledger: m.ledger().map((r) => [r.name, r.checksum]) };
+    });
+    await withObject(async (state) => {
+      const store = new MemoryPlanStore(release);
+      // Emulate an object reset in the transaction at statement 4: its writes roll back, and nothing
+      // after it runs. Storage then holds what `attempt()` synced before the transaction.
+      let atReset: Progress | undefined;
+      const RESET = new Error("emulated reset");
+      const first = logged(state, store, (fn, real) => {
+        const p = real.kv.get<Progress>(PROGRESS_KEY);
+        if (!atReset && p?.phase === "migrations" && p.statement === 4) {
+          atReset = structuredClone(p);
+          try { real.transactionSync(() => { fn(); throw RESET; }); } catch { /* rolled back */ }
+          throw RESET;
+        }
+        return real.transactionSync(fn);
+      });
+      await first.m.applyRelease(release.id);
+      for (let i = 0; i < 100 && !atReset; i += 1) await first.m.alarm();
+      expect(atReset).toMatchObject({ phase: "migrations", unit: 0, chunk: 0, statement: 4, attempts: 1, unitState: "running" });
+      // Drop everything the dying instance did after the reset point.
+      state.storage.kv.put(PROGRESS_KEY, atReset);
+      expect(state.storage.sql.exec("SELECT name FROM sqlite_schema WHERE type='table' AND name IN ('a','b','c','d') ORDER BY name").toArray().map((r) => r.name)).toEqual(["a", "b"]);
+      expect(first.m.ledger().map((r) => r.name)).not.toContain("0001_split.sql");
+
+      const second = logged(state, store);
+      expect(second.m.gateClosed()).toBe(true);
+      const done = await drain(second.m);
+      expect(done).toMatchObject({ state: "done", error: null, applied: ["0001_split.sql"] });
+      // Resumed at statement 4: no "already exists" and no doubled row.
+      expect(second.log.filter((l) => l.startsWith("tx migration/0001_split.sql"))).toEqual([
+        "tx migration/0001_split.sql chunk 0 statements 2",
+        "tx migration/0001_split.sql chunk 0 statements 2",
+      ]);
+      for (const t of ["a", "b", "c", "d"]) expect(state.storage.sql.exec(`SELECT count(*) AS n FROM ${t}`).one().n).toBe(1);
+      expect(schema(state.storage.sql)).toEqual(reference.schema);
+      expect(second.m.ledger().map((r) => [r.name, r.checksum])).toEqual(reference.ledger);
+      expect(second.capture.finalizeCalls.map((c) => c.commandId)).toEqual(["migration:0001_split.sql"]);
+    });
+  });
+
+  it("never splits a range the transform marks atomic (a TEMP table's lifetime); a long one is logged unsplittable", async () => {
+    const release = await plan(tenant(`CREATE TEMP TABLE g (id INTEGER);
+INSERT INTO g VALUES (1);
+INSERT INTO g VALUES (2);
+CREATE TABLE kept (x INTEGER);
+INSERT INTO kept SELECT id FROM g;`), { chunk: { maxStatements: 200 } });
+    const unit = release.migrations[0]!;
+    expect(unit.atomic).toEqual([[[0, unit.statements - 1]]]);
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (line: string) => void warnings.push(line);
+    try {
+      await withObject(async (state) => {
+        const { m, log } = logged(state, new MemoryPlanStore(release));
+        await m.applyRelease(release.id);
+        expect((await drain(m)).state).toBe("done");
+        expect(log.filter((l) => l.startsWith("tx migration/0001_split.sql"))).toEqual([`tx migration/0001_split.sql chunk 0 statements ${unit.statements}`]);
+        expect(state.storage.sql.exec("SELECT count(*) AS n FROM kept").one().n).toBe(2);
+      });
+    } finally {
+      console.warn = warn;
+    }
+    expect(warnings.map((w) => JSON.parse(w))).toContainEqual(expect.objectContaining({ event: "gonvex.migrate.unsplittable", statements: unit.statements }));
+  });
+
+  /** Transactions of 0002, as statement counts, with A01's ranges as planned or removed (the migrator's own grouping). */
+  async function transactionsOf(files: Record<string, string>, withPlanRanges: boolean) {
+    const built = await plan(files, { chunk: { maxStatements: 200 } });
+    const release: ReleasePlan = withPlanRanges ? built : { ...built, migrations: built.migrations.map((m) => ({ ...m, atomic: Array.from({ length: m.chunks }, () => []) })) };
+    return withObject(async (state) => {
+      const { m, log } = logged(state, new MemoryPlanStore(release));
+      await m.applyRelease(release.id);
+      const done = await drain(m);
+      return { done, sizes: log.filter((l) => l.startsWith("tx migration/0002_")).map((l) => Number(l.split(" ").at(-1))), sql: state.storage.sql };
+    });
+  }
+  const twoMigrations = (first: string, second: string) => ({
+    "migrations/0001_base.sql": `-- gonvex:scope tenant\n${first}`,
+    "migrations/0002_change.sql": `-- gonvex:scope tenant\n${second}`,
+  });
+
+  for (const withPlanRanges of [true, false]) {
+    const label = withPlanRanges ? "with the plan's ranges" : "from the migrator's own grouping";
+    it(`keeps a deferred-foreign-key INSERT and its DELETE in one transaction (${label})`, async () => {
+      const files = twoMigrations(
+        `CREATE TABLE parent (id TEXT PRIMARY KEY);
+CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);`,
+        `INSERT INTO child VALUES ('scope', 'missing');
+CREATE TABLE f1 (x INTEGER);
+CREATE TABLE f2 (x INTEGER);
+DELETE FROM child WHERE id = 'scope';
+CREATE TABLE f3 (x INTEGER);
+CREATE TABLE f4 (x INTEGER);`);
+      const { done, sizes } = await transactionsOf(files, withPlanRanges);
+      expect(done).toMatchObject({ state: "done", error: null });
+      // Split at 2 statements, the INSERT would commit alone and fail the deferred key at commit.
+      expect(sizes[0]).toBe(4);
+      expect(sizes.reduce((a, b) => a + b, 0)).toBe(6);
+    });
+  }
+
+  it("keeps a table rebuild (create, copy, drop, rename) and a dropped-and-recreated index each in one transaction", async () => {
+    const files = twoMigrations(
+      `CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);
+CREATE INDEX t_name ON t(name);
+INSERT INTO t VALUES (1, 'a'), (2, 'b');`,
+      `CREATE TABLE t_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT '');
+INSERT INTO t_new (id, name) SELECT id, coalesce(name, '') FROM t;
+DROP TABLE t;
+ALTER TABLE t_new RENAME TO t;
+DROP INDEX IF EXISTS t_name;
+CREATE TABLE side (x INTEGER);
+CREATE UNIQUE INDEX t_name ON t(name);
+CREATE TABLE tail (x INTEGER);`);
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (line: string) => void warnings.push(line);
+    try {
+      const { done, sizes } = await transactionsOf(files, false);
+      expect(done).toMatchObject({ state: "done", error: null });
+      expect(sizes).toEqual([4, 3, 1]);
+    } finally {
+      console.warn = warn;
+    }
+    expect(warnings.map((w) => JSON.parse(w)).filter((w) => w.event === "gonvex.migrate.unsplittable" && String(w.what).startsWith("migration/0002_")).map((w) => w.statements)).toEqual([4, 3]);
+  });
+
+  it("groups dependent statements by name, quoted or not, and leaves independent ones splittable", () => {
+    const deferred = (t: string) => t === "child";
+    expect(dependentStatements([
+      'INSERT INTO "child" VALUES (1)', "CREATE TABLE a (x)", "DELETE FROM main.child WHERE x = 1",
+      "CREATE TABLE b (x)", 'CREATE TABLE "B_new" (x)', "INSERT INTO B_new SELECT * FROM b", "DROP TABLE b", "ALTER TABLE b_new RENAME TO b",
+      "INSERT INTO a VALUES (1)", "DELETE FROM a",
+      "DROP VIEW v", "CREATE VIEW v AS SELECT 1", "DROP TRIGGER IF EXISTS g", "CREATE TABLE c (x)",
+    ], deferred)).toEqual([[0, 2], [4, 7], [10, 11]]);
+    // An INSERT whose DELETE is in a later chunk stays with the rest of this one.
+    expect(dependentStatements(["CREATE TABLE a (x)", "INSERT INTO child VALUES (1)", "CREATE TABLE b (x)"], deferred)).toEqual([[1, 2]]);
+  });
+
+  it("a plan built before X10 (no atomic ranges) applies each chunk whole, as before", async () => {
+    const release = await plan(tenant(EIGHT), { chunk: { maxStatements: 200 } });
+    const legacy: ReleasePlan = { ...release, migrations: release.migrations.map(({ atomic: _a, ...m }) => m), prelude: release.prelude.map(({ atomic: _a, ...p }) => p) };
+    await withObject(async (state) => {
+      const { m, log } = logged(state, new MemoryPlanStore(legacy));
+      await m.applyRelease(legacy.id);
+      expect((await drain(m)).state).toBe("done");
+      expect(log.filter((l) => l.startsWith("tx migration/0001_split.sql"))).toEqual(["tx migration/0001_split.sql chunk 0 statements 8"]);
     });
   });
 });

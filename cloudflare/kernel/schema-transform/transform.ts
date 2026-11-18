@@ -78,6 +78,12 @@ export interface TransformedMigration {
   statements: string[];
   /** The same statements cut into storage transactions (T7). */
   chunks: string[][];
+  /**
+   * [first, last] statement ranges (indexes into `statements`, merged) that must commit in one storage
+   * transaction: a TEMP table's lifetime (T4), a statement the transform expanded into several, and a
+   * deferred-foreign-key span (T7). K02 never splits a chunk inside one.
+   */
+  atomic: Array<[number, number]>;
   /** `-- gonvex:` directive lines from the source, verbatim. */
   directives: string[];
   /** `-- gonvex:foreign-key-rebuild`: apply with foreign keys off, then check. */
@@ -210,11 +216,13 @@ export class SchemaTransform {
       ctx.rewrites.push({ rule: "T4", object: created ? created.name : lower });
     }
     const directives = source.split("\n").filter((l) => /^\s*--\s*gonvex:/.test(l)).map((l) => l.trim());
+    const atomic = mergeRanges([...ctx.tempGroups, ...ctx.keep, ...this.deferredSpans(ctx.out)]);
     return {
       name,
       version: TRANSFORM_VERSION,
       statements: ctx.out,
-      chunks: chunkStatements(ctx.out, this.chunkOptions, mergeRanges([...ctx.tempGroups, ...ctx.keep, ...this.deferredSpans(ctx.out)])),
+      chunks: chunkStatements(ctx.out, this.chunkOptions, atomic),
+      atomic,
       directives,
       foreignKeyRebuild: directives.some((d) => /^--\s*gonvex:foreign-key-rebuild$/.test(d)),
       sourceStatements: statements.length,

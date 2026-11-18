@@ -44,6 +44,9 @@ statements per chunk (`<unit>/<index>`). An object reads the manifest once and o
   Progress (chunk and statement offset) lives in `ctx.storage.kv` (`gonvex/migrate/progress`) and commits in the same
   transaction, so a reset loses at most the transaction in flight. A migration's last statements still commit with its
   finalize and ledger row, and a failure after any committed transaction still restores the migration's bookmark.
+  A transaction never ends inside a range A01 marks atomic (a TEMP table's lifetime, an expanded statement, a
+  deferred-foreign-key span; `atomic` per chunk in the plan, format `k02.2`). A plan without those ranges, or a chunk
+  that sets `PRAGMA defer_foreign_keys`, is applied one whole chunk per transaction, as before.
 - CPU budget (0022 §5b, X10): on a schema of thousands of objects one DDL statement costs about 9 ms (local workerd),
   so a whole 200-statement chunk took about 1.8 s locally and 2.5 s on the platform. `batch` starts at
   `initialStatementsPerTransaction` (8) and adapts to `transactionMs` (300 ms), at most doubling per transaction and

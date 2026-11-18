@@ -125,3 +125,24 @@ it('imports, checks and verifies 115k rows with every request inside the CPU bud
   // Budgeted operations stop at the budget plus at most one page or table; inserts are bounded by the page size.
   for (const op of ['schema', 'checksum', 'check', 'verify', 'insert']) expect(summary[op]!.maxMs, op).toBeLessThan(2 * REQUEST_BUDGET_MS);
 }); 
+
+it('a catalog read while a schema request yields cannot leave plans of the old schema cached', async () => {
+  await runInDurableObject(env.TENANT.getByName('devcopy-plans-cache'), async (_instance, state) => {
+    const transfer = new TenantTransfer(state, { budgetMs: 1e9 });
+    const post = (op: string, body: unknown) => transfer.fetch(new Request(`http://t/${op}`, { method: 'POST', body: JSON.stringify(body) })).then((r) => r.json() as Promise<Record<string, any>>);
+    const statements = Array.from({ length: 300 }, (_, i) => ({ name: `s${i}`, sql: `CREATE TABLE s${i} (id INTEGER PRIMARY KEY)` }));
+    let done = false;
+    const schema = post('schema', { statements }).then((r) => { done = true; return r; });
+    let interleaved = 0;
+    // Readers run in the schema request's yields, between its transactions.
+    while (!done) {
+      const { plans } = await post('catalog', {});
+      if (!done && plans.length < 300) interleaved += 1;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect((await schema).applied).toBe(300);
+    expect(interleaved).toBeGreaterThan(0);
+    const { plans } = await post('catalog', {});
+    expect(plans.filter((p: { name: string }) => p.name.startsWith('s'))).toHaveLength(300);
+  });
+});

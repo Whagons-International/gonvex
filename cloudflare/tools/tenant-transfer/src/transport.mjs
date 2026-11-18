@@ -111,11 +111,14 @@ export class TenantTransfer {
         }
       }
       consumed += batch.length;
+      // A catalog, read or checksum may run while this request yields: it must not keep plans of the old schema.
+      this.cachedPlans = null;
       await settle();
       const ms = Date.now() - t0;
       size = Math.max(1, Math.min(64, size * 2, ms > 0 ? Math.floor((batch.length * this.budgetMs) / (4 * ms)) : size * 2));
       if (Date.now() - started >= this.budgetMs) break;
     }
+    this.cachedPlans = null;
     return { applied, failed, consumed };
   }
 

@@ -33,7 +33,7 @@
 // (Rust holds its schema lock for the whole provision).
 
 import type { CaptureHooks, CaptureSql, CommitNotice, InstallUnit } from "./capture-port.ts";
-import { unitKey, type PlanManifest, type PlanStore, type PlannedMigration, type PlannedPrelude } from "./plan.ts";
+import { unitKey, type PlanManifest, type PlanStore, type PlannedMigration, type PlannedPrelude, type PlannedUnit } from "./plan.ts";
 
 export const PROGRESS_KEY = "gonvex/migrate/progress";
 export const APPLIED_PREFIX = "gonvex/migrate/applied/";
@@ -168,6 +168,81 @@ export interface TransactionEvent {
 /** A macrotask turn: on the platform, `Date.now()` afterwards includes the CPU spent before it. */
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+/** `PRAGMA defer_foreign_keys` holds for one transaction only: a chunk that sets it is applied whole. */
+const DEFER_PRAGMA = /^\s*PRAGMA\s+(\w+\.)?defer_foreign_keys\b/i;
+const DEFERRED_KEY = /\bDEFERRABLE\s+INITIALLY\s+DEFERRED\b/i;
+
+/** An identifier at the start of `rest` (quoted or bare), lower-case, without a schema prefix. */
+const NAME = String.raw`(?:(?:"(?:[^"]|"")+"|\[[^\]]+\]|\x60[^\x60]+\x60|[\w$]+)\s*\.\s*)?("(?:[^"]|"")+"|\[[^\]]+\]|\x60[^\x60]+\x60|[\w$]+)`;
+const unquote = (name: string) => (/^["[\x60]/.test(name) ? name.slice(1, -1).replace(/""/g, '"') : name).toLowerCase();
+const statementPatterns = {
+  insert: new RegExp(String.raw`^\s*(?:INSERT(?:\s+OR\s+\w+)?|REPLACE)\s+INTO\s+${NAME}`, "i"),
+  delete: new RegExp(String.raw`^\s*DELETE\s+FROM\s+${NAME}`, "i"),
+  createTable: new RegExp(String.raw`^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`, "i"),
+  rename: new RegExp(String.raw`^\s*ALTER\s+TABLE\s+${NAME}\s+RENAME\s+TO\s+`, "i"),
+  drop: new RegExp(String.raw`^\s*DROP\s+(INDEX|VIEW|TRIGGER)\s+(?:IF\s+EXISTS\s+)?${NAME}`, "i"),
+  create: new RegExp(String.raw`^\s*CREATE\s+(?:UNIQUE\s+|TEMP(?:ORARY)?\s+)?(INDEX|VIEW|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?${NAME}`, "i"),
+};
+const stripComments = (sql: string) => sql.replace(/^(?:\s*--[^\n]*\n|\s*\/\*[\s\S]*?\*\/)*/, "");
+
+/**
+ * Ranges of statements in one chunk that depend on each other and must commit together (see
+ * `TenantMigrator.units`). `deferred(table)` says whether a table not created in the chunk declares a
+ * deferred foreign key. Exported for tests.
+ */
+export function dependentStatements(all: readonly string[], deferred: (table: string) => boolean): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const createdDeferred = new Map<string, boolean>();
+  const openInsert = new Map<string, number>();
+  const createdAt = new Map<string, number>();
+  const dropped = new Map<string, number>();
+  all.forEach((raw, i) => {
+    const sql = stripComments(raw);
+    let m: RegExpExecArray | null;
+    if ((m = statementPatterns.createTable.exec(sql))) {
+      const table = unquote(m[1]!);
+      createdAt.set(table, i);
+      createdDeferred.set(table, DEFERRED_KEY.test(sql));
+    } else if ((m = statementPatterns.insert.exec(sql))) {
+      const table = unquote(m[1]!);
+      if (!openInsert.has(table) && (createdDeferred.get(table) ?? deferred(table))) openInsert.set(table, i);
+    } else if ((m = statementPatterns.delete.exec(sql))) {
+      const table = unquote(m[1]!);
+      const at = openInsert.get(table);
+      if (at !== undefined) {
+        out.push([at, i]);
+        openInsert.delete(table);
+      }
+    } else if ((m = statementPatterns.rename.exec(sql))) {
+      const at = createdAt.get(unquote(m[1]!));
+      if (at !== undefined) out.push([at, i]);
+    } else if ((m = statementPatterns.drop.exec(sql))) {
+      dropped.set(`${m[1]!.toUpperCase()} ${unquote(m[2]!)}`, i);
+    } else if ((m = statementPatterns.create.exec(sql))) {
+      const key = `${m[1]!.toUpperCase()} ${unquote(m[2]!)}`;
+      const at = dropped.get(key);
+      if (at !== undefined) {
+        out.push([at, i]);
+        dropped.delete(key);
+      }
+    }
+  });
+  // An INSERT whose DELETE is not in this chunk: keep it with the rest of the chunk.
+  for (const at of openInsert.values()) out.push([at, all.length - 1]);
+  return mergeUnits(out);
+}
+
+function mergeUnits(ranges: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
+  const sorted = ranges.map(([a, b]): [number, number] => [a, b]).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  const out: Array<[number, number]> = [];
+  for (const r of sorted) {
+    const last = out[out.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else out.push(r);
+  }
+  return out;
+}
+
 class StepFailure extends Error {
   readonly restore: boolean;
   constructor(message: string, restore: boolean) {
@@ -200,6 +275,8 @@ export class TenantMigrator {
   private sessionForeignKeysOff = false;
   /** Statements in the next transaction; adapts to the measured cost (see `measured`). */
   private batch: number;
+  /** The dependent-statement units of the chunk being applied (see `units`). */
+  private unitCache: { key: string; units: ReadonlyArray<readonly [number, number]> } | null = null;
   /** The last plan chunk read, reused while it is applied in several transactions. */
   private chunkCache: { key: string; statements: string[] } | null = null;
   /** The change-feed units still to apply, valid while sqlite_schema is unchanged. */
@@ -461,6 +538,52 @@ export class TenantMigrator {
   }
 
   /**
+   * The end (exclusive) of the next transaction of a chunk, starting at `from` with about `batch`
+   * statements. It never falls inside a unit of statements that depend on each other (`units`). A unit
+   * longer than the batch is kept whole and logged as `gonvex.migrate.unsplittable`.
+   */
+  private cut(unit: PlannedUnit, chunk: number, all: readonly string[], from: number): number {
+    let end = Math.min(all.length, from + this.batch);
+    for (const [a, b] of this.units(unit, chunk, all)) {
+      if (a >= end || b < end || b < from) continue;
+      // `end` falls inside [a, b]: stop before the unit, or take all of it when it starts here.
+      end = a > from ? a : b + 1;
+      break;
+    }
+    if (end - from > this.batch) {
+      console.warn(JSON.stringify({ event: "gonvex.migrate.unsplittable", what: `${unitKey(unit)} chunk ${chunk} statements ${from}-${end - 1} must commit together`, statements: end - from, batch: this.batch }));
+    }
+    return end;
+  }
+
+  /**
+   * [first, last] statement ranges of a chunk (sorted, disjoint) that must commit in one transaction:
+   * - A01's atomic ranges from the plan: a TEMP table's lifetime (T4), a statement the transform expanded
+   *   into several, a deferred-foreign-key span (T7);
+   * - found here as well, so they hold whatever the plan knew: an INSERT into a table with a
+   *   `DEFERRABLE INITIALLY DEFERRED` foreign key up to the next DELETE from it (the commit checks deferred
+   *   keys); a table rebuild from `CREATE TABLE n` to `ALTER TABLE n RENAME TO o`; an index, view or
+   *   trigger dropped and created again under the same name;
+   * - the whole chunk when the plan predates A01's ranges, or when the chunk sets
+   *   `PRAGMA defer_foreign_keys` (it lasts one transaction).
+   */
+  private units(unit: PlannedUnit, chunk: number, all: readonly string[]): ReadonlyArray<readonly [number, number]> {
+    const key = `${unitKey(unit)}\u0000${chunk}`;
+    if (this.unitCache?.key === key) return this.unitCache.units;
+    let units: Array<[number, number]>;
+    if (!unit.atomic || all.some((s) => DEFER_PRAGMA.test(s))) units = all.length ? [[0, all.length - 1]] : [];
+    else units = mergeUnits([...(unit.atomic[chunk] ?? []), ...dependentStatements(all, (table) => this.declaresDeferredKey(table))]);
+    this.unitCache = { key, units };
+    return units;
+  }
+
+  /** Whether the live schema declares a deferred foreign key on `table` (lower-case name). */
+  private declaresDeferredKey(table: string): boolean {
+    const sql = this.sql.exec<{ sql: string | null }>("SELECT sql FROM sqlite_schema WHERE type='table' AND lower(name)=?", table).toArray()[0]?.sql;
+    return !!sql && DEFERRED_KEY.test(sql);
+  }
+
+  /**
    * Time since `t0` once the transaction's CPU is visible (after a yield), and the next
    * transaction's size: scaled toward `transactionMs`, at most doubling per step. A single
    * statement that costs more than the whole event budget cannot be split; it is logged.
@@ -486,7 +609,7 @@ export class TenantMigrator {
     await this.attempt(p, `prelude ${unit.name} chunk ${p.chunk}`);
     const all = await this.chunkStatements(manifest.id, unitKey(unit), p.chunk);
     const from = p.statement ?? 0;
-    const statements = all.slice(from, from + this.batch);
+    const statements = all.slice(from, this.cut(unit, p.chunk, all, from));
     const chunk = p.chunk;
     const t0 = Date.now();
     try {
@@ -544,9 +667,10 @@ export class TenantMigrator {
     await this.attempt(p, `migration ${m.name} chunk ${p.chunk + 1}/${m.chunks}`);
     const all = await this.chunkStatements(manifest.id, unitKey(m), p.chunk);
     const from = p.statement ?? 0;
+    const end = this.cut(m, p.chunk, all, from);
     // The migration's last statements commit with its finalize and ledger row, as before.
-    if (lastChunk && all.length - from <= this.batch) return this.finish(p, m, manifest, all.slice(from));
-    const statements = all.slice(from, from + this.batch);
+    if (lastChunk && end === all.length) return this.finish(p, m, manifest, all.slice(from));
+    const statements = all.slice(from, end);
     const started = Date.now();
     const chunk = p.chunk;
     try {
