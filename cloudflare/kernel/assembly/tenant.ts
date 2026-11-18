@@ -23,7 +23,7 @@ import { filesRpc, type FilesTenantRpc } from "../files/rpc";
 import { filesConfigFromEnv } from "../files/config";
 import { reducerFiles } from "../files/reducer";
 import { TenantOperator } from "../../control/operator/tenant/operator";
-import { TENANT_DELETED_REASON, type OperatorDataSink, type RowsQuery, type ServedModule } from "../../control/operator/tenant/port";
+import { TENANT_DELETED_REASON, TENANT_RELEASE_PENDING, type OperatorDataSink, type RowsQuery, type ServedModule } from "../../control/operator/tenant/port";
 import { TenantMemberships } from "./memberships";
 import type { AssemblyGatewayEnv } from "./gateway";
 import type { BakedRelease } from "./releases";
@@ -61,6 +61,9 @@ import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } fro
 const artifactFormat = (generation: unknown): number => typeof generation === "number" ? generation : 0;
 const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
 const PROJECT_KEY = "assembly/project";
+/** The tenant plan Control built with this release (builder `module.release.planId`). */
+const bakedPlanId = (release: BakedRelease): string | undefined =>
+  ((release.manifest.module as Record<string, unknown> | undefined)?.release as { planId?: string } | undefined)?.planId;
 export interface AssemblyTenantEnv extends AssemblyGatewayEnv, TransferEnv {
   RELEASES: R2Bucket;
   FILES: R2Bucket;
@@ -410,8 +413,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     this.ctx.storage.kv.put(PROJECT_KEY, projectId);
     const release = releases[projectId];
     if (!release) throw new Error(`project ${JSON.stringify(projectId)} has no active TypeScript module`);
-    const planId = ((release.manifest.module as Record<string, unknown>).release as { planId: string }).planId;
-    await this.activate(projectId, release.manifest, planId);
+    await this.activate(projectId, release.manifest, bakedPlanId(release) ?? null);
   }
   /** Authenticated development router only; it uses this object's real SQLite and serial queue. */
   async assemblyTransfer(request: Request): Promise<Response> {
@@ -437,8 +439,13 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   private async activateProvisioned(status: Awaited<ReturnType<typeof this.kernel.migrator.status>>): Promise<void> {
     if (status.state !== "done" || this.kernel.module) return;
     const project = this.ctx.storage.kv.get<string>(PROJECT_KEY);
-    const release = project && releases[project];
-    if (release) { await super.activate(project, release.manifest, null); await this.setupScheduled(); }
+    if (!project) return;
+    const release = releases[project];
+    // A plan's chunks come from the plan store, so an object still on the previous Worker version can
+    // finish it. That version's baked catalog lacks the new release: answering `done` here made the
+    // sync succeed with no module served until the code update reset this object (X03, run8).
+    if (!release || bakedPlanId(release) !== status.planId) throw new Error(`${TENANT_RELEASE_PENDING}: project ${JSON.stringify(project)}, plan ${status.planId}`);
+    await super.activate(project, release.manifest, null); await this.setupScheduled();
   }
   async operatorMigrationStatus() { const status = await this.kernel.migrator.status(); await this.activateProvisioned(status); return status; }
   async operatorLedger() { return this.kernel.migrator.ledger(); }

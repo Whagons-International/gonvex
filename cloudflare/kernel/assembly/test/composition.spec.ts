@@ -301,6 +301,33 @@ it('X03 a tenant whose provisioning was interrupted before its schema exists sti
   expect(tenant.scheduler).toBeDefined();
  });
 });
+it('X03 a tenant on a Worker version whose catalog lacks the release does not report its plan done without a module',async()=>{
+ // Run8: a sync's rollout reached tenant objects still on the previous runtime version. They finished the
+ // plan (its chunks come from the plan store), found no baked release, skipped activation and answered
+ // `done`, so the sync succeeded while every call answered "no active TypeScript module" for about a minute.
+ const {waitForRelease,TENANT_RELEASE_PENDING}=await import('../../../control/operator/tenant/port');
+ const {releases}=await import('../releases');
+ const release=await buildReleasePlan(await migrationsFromFiles(files)); plans.add(release);
+ const project=`stale-${crypto.randomUUID()}`;
+ const stub=bindings.TENANT.getByName(`assembly-stale-${crypto.randomUUID()}`);
+ const port=stub as unknown as import('../../../control/operator/tenant/port').OperatorTenantPort;
+ // A native promise: vitest probing an RpcPromise's properties would pipeline extra (unhandled) calls.
+ const status=async()=>{await port.operatorMigrationStatus();};
+ const served=()=>runInDurableObject(stub,(object)=>!!(object as unknown as {kernel:{module?:unknown}}).kernel.module);
+ // This version's catalog has no release for the project: the waiter keeps retrying until its deadline.
+ await expect(waitForRelease(port,release.id,project,Date.now()+1500,20)).rejects.toThrow(TENANT_RELEASE_PENDING);
+ await expect(status()).rejects.toThrow(TENANT_RELEASE_PENDING);
+ expect(await served()).toBe(false);
+ // A catalog release built from a different plan is the same stale code.
+ releases[project]={project,hash:'h',generation:1,manifest:{...manifest,module:{...(manifest as {module:object}).module,release:{planId:'other-plan'}}},exports:{} as never};
+ await expect(status()).rejects.toThrow(TENANT_RELEASE_PENDING);
+ // Once the serving version bakes the release of this plan, the same wait activates it and reports done.
+ releases[project]={project,hash:'h',generation:1,manifest:{...manifest,module:{...(manifest as {module:object}).module,release:{planId:release.id}}},exports:{} as never};
+ try {
+  await expect(waitForRelease(port,release.id,project,Date.now()+5000,20)).resolves.toMatchObject({state:'done',planId:release.id});
+  expect(await served()).toBe(true);
+ } finally { delete releases[project]; }
+});
 it('X03 dev fixture: service principals override merges with the environment and survives a new Control instance',async()=>{
  const {withFixturePrincipals,FIXTURE_PRINCIPALS_KEY}=await import('../../../control/src/control-object');
  const envList=[{id:'gateway',tokenSha256:'a'.repeat(64),projects:['p'],functions:['f'],maxDelegationSeconds:0,manifest:false},{id:'app',tokenSha256:'b'.repeat(64),projects:['q'],functions:['g'],maxDelegationSeconds:0,manifest:false}] as never;
