@@ -7,7 +7,8 @@
  * Nothing generated is committed: bundles are built into a temp directory once
  * per run and shared by all backends.
  */
-import { cp, mkdir, readFile, symlink, rm } from 'node:fs/promises';
+import { cp, mkdir, readFile, symlink, rm, writeFile } from 'node:fs/promises';
+import { upstreamOrigin, UPSTREAM_ORIGIN } from '../scenarios/actions-upstream.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
@@ -26,6 +27,12 @@ export async function buildFixture(workDir, generation) {
   await rm(dir, { recursive: true, force: true });
   await cp(join(CONFORMANCE, 'fixtures/app'), dir, { recursive: true });
   if (generation > 1) await cp(join(CONFORMANCE, `fixtures/app-v${generation}`), dir, { recursive: true, force: true });
+  // Every backend gets the same fixture: a remote upstream origin replaces the local one everywhere it is declared.
+  const origin = upstreamOrigin();
+  if (origin !== UPSTREAM_ORIGIN) {
+    const file = join(dir, 'gonvex/actions.ts');
+    await writeFile(file, (await readFile(file, 'utf8')).replaceAll(UPSTREAM_ORIGIN, origin));
+  }
   await mkdir(join(dir, 'node_modules/@gonvex'), { recursive: true });
   for (const pkg of ['module-sdk', 'client', 'protocol']) {
     await symlink(join(REPO, 'packages', pkg), join(dir, 'node_modules/@gonvex', pkg), 'dir');

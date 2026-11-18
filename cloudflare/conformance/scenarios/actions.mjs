@@ -25,11 +25,12 @@
  *    covered by the kernel's own tests.)
  *
  * The Actions fetch `scenarios/actions-upstream.mjs`, served on
- * 127.0.0.1:47812 for the whole run (the fixture's declared origin).
+ * 127.0.0.1:47812 for the whole run (the fixture's declared origin), or on
+ * `GONVEX_CONFORMANCE_UPSTREAM_ORIGIN` when a deployed backend cannot reach it.
  */
 import { randomUUID } from 'node:crypto';
 import { RAW_CAPABILITIES } from './helpers.mjs';
-import { startUpstream } from './actions-upstream.mjs';
+import { startUpstream, upstreamIsLocal } from './actions-upstream.mjs';
 
 /** Frame-level Action call. */
 async function rawAction(socket, path, args, extra = {}) {
@@ -44,7 +45,8 @@ let shared = null;
 let users = 0;
 async function acquireUpstream() {
   users += 1;
-  shared ??= startUpstream();
+  // A remote upstream (GONVEX_CONFORMANCE_UPSTREAM_ORIGIN) is already serving: nothing to start.
+  shared ??= upstreamIsLocal() ? startUpstream() : Promise.resolve({ close: async () => {} });
   return shared;
 }
 async function releaseUpstream() {

@@ -1,0 +1,8 @@
+// Dev-only conformance upstream (X03). Deployed by the dev deploy agent; never production.
+{
+  "name": "gonvex-cf-dev-conformance-upstream",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-23",
+  "workers_dev": true,
+  "preview_urls": false
+}
