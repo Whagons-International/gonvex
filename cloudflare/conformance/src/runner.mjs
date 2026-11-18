@@ -24,6 +24,7 @@ import { checksumRows } from './checksum.mjs';
 import { checkDigests } from './digest-check.mjs';
 import { checkWatermarks } from './watermark-check.mjs';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { join } from 'node:path';
 
 export const PASSWORD = 'conformance-password-1';
@@ -37,6 +38,30 @@ const UNTIL_MS = Number(process.env.GONVEX_CONFORMANCE_UNTIL_MS) || 15_000;
  * run continues, instead of stalling the suite with the lane lock held. The longest scenario takes about 3 min.
  */
 export const SCENARIO_MS = Number(process.env.GONVEX_CONFORMANCE_SCENARIO_MS) || 10 * 60_000;
+/**
+ * After its deadline a scenario is aborted (sockets dropped, fetches aborted, no further step runs) and given this
+ * long to settle. One that still runs could act on the shared backend during the next scenario, so the run is invalid.
+ */
+export const ABORT_GRACE_MS = Number(process.env.GONVEX_CONFORMANCE_ABORT_GRACE_MS) || 30_000;
+
+/** The running scenario's abort signal, per async context (backends may run one scenario concurrently). */
+const scenarioScope = new AsyncLocalStorage();
+let fetchScoped = false;
+/** Every `fetch` made inside a scenario (directly or by a backend adapter) is aborted with that scenario. */
+function scopeFetch() {
+  if (fetchScoped) return;
+  fetchScoped = true;
+  const original = globalThis.fetch;
+  globalThis.fetch = function scopedFetch(input, init) {
+    const signal = scenarioScope.getStore();
+    if (!signal) return original(input, init);
+    const own = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    return original(input, { ...init, signal: own ? AbortSignal.any([own, signal]) : signal });
+  };
+}
+
+/** The scenario deadline passed (distinct from a failure inside the scenario). */
+export class DeadlineError extends Error {}
 const QUIET_MAX_MS = 5_000;
 
 /** Replaces backend-assigned identifiers with stable aliases, deep. */
@@ -61,14 +86,14 @@ class ExpectationError extends Error {}
  * @param {{ scenario: any, backend: import('./backend.mjs').Backend, fixtures: Record<number, any>, verbose?: boolean, created?: string[] }} options
  *   `created` receives every project id the run creates, even when setup then fails (see cleanup.mjs).
  */
-/** Settles like `work`, or rejects with `message()` once `ms` have passed (the work itself is not cancelled). */
+/** Settles like `work`, or rejects with a DeadlineError(`message()`) once `ms` have passed (the work itself is not cancelled). */
 export async function withDeadline(work, ms, message) {
   let timer;
-  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message())), ms); });
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new DeadlineError(message())), ms); });
   try { return await Promise.race([work, deadline]); } finally { clearTimeout(timer); }
 }
 
-export async function runScenario({ scenario, backend, fixtures, verbose = false, created = [], scenarioMs = SCENARIO_MS }) {
+export async function runScenario({ scenario, backend, fixtures, verbose = false, created = [], scenarioMs = SCENARIO_MS, graceMs = ABORT_GRACE_MS }) {
   const trace = { backend: backend.name, scenario: scenario.name, failures: [], steps: [], checksums: {} };
   const missing = (scenario.requires ?? []).filter(c => !backend.capabilities[c]);
   if (missing.length) { trace.skipped = `backend lacks ${missing.join(', ')}`; return trace; }
@@ -103,6 +128,9 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
   }
 
   // ---- context --------------------------------------------------------------
+  scopeFetch();
+  const abort = new AbortController();
+  const live = () => abort.signal.throwIfAborted();
   const quiesce = async () => {
     const end = Date.now() + QUIET_MAX_MS;
     while (Date.now() < end && Date.now() - recorder.lastFrameAt < QUIET_MS) await delay(50);
@@ -129,6 +157,7 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
      * that session unless `fresh`. `authenticate: false` stops after login.
      */
     async sdk(tag, { member, tenant = 'a', options = {}, authenticate = true, fresh = false } = {}) {
+      live();
       const c = sdkClient(backend.wsUrl, tag, recorder, { project: projectId }, { clientContract: CLIENT_CONTRACT, ...options });
       clients.push(c);
       c.connect();
@@ -140,6 +169,7 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
     },
     /** Thin protocol client, logged in and authenticated. */
     async thin(tag, { member, tenant = 'a', options = {}, fresh = false } = {}) {
+      live();
       const c = thinClient(backend.wsUrl, tag, recorder, projectId, { clientContract: CLIENT_CONTRACT, ...options });
       clients.push(c);
       c.connect();
@@ -154,8 +184,10 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
       const params = new URLSearchParams(query ?? {});
       if (publicTransport) params.set('public', '1');
       // `closeFrame` (0092): record when the server's close frame arrives (RawSocket.whenCloseFrame).
-      const s = await new RawSocket(params.size ? `${backend.wsUrl}?${params}` : backend.wsUrl, tag, recorder, { closeFrame }).open();
+      live();
+      const s = new RawSocket(params.size ? `${backend.wsUrl}?${params}` : backend.wsUrl, tag, recorder, { closeFrame });
       clients.push(s);
+      await s.open();
       return s;
     },
     /** Logs in over a raw socket; returns the control session. */
@@ -171,12 +203,14 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
       return reply.result;
     },
     async step(name, fn) {
+      live(); // an aborted scenario runs no further step
       if (verbose) console.log(`    [${backend.name}] ${name}`);
       current = { name, observations: {} };
       const at = Date.now();
       trace.steps.push(current);
       recorder.step = trace.steps.length - 1;
       try { await fn(); } catch (error) {
+        if (abort.signal.aborted) throw abort.signal.reason;
         current.error = (error instanceof ExpectationError ? 'expectation failed: ' : '') + String(error?.message ?? error);
         trace.failures.push(`step "${name}": ${current.error}`);
       }
@@ -191,8 +225,9 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
       const end = Date.now() + timeoutMs;
       for (;;) {
         try { if (await check()) return; } catch {}
+        live();
         if (Date.now() > end) throw new Error(`timed out waiting for ${label}`);
-        await delay(25);
+        await delay(25, undefined, { signal: abort.signal });
       }
     },
     /** Raw frames a session sent or received (unnormalized). */
@@ -204,15 +239,29 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
      */
     alias(value, name) { aliases.add(value, `<${name}>`); return value; },
     async deploy(generation) { const r = await backend.deploy(projectId, fixtures[generation].manifest); if (!r.ok) throw new Error(`deploy of generation ${generation} failed`); return r; },
-    restart: (options) => backend.restart(options),
+    restart: (options) => { live(); return backend.restart(options); },
     quiesce,
-    delay,
+    delay: (ms, value) => delay(ms, value, { signal: abort.signal }),
+    /** Aborted when the scenario deadline passes; pass it to any long wait a scenario makes itself. */
+    signal: abort.signal,
   };
 
   // ---- run ------------------------------------------------------------------
   try {
-    await withDeadline(scenario.run(ctx), scenarioMs,
-      () => `exceeded the ${scenarioMs} ms scenario deadline in step ${JSON.stringify(current?.name ?? '(setup)')} on ${backend.name}`);
+    const running = scenarioScope.run(abort.signal, () => Promise.resolve().then(() => scenario.run(ctx)));
+    try {
+      await withDeadline(running, scenarioMs,
+        () => `exceeded the ${scenarioMs} ms scenario deadline in step ${JSON.stringify(current?.name ?? '(setup)')} on ${backend.name}`);
+    } catch (error) {
+      if (!(error instanceof DeadlineError)) throw error;
+      // Stop it before anything else touches the shared backend: abort its fetches and waits, drop its sockets
+      // (so pending replies reject), then wait for scenario.run to settle.
+      abort.abort(error);
+      for (const c of clients) { try { if (typeof c.drop === 'function') c.drop(); else c.close(); } catch {} }
+      const settled = await withDeadline(running.then(() => true, () => true), graceMs, () => '').catch(() => false);
+      if (!settled) trace.runInvalid = `scenario ${scenario.name} on ${backend.name} still ran ${graceMs} ms after it was aborted at its deadline; it may act on the shared backend during later scenarios`;
+      throw error;
+    }
   } catch (error) {
     trace.failures.push(`scenario aborted: ${error?.stack ?? error}`);
   } finally {

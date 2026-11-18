@@ -87,11 +87,21 @@ try {
     for (const line of [...failures, ...diffs]) console.log('  ' + line);
     for (const line of skipped) console.log('  skipped on ' + line);
     report.scenarios.push({ name: scenario.name, status, failures, diffs, skipped, traces });
+    // A scenario that kept running after its deadline and abort may still act on the shared backend: every later
+    // result would be suspect, so the run stops here and is reported invalid.
+    const invalid = traces.map(t => t.runInvalid).filter(Boolean);
+    if (invalid.length) {
+      report.invalid = invalid;
+      exitCode = 3;
+      for (const line of invalid) console.log(`RUN INVALID: ${line}`);
+      break;
+    }
   }
 } finally {
   await Promise.allSettled(backends.map(b => b.stop()));
 }
 console.log(`\n${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped of ${selected.length} scenarios in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+if (report.invalid) console.log(`RUN INVALID after ${report.scenarios.length} of ${selected.length} scenarios: the results above are not a conformance verdict`);
 if (values.json) await writeFile(values.json, JSON.stringify(report, null, 1) + '\n');
 if (!values.keep && !values.work && exitCode === 0) await rm(workDir, { recursive: true, force: true });
 else console.log(`kept ${workDir}`);
