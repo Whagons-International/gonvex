@@ -302,13 +302,13 @@ export class LiveQueries {
   }
 
   /** K22: delivery already owns this read snapshot; never open a nested storage invocation. */
-  applyFeedSnapshot(db: StorageSession, event: FeedEvent, stats?: FeedStats, only?: ReadonlySet<string>): Map<string, string[]> {
+  applyFeedSnapshot(db: StorageSession, event: FeedEvent, stats?: FeedStats, only?: ReadonlySet<string>, except?: ReadonlySet<string>): Map<string, string[]> {
     const reset = event.kind === "reset";
     const revision = event.kind === "transaction" ? event.revision : 0;
     const changes = event.kind === "transaction" ? event.changes : [];
     const due: Array<{ connection: Connection; connectionId: string; subscription: Subscription }> = [];
     for (const [connectionId, connection] of this.connections) {
-      if (only && !only.has(connectionId)) continue;
+      if ((only && !only.has(connectionId)) || except?.has(connectionId)) continue;
       for (const id of [...connection.subscriptions.keys()].sort(byteOrder)) {
         const subscription = connection.subscriptions.get(id)!;
         if (!reset && revision <= subscription.computedRevision) continue;

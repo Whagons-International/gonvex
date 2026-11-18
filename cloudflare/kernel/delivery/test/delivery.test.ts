@@ -785,6 +785,77 @@ describe("BUG-4 a large tenant's first load converges under ordinary commits", (
     }, MODULE, false, undefined, undefined, ["h1", "h2"]);
   });
 
+  /** Holder h1's socket A is held by its large first snapshot (its RPC waits on `release`). */
+  const heldLoad = async (h: Harness, extra?: (view: SocketView) => Promise<void>) => {
+    const insert: Array<[string, unknown[]]> = [];
+    for (let i = 0; i < 7_500; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+    for (let i = 0; i < insert.length; i += 2500) await h.commit(insert.slice(i, i + 2500));
+    const log: Array<{ host: string; payload: ReplicaDelivery }> = [];
+    const state = { held: false, recoveries: 0, release: () => {} };
+    const gate = new Promise<void>((resolve) => { state.release = resolve; });
+    h.receiver.deliver = async (host, payload) => {
+      log.push({ host, payload });
+      if (payload.recovery) { state.recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+      if (host === "h1" && !state.held && (payload.sockets.A?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"'))) {
+        state.held = true; await gate;
+      }
+      return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+    };
+    const view = socket("A", {}, "h1");
+    await extra?.(view);
+    h.engine.dispatch(view, { type: "replica.open", id: "sub-A", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 2000 && !state.held; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(state.held).toBe(true);
+    const marks = () => log.filter((e) => e.host === "h1").map((e) => e.payload.sockets.A?.watermark ?? e.payload.watermark).filter((m): m is number => m !== undefined);
+    const until = async (done: () => boolean) => { for (let spin = 0; spin < 4000 && !done() && !state.recoveries; spin++) await new Promise((resolve) => setTimeout(resolve, 5)); };
+    return { log, state, marks, until };
+  };
+
+  it("never certifies a deferred holder's live query with a watermark before its result was sent", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      const { log, state, marks, until } = await heldLoad(h, async (view) => {
+        h.engine.observe(view);
+        expect(JSON.parse(await h.live.subscribe("A", view.tenant!, { id: "live", path: "items.live", args: {} })).type).toBe("query.result");
+      });
+      const revision = await h.commit([["UPDATE items SET label = 'changed-while-deferred' WHERE id = 'i000000'", []]], false);
+      for (let spin = 0; spin < 40; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(marks().some((m) => m >= revision), "A is deferred while its snapshot drains").toBe(false);
+      state.release();
+      await until(() => marks().some((m) => m >= revision));
+      await h.engine.settled();
+      expect(state.recoveries).toBe(0);
+      // Every op to A in order; the first watermark at or past the commit must come after the changed live result.
+      const ordered = log.filter((e) => e.host === "h1" && e.payload.sockets.A).flatMap((e) => [
+        ...e.payload.sockets.A!.ops.filter((op) => op[0] === "f").map((op) => op[1] as string),
+        ...(e.payload.sockets.A!.watermark !== undefined ? [`mark:${e.payload.sockets.A!.watermark}`] : []),
+      ]);
+      const certified = ordered.findIndex((text) => text.startsWith("mark:") && Number(text.slice(5)) >= revision);
+      const result = ordered.findIndex((text) => text.includes('"type":"query.result"') && text.includes("changed-while-deferred"));
+      expect(certified).toBeGreaterThanOrEqual(0);
+      expect(result, "the changed live result reaches A").toBeGreaterThanOrEqual(0);
+      expect(result).toBeLessThan(certified);
+    }, MODULE, true, undefined, undefined, ["h1"]);
+  });
+
+  it("replays a long deferral in payloads that fit: 300 commits, no reset, in order, watermark to the last", { timeout: 120_000 }, async () => {
+    await withEngine(async (h) => {
+      const { log, state, marks, until } = await heldLoad(h);
+      let last = 0;
+      for (let n = 0; n < 300; n++) last = await h.commit([[`UPDATE items SET label = 'c${n}' WHERE id = 'i000001'`, []]], false);
+      state.release();
+      await until(() => marks().includes(last));
+      await h.engine.settled();
+      expect(state.recoveries).toBe(0);
+      expect(h.engine.stats.resets).toBe(0);
+      const seen = marks();
+      expect(seen).toEqual([...seen].sort((a, b) => a - b));
+      expect(seen[seen.length - 1]).toBe(last);
+      const labels = log.filter((e) => e.host === "h1").flatMap((e) => (e.payload.sockets.A?.ops ?? []).filter((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"')).map((op) => /"label":"(c\d+)"/.exec(op[1] as string)?.[1]));
+      expect(labels.length).toBeGreaterThan(0);
+      expect(labels[labels.length - 1]).toBe("c299");
+    }, MODULE, false, undefined, undefined, ["h1"]);
+  });
+
   it("still resets a holder that stops making progress, after the stall bound, and then converges", { timeout: 120_000 }, async () => {
     const { recoveries, ready } = await load(2_000, 4, { hold: 400, stallMs: 50 });
     expect(recoveries).toBeGreaterThanOrEqual(1);
