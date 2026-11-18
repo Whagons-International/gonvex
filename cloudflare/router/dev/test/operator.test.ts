@@ -153,6 +153,15 @@ describe("projects, keys, members, env", () => {
     expect((await call("GET", `/dev/manifest?project=${gone.id}`)).status).toBe(404);
     expect(await sql("SELECT state FROM gonvex_cf_releases WHERE project_id=$1", gone.id)).toEqual([{ state: "retired" }]);
     expect(await sql("SELECT count(*) AS n FROM gonvex_runtime_manifests WHERE project_id=$1", gone.id)).toEqual([{ n: 0 }]);
+    // A project deleted before this change (row gone, release still active) is retired by deleting it again.
+    const orphan = await createProject("orphaned-project");
+    expect((await sync(orphan.id, await manifest(orphan.id), orphan.key)).status).toBe(200);
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => { instance.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1", orphan.id); });
+    expect(await active()).toContain(orphan.id);
+    expect((await call("DELETE", `/dev/projects/${orphan.id}`)).body).toEqual({ ok: true, retiredOrphanRelease: true });
+    expect(await active()).not.toContain(orphan.id);
+    expect((await call("GET", `/dev/manifest?project=${orphan.id}`)).status).toBe(404);
+    expect((await call("DELETE", `/dev/projects/${orphan.id}`)).status).toBe(422);
     // The next publication's catalog no longer carries the deleted project.
     const next = await createProject("after-delete");
     expect((await sync(next.id, await manifest(next.id), next.key)).status).toBe(200);

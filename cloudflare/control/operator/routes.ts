@@ -482,10 +482,28 @@ const updateProject: Handler = async (op, request, _url, [project]) => {
   return json({ project: projectJson(row) });
 };
 
+/** Retires a deleted project's active release: the next publication's Worker catalog omits it and its manifest is no longer served. */
+function retireProjectRelease(op: Op, project: string): void {
+  op.ctx.sql.tx(() => {
+    op.ctx.sql.run("UPDATE gonvex_cf_releases SET state='retired' WHERE project_id=$1 AND state='active'", project);
+    op.ctx.sql.run("DELETE FROM gonvex_cf_active_releases WHERE project_id=$1", project);
+    op.ctx.sql.run("DELETE FROM gonvex_runtime_manifests WHERE project_id=$1", project);
+  });
+}
+
 const deleteProject: Handler = async (op, request, _url, [project]) => {
   await op.auth.authorizeProject(request.headers, "projects:delete", project!, true, "project owner or admin access is required");
   const row = op.ctx.sql.get("SELECT runtime_created FROM gonvex_runtime_projects WHERE id=$1 AND status NOT IN('deleted','disabled')", project);
-  if (!row) return error(422, dbError.projectNotFound(project!));
+  if (!row) {
+    // Projects deleted before releases were retired on delete still sit in the catalog: re-deleting them retires
+    // the orphaned release. With no project row and no active release the project is simply unknown.
+    if (op.ctx.sql.value("SELECT 1 FROM gonvex_runtime_projects WHERE id=$1", project) !== undefined
+      || op.ctx.sql.value("SELECT 1 FROM gonvex_cf_active_releases WHERE project_id=$1", project) === undefined) return error(422, dbError.projectNotFound(project!));
+    if (op.ctx.sql.value("SELECT 1 FROM gonvex_cf_syncs WHERE project_id=$1 AND state IN('running','publishing')", project) !== undefined)
+      return error(409, "a /dev/sync of this project is still running; finish or abort its publication first");
+    retireProjectRelease(op, project!);
+    return json({ ok: true, retiredOrphanRelease: true });
+  }
   if (!bool(row.runtime_created)) return error(422, dbError.protocol("only runtime-created projects may be deleted through this operation"));
   // A publication still in flight would re-activate the project's release after it is retired below.
   if (op.ctx.sql.value("SELECT 1 FROM gonvex_cf_syncs WHERE project_id=$1 AND state IN('running','publishing')", project) !== undefined)
@@ -495,10 +513,7 @@ const deleteProject: Handler = async (op, request, _url, [project]) => {
   for (const tenant of tenants) await op.deleteTenantStorage(tenant);
   op.ctx.sql.tx(() => {
     op.ctx.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'", project);
-    // Retire its active release: the next publication's Worker catalog omits it and its manifest is no longer served.
-    op.ctx.sql.run("UPDATE gonvex_cf_releases SET state='retired' WHERE project_id=$1 AND state='active'", project);
-    op.ctx.sql.run("DELETE FROM gonvex_cf_active_releases WHERE project_id=$1", project);
-    op.ctx.sql.run("DELETE FROM gonvex_runtime_manifests WHERE project_id=$1", project);
+    retireProjectRelease(op, project!);
   });
   return json({ ok: true });
 };
