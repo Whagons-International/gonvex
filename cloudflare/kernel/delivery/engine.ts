@@ -512,9 +512,16 @@ export class ReplicaDeliveryEngine {
 
   // ---- the task loop ---------------------------------------------------------------------
 
+  /** A wake that arrived while the loop was finishing; the loop runs once more (BUG-4: a holder's room signal). */
+  private again = false;
+
   private kick(): void {
-    if (this.running) return;
-    this.running = this.run().finally(() => { this.running = undefined; });
+    if (this.running) { this.again = true; return; }
+    this.again = false;
+    this.running = this.run().finally(() => {
+      this.running = undefined;
+      if (this.again) this.kick();
+    });
   }
 
   private async run(): Promise<void> {

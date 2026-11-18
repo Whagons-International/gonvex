@@ -61,6 +61,11 @@ interface Harness {
   payloads: Array<[string, ReplicaDelivery]>;
   receiver: { deliver?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt> };
   delivered: number[];
+  /**
+   * Tenant invocations that overlapped another (`an invocation is already running`) and engine reads outside the
+   * invocation queue. Production's `serial` is the reducers' queue (delivery/object.ts), so both must stay empty.
+   */
+  conflicts: string[];
   /** `settle: false` returns once the commit is published, while delivery may still be running (a concurrent writer). */
   commit(statements: Array<[string, unknown[]]>, settle?: boolean): Promise<number>;
 }
@@ -92,14 +97,29 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       } } } },
       visibility: { items: { table: "items", key: "id", where: { operator: "public" } } },
     });
-    const live = new LiveQueries({ run: snapshotRunner(storage), module: () => liveModule, visibility: kernelVisibility(new VisibilityRegistry()) });
+    // One invocation queue for the engine and the reducers, as the tenant object has (`kernel.reducers.serial`).
+    const conflicts: string[] = [];
+    let inQueue = false;
+    const serial = <R>(fn: () => Promise<R>): Promise<R> => {
+      const run = async () => { inQueue = true; try { return await fn(); } finally { inQueue = false; } };
+      const next = queue.then(run, run); queue = next.catch(() => undefined); return next;
+    };
+    const invoke = async <R>(fn: () => Promise<R>): Promise<R> => {
+      try { return await fn(); } catch (error) { if (String(error).includes("already running")) conflicts.push(String(error)); throw error; }
+    };
+    const live = new LiveQueries({ run: (body) => serial(() => snapshotRunner(storage)(body)), module: () => liveModule, visibility: kernelVisibility(new VisibilityRegistry()) });
     const receive = (host:string,payload:ReplicaDelivery) => { payloads.push([host,payload]); return (receiver.deliver?.(host,payload) ?? {v:1,sockets:Object.keys(payload.sockets).length}) as ReplicaReceipt; };
     const engine = new ReplicaDeliveryEngine({
       ...(composeLive ? { live } : {}),
       tenantId: "t",
       delivered: (revision) => delivered.push(revision),
-      serial: <R>(fn: () => Promise<R>) => { const next = queue.then(fn, fn); queue = next.catch(() => undefined); return next; },
-      read: async (fn) => { const r = await storage.invoke("query", async (s) => fn(s)); if (!r.ok) throw r.error; return r.value; },
+      serial,
+      read: async (fn) => {
+        if (!inQueue) conflicts.push(`engine read outside the invocation queue: ${new Error().stack}`);
+        const r = await invoke(() => storage.invoke("query", async (s) => fn(s)));
+        if (!r.ok) throw r.error;
+        return r.value;
+      },
       module: () => module,
       outlet: new LocalOutlet(receive, () => hosts, undefined, receive),
       ...(activity ? { activity } : {}),
@@ -107,11 +127,12 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     });
     let commands = 0;
     return body({
-      engine, live, payloads, receiver, delivered,
+      engine, live, payloads, receiver, delivered, conflicts,
       async commit(statements, settle = true) {
-        const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (s) => {
+        const commandId = `c${++commands}`;
+        const result = await serial(() => invoke(() => invokeCaptured(storage, "reducer", { commandId }, async (s) => {
           for (const [text, parameters] of statements) s.run(text, parameters);
-        }, context);
+        }, context)));
         if (!result.ok) throw result.error;
         const revision = result.notice?.revision ?? 0;
         engine.wake(revision);
@@ -853,6 +874,7 @@ describe("BUG-4 a large tenant's first load converges under ordinary commits", (
       const labels = log.filter((e) => e.host === "h1").flatMap((e) => (e.payload.sockets.A?.ops ?? []).filter((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"')).map((op) => /"label":"(c\d+)"/.exec(op[1] as string)?.[1]));
       expect(labels.length).toBeGreaterThan(0);
       expect(labels[labels.length - 1]).toBe("c299");
+      expect(h.conflicts, "catch-up, commits and opens share one invocation queue").toEqual([]);
     }, MODULE, false, undefined, undefined, ["h1"]);
   });
 
