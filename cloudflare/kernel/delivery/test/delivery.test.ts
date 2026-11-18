@@ -65,7 +65,7 @@ interface Harness {
   commit(statements: Array<[string, unknown[]]>, settle?: boolean): Promise<number>;
 }
 
-async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void, stallMs?: number): Promise<T> {
+async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void, stallMs?: number, hosts: string[] = ["h1"]): Promise<T> {
   const stub = env.HELLO.getByName(`k10-${++objects}-${Math.random()}`);
   return runInDurableObject(stub, async (_instance, state) => {
     const sql = directSql(state.storage.sql);
@@ -101,7 +101,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       serial: <R>(fn: () => Promise<R>) => { const next = queue.then(fn, fn); queue = next.catch(() => undefined); return next; },
       read: async (fn) => { const r = await storage.invoke("query", async (s) => fn(s)); if (!r.ok) throw r.error; return r.value; },
       module: () => module,
-      outlet: new LocalOutlet(receive, () => ["h1"], undefined, receive),
+      outlet: new LocalOutlet(receive, () => hosts, undefined, receive),
       ...(activity ? { activity } : {}),
       ...(stallMs !== undefined ? { stallMs } : {}),
     });
@@ -734,6 +734,55 @@ describe("BUG-4 a large tenant's first load converges under ordinary commits", (
     expect(await load(12_000, 24)).toEqual({ recoveries: 0, ready: 24 });
     // Twice the rows (two scan chunks per open) and more replicas: nothing in the commit path scales with size.
     expect(await load(24_000, 32)).toEqual({ recoveries: 0, ready: 32 });
+  });
+
+  it("defers only the backlogged holder: another holder gets a commit at once, the backlogged one catches up in order", { timeout: 60_000 }, async () => {
+    await withEngine(async ({ engine, receiver, commit }) => {
+      // ~1.8 Mi chars in one final snapshot post (one scan chunk): ~14 MiB of credits, over the 8 MiB holder budget.
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 7_500; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+      for (let i = 0; i < insert.length; i += 2500) await commit(insert.slice(i, i + 2500));
+      const log: Array<{ host: string; at: number; payload: ReplicaDelivery }> = [];
+      let release!: () => void, held = false, recoveries = 0;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      receiver.deliver = async (host, payload) => {
+        log.push({ host, at: Date.now(), payload });
+        if (payload.recovery) { recoveries += 1; return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        // Holder A's RPC carrying its snapshot's end is slow (a large first load over the gateway hop).
+        if (host === "h1" && !held && (payload.sockets.A?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"'))) {
+          held = true; await gate;
+        }
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      engine.dispatch(socket("B", {}, "h2"), { type: "replica.open", id: "sub-B", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      engine.dispatch(socket("A", {}, "h1"), { type: "replica.open", id: "sub-A", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      for (let spin = 0; spin < 2000 && !held; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(held).toBe(true);
+
+      const started = Date.now();
+      const revision = await commit([["UPDATE items SET label = 'live' WHERE id = 'i000000'", []]], false);
+      const deltaFor = (id: string, sub: string) => log.find((entry) => (entry.payload.sockets[id]?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && (op[1] as string).includes(`"id":"${sub}"`)));
+      for (let spin = 0; spin < 400 && !deltaFor("B", "sub-B"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      const toB = deltaFor("B", "sub-B");
+      expect(toB, "holder B gets the commit while A is still draining").toBeDefined();
+      expect(toB!.at - started).toBeLessThan(1_000); // the realtime row: a second client within 1 s
+      expect(deltaFor("A", "sub-A")).toBeUndefined(); // A is deferred, not reset
+      expect(toB!.payload.sockets.B!.watermark).toBe(revision);
+
+      release();
+      for (let spin = 0; spin < 2000 && !deltaFor("A", "sub-A"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await engine.settled();
+      // A: its snapshot, then the deferred commit from the log, then the watermark; nothing reset either holder.
+      const framesA = log.filter((entry) => entry.host === "h1").flatMap((entry) => (entry.payload.sockets.A?.ops ?? []).filter((op) => op[0] === "f").map((op) => JSON.parse(op[1] as string).type as string));
+      expect(framesA.indexOf("replica.delta")).toBeGreaterThan(framesA.indexOf("replica.ready"));
+      const marks = log.filter((entry) => entry.host === "h1").map((entry) => entry.payload.sockets.A?.watermark ?? entry.payload.watermark).filter((mark): mark is number => mark !== undefined);
+      expect(marks).toEqual([...marks].sort((a, b) => a - b));
+      expect(marks[marks.length - 1]).toBe(revision);
+      expect(recoveries).toBe(0);
+      expect(engine.stats.resets).toBe(0);
+      expect(log.some((entry) => (entry.payload.sockets.B?.ops ?? []).some((op) => op[0] === "f" && (op[1] as string).includes('"replica.reset"')))).toBe(false);
+    }, MODULE, false, undefined, undefined, ["h1", "h2"]);
   });
 
   it("still resets a holder that stops making progress, after the stall bound, and then converges", { timeout: 120_000 }, async () => {

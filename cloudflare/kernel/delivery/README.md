@@ -76,10 +76,13 @@ holder (any object):  Session ─ SocketDelivery (socket.ts) ─ ReplicaBatcher 
 - **Resets.** `change-feed-reset` when the log no longer covers what follows the delivery's cursor (pruned, or a
   database at an earlier revision); `change-feed-lagged` when a holder falls 256 payloads behind or stays
   backlogged for `HOLDER_STALL_MS` (30 s, Rust's `GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS`) (its queue is discarded and
-  its sockets resync). Outbound bytes alone never lag a holder (BUG-4): while a holder is over its byte budget the
-  feed waits for it to drain, outside the invocation queue, and the commits that landed meanwhile go out together, as
-  Rust defers its feed while a socket is backlogged (lib.rs `defer_feed`). Snapshot work likewise waits for room on
-  the holder's channel instead of being refused there. A new database epoch with the log intact is delivered as Rust delivers it: the
+  its sockets resync). Outbound bytes alone never lag a holder (BUG-4), and one holder's backlog never delays
+  another's commits: a holder over its budget (typically a large first load's snapshot pages) is deferred on its own,
+  every other holder gets each commit at once, and when it drains it gets the commits after its last one read again
+  from the change log for its connections only, in order with their watermarks (its live queries re-snapshotted), as
+  Rust defers its feed per socket (lib.rs `defer_feed`). An open's last work that does not fit waits with it; pages
+  in the middle of a scan wait for room instead of being refused. The waits are the holder's `idle` signal, or a timer
+  backing off from 10 ms to 1 s while the isolate-wide credits are full (another object cannot signal this one). A new database epoch with the log intact is delivered as Rust delivers it: the
   transaction carries the new epoch, collection cursors keep theirs, and resumes from the old epoch reload. A socket
   whose collections span two epochs is closed (1011), as Rust ends that socket's task.
 - **Tenant restarts.** Subscriptions live in the tenant object's memory. A holder tracks its sockets' collections and
