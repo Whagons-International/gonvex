@@ -19,8 +19,10 @@ export class LocalTarget {
     }
     // The entry imports `./releases/...`; point it at the staging directory.
     const base = relative(this.dir, this.stagingDir).split('\\').join('/') || '.';
-    const entry = files.get(RELEASES_ENTRY).replaceAll('from "./releases/', `from "${base.startsWith('.') ? base : `./${base}`}/releases/`);
-    const actions = files.get(ACTION_RELEASES_ENTRY)?.replaceAll('from "./releases/', `from "${base.startsWith('.') ? base : `./${base}`}/releases/`);
+    const prefix = base.startsWith('.') ? base : `./${base}`;
+    const rebase = (text) => text?.replaceAll('from "./releases/', `from "${prefix}/releases/`).replaceAll('require("./releases/', `require("${prefix}/releases/`);
+    const entry = rebase(files.get(RELEASES_ENTRY));
+    const actions = rebase(files.get(ACTION_RELEASES_ENTRY));
     this.staged.set(version, { kernel: entry, actions });
   }
   async deploy(version) {
