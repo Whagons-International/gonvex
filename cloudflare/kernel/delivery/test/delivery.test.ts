@@ -13,7 +13,7 @@ import { parsePlan } from "../../visibility/plan.ts";
 import { ReplicaBatcher } from "../batcher.ts";
 import { Aggregate, stableJson } from "../canonical.ts";
 import { parseDefinition, type ReplicaModule } from "../definition.ts";
-import { ReplicaDeliveryEngine, STALL_TICKS, type DeliveryClock } from "../engine.ts";
+import { ReplicaDeliveryEngine, STALL_TICKS, DEFERRED_QUERY_CHARS, type DeliveryClock } from "../engine.ts";
 import { LocalOutlet } from "../outlet.ts";
 import type { ReplicaDelivery, ReplicaReceipt } from "../protocol.ts";
 import type { ScopedSocketWork } from "../recovery.ts";
@@ -1006,6 +1006,80 @@ describe("BUG-10 a live query's initial reply waits for room on a full channel",
       expect(recoveries).toBe(0);
       expect(h.conflicts).toEqual([]);
     }, MODULE, true, undefined, 60_000, ["h1", "h2"]);
+  });
+
+  /** h1 holds every row on S1, then one RPC stays in flight on h1 until `release`. */
+  const stuckH1 = async (h: Harness, state: { hold: boolean; held: Array<() => void>; recoveries: string[]; receipt?: (payload: ReplicaDelivery) => ReplicaReceipt }) => {
+    const insert: Array<[string, unknown[]]> = [];
+    for (let i = 0; i < 4_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 1500)]]);
+    for (let i = 0; i < insert.length; i += 1000) await h.commit(insert.slice(i, i + 1000));
+    h.receiver.deliver = async (host, payload) => {
+      if (payload.recovery) { state.recoveries.push(host); return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+      if (host === "h1" && state.hold) await new Promise<void>((resolve) => state.held.push(resolve));
+      return state.receipt?.(payload) ?? { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+    };
+    h.engine.dispatch(socket("S1", {}, "h1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 4000 && !frames(h.payloads, "S1").some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    await h.engine.settled();
+    state.hold = true;
+    const revision = await h.commit([["UPDATE items SET label = 'busy-' || label WHERE rank < 400", []]], false);
+    for (let spin = 0; spin < 2000 && !state.held.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(state.held.length).toBe(1);
+    return revision;
+  };
+  const deferredOf = (h: Harness, host: string) => (h.engine as unknown as { behind: Map<string, { outbox: Array<{ query?: string }>; queryChars: number }> }).behind.get(host);
+
+  it("r4617948599: a stuck holder keeps one pending reply per query; an unsubscribe drops it; over the byte bound only that holder is reset", { timeout: 120_000 }, async () => {
+    const state = { hold: false, held: [] as Array<() => void>, recoveries: [] as string[] };
+    await withEngine(async (h) => {
+      await stuckH1(h, state);
+      const view = { ...socket("Q", {}, "h1"), queryId: "live" };
+      const subscribe = (id: string) => h.engine.querySubscribe({ ...view, queryId: id } as SocketView, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id, path: "items.live", args: {} }));
+      for (let i = 0; i < 5; i++) await subscribe("live");
+      const pending = () => deferredOf(h, "h1")?.outbox.filter((entry) => entry.query !== undefined) ?? [];
+      expect(new Set(pending().map((entry) => entry.query))).toEqual(new Set([`Q\u0000live`]));
+      const one = deferredOf(h, "h1")!.queryChars;
+      expect(one).toBeGreaterThan(4_000 * 1500);
+      expect(one).toBeLessThanOrEqual(DEFERRED_QUERY_CHARS);
+      // An unsubscribe drops the pending reply and its bytes.
+      h.engine.queryUnsubscribe(view, "live");
+      expect(pending()).toEqual([]);
+      expect(deferredOf(h, "h1")!.queryChars).toBe(0);
+      // Two different queries of every row are over the bound: h1 is reset (its sockets resubscribe); nothing else is.
+      await subscribe("a");
+      expect(state.recoveries).toEqual([]);
+      await subscribe("b");
+      expect(deferredOf(h, "h1")).toBeUndefined();
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 2000 && !state.recoveries.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(state.recoveries).toEqual(["h1"]);
+    }, MODULE, true, undefined, 60_000, ["h1", "h2"]);
+  });
+
+  it("r4617948603: a live-query-only socket's deferred initial reply advances its floor and completes its initial request as an immediate send does", { timeout: 120_000 }, async () => {
+    const state = {
+      hold: false, held: [] as Array<() => void>, recoveries: [] as string[],
+      receipt: (payload: ReplicaDelivery) => ({ v: 1, sockets: Object.keys(payload.sockets).length,
+        ...(payload.sockets.Q?.initialCompletions?.length ? { initialCompletions: { Q: payload.sockets.Q.initialCompletions.map((c) => ({ generation: c.request.generation, status: "enqueued" as const })) } } : {}) }) as ReplicaReceipt,
+    };
+    await withEngine(async (h) => {
+      const revision = await stuckH1(h, state);
+      const view = { ...socket("Q", {}, "h1"), queryId: "live", initialRequests: [{ kind: "query" as const, id: "live", path: "items.live", epoch: 0, generation: 1 }] };
+      await h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }));
+      expect(deferredOf(h, "h1")).toBeDefined();
+      expect(h.engine.subscriptionFloor(view)).toBe(0); // not yet sent
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "Q").some((f) => f.type === "query.result"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      for (let spin = 0; spin < 4000 && deferredOf(h, "h1"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // No commit came after the snapshot, so the deferral ends without a catch-up: the reply's own certificate counts.
+      expect(frames(h.payloads, "Q").filter((f) => f.type === "query.result").map((f) => f.reason)).toEqual(["initial"]);
+      expect(h.engine.subscriptionFloor(view)).toBe(revision);
+      expect((h.engine as unknown as { connections: Map<string, { initials: Map<number, unknown> }> }).connections.get("Q")!.initials.size).toBe(0);
+      expect(state.recoveries).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
   });
 });
 

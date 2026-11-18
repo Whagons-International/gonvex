@@ -60,6 +60,9 @@ const backoff = (attempt: number) => Math.min(ROOM_BACKOFF_MS[1], ROOM_BACKOFF_M
 export const MAX_PAYLOAD_CHARS = 8 << 20;
 
 const opChars = (op: SocketOp): number => op.reduce<number>((n, part) => n + (typeof part === "string" ? part.length : 8), 0);
+/** A payload's characters: its sockets' ops and the shared texts they reference (a retained reply's size). */
+const payloadChars = (payload: ReplicaDelivery): number =>
+  payload.shared.reduce((n, text) => n + text.length, 0) + Object.values(payload.sockets).reduce((n, work) => n + work.ops.reduce((m, op) => m + opChars(op), 0), 0);
 
 /**
  * Splits a payload under `MAX_PAYLOAD_CHARS`: whole sockets first, then one socket's ops across consecutive parts.
@@ -221,7 +224,17 @@ interface HostBarrier { pending: boolean; retryAt: number; catchup: boolean; owe
  * change log until its channel has room. `outbox` holds payloads waiting for admission, in order: an open's last work
  * that did not fit, then catch-up chunks.
  */
-interface Deferred { from: number; outbox: Array<{ payload: ReplicaDelivery; revision: number }>; waiting: boolean; attempts: number }
+interface Deferred {
+  from: number; outbox: Array<{ payload: ReplicaDelivery; revision: number; query?: string; chars?: number }>; waiting: boolean; attempts: number; queryChars: number;
+  /** BUG-10 (r4617948603): certificates of deferred live-query replies, sent once the holder owes no commit before them. */
+  certificates: Map<string, { epoch: number; revision: number }>;
+}
+/**
+ * BUG-10 (r4617948599): materialized live-query replies a deferred holder may keep waiting in its outbox, in characters
+ * (one RPC payload's worth). At most one per query (a newer reply replaces a pending one); over this, the holder is
+ * reset as a stalled one is, never kept growing.
+ */
+export const DEFERRED_QUERY_CHARS = 8 << 20;
 interface DeferredQuery { readonly socket: SocketView; readonly id: string; readonly snapshot: (db: StorageSession) => string }
 
 /** FNV-1a 64 of path and arguments: the stream identity (any per-socket-unique token works, A.4 row 2). */
@@ -350,9 +363,11 @@ export class ReplicaDeliveryEngine {
    * BUG-10: a live query's initial reply is never refused on a full holder channel (a refusal reset the whole holder
    * `change-feed-lagged`: every replica of the socket, 81 on -12). It is computed in the serialization turn and never
    * waits there (r4617752119: that would stall every reducer and every other holder behind one slow client). If the
-   * holder has no room, it is deferred as in BUG-4 and the reply leads its outbox, so every later commit for that
-   * holder follows it in order; the deferral sends it once the channel has room, and resets only a stalled holder.
-   * A deferred holder's reply carries no watermark: certification comes with its catch-up (BUG-4).
+   * holder has no room, it is deferred as in BUG-4 and the reply joins its outbox in order before any later commit for
+   * that holder; the deferral sends it through `sendOne` exactly as an immediate send, so its watermark and initial
+   * completions are accepted the same way (r4617948603). The snapshot joined at the delivered clock
+   * (`subscribeQuery`), so a holder deferred by this reply owes nothing before it and its certificate stands; a holder
+   * that was already behind gets none (`queryWork`), as before. Retained replies are bounded (r4617948599).
    */
   private queryReplyOrdered(socket: SocketView, replies: readonly string[]): void {
     const reply = this.queryWork(socket, replies);
@@ -364,11 +379,42 @@ export class ReplicaDeliveryEngine {
       if (!parts.every((part) => outlet.admits!(host, part))) deferred = this.defer(host, this.delivered?.revision ?? 0);
     }
     if (!deferred) { this.post(connection, reply.work); return; }
-    const { watermark: _certify, ...work } = reply.work;
-    this.queueDeferred(deferred, this.socketPayload(connection, work), 0);
+    const key = `${connection.id}\u0000${(socket as SocketView & { queryId?: string }).queryId ?? ""}`;
+    this.dropDeferredQuery(deferred, key, connection);
+    // The certificate never travels ahead of commits the holder still owes (BUG-4): it is sent when the deferral ends.
+    const { watermark: _ahead, ...work } = reply.work;
+    if (reply.certificate !== undefined) {
+      const previous = deferred.certificates.get(connection.id);
+      deferred.certificates.set(connection.id, { epoch: connection.epoch, revision: previous && previous.epoch === connection.epoch ? Math.min(previous.revision, reply.certificate) : reply.certificate });
+    }
+    const payload = this.socketPayload(connection, work), chars = payloadChars(payload);
+    if (deferred.queryChars + chars > DEFERRED_QUERY_CHARS) {
+      // Over the bound: reset this holder as the stall rule does (its sockets resubscribe), never grow the outbox.
+      this.undefer(host);
+      outlet.abandon?.(host);
+      this.requestRecovery(host);
+      return;
+    }
+    const parts = splitPayload(payload);
+    parts.forEach((part, index) => deferred!.outbox.push({ payload: part, revision: 0, query: key, chars: index === 0 ? chars : 0 }));
+    deferred.queryChars += chars;
   }
 
-  private queryWork(socket: SocketView, replies: readonly string[]): { connection: Connection; work: SocketWork } | undefined {
+  /** A pending reply for this query that has not gone yet is superseded (a newer reply or an unsubscribe): drop it and its initial refs. */
+  private dropDeferredQuery(deferred: Deferred, key: string, connection: Connection | undefined): void {
+    if (!deferred.outbox.some((entry) => entry.query === key)) return;
+    deferred.outbox = deferred.outbox.filter((entry) => {
+      if (entry.query !== key) return true;
+      deferred.queryChars -= entry.chars ?? 0;
+      for (const work of Object.values(entry.payload.sockets)) for (const c of work.initialCompletions ?? []) {
+        const ref = connection?.initials.get(c.request.generation);
+        if (ref && ref.epoch === c.request.epoch && ref.id === c.request.id && ref.kind === c.request.kind) connection!.initials.delete(ref.generation);
+      }
+      return false;
+    });
+  }
+
+  private queryWork(socket: SocketView, replies: readonly string[]): { connection: Connection; work: SocketWork; certificate?: number } | undefined {
     if (!socket.tenant) return undefined;
     const connection = this.connection(socket, socket.tenant);
     if (!connection) return undefined;
@@ -378,7 +424,8 @@ export class ReplicaDeliveryEngine {
     const initialCompletions = initial ? ops.flatMap((op, index) => { const c = initialCompletion(initial, op, index); return c ? [c] : []; }) : [];
     // BUG-4: a deferred holder's watermark comes with its catch-up, never ahead of the replica commits it owes.
     const certify = computed.length && initialCompletions.some(c=>c.outcome==="accepted") && !this.behind.has(connection.host);
-    return { connection, work: { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(certify ? { watermark: Math.min(...computed) } : {}) } };
+    const certificate = computed.length && initialCompletions.some(c=>c.outcome==="accepted") ? Math.min(...computed) : undefined;
+    return { connection, work: { ops, initialCompletions, ...(initial?{initialScope:initial}:{}), ...(certify ? { watermark: Math.min(...computed) } : {}) }, ...(certificate !== undefined ? { certificate } : {}) };
   }
 
   /** Initial LQ snapshots and their enqueue share the reducer/commit serialization turn. */
@@ -400,6 +447,8 @@ export class ReplicaDeliveryEngine {
         this.deferredQueries.set(socket.connectionId, pending);
         return [];
       }
+      // The snapshot joins at the delivered clock (as an open's does): no commit before it is owed to this socket.
+      if (!recovery) await this.deliverCommits();
       const replies = await this.options.read((db) => [snapshot(db)]);
       if (recovery) return replies;
       this.queryReplyOrdered(socket, replies);
@@ -417,6 +466,8 @@ export class ReplicaDeliveryEngine {
     }
     this.options.live?.unsubscribe(socket.connectionId, id);
     const connection = this.connections.get(socket.connectionId);
+    const deferred = connection && this.behind.get(connection.host);
+    if (deferred) this.dropDeferredQuery(deferred, `${socket.connectionId}\u0000${id}`, connection);
     for (const [generation,ref] of connection?.initials ?? []) if (ref.kind === "query" && ref.id === id) connection!.initials.delete(generation);
     this.options.activity?.();
     return true;
@@ -623,7 +674,7 @@ export class ReplicaDeliveryEngine {
   private defer(host: string, from: number): Deferred {
     let deferred = this.behind.get(host);
     if (!deferred) {
-      deferred = { from, outbox: [], waiting: false, attempts: 0 };
+      deferred = { from, outbox: [], waiting: false, attempts: 0, queryChars: 0, certificates: new Map() };
       this.behind.set(host, deferred);
       this.startTicker();
     }
@@ -717,14 +768,15 @@ export class ReplicaDeliveryEngine {
     if (!this.ready(host, deferred)) return this.awaitRoom(host, deferred);
     if (deferred.outbox.length) {
       while (deferred.outbox.length && this.hasRoom(host, deferred)) {
-        const { payload, revision } = deferred.outbox.shift()!;
+        const { payload, revision, chars } = deferred.outbox.shift()!;
+        if (chars) deferred.queryChars -= chars;
         void this.sendOne(host, payload, revision);
       }
       if (deferred.outbox.length) this.awaitRoom(host, deferred);
       return;
     }
     const through = this.delivered?.revision ?? deferred.from;
-    if (deferred.from >= through) { this.undefer(host); return; }
+    if (deferred.from >= through) { this.certify(host, deferred); this.undefer(host); return; }
     const ids = new Set([...this.connections.values()].filter((c) => c.host === host).map((c) => c.id));
     const chunk = await this.options.read((db) => {
       const clock = readClock(sqlOf(db));
@@ -747,6 +799,21 @@ export class ReplicaDeliveryEngine {
     if (!chunk) { this.undefer(host); this.requestRecovery(host); return; }
     deferred.from = chunk.to;
     for (const [, payload, revision] of chunk.payloads) this.queueDeferred(deferred, payload, revision);
+  }
+
+  /**
+   * BUG-10 (r4617948603): the deferral ends with every owed commit sent before this point on the holder's channel, so a
+   * deferred live-query reply's certificate goes now, through `sendOne` as any watermark: `accepted` advances on its
+   * receipt exactly as for an immediate reply. (A catch-up that already certified the socket further makes it a no-op.)
+   */
+  private certify(host: string, deferred: Deferred): void {
+    for (const [id, certificate] of deferred.certificates) {
+      const connection = this.connections.get(id);
+      if (!connection || connection.host !== host || connection.epoch !== certificate.epoch) continue;
+      if ((this.accepted.get(id) ?? 0) >= certificate.revision || certificate.revision > deferred.from) continue;
+      this.post(connection, { ops: [], watermark: certificate.revision });
+    }
+    deferred.certificates.clear();
   }
 
   /** Appends `payload` to a deferred holder's outbox in parts under the RPC cap; the revision rides the last part. */
