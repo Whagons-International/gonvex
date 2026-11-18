@@ -526,6 +526,10 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     if (!this.draining) {
       this.draining = { ...command, nextAt: Math.max(Date.now(), command.notBefore) + (hashConnection(`${this.gatewayName}:${this.placementEpoch}`) % 1000) };
       await this.ctx.storage.put("autoscale-drain", this.draining);
+    } else if (this.draining.replacement !== command.replacement || this.draining.replacementEpoch !== command.replacementEpoch) {
+      // The controller re-pointed this drain because its old replacement drained or retired (BUG-9 review).
+      this.draining = { ...this.draining, replacement: command.replacement, replacementEpoch: command.replacementEpoch };
+      await this.ctx.storage.put("autoscale-drain", this.draining);
     }
     await this.drainTick();
     this.host.reschedule();

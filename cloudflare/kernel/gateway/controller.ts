@@ -205,6 +205,13 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
     // One reconnecting drain per cell, and at most TWO holder probes per control event. A scale-in holder
     // still inside its natural-disconnect grace reconnects nobody, so it does not block pressure decisions.
     const draining = this.state.slots.filter(s => s.mode === "draining");
+    // Review r4609054691: a drain's replacement may itself drain (pressure B -> C) or retire. Re-point each
+    // draining holder at a live active target, so drainReady accepts it and every waiting drain can finish.
+    for (const slot of draining) this.repoint(slot, now);
+    // Review r4609054682: every overdue schedule advances this round, whichever slot is probed, so save()
+    // never re-arms an alarm at an expired deadline.
+    const overdue = new Set(draining.filter(s => (s.nextCheck ?? 0) <= now));
+    for (const slot of overdue) slot.nextCheck = now + (this.waitingScaleIn(slot, now) ? SCALE_IN_CHECK_MS : 30_000);
     const reconnecting = draining.find(s => !this.waitingScaleIn(s, now));
     if (reconnecting) {
       if (!this.pending(reconnecting)) {
@@ -214,7 +221,7 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       }
       return;
     }
-    const due = draining.find(s => !this.pending(s) && ((s.nextCheck ?? 0) <= now || s.sample?.sockets === 0));
+    const due = draining.find(s => !this.pending(s) && (overdue.has(s) || s.sample?.sockets === 0));
     if (due) {
       due.nextCheck = now + SCALE_IN_CHECK_MS;
       try { if ((await this.probe(due)).sockets === 0) this.retire(due); }
@@ -260,6 +267,18 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
     slot.mode = "draining"; slot.drainKind = kind; slot.changedAt = now;
     slot.nextCheck = now + (kind === "scale-in" ? SCALE_IN_CHECK_MS : 30_000);
     slot.quietSince = null; slot.replacement = replacement.name; this.event("drain", slot);
+  }
+  /** The live active target of a draining slot: its replacement, else the end of that slot's own drain chain,
+   * else any other active slot, else a new allocation (bounded by the cell's ceiling). */
+  private repoint(slot: Slot, now: number): void {
+    const byName = (name: string | null) => (name === null ? undefined : this.state.slots.find(s => s.name === name));
+    let target = byName(slot.replacement);
+    for (let hops = 0; target && target.mode === "draining" && target !== slot && hops < this.state.slots.length; hops++) target = byName(target.replacement);
+    if (!target || target === slot || target.mode !== "active") {
+      target = this.state.slots.find(s => s !== slot && s.mode === "active");
+      if (!target && (this.state.slots.some(s => s.mode === "retired") || this.state.slots.length < MAX_GATEWAYS_PER_CELL)) target = this.allocate(now);
+    }
+    if (target && target.name !== slot.replacement) slot.replacement = target.name;
   }
   /** A scale-in drain inside its grace: no admissions, no reconnects; it retires when its sockets close. */
   private waitingScaleIn(slot: Slot, now: number): boolean {
