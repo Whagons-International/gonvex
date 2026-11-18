@@ -189,7 +189,7 @@ export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
       // hands it to a Workflow, as for any dead runner.
       let claim: Awaited<ReturnType<TenantStub["startCall"]>>;
       try {
-        claim = await tenant.startCall({ ...request, owner: `inline:${crypto.randomUUID()}` });
+        claim = await startInline(tenant, { ...request, owner: `inline:${crypto.randomUUID()}` }, active?.engine);
       } catch (error) {
         // Deploy skew: an older tenant object has no `startCall`. Hand the call to a Workflow as before.
         if (!/does not implement the method/i.test(String((error as Error)?.message ?? error))) throw error;
@@ -204,6 +204,22 @@ export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
     }
     return runtime.execute({ session: input.session, path: input.path, args: input.args, provenance: input.provenance, allowInternal: input.allowInternal === true });
   }
+}
+
+/**
+ * X13b: starts an inline run in the tenant. On a cold isolate the app bundle has not been evaluated yet
+ * (Whagons: ~350-450 ms CPU); it is evaluated while the tenant writes the run instead of after it. One
+ * turn of the event loop lets the request leave before the CPU-bound evaluation. A bundle that fails to
+ * evaluate fails the call in `execute`, as before.
+ */
+export async function startInline<T>(tenant: { startCall(request: Parameters<TenantStub["startCall"]>[0]): Promise<T> }, request: Parameters<TenantStub["startCall"]>[0], engine: { readonly loaded: boolean; load(): void } | undefined): Promise<T> {
+  const started = tenant.startCall(request);
+  if (engine && !engine.loaded) {
+    void started.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    try { engine.load(); } catch { /* reported by execute */ }
+  }
+  return started;
 }
 
 /** Attempts and first delay for applying an inline run's answer (a Workflow's "apply result" step retries too). */

@@ -66,6 +66,10 @@ direct action.call (K05/K07) ─► ActionWorker.call ─┬─ standard / publi
   runner dies, its lease expires and the sweep hands the run to a Workflow; if the run throws,
   `releaseCall` hands it to a Workflow at once. An older tenant without `startCall` gets the Workflow
   hand-off as before. `kernel/assembly/test/x13-latency.spec.ts` measures it.
+- **Cold isolates (X13b).** The generated Actions catalog loads a project's manifest and its code separately,
+  and the registry installs the code as a loader (`ModuleExportsSource`). So reading contracts never
+  evaluates an app; an inline agent call on a cold isolate evaluates the bundle (Whagons: ~350-450 ms
+  CPU) while the tenant writes the run (`startInline`), not after it. `test/cold.test.ts` measures it.
 
 - **Outbox and scheduled Actions belong to K11.** K11's scheduler claims the row or the job, applies the durable hop and
   the attempt cap, and hands the run over. `WorkflowHandoff` accepts every run: it never runs an Action inline in the

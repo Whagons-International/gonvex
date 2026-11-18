@@ -19,7 +19,7 @@
 // - an invocation may pin a generation: a newer one than the active is
 //   UNKNOWN_GENERATION (retryable, "host behind"); an older pin is served by
 //   the active generation, as in Rust.
-import { ModuleEngine, type EngineConfig, type FunctionContract, type ModuleExports } from "./engine.js";
+import { ModuleEngine, type EngineConfig, type FunctionContract, type ModuleExportsSource } from "./engine.js";
 import { codes, wireError, type WireError } from "./errors.js";
 
 export interface ModuleArtifact {
@@ -29,7 +29,7 @@ export interface ModuleArtifact {
   /** Client contract version (`client.updateRequired` when a client's differs). */
   clientContract?: number | undefined;
   functions: readonly FunctionContract[];
-  exports: ModuleExports;
+  exports: ModuleExportsSource;
   /** Module schema (manifest `schema`) for declared primary keys. */
   schema?: unknown;
 }

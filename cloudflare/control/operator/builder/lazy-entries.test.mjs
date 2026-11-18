@@ -34,6 +34,8 @@ test('generated entries have no static per-app imports and load each app once, o
    globalThis.__evaluated=[];
    const {releases}=await import(pathToFileURL(out).href);
    assert.deepEqual(globalThis.__evaluated,[],`no ${piece} module may run at startup`);
+   // X13b: an Action isolate reads a project's manifest without evaluating its code.
+   if(piece==='actions'){assert.equal(releases.gamma.manifest.project,'gamma');assert.deepEqual(globalThis.__evaluated,[],'manifest alone evaluates no Action code');}
    assert.equal(releases.beta[field][piece==='app'?'ping':'act'](),'beta');
    assert.deepEqual(globalThis.__evaluated,[`beta:${piece}`]);
    assert.equal(releases.beta.manifest.project,'beta');

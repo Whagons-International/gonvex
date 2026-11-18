@@ -26,7 +26,8 @@ configureActions<Env>({
       if (!release) throw new Error(`project ${JSON.stringify(projectId)} has no active TypeScript module`);
       const module = projectModuleFromManifest(projectId, release.manifest);
       registry = new ModuleRegistry(projectId);
-      registry.install(moduleArtifact(module, module.generation, release.exports));
+      // X13b: the bundle evaluates on first use (or `engine.load()`), not when the contracts are read.
+      registry.install(moduleArtifact(module, module.generation, () => release.exports));
       registries.set(projectId, registry);
     }
     return registry;
