@@ -72,6 +72,13 @@ export interface AssemblyTenantEnv extends AssemblyGatewayEnv, TransferEnv {
   [key: string]: unknown;
 }
 
+/** X13c: one log line per Reducer that waited or ran long (path only; never arguments), to split its wall time. */
+export function slowCallLog(kind: string, path: string, queued: number, started: number, now = Date.now()): void {
+  const waitMs = started - queued, totalMs = now - queued;
+  if (totalMs >= SLOW_CALL_MS) console.log("reducer: slow call", { kind, path, waitMs, runMs: now - started, totalMs });
+}
+const SLOW_CALL_MS = 100;
+
 export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   readonly queries: QueryEngine;
   private scheduler: Scheduler | undefined;
@@ -327,7 +334,10 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
         return { ok: true as const, value };
       } catch (error) { return { ok: false as const, error: (error as Error).message, transient: false }; }
     }
+    const queued = Date.now();
+    let started = queued;
     const outcome = await this.kernel.reducers.serial(async () => {
+      started = Date.now();
       const admissionError = writeAdmissionError(() => this.kernel.migrator.gateClosed());
       if (admissionError) return { ok: false as const, error: admissionError.message, transient: retryable(admissionError.class) };
       this.kernel.storage.arm({ provenance: publicInfo(request.provenance), afterSuccess: (db) => { flushReferences(db); } });
@@ -337,7 +347,17 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
         return report.ok ? { ok: true as const, value: report.value ?? "null", committedRevision: commit?.notice?.revision } : { ok: false as const, error: report.error?.message ?? "call failed", transient: report.error?.retryable ?? false };
       } finally { this.kernel.storage.disarm(); }
     });
-    if (outcome.ok) await this.kernel.reducers.serial(async () => { await this.scheduler?.notify(); });
+    slowCallLog("tool", request.function, queued, started);
+    if (outcome.ok) {
+      const notified = this.kernel.reducers.serial(async () => { await this.scheduler?.notify(); });
+      // X13c: an Action's tool or `ctx.functions` Reducer answers once its commit is durable (the platform
+      // holds this reply until then), as Rust's `call_reducer` returns after its commit and feeds sockets
+      // asynchronously. Waiting for this turn of the serial queue made the answer wait behind the commit's
+      // own delivery and any replica open queued after it (~0.1 s per tool call on dev). The scheduler is
+      // still notified in queue order; a scheduled run keeps the old order.
+      if (lane === "scheduled") await notified;
+      else this.ctx.waitUntil(notified.catch((error) => console.error("scheduler: notify after tool call failed", error)));
+    }
     return outcome;
   }
   private sessionFromAction(s: ActionSession): TenantSession {

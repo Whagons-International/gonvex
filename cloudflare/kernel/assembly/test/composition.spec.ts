@@ -362,3 +362,27 @@ it('X03 dev fixture route: purging revoked tokens is 404 without the exact fixtu
  expect((await fixtureControl(request(),{TENANT:bindings.TENANT,GATEWAY:bindings.TENANT,GONVEX_ASSEMBLY_FIXTURE_KEY:'real'} as never))!.status).toBe(404);
  expect((await fixtureControl(request(),{TENANT:bindings.TENANT,GATEWAY:bindings.TENANT} as never))!.status).toBe(404);
 });
+it('X13c an Action tool Reducer answers after its commit, not behind serial work its commit queued; that work still runs in order',async()=>fixture(async(object,state)=>{
+ const session=systemSession('p',state.id.name!);
+ let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});const order:string[]=[];
+ // Stands in for the commit's delivery or a replica open: serial work queued right after the commit.
+ const stop=object.kernel.capture.wake.subscribe(()=>{void object.kernel.reducers.serial(async()=>{order.push('queued:start');await gate;order.push('queued:end');});});
+ try{
+  const before=Number(state.storage.sql.exec('SELECT revision FROM _gonvex_sync_clock WHERE singleton=1').one().revision);
+  let answered=false;
+  const call=object.call({v:1,function:'probe.write',kind:'reducer',args:{id:'x13c'},session,provenance:directProvenance(session,'agent','x13c',manifest.module.hash),allowInternal:true}).then(r=>{answered=true;order.push('answered');return r;});
+  for(let i=0;i<100&&!answered;i++)await new Promise(r=>setTimeout(r,5));
+  expect(answered).toBe(true);
+  const report=await call;
+  expect(report).toMatchObject({ok:true});
+  // The answer carries the commit's revision, so the socket's watermark still covers it.
+  expect((report as {committedRevision?:number}).committedRevision).toBe(before+1);
+  expect(state.storage.sql.exec("SELECT count(*) n FROM board WHERE id='x13c'").one().n).toBe(1);
+  release();
+  // The queued work and the scheduler notification still run, after the commit, in queue order.
+  await object.kernel.reducers.serial(async()=>{order.push('after');});
+  expect(order.indexOf('answered')).toBeLessThan(order.indexOf('queued:end'));
+  expect(order.slice(-2)).toEqual(['queued:end','after']);
+  expect(order).toContain('queued:start');
+ }finally{release();stop();}
+}));
