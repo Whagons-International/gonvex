@@ -91,8 +91,11 @@ holder (any object):  Session ─ SocketDelivery (socket.ts) ─ ReplicaBatcher 
   backing off from 10 ms to 1 s while the isolate-wide credits are full (another object cannot signal this one).
   A payload over the budget (one large commit, e.g. a bulk update) is legal only alone in the isolate; its holder
   claims the isolate while its channel is empty, and `admits` makes every other holder wait until it went (BUG-4b),
-  so it cannot be starved by steady traffic elsewhere. The claim has no timer: it ends when the payload is admitted
-  or the engine stops waiting for that holder (`unclaim`). `send` admission is unchanged. A new database epoch with the log intact is delivered as Rust delivers it: the
+  so it cannot be starved by steady traffic elsewhere. The claim has no timer: it lasts until the payload is enqueued
+  or the engine stops waiting for that holder (`unclaim`), and it never waits on a stalled RPC: stall ticks watch every
+  holder of the tenant while one is deferred (a stalled one is reset and its stuck RPC's credits returned), and the
+  claim's own ticks return the credits of any RPC in the isolate stuck for `STALL_TICKS` ticks. Completions are counted
+  per holder across its queue's lifetimes. `send` admission is unchanged. A new database epoch with the log intact is delivered as Rust delivers it: the
   transaction carries the new epoch, collection cursors keep theirs, and resumes from the old epoch reload. A socket
   whose collections span two epochs is closed (1011), as Rust ends that socket's task.
 - **Tenant restarts.** Subscriptions live in the tenant object's memory. A holder tracks its sockets' collections and

@@ -1016,7 +1016,7 @@ describe("BUG-4b one large commit is delivered, never reset lagged", () => {
     const recovered: string[] = [];
     let holdH2 = false;
     const heldH2: Array<() => void> = [];
-    const bulkTo = new Set<string>();
+    const bulkTo = new Set<string>(), againTo = new Set<string>();
     await withEngine(async (h) => {
       const insert: Array<[string, unknown[]]> = [];
       for (let i = 0; i < 6_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
@@ -1025,7 +1025,8 @@ describe("BUG-4b one large commit is delivered, never reset lagged", () => {
         if (host === "h2" && holdH2 && !payload.recovery) await new Promise<void>((resolve) => heldH2.push(resolve));
         if (payload.recovery) { recoveries += 1; recovered.push(host); return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
         for (const [id, work] of Object.entries(payload.sockets)) {
-          if (work.ops.some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && ((op[1] as string).includes("bulk-") || (op[1] as string).includes("again-")))) bulkTo.add(id);
+          if (work.ops.some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && (op[1] as string).includes("bulk-"))) bulkTo.add(id);
+          if (work.ops.some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && (op[1] as string).includes("again-"))) againTo.add(id);
         }
         return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
       };
@@ -1069,13 +1070,54 @@ describe("BUG-4b one large commit is delivered, never reset lagged", () => {
       // socket's close would), so the holder sees it once that RPC returns.
       expect(h.engine.stats.resets).toBeGreaterThan(resetsBefore);
       expect(recovered).toEqual([]);
-      // h2 resumes (its stuck RPC completes): the isolate drains and h1's large payload goes; h1 was never reset.
-      bulkTo.clear();
+      // Its stuck RPC no longer holds the isolate (r4609198131): h1's large payload goes without waiting for it.
+      for (let tick = 0; tick < 4 * STALL_TICKS && !againTo.has("S1"); tick++) await advance(TICK);
+      expect(againTo.has("S1")).toBe(true);
       holdH2 = false;
       heldH2.splice(0).forEach((release) => release());
-      for (let tick = 0; tick < 4 * STALL_TICKS && !bulkTo.has("S1"); tick++) await advance(TICK);
-      expect(bulkTo.has("S1")).toBe(true);
+      for (let tick = 0; tick < 2 * STALL_TICKS && !recovered.length; tick++) await advance(TICK);
       expect(recovered).toEqual(["h2"]); // only the stalled holder
+      expect(h.conflicts).toEqual([]);
+    }, MODULE, false, undefined, STALL, ["h1", "h2"], clock);
+  });
+
+  it("r4609198131: a holder whose RPC never settles is reset at the stall bound and the large commit then goes (explicit ticks)", { timeout: 120_000 }, async () => {
+    const STALL = 30_000, TICK = STALL / STALL_TICKS;
+    const { clock, advance } = manualClock();
+    const recovered: string[] = [];
+    let stuck = false;
+    const bulkTo = new Set<string>();
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 6_000; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
+      for (let i = 0; i < insert.length; i += 2500) await h.commit(insert.slice(i, i + 2500));
+      h.receiver.deliver = async (host, payload) => {
+        if (payload.recovery) { recovered.push(host); return { v: 1, sockets: 1, recoveryAck: 1 } as ReplicaReceipt; }
+        if (host === "h2" && stuck) await new Promise<never>(() => {}); // this RPC never settles
+        for (const [id, work] of Object.entries(payload.sockets)) {
+          if (work.ops.some((op) => op[0] === "f" && (op[1] as string).includes('"type":"replica.delta"') && (op[1] as string).includes("bulk-"))) bulkTo.add(id);
+        }
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      h.engine.dispatch(socket("S1", {}, "h1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      h.engine.dispatch(socket("S2", {}, "h2"), { type: "replica.open", id: "top", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      const ready = () => new Set(h.payloads.flatMap(([, p]) => Object.entries(p.sockets).filter(([, w]) => w.ops.some((op) => op[0] === "f" && (op[1] as string).startsWith('{"type":"replica.ready"'))).map(([id]) => id)));
+      for (let step = 0; step < 200 && ready().size < 2; step++) { await advance(TICK); await h.engine.settled(); }
+      expect(ready().size).toBe(2);
+      // h2's next RPC never settles; h2 then has nothing more to send, so it is never deferred by its own traffic.
+      stuck = true;
+      await h.commit([["UPDATE items SET label = 'w1' WHERE id = 'i000000'", []]], false);
+      for (let step = 0; step < 50 && !h.payloads.some(([host, p]) => host === "h2" && p.watermark !== undefined && JSON.stringify(p).includes("w1")); step++) await advance(1);
+      // The bulk reassign leaves h2's two rows alone: only h1's payload, over the budget, claims the isolate.
+      await h.commit([["UPDATE items SET label = 'bulk-' || id WHERE id NOT IN ('i000000', 'i000001')", []]], false);
+      const resetsBefore = h.engine.stats.resets;
+      for (let tick = 0; tick < STALL_TICKS - 2; tick++) await advance(TICK);
+      expect({ resets: h.engine.stats.resets - resetsBefore, bulk: [...bulkTo] }).toEqual({ resets: 0, bulk: [] });
+      for (let tick = 0; tick < 8; tick++) await advance(TICK);
+      // h2 hit the stall rule: it is reset, its stuck RPC no longer holds the isolate, and h1's large commit goes.
+      expect(h.engine.stats.resets).toBeGreaterThan(resetsBefore);
+      expect([...bulkTo]).toEqual(["S1"]);
+      expect(recovered).not.toContain("h1");
       expect(h.conflicts).toEqual([]);
     }, MODULE, false, undefined, STALL, ["h1", "h2"], clock);
   });

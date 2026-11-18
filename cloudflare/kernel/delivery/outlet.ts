@@ -49,6 +49,8 @@ interface Pending {
   payload: ReplicaDelivery;
   bytes: number;
   recovery: boolean;
+  /** Its credits were returned already: on completion, or (BUG-4b) when its RPC stopped progressing. */
+  released?: boolean;
   enqueued: number;
   resolve(value: ReplicaReceipt | undefined): void;
   reject(error: unknown): void;
@@ -56,8 +58,11 @@ interface Pending {
 interface Queue {
   pending: Pending[];
   running: boolean;
-  /** BUG-4b: RPCs this holder's channel has completed (the engine's stall ticks watch it). */
-  completed: number;
+  /** The item whose RPC is in flight. */
+  current?: Pending | undefined;
+  /** BUG-4b: ticks of an isolate claim that found this channel's RPC in flight and no completion since the last. */
+  stuckTicks: number;
+  stuckSeen: number;
   bytes: number;
   rpcMs: number;
   recoveryRequired: boolean;
@@ -74,6 +79,8 @@ export interface ReplicaHolderRpc {
 
 abstract class OrderedOutlet implements DeliveryOutlet {
   private readonly queues = new Map<string, Queue>();
+  /** BUG-4b: RPCs completed per holder, kept across the lifetimes of its queue (a drained queue is dropped). */
+  private readonly completed = new Map<string, number>();
   private readonly owner = new WeakRef(this);
 
   private sweepOwners(): void {
@@ -98,7 +105,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       owners.add(this.owner);
       let drained!: () => void;
       const idle = new Promise<void>(resolve => { drained = resolve; });
-      this.queues.set(host, (queue = { pending: [], running: false, completed: 0, bytes: 0, rpcMs: 0,
+      this.queues.set(host, (queue = { pending: [], running: false, stuckTicks: 0, stuckSeen: -1, bytes: 0, rpcMs: 0,
         recoveryRequired: false, recovery: undefined, idle, drained }));
     }
     return queue;
@@ -116,20 +123,20 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       this.settleEmpty(host, queue);
       return Promise.reject(new DeliveryCapacityError());
     }
-    return this.enqueue(host, queue, payload, bytes, false);
+    const sent = this.enqueue(host, queue, payload, bytes, false);
+    this.unclaim(host); // a claimant's payload is enqueued: its claim ends (r4609198128)
+    return sent;
   }
 
   /**
    * A legal large singleton is allowed when it is the only retained normal delivery. Never impose
    * the pending budget as a smaller wire/frame limit. Its real isolate peak remains a V04 gate.
    */
-  /**
-   * A legal large singleton is allowed when it is the only retained normal delivery. Never impose
-   * the pending budget as a smaller wire/frame limit. Its real isolate peak remains a V04 gate.
-   */
   private static fits(queue: Queue | undefined, bytes: number): boolean {
     if (queue?.recoveryRequired || credits.count >= MAX_PENDING) return false;
-    const singleton = credits.normal === 0 && credits.recovery === 0 && !queue?.running && !queue?.pending.length;
+    // The recovery reserve is its own bounded budget (`RECOVERY_BYTES`): a recovery barrier queued behind a stalled
+    // RPC must not hold back the singleton forever (BUG-4b r4609198131). Peak: the singleton plus that reserve.
+    const singleton = credits.normal === 0 && !queue?.running && !queue?.pending.length;
     return singleton || ((queue?.bytes ?? 0) + bytes <= HOST_PENDING_BYTES && credits.normal + bytes <= NORMAL_BYTES);
   }
 
@@ -138,10 +145,8 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     const queue = this.queues.get(host), bytes = retainedBytes(payload);
     const mine = claim?.owner.deref() === this && claim.host === host;
     if (claim && !claim.owner.deref()) claim = undefined;
-    if (OrderedOutlet.fits(queue, bytes)) {
-      if (mine) claim = undefined; // its turn: it goes alone
-      return !claim || mine;
-    }
+    // Its turn: the claim stays until `send` enqueues it, so nobody takes the quiet isolate in between (r4609198128).
+    if (OrderedOutlet.fits(queue, bytes)) return !claim || mine;
     // BUG-4b: over the budget with its own channel empty, it can only wait for the isolate to be quiet: claim it.
     const oversize = bytes > HOST_PENDING_BYTES || bytes > NORMAL_BYTES;
     if (oversize && !queue?.recoveryRequired && !queue?.running && !queue?.pending.length && (!claim || mine)) claim = { owner: this.owner, host };
@@ -153,9 +158,38 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     if (claim?.owner.deref() === this && claim.host === host) claim = undefined;
   }
 
-  /** BUG-4b: RPCs this holder's channel has completed (resets with the channel once it was idle and dropped). */
+  /** BUG-4b: RPCs this holder's channel has completed, monotonic across its queue's lifetimes (r4609198111). */
   progress(host: string): number {
-    return this.queues.get(host)?.completed ?? 0;
+    return this.completed.get(host) ?? 0;
+  }
+
+  /**
+   * BUG-4b (r4609198131): one stall tick of the claim `host` holds. A claim never waits on a stalled RPC: any channel
+   * in the isolate whose RPC has been in flight for `threshold` such ticks with no completion has its credits
+   * returned (the RPC itself may still settle; its credits are not returned twice). True when that freed some.
+   */
+  claimTick(host: string, threshold: number): boolean {
+    if (claim?.owner.deref() !== this || claim.host !== host) return false;
+    let freed = false;
+    for (const ref of owners) {
+      const outlet = ref.deref();
+      if (!outlet) continue;
+      for (const [name, queue] of outlet.queues) {
+        const current = queue.current;
+        if (!current || current.recovery || current.released) { queue.stuckTicks = 0; continue; }
+        const done = outlet.progress(name);
+        if (done === queue.stuckSeen) queue.stuckTicks += 1;
+        else { queue.stuckTicks = 1; queue.stuckSeen = done; }
+        if (queue.stuckTicks > threshold) { outlet.release(queue, current); freed = true; }
+      }
+    }
+    return freed;
+  }
+
+  /** BUG-4b: the engine reset `host` for a stall: its in-flight RPC's credits are returned now, not when it settles. */
+  abandon(host: string): void {
+    const queue = this.queues.get(host);
+    if (queue?.current && !queue.current.recovery) this.release(queue, queue.current);
   }
 
   /**
@@ -208,7 +242,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       if (queue.running) continue;
       const item = queue.pending.shift();
       if (!item) continue;
-      queue.running = true; credits.running++;
+      queue.running = true; credits.running++; queue.current = item;
       void this.run(host, queue, item);
       return;
     }
@@ -228,7 +262,8 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     } catch (error) { item.reject(error); }
     finally {
       queue.rpcMs = Date.now() - started;
-      queue.completed += 1;
+      this.completed.set(host, (this.completed.get(host) ?? 0) + 1);
+      queue.current = undefined;
       this.release(queue, item);
       if (item.recovery) queue.recovery = undefined;
       queue.running = false; credits.running--;
@@ -245,6 +280,8 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
 
   private release(queue: Queue, item: Pending): void {
+    if (item.released) return;
+    item.released = true;
     if (item.recovery) credits.recovery -= item.bytes;
     else { queue.bytes -= item.bytes; credits.normal -= item.bytes; credits.count--; }
   }
