@@ -302,3 +302,70 @@ it("keeps the 120-KiB routing-state guard and rolls back a refused admission's p
   const status=await controller.status();expect(status.pending).toBe(0);
   expect(status.slots).toHaveLength(1);expect(status.slots[0]!.name).toBe(assignment.gateway);
 });
+
+it("BUG-9 quiet scale-in reconnects no ordinary session within its natural-disconnect grace, and admits nothing new", async () => {
+  const { SCALE_IN_GRACE_MS } = await import("../placement");
+  const controller = bindings.GATEWAY_CONTROLLER.getByName("gateway-cell-29");
+  const assignment = await controller.acquire(key(29));
+  const holder = bindings.GATEWAY.getByName(assignment.gateway);
+  const response = await holder.fetch(new Request("https://test/ws", {headers:{upgrade:"websocket",
+    "x-gonvex-connection-id":assignment.connectionId,[ASSIGNMENT_HEADER]:JSON.stringify(assignment)}}));
+  expect(response.status).toBe(101); response.webSocket!.accept();
+  let closed: number | undefined;
+  response.webSocket!.addEventListener("close", (event) => { closed = event.code; });
+  // An ordinary idle, already-authenticated session (fixture data only, as in the test above).
+  await runInDurableObject(holder, object => {
+    for (const [socket, session] of (object as any).host.sessions) {
+      session.record.pendingUntil = null;
+      socket.serializeAttachment({...socket.deserializeAttachment(), session: session.record});
+    }
+  });
+  try {
+    const leases = [];
+    for (let n = 0; n < 10_000; n++) {
+      const id = `quiet-grace-${n}`; if (controllerCell(id) !== 29) continue;
+      const next = await controller.acquire(id); leases.push(next);
+      if (next.gateway !== assignment.gateway) break;
+    }
+    for (const lease of leases) await controller.release(lease);
+    const commands: any[] = [];
+    const startedAt = Date.now();
+    await runInDurableObject(controller, async (_object, state) => {
+      const stored = (await state.storage.get<any>("placement"))!; stored.leases = [];
+      for (const slot of stored.slots) {slot.quietSince = Date.now() - 121_000;slot.changedAt = Date.now() - 121_000;}
+      await state.storage.put("placement",stored);
+      const actual = _object as any, originalEnv = actual.env;
+      Object.defineProperty(actual,"env",{configurable:true,value:{...originalEnv,GATEWAY:{getByName(name:string){
+        const rpc=bindings.GATEWAY.getByName(name) as any;return {
+          capacity:(epoch:number)=>rpc.capacity(epoch),
+          drain:(command:any)=>{commands.push(command);return rpc.drain(command);},
+        };}}}});
+      try { await actual.alarm(); } finally { Object.defineProperty(actual,"env",{configurable:true,value:originalEnv}); }
+    });
+    const slot = (await controller.status()).slots.find(s=>s.name===assignment.gateway)!;
+    expect(slot.mode).toBe("draining");
+    expect(commands).toHaveLength(1);
+    // 0054: normal scale-in waits for natural disconnect; the bounded 1012 cohort may start only after the grace.
+    expect(commands[0].notBefore).toBeGreaterThanOrEqual(startedAt + SCALE_IN_GRACE_MS - 1_000);
+    // The holder's drain tick a minute later (past the old 30 s start) closes nobody.
+    const inHolder = runInDurableObject as unknown as (stub: unknown, fn: (object: any) => Promise<unknown>) => Promise<unknown>;
+    const tick = await inHolder(holder as unknown, async (object: any) => {
+      const { vi } = await import("vitest");
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+      try { await object.alarm(); return { sessions: object.host.sessions.size, result: await object.drainStatus() }; }
+      finally { clock.mockRestore(); }
+    }) as { sessions: number; result: { closed: number } };
+    expect(tick.sessions).toBe(1);
+    expect(tick.result.closed).toBe(0);
+    await new Promise(r => setTimeout(r, 50));
+    expect(closed).toBeUndefined();
+    // No new admission goes to the draining holder.
+    for (let n = 0; n < 10_000; n++) {
+      const id = `quiet-grace-after-${n}`; if (controllerCell(id) !== 29) continue;
+      const next = await controller.acquire(id);
+      expect(next.gateway).not.toBe(assignment.gateway);
+      await controller.release(next);
+      break;
+    }
+  } finally {response.webSocket!.close();}
+});
