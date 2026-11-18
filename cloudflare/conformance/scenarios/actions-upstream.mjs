@@ -14,6 +14,22 @@
 export const UPSTREAM_PORT = 47812;
 export const UPSTREAM_ORIGIN = `http://127.0.0.1:${UPSTREAM_PORT}`;
 
+/**
+ * The origin the fixture's Actions fetch. By default the local Node server above (Rust, local workerd). A
+ * deployed Worker cannot reach this machine's 127.0.0.1 (Cloudflare answers `error code: 1003`), so
+ * `GONVEX_CONFORMANCE_UPSTREAM_ORIGIN` names a reachable host serving the same `upstream()` (for example the
+ * dev-only Worker in `upstream-worker/`). The fixture is built with that origin for every backend, so all of
+ * them fetch the same upstream and their answers stay comparable (fixture.mjs).
+ */
+export function upstreamOrigin() {
+  const configured = process.env.GONVEX_CONFORMANCE_UPSTREAM_ORIGIN;
+  if (!configured) return UPSTREAM_ORIGIN;
+  const url = new URL(configured);
+  if (!['http:', 'https:'].includes(url.protocol) || url.origin !== configured.replace(/\/$/, '')) throw new Error('GONVEX_CONFORMANCE_UPSTREAM_ORIGIN must be a bare http(s) origin');
+  return url.origin;
+}
+export const upstreamIsLocal = () => upstreamOrigin() === UPSTREAM_ORIGIN;
+
 const encoder = new TextEncoder();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

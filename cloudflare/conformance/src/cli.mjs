@@ -44,6 +44,7 @@ console.log(`work directory: ${workDir}`);
 const started = Date.now();
 const fixtures = { 1: await buildFixture(workDir, 1), 2: await buildFixture(workDir, 2), 3: await buildFixture(workDir, 3) };
 console.log(`fixture bundles: ${Object.values(fixtures).map(f => `v${f.generation} ${f.hash.slice(0, 12)}`).join(', ')}`);
+if (process.env.GONVEX_CONFORMANCE_UPSTREAM_ORIGIN) console.log(`actions upstream: ${process.env.GONVEX_CONFORMANCE_UPSTREAM_ORIGIN}`);
 
 const backends = [];
 for (const { label, kind } of specs) {
