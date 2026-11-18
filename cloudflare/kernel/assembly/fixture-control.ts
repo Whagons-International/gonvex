@@ -58,6 +58,11 @@ export async function fixtureControl(request: Request, env: Env): Promise<Respon
   if(request.method==='GET'&&url.pathname==='/__assembly/delivery-state')return Response.json(await rpc<FixtureTenant>(env.TENANT,url.searchParams.get('tenant')??'').fixtureDeliveryState());
   if (request.method === "POST") {
     const body = await request.json<{ tenant: string; principals?: string; holder?:string;hold?:boolean;phase?:'bootstrap'|'challenge';epoch?: string; now?: number; offlineMaxAgeMs?: number | null }>();
+    if (url.pathname === "/__assembly/purge-revoked-tokens") {
+      if (!env.CONTROL) return new Response("control is not bound", { status: 503 });
+      const result = await rpc<{ fixturePurgeRevokedTokens(): Promise<{ deleted: number } | { error: string }> }>(env.CONTROL, "control").fixturePurgeRevokedTokens();
+      return Response.json(result, { status: "error" in result ? 400 : 200 });
+    }
     if (url.pathname === "/__assembly/gateway-restart") {
       if (!body.holder || body.holder.length > 128) return new Response("holder required", { status: 400 });
       // The holder's own abort rejects this call once it has reset: that is the success signal.

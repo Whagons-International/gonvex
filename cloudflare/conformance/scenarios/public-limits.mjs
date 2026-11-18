@@ -13,12 +13,15 @@
  *
  * `public-calls` (same helpers) covers anonymous calls on backends that run Reducers.
  *
- * Every step uses its own client address through `CF-Connecting-IP`, so no
- * budget carries over from another step or scenario. The Rust backend trusts
- * that header from 127.0.0.1 (`GONVEX_TRUSTED_PROXY_CIDRS`); on Cloudflare the
- * edge sets it (contract-changes 0042).
+ * Every step uses its own client address, so no budget carries over from
+ * another step or scenario. The Rust backend trusts `CF-Connecting-IP` from
+ * 127.0.0.1 (`GONVEX_TRUSTED_PROXY_CIDRS`); on Cloudflare the edge sets it and
+ * refuses a client-supplied one (403 `error code: 1000`), so the assembly
+ * adapter names the address with the dev/test fixture headers instead
+ * (src/client-address.mjs, contract-changes 0042).
  */
 import WebSocket from 'ws';
+import { addressHeaders } from '../src/client-address.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 let addresses = 0;
@@ -29,7 +32,7 @@ export const nextAddress = () => `203.0.113.${(++addresses % 250) + 1}`;
 export function open(wsUrl, address, { public: publicTransport = false } = {}) {
   const url = publicTransport ? `${wsUrl}?public=1` : wsUrl;
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, { headers: { 'cf-connecting-ip': address } });
+    const ws = new WebSocket(url, { headers: addressHeaders(wsUrl, address) });
     const socket = { ws, inbox: [], waiters: [], close: undefined };
     const wake = () => { for (const w of socket.waiters.splice(0)) w(); };
     ws.on('message', (data) => { try { socket.inbox.push(JSON.parse(String(data))); } catch {} wake(); });

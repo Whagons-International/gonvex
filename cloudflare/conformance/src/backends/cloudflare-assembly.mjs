@@ -8,6 +8,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { postDevSync } from '../../../../packages/gonvex/src/sync-request.ts';
+import { registerAddressHeaders } from '../client-address.mjs';
 export class CloudflareAssemblyBackend extends RustBackend {
   constructor(options) { super({ ...options, binary: process.execPath }); }
   get capabilities() { return { ...super.capabilities, orphanReveal: true, tenantRestart: true, receiptExpiry: true }; }
@@ -25,6 +26,9 @@ export class CloudflareAssemblyBackend extends RustBackend {
       this.port = Number(new URL(this.httpUrl).port);
     }
     this.wsUrl = this.httpUrl.replace(/^http/, 'ws') + '/ws';
+    // The edge refuses a client-supplied CF-Connecting-IP; the fixture key gates the dev/test override.
+    const fixtureKey = process.env.GONVEX_ASSEMBLY_URL ? (process.env.GONVEX_ASSEMBLY_FIXTURE_KEY || this.adminKey) : this.adminKey;
+    registerAddressHeaders(this.wsUrl, (address) => ({ 'x-gonvex-fixture-key': fixtureKey, 'x-gonvex-fixture-client-ip': address }));
   }
   async stop() { await this.runtime?.stop(); this.runtime = undefined; }
   inspectHolders(project) { return this.request('GET', `/__assembly/holders?${new URLSearchParams({project})}`); }
@@ -83,6 +87,19 @@ export class CloudflareAssemblyBackend extends RustBackend {
   deleteProject(project) { return this.request('DELETE', `/dev/projects/${encodeURIComponent(project)}`); }
   /** cleanup.mjs: the open whole-catalog deployment fence, or null. */
   async openDeployment() { return (await this.request('GET', '/_gonvex/k19/topology')).deployment ?? null; }
+  /**
+   * operator-routes creates an admin-operator account token ('ci') and lists them all, revoked ones included
+   * (as Rust does). A persistent deployment keeps every run's token, so around that scenario the adapter
+   * revokes the operator's active 'ci' tokens through the normal DELETE /dev/auth/tokens/{id} path and drops
+   * the revoked ones through the dev/test fixture (X03). Never compared.
+   */
+  async beforeScenario(name) { if (name === 'operator-routes') await this.cleanOperatorTokens(); }
+  async afterScenario(name) { if (name === 'operator-routes') await this.cleanOperatorTokens(); }
+  async cleanOperatorTokens() {
+    const { tokens = [] } = await this.request('GET', '/dev/auth/tokens');
+    for (const t of tokens) if (t.name === 'ci' && !t.revokedAt) await this.request('DELETE', `/dev/auth/tokens/${encodeURIComponent(t.id)}`);
+    return this.request('POST', '/__assembly/purge-revoked-tokens', { body: {} });
+  }
   resetEpoch(_project, tenant, epoch) { return this.request('POST', '/__assembly/epoch', { body: { tenant, epoch } }); }
   restartTenant(_project, tenant) { return this.request('POST', '/__assembly/tenant-restart', { body: { tenant } }); }
   async readChangeLog(_project, tenant) {

@@ -9,7 +9,7 @@ import {SyncCoordinator,type SyncOutcome,type SyncPorts} from "../../../control/
 import {HttpError} from "../../../control/operator/http";
 import type {DeploymentRef,ReleaseBuilder} from "../../../control/operator/release";
 import type {OperatorControlObject} from "../../../control/operator/object";
-import {handleDevRequest,type DevRouterEnv} from "../routes";
+import {handleDevRequest,platformFailure,type DevRouterEnv} from "../routes";
 import {manifest,testEnv} from "./helpers";
 
 const gate=()=>{let release!:()=>void;const promise=new Promise<void>(resolve=>{release=resolve;});return {promise,release};};
@@ -303,6 +303,21 @@ it('completed settlement needs no catalog RPC and late asynchronous failure cann
  const c=staged(await f.sync(await f.request('settle-c')));
  delayed.release();f.versionGate(undefined);await late;
  expect(f.coordinator.deployments.current()).toEqual(ref(c));await f.publish(c);
+}));
+it('a platform RPC failure during a same-ID sync is reported retryable, and the retry completes the retained fence',async()=>fixture(async f=>{
+ const a=await f.request('platform-a');
+ f.failNotify(true);
+ const failed=await f.http(a);expect(failed?.status).toBe(503);await failed!.arrayBuffer();
+ const fence=f.coordinator.deployments.current();expect(fence).not.toBeNull();
+ // The retry's devSync RPC dies in a platform reset: still retryable, fence untouched.
+ const devSync=f.coordinator.sync.bind(f.coordinator);let resets=1;
+ f.coordinator.sync=(async(q:Parameters<typeof devSync>[0])=>{if(resets-->0)throw Error('internal error; reference = synthetic');return devSync(q);}) as typeof f.coordinator.sync;
+ const reset=await f.http(a);expect(reset?.status).toBe(503);expect(await reset!.json()).toMatchObject({retryable:true});
+ expect(f.coordinator.deployments.current()).toEqual(fence);
+ f.failNotify(false);
+ const retried=await f.http(a);expect(retried?.status).toBe(200);await retried!.arrayBuffer();
+ expect(f.coordinator.deployments.current()).toBeNull();
+ expect([platformFailure(Error('internal error; reference = x')),platformFailure(Object.assign(Error('x'),{retryable:true})),platformFailure(new HttpError(409,'internal error')),platformFailure(Error('release publication is no longer current'))]).toEqual([true,true,false,false]);
 }));
 it('a superseded abort needs an expired write lease and no serving component, and a late write is refused',async()=>fixture(async f=>{
  const age=(ms:number)=>f.instance.sql.run("UPDATE gonvex_cf_target_attempts SET authorized_at=authorized_at-$1",ms);

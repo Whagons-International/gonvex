@@ -329,3 +329,9 @@ it('X03 dev fixture routes: gateway restart and service principals are 404 witho
   expect((await fixtureControl(request(),{TENANT:bindings.TENANT,GATEWAY:bindings.TENANT} as never))!.status).toBe(404);
  }
 });
+it('X03 dev fixture route: purging revoked tokens is 404 without the exact fixture key',async()=>{
+ const {fixtureControl}=await import('../fixture-control');
+ const request=()=>new Request('https://local/__assembly/purge-revoked-tokens',{method:'POST',headers:{authorization:'Bearer guess'},body:'{}'});
+ expect((await fixtureControl(request(),{TENANT:bindings.TENANT,GATEWAY:bindings.TENANT,GONVEX_ASSEMBLY_FIXTURE_KEY:'real'} as never))!.status).toBe(404);
+ expect((await fixtureControl(request(),{TENANT:bindings.TENANT,GATEWAY:bindings.TENANT} as never))!.status).toBe(404);
+});
