@@ -4,7 +4,7 @@ import {evictDurableObject,runInDurableObject} from "cloudflare:test";
 import {expect,it,vi} from "vitest";
 import {MemoryVersionTarget,PRELUDE_SPECIFIER,ReleaseBuilderCore,type BlobStore} from "../../../control/operator/builder/core";
 import {PublicationExecutor} from "../../../control/operator/builder/publication";
-import {installDeploymentSchema,TARGET_ATTEMPT_LEASE_MS} from "../../../control/operator/deployment";
+import {bumpRetirementGeneration,installDeploymentSchema,TARGET_ATTEMPT_LEASE_MS} from "../../../control/operator/deployment";
 import {SyncCoordinator,type SyncOutcome,type SyncPorts} from "../../../control/operator/sync";
 import {HttpError} from "../../../control/operator/http";
 import type {DeploymentRef,ReleaseBuilder} from "../../../control/operator/release";
@@ -178,6 +178,22 @@ it('an expired preparation cannot stage/deploy after a successor takes the durab
  expect(f.target.staged.size).toBe(1);await f.publish(next);expect(f.serving()).toContain('expired-b');expect(f.serving()).not.toContain('expired-a');
 }));
 
+it('a preparation past its lease, or whose catalog snapshot has a retired project, cannot move to publishing',async()=>fixture(async f=>{
+ const x=staged(await f.sync(await f.request('snap-x')));await f.publish(x);
+ // Lease expired while the build ran: refused at the running -> publishing step.
+ const a=await f.request('snap-a'),heldA=gate(),builtA=gate();f.stageGate(heldA,builtA);
+ const lateA=f.sync(a);await builtA.promise;
+ f.instance.sql.run('UPDATE gonvex_cf_syncs SET expires_at=$2 WHERE sync_id=$1',a.requestId,Date.now()-1);
+ heldA.release();await expect(lateA).rejects.toThrow('preparation lease expired');
+ expect(f.instance.sql.value("SELECT state FROM gonvex_cf_syncs WHERE sync_id=$1",a.requestId)).not.toBe('publishing');
+ // A project in the snapshot retired meanwhile (as a delete does): refused too, and nothing is deployed.
+ const b=await f.request('snap-b'),heldB=gate(),builtB=gate();f.stageGate(heldB,builtB);
+ const lateB=f.sync(b);await builtB.promise;
+ f.instance.sql.run('DELETE FROM gonvex_cf_active_releases WHERE project_id=(SELECT project_id FROM gonvex_cf_syncs WHERE sync_id=$1)',x.publication);bumpRetirementGeneration(f.instance.sql);
+ heldB.release();await expect(lateB).rejects.toThrow('a project in its catalog was retired');
+ expect(f.target.deployed.some(v=>v!==x.deploy)).toBe(false);
+ expect(f.coordinator.deployments.current()).toBeNull();
+}));
 it('a late completed build cannot publish or deploy over the successor catalog',async()=>fixture(async f=>{
  const a=await f.request('late-a'),b=await f.request('late-b'),held=gate(),built=gate();f.stageGate(held,built);
  const old=f.sync(a);await built.promise;expect(f.target.staged.size).toBe(1);

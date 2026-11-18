@@ -2,7 +2,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { OperatorControlObject } from "../../../control/operator/object.ts";
-import { ADMIN, call, control, createProject, manifest, sync, useBuilder } from "./helpers.ts";
+import { ADMIN, FALLBACK_SYNC_KEY, call, control, createProject, manifest, sync, useBuilder } from "./helpers.ts";
 
 const CONFIGURED = { email: "operator@example.test", password: "configured-password-123" };
 
@@ -154,6 +154,85 @@ describe("projects, keys, members, env", () => {
 
     expect((await call("DELETE", `/dev/projects/${id}`)).body).toEqual({ ok: true });
     expect((await call("GET", "/dev/projects")).body.projects.some((p: { id: string }) => p.id === id)).toBe(false);
+  });
+
+  it("deleting a project retires its active release: the catalog omits it and its manifest is gone", async () => {
+    await useBuilder();
+    const kept = await createProject("kept-project"), gone = await createProject("deleted-project");
+    for (const p of [kept, gone]) expect((await sync(p.id, await manifest(p.id), p.key)).status).toBe(200);
+    const active = async () => (await runInDurableObject(control(), async (instance: OperatorControlObject) => instance.sql.all("SELECT project_id FROM gonvex_cf_active_releases ORDER BY project_id"))).map((r) => String(r.project_id));
+    expect(await active()).toEqual(expect.arrayContaining([kept.id, gone.id]));
+    expect((await call("GET", `/dev/manifest?project=${gone.id}`)).status).toBe(200);
+    expect((await call("DELETE", `/dev/projects/${gone.id}`)).body).toEqual({ ok: true });
+    expect(await active()).toContain(kept.id);
+    expect(await active()).not.toContain(gone.id);
+    expect((await call("GET", `/dev/manifest?project=${gone.id}`)).status).toBe(404);
+    expect(await sql("SELECT state FROM gonvex_cf_releases WHERE project_id=$1", gone.id)).toEqual([{ state: "retired" }]);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_runtime_manifests WHERE project_id=$1", gone.id)).toEqual([{ n: 0 }]);
+    // A project deleted before this change (row gone, release still active) is retired by deleting it again.
+    const orphan = await createProject("orphaned-project");
+    expect((await sync(orphan.id, await manifest(orphan.id), orphan.key)).status).toBe(200);
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => { instance.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1", orphan.id); });
+    expect(await active()).toContain(orphan.id);
+    expect((await call("DELETE", `/dev/projects/${orphan.id}`)).body).toEqual({ ok: true, retiredOrphanRelease: true });
+    expect(await active()).not.toContain(orphan.id);
+    expect((await call("GET", `/dev/manifest?project=${orphan.id}`)).status).toBe(404);
+    expect((await call("DELETE", `/dev/projects/${orphan.id}`)).status).toBe(422);
+    // The next publication's catalog no longer carries the deleted project.
+    const next = await createProject("after-delete");
+    expect((await sync(next.id, await manifest(next.id), next.key)).status).toBe(200);
+    const topology = await runInDurableObject(control(), async (instance: OperatorControlObject) => instance.runtimeTopology("status"));
+    expect((topology as { releases: { project: string }[] }).releases.map((r) => r.project)).not.toContain(gone.id);
+    // Leave the shared catalog as found: later tests measure per-sync cost against it.
+    for (const id of [kept.id, next.id]) expect((await call("DELETE", `/dev/projects/${id}`)).body).toEqual({ ok: true });
+  });
+
+  it("project delete: an expired preparation does not block it, any live sync (any project) does; a sync is fenced only while the delete runs, then delete -> recreate -> sync works", async () => {
+    await useBuilder();
+    const p = await createProject("delete-race");
+    expect((await sync(p.id, await manifest(p.id), p.key)).status).toBe(200);
+    const stale = crypto.randomUUID(), live = crypto.randomUUID();
+    // A preparation abandoned past its lease (state stays 'running' until the next acquire) must not block deletion.
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      instance.sql.run("INSERT INTO gonvex_cf_syncs(sync_id,project_id,state,expires_at) VALUES($1,$2,'running',$3)", live, p.id, Date.now() + 60_000);
+    });
+    expect((await call("DELETE", `/dev/projects/${p.id}`)).status).toBe(409);
+    // Another project's live sync blocks it too: its staged catalog snapshot still carries this project's release.
+    const other = await createProject("delete-race-other");
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      instance.sql.run("UPDATE gonvex_cf_syncs SET project_id=$2,state='publishing' WHERE sync_id=$1", live, other.id);
+    });
+    const refused = await call("DELETE", `/dev/projects/${p.id}`);
+    expect([refused.status, refused.body]).toEqual([409, { error: "a /dev/sync or runtime topology migration is in progress; delete the project after it finishes or is aborted" }]);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 1 }]);
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      instance.sql.run("UPDATE gonvex_cf_syncs SET sync_id=$2,project_id=$3,state='running',expires_at=$4 WHERE sync_id=$1", live, stale, p.id, Date.now() - 1);
+    });
+    // A frozen topology (a migration captured the catalog) refuses it too; the thaw's version check depends on it.
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => { instance.sql.run("INSERT INTO gonvex_cf_topology(singleton,frozen) VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET frozen=1"); });
+    expect((await call("DELETE", `/dev/projects/${p.id}`)).status).toBe(409);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 1 }]);
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => { instance.sql.run("UPDATE gonvex_cf_topology SET frozen=0 WHERE singleton=1"); });
+    expect((await call("DELETE", `/dev/projects/${p.id}`)).body).toEqual({ ok: true });
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 0 }]);
+    expect((await call("GET", `/dev/manifest?project=${p.id}`)).status).toBe(404);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_project_deletions")).toEqual([{ n: 0 }]);
+    // While a deletion is in progress (fence held between its check and its commit), a sync of that id is refused.
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => { instance.sql.run("INSERT INTO gonvex_cf_project_deletions(project_id,started_at) VALUES($1,$2)", p.id, Date.now()); });
+    const during = await sync(p.id, await manifest(p.id), FALLBACK_SYNC_KEY);
+    expect([during.status, during.body]).toEqual([409, { error: `project ${p.id} is being deleted`, retryable: true }]);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 0 }]);
+    await runInDurableObject(control(), async (instance: OperatorControlObject) => { instance.sql.run("DELETE FROM gonvex_cf_project_deletions WHERE project_id=$1", p.id); });
+    // delete -> recreate -> sync: after the delete commits the id is free again (Rust parity: an unknown project syncs under the fallback key).
+    const recreated = await sync(p.id, await manifest(p.id), FALLBACK_SYNC_KEY);
+    expect(recreated.status).toBe(200);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_cf_active_releases WHERE project_id=$1", p.id)).toEqual([{ n: 1 }]);
+    expect((await call("GET", `/dev/manifest?project=${p.id}`)).status).toBe(200);
+    // A project created through the normal path is never blocked by a stale fence.
+    const fresh = await createProject("after-recreate");
+    expect((await sync(fresh.id, await manifest(fresh.id), fresh.key)).status).toBe(200);
+    expect((await call("DELETE", `/dev/projects/${fresh.id}`)).body).toEqual({ ok: true });
+    expect((await call("DELETE", `/dev/projects/${p.id}`)).body).toEqual({ ok: true, retiredOrphanRelease: true });
   });
 
   it("env: the project key reads and writes; dotenv replace; names validated", async () => {

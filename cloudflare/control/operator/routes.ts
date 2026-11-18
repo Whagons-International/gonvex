@@ -17,7 +17,8 @@ import { OperatorAuth, credentialName, globalAdmin, has, type OperatorActor, typ
 import { devTransferAllowed, type OperatorConfig } from "./config";
 import { Body, HttpError, PlainError, byteLength, displayName, error, isoTime, isoTimeOrNull, json, normalizeEmail, plainResponse, projectHeaderOrQuery } from "./http";
 import { releaseKey, type ReleaseSummary } from "./release";
-import type { SyncCoordinator } from "./sync";
+import { bumpRetirementGeneration, topologyFrozen } from "./deployment";
+import { liveSync, type SyncCoordinator } from "./sync";
 import type { OperatorTenantPort, PortResult, RowsQuery } from "./tenant/port";
 import { internalTable, validIdent } from "./tenant/rows";
 import { findPrincipal } from "../src/auth";
@@ -409,6 +410,8 @@ const createProject: Handler = async (op, request) => {
   const projectKey = newProjectKey(projectId);
   const owner = actor.email.trim().toLowerCase();
   op.ctx.sql.tx(() => {
+    // A fresh id never has one; cleared anyway so a stale deletion fence can never block a project created normally.
+    op.ctx.sql.run("DELETE FROM gonvex_cf_project_deletions WHERE project_id=$1", projectId);
     op.ctx.sql.run(
       `INSERT INTO gonvex_runtime_projects
        (id,name,environment,database_name,database_mode,database_url,storage_bucket,status,description,project_key,provisioned,runtime_created,owner_email)
@@ -482,15 +485,52 @@ const updateProject: Handler = async (op, request, _url, [project]) => {
   return json({ project: projectJson(row) });
 };
 
+/** Retires a deleted project's active release (caller's transaction): the next publication's Worker catalog omits it and its manifest is no longer served. */
+function retireProjectRelease(op: Op, project: string): void {
+  bumpRetirementGeneration(op.ctx.sql);
+  op.ctx.sql.run("UPDATE gonvex_cf_releases SET state='retired' WHERE project_id=$1 AND state='active'", project);
+  op.ctx.sql.run("DELETE FROM gonvex_cf_active_releases WHERE project_id=$1", project);
+  op.ctx.sql.run("DELETE FROM gonvex_runtime_manifests WHERE project_id=$1", project);
+}
+
+/**
+ * In one transaction: refuse while any live sync can still deploy a catalog (shared by every project) or a topology
+ * migration has frozen the catalog it captured, else run
+ * `then`. With `fence`, also mark the deletion in progress so no /dev/sync claims a fence for the project until the
+ * delete commits (SyncCoordinator.lock checks it in its own transaction).
+ */
+function beginProjectDeletion(op: Op, project: string, fence: boolean, then: () => void): boolean {
+  return op.ctx.sql.tx(() => {
+    if (liveSync(op.ctx.sql) || topologyFrozen(op.ctx.sql)) return false;
+    if (fence) op.ctx.sql.run(`INSERT INTO gonvex_cf_project_deletions(project_id,started_at) VALUES($1,${NOW}) ON CONFLICT(project_id) DO NOTHING`, project);
+    then();
+    return true;
+  });
+}
+const SYNC_IN_FLIGHT = "a /dev/sync or runtime topology migration is in progress; delete the project after it finishes or is aborted";
+
 const deleteProject: Handler = async (op, request, _url, [project]) => {
   await op.auth.authorizeProject(request.headers, "projects:delete", project!, true, "project owner or admin access is required");
   const row = op.ctx.sql.get("SELECT runtime_created FROM gonvex_runtime_projects WHERE id=$1 AND status NOT IN('deleted','disabled')", project);
-  if (!row) return error(422, dbError.projectNotFound(project!));
+  if (!row) {
+    // Projects deleted before releases were retired on delete still sit in the catalog: re-deleting them retires
+    // the orphaned release. With no project row and no active release the project is simply unknown.
+    if (op.ctx.sql.value("SELECT 1 FROM gonvex_runtime_projects WHERE id=$1", project) !== undefined
+      || op.ctx.sql.value("SELECT 1 FROM gonvex_cf_active_releases WHERE project_id=$1", project) === undefined) return error(422, dbError.projectNotFound(project!));
+    if (!beginProjectDeletion(op, project!, false, () => retireProjectRelease(op, project!))) return error(409, SYNC_IN_FLIGHT);
+    return json({ ok: true, retiredOrphanRelease: true });
+  }
   if (!bool(row.runtime_created)) return error(422, dbError.protocol("only runtime-created projects may be deleted through this operation"));
+  // A publication still in flight would re-activate the project's release after it is retired below.
+  if (!beginProjectDeletion(op, project!, true, () => op.ctx.sql.run(`UPDATE gonvex_runtime_projects SET status='deleting',updated_at=${NOW} WHERE id=$1`, project))) return error(409, SYNC_IN_FLIGHT);
   const tenants = op.ctx.sql.all("SELECT tenant_id FROM gonvex_runtime_tenants WHERE project_id=$1 AND runtime_created=1 AND database_url<>''", project).map((t) => str(t.tenant_id));
-  op.ctx.sql.tx(() => op.ctx.sql.run(`UPDATE gonvex_runtime_projects SET status='deleting',updated_at=${NOW} WHERE id=$1`, project));
   for (const tenant of tenants) await op.deleteTenantStorage(tenant);
-  op.ctx.sql.tx(() => op.ctx.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'", project));
+  op.ctx.sql.tx(() => {
+    op.ctx.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'", project);
+    retireProjectRelease(op, project!);
+    // Deletion committed: the id is free again, as in Rust (a later sync or create of it proceeds normally).
+    op.ctx.sql.run("DELETE FROM gonvex_cf_project_deletions WHERE project_id=$1", project);
+  });
   return json({ ok: true });
 };
 

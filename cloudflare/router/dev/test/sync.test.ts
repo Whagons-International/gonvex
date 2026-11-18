@@ -270,10 +270,11 @@ describe("/dev/sync", () => {
     const after = await mark();
     const cost = { rowsRead: after.read - before.read, rowsWritten: after.written - before.written };
     console.log(`control object, one /dev/sync with 2 tenants: ${JSON.stringify(cost)}`);
-    // Lock, release row, two rollout reports, activation (release, active release, manifest), unlock; plus indexes.
-    // Measured: 13 written, 20 read.
+    // Lock, release row, two rollout reports, activation (release, active release, manifest), unlock; plus indexes,
+    // plus the delete fence: the deletion check at lock and the retirement generation at catalog/staged (#481).
+    // Measured 2026-11-18: 19 written; 33 read alone, 42 read after the rest of the suite (40 before #481).
     expect(cost.rowsWritten).toBeLessThanOrEqual(20);
-    expect(cost.rowsRead).toBeLessThanOrEqual(40);
+    expect(cost.rowsRead).toBeLessThanOrEqual(45);
   });
 
   it("healthz answers {ok} and diagnostics only for an admin credential", async () => {
