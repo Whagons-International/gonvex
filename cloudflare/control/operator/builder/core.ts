@@ -32,6 +32,8 @@ export interface VersionTarget {
 }
 
 /** Memoizes one release's module, functions and manifest per isolate; evaluated on first access only. */
+/** X13d: the artifact file that carries the Action-only bundle (packages/gonvex `ACTION_BUNDLE_FILE`). */
+export const ACTION_BUNDLE_FILE = "actions/bundle.js";
 export const LAZY_PRELUDE = "const lazy = (load) => { let value; return () => (value ??= load()); };\n";
 
 /** The module the kernel Worker imports for the active releases (the `gonvex:releases` alias). */
@@ -157,8 +159,23 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
     const bundle = isObject(module.reducerBundle) ? module.reducerBundle : (module.javascript as Json);
     const source = decodeBase64Utf8(String(bundle.code));
     let app: string;
+    let actions: string;
     try {
       app = wrapBundle(source, this.options.preludeSpecifier);
+      // X13d: an artifact that carries the Action-only bundle (`files["actions/bundle.js"]`, signed by the artifact
+      // hash) gives the Actions Worker only Action code: a cold isolate compiles and evaluates about half of the
+      // complete bundle (Whagons 678bdc80: 3.0 of 6.3 MB). Otherwise the complete bundle, as before. Validated here
+      // with the other bundles (review r4620859237): a present but undecodable file is an invalid artifact (422).
+      const files = isObject(module.files) ? module.files : {};
+      const actionFile = files[ACTION_BUNDLE_FILE];
+      if (actionFile !== undefined && (typeof actionFile !== "string" || !actionFile)) throw new Error(`${ACTION_BUNDLE_FILE} must be base64 text`);
+      let actionSource: string;
+      try {
+        actionSource = decodeBase64Utf8(typeof actionFile === "string" ? actionFile : String((module.javascript as Json).code));
+      } catch (cause) {
+        throw new Error(`${actionFile === undefined ? "javascript" : ACTION_BUNDLE_FILE} is not base64 UTF-8: ${(cause as Error).message}`);
+      }
+      actions = wrapBundle(actionSource, this.options.preludeSpecifier);
     } catch (cause) {
       return fail(new Error(`project ${JSON.stringify(project)} has an invalid module artifact: ${(cause as Error).message}`));
     }
@@ -208,7 +225,6 @@ export class ReleaseBuilderCore implements ReleaseBuilder {
     await this.options.blobs.put(releaseKey(project, hash, "manifest.json"), JSON.stringify(manifest));
     await this.options.blobs.put(releaseKey(project, hash, "view.json"), JSON.stringify({ functions: manifest.functions ?? {}, schema: manifest.schema ?? {}, visibility: module.visibility ?? manifest.visibility ?? {} }));
     await this.options.blobs.put(releaseKey(project, hash, "app.js"), app);
-    const actions = wrapBundle(decodeBase64Utf8(String((module.javascript as Json).code)), this.options.preludeSpecifier);
     await this.options.blobs.put(releaseKey(project, hash, "actions.js"), actions);
     await this.options.blobs.put(`releases/${encodeURIComponent(project)}/${hash}/functions.json`, JSON.stringify(contracts));
     // Written last: a release is prepared only when every piece is.

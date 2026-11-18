@@ -105,6 +105,8 @@ export type ModuleArtifactOptions = {
   bundle?: string;
   /** gonvex.json `module.split`: also emit the Query/Reducer-only bundle. */
   split?: boolean;
+  /** X13d: also emit the Action-only bundle as `files[ACTION_BUNDLE_FILE]` (signed by the artifact hash). */
+  actionBundle?: boolean;
 };
 
 /**
@@ -221,6 +223,10 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     const contract = JSON.parse(bytes.toString());
     if (!Number.isSafeInteger(contract.version) || contract.version < 1 || (contract.offlineMaxAgeMs !== null && (!Number.isSafeInteger(contract.offlineMaxAgeMs) || contract.offlineMaxAgeMs <= 0))) throw new Error("Invalid client-contract.json");
     files["client-contract.json"] = bytes.toString("base64");
+  }
+  if (options.actionBundle) {
+    const actions = await bundleActionJavaScript(options, javascript, sortedRecord(functions));
+    if (actions) files[ACTION_BUNDLE_FILE] = actions.code;
   }
   const sortedFiles = sortedRecord(files);
   const sortedFunctions = sortedRecord(functions);
@@ -787,6 +793,46 @@ function moduleBundleOutputPath(options: ModuleArtifactOptions): string {
 }
 
 const reducerEntryId = "\0gonvex-reducer-entry";
+const actionEntryId = "\0gonvex-action-entry";
+
+/** X13d: where the Action-only bundle travels in the artifact. Rust reads only `migrations/*.sql` from `files`. */
+export const ACTION_BUNDLE_FILE = "actions/bundle.js";
+
+/**
+ * X13d: the Action-only bundle. Its entry imports each Action export straight
+ * from its defining file and re-exports it under the function path (as the
+ * Query/Reducer bundle does), and Query/Reducer definitions are treated as
+ * pure, so code only they use drops out. Hosts that run Actions apart load it
+ * instead of the complete bundle. Null when an Action cannot be addressed
+ * statically: the host then keeps the complete bundle for Actions.
+ */
+async function bundleActionJavaScript(
+  options: ModuleArtifactOptions,
+  complete: ModuleJavaScript,
+  functions: Record<string, ModuleFunction>,
+): Promise<ModuleJavaScript | null> {
+  const actions = Object.entries(functions).filter(([, entry]) => entry.kind === "action");
+  if (actions.length === 0 || actions.some(([, entry]) => !entry.export || !entry.file)) return null;
+  const lines: string[] = [];
+  const exports: string[] = [];
+  actions.forEach(([path, entry], index) => {
+    const source = resolve(options.root, entry.file!);
+    assertInside(resolve(options.root), source, `function ${path} file must be inside the project`);
+    lines.push(`import { ${entry.export} as __gonvex_${index} } from ${JSON.stringify(source)};`);
+    exports.push(`  __gonvex_${index} as ${JSON.stringify(path)},`);
+  });
+  const entrySource = `${lines.join("\n")}\nexport {\n${exports.join("\n")}\n};\n`;
+  const completePath = resolve(options.root, complete.path);
+  const outputPath = completePath.replace(/(\.[cm]?js)?$/, ".actions.js");
+  return writeBundle(options, actionEntryId, outputPath, [{
+    name: "gonvex-action-entry",
+    resolveId: (id) => (id === actionEntryId ? actionEntryId : null),
+    load: (id) => (id === actionEntryId ? entrySource : null),
+  }], "action bundle", true, {
+    // Unused Query/Reducer definitions are dead here; the complete bundle still evaluates them.
+    manualPureFunctions: ["query", "internalQuery", "liveQuery", "replicaCollection", "reducer", "internalReducer"],
+  });
+}
 
 /**
  * Builds the Query/Reducer-only bundle. Its entry imports each Query and

@@ -71,6 +71,15 @@ type ProjectConfig = {
      */
     split?: boolean;
     /**
+     * Also emit an Action-only bundle in `files["actions/bundle.js"]`, so a host
+     * that runs Actions apart (the Cloudflare Actions Worker) compiles and
+     * evaluates only Action code on a cold isolate. It is a file of the
+     * artifact, so the artifact hash signs it; the Rust runtime reads only
+     * `migrations/*.sql` from `files` and still runs the complete bundle.
+     * Default false; `GONVEX_ACTION_BUNDLE=1` also enables it for one build.
+     */
+    actionBundle?: boolean;
+    /**
      * Project-relative tsconfig whose compiler options (paths, module
      * resolution) apply to the backend. Used by the local Reducer dependency
      * analysis; defaults to gonvex/tsconfig.json, then tsconfig.json.
@@ -1293,6 +1302,7 @@ async function buildManifest(root: string, sources: BackendSources, projectID: s
       entrypoint: sources.config.module?.entrypoint,
       bundle: sources.config.module?.bundle,
       split: sources.config.module?.split === true,
+      actionBundle: sources.config.module?.actionBundle === true || process.env.GONVEX_ACTION_BUNDLE === "1",
     });
   const functions = moduleManifestFunctions(module);
   await applyLocalDependencies(root, sources, functions);

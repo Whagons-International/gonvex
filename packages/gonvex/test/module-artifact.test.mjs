@@ -280,6 +280,65 @@ export const ask = action({ args: schema.object({}), result: schema.string(), ru
   }
 });
 
+test("X13d an Action bundle travels as a signed artifact file; Rust hashes the same contract and keeps the complete bundle", async (t) => {
+  const definitions = `
+export const schema = {
+  string: () => ({ kind: "string" }),
+  object: (fields) => ({ kind: "object", fields }),
+};
+export const query = (definition) => ({ kind: "query", ...definition });
+export const reducer = (definition) => ({ kind: "reducer", ...definition });
+export const action = (definition) => ({ kind: "action", ...definition });
+`;
+  const project = await moduleProject(t, `
+export * as tasks from "./tasks.ts";
+export * as assistant from "./assistant.ts";
+`, {
+    "sdk.ts": definitions,
+    "heavy.ts": "export const heavyModel = () => 'HEAVY_ACTION_DEPENDENCY';\n",
+    "reducerOnly.ts": "export const reducerOnly = () => 'REDUCER_ONLY_DEPENDENCY';\n",
+    "tasks.ts": `
+import { reducer, schema } from "./sdk.ts";
+import { reducerOnly } from "./reducerOnly.ts";
+export const rename = reducer({ name: "tasks.rename", args: schema.object({ title: schema.string() }), result: schema.string(), run: async () => reducerOnly() });
+`,
+    "assistant.ts": `
+import { action, schema } from "./sdk.ts";
+import { heavyModel } from "./heavy.ts";
+export const ask = action({ args: schema.object({}), result: schema.string(), run: async () => heavyModel() });
+`,
+  });
+  const files = ["index.ts", "sdk.ts", "heavy.ts", "reducerOnly.ts", "tasks.ts", "assistant.ts"].map((name) => join(project.backendDir, name));
+  const plain = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files, migrations: [], split: true });
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files, migrations: [], split: true, actionBundle: true });
+
+  // Opt-in: without it the artifact is exactly what it was.
+  assert.equal(plain.files["actions/bundle.js"], undefined);
+  // Same functions, same complete bundle, same Query/Reducer bundle; only the signed file set grows.
+  assert.deepEqual(artifact.functions, plain.functions);
+  assert.equal(artifact.javascript.hash, plain.javascript.hash);
+  assert.equal(artifact.reducerBundle.hash, plain.reducerBundle.hash);
+  assert.notEqual(artifact.hash, plain.hash, "the Action bundle is signed through files");
+  const actionCode = Buffer.from(artifact.files["actions/bundle.js"], "base64").toString("utf8");
+  assert.match(actionCode, /HEAVY_ACTION_DEPENDENCY/);
+  assert.doesNotMatch(actionCode, /REDUCER_ONLY_DEPENDENCY/);
+  const namespace = await import(`data:text/javascript;base64,${artifact.files["actions/bundle.js"]}`);
+  assert.deepEqual(Object.keys(namespace), ["assistant.ask"]);
+  assert.equal(await namespace["assistant.ask"].run({}, {}), "HEAVY_ACTION_DEPENDENCY");
+
+  const artifactFile = join(project.root, "artifact.json");
+  await writeFile(artifactFile, JSON.stringify(artifact));
+  const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+  const verify = () => execFileSync("cargo", [
+    "run", "--quiet", "--manifest-path", join(repositoryRoot, "rust", "Cargo.toml"),
+    "-p", "gonvex-runtime", "--", "verify-module-artifact", "--file", artifactFile,
+  ], { cwd: repositoryRoot, encoding: "utf8", stdio: "pipe" }).trim();
+  assert.equal(verify(), artifact.hash, "TypeScript CLI and Rust runtime must hash the same contract");
+  const tampered = { ...artifact, files: { ...artifact.files, "actions/bundle.js": Buffer.from("export const x = 1;").toString("base64") } };
+  await writeFile(artifactFile, JSON.stringify(tampered));
+  assert.throws(verify, /Command failed/);
+});
+
 test("literal agent metadata is signed and checkout-path independent", async (t) => {
   const source = `
 const schema = { object: (fields) => ({ kind: "object", fields }), string: () => ({ kind: "string" }) };
