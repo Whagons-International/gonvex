@@ -415,8 +415,11 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
   async devCreateTenant(projectId: string, tenantId: string, name: string) {
     return dev.createTenant(this.context(), projectId, tenantId, name);
   }
-  async devE2eMember(input: { projectId: string; tenantId?: string; email: string; password: string; name?: string; accountOnly?: boolean }) {
+  async devE2eMember(input: { projectId: string; tenantId?: string; email: string; password: string; name?: string; accountOnly?: boolean; role?: string; permissions?: Record<string, unknown> }) {
     return dev.e2eMember(this.context(), input);
+  }
+  async devE2eMemberRead(input: { projectId: string; tenantId: string; accountId?: string; email?: string; memberId?: string }) {
+    return dev.e2eMemberRead(this.context(), input);
   }
   async devProjectMember(projectId: string, input: { email: string; name?: string; role?: string }) {
     return dev.upsertProjectMember(this.context(), projectId, input);

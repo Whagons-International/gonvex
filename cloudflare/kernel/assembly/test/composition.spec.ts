@@ -231,6 +231,42 @@ it('X03 the tenant wipe is made durable (storage.sync) before the reset that end
   expect(state.storage.sql.exec("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name IN ('board','gonvex_migrations')").one().n).toBe(0);
  });
 });
+it('X12b DEV e2e member seed: defaults stay Rust\'s admin/{"e2e":true}; role/permissions overrides and the read go through real Control and tenant RPC',async()=>{
+ const control=(env as unknown as {REAL_CONTROL:DurableObjectNamespace}).REAL_CONTROL.getByName('e2e-grants-'+crypto.randomUUID()) as unknown as import('../../../control/src/control-object').ControlObject;
+ await control.devCreateProject({id:'p',name:'e2e grants fixture'});
+ await control.devSaveManifest('p',manifest);
+ let tenantId='';
+ await fixture(async(_object,state)=>{tenantId=state.id.name!;});
+ await runInDurableObject(control as never,(_object,state)=>{
+  state.storage.sql.exec("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_name,database_url,status,description,provisioned,runtime_created) VALUES (?,'p',?,'Fixture','fixture',?,'active','synthetic',1,1)",tenantId,tenantId,'do://tenant/'+tenantId);
+ });
+ const seed=(extra:{role?:string;permissions?:Record<string,unknown>}={})=>control.devE2eMember({projectId:'p',tenantId,email:'Walkthrough@Fixture.invalid',password:'synthetic-test-password',...extra});
+ const read=(selector:{accountId?:string;email?:string;memberId?:string})=>control.devE2eMemberRead({projectId:'p',tenantId,...selector});
+ const stored=async()=>runInDurableObject(bindings.TENANT.getByName(tenantId),(_object,state)=>state.storage.sql.exec("SELECT id,role,permissions,membership_revision FROM members").toArray());
+
+ const first=await seed();
+ expect(await read({accountId:first.accountId!})).toEqual({projectId:'p',tenantId,accountId:first.accountId,memberId:first.memberId,status:'active',role:'admin',permissions:{e2e:true}});
+ expect(await stored()).toEqual([{id:first.memberId,role:'admin',permissions:'{"e2e":true}',membership_revision:1}]);
+
+ // Copy a real Member's grants: same Member row, new revision, exact JSON.
+ const copied={'config.integrations':true,'settings.access':true,e2e:true};
+ const granted=await seed({role:'owner',permissions:copied});
+ expect(granted.memberId).toBe(first.memberId);
+ expect(await read({email:'walkthrough@fixture.invalid'})).toMatchObject({memberId:first.memberId,role:'owner',permissions:copied});
+ expect(await read({memberId:first.memberId!})).toMatchObject({accountId:first.accountId,role:'owner',permissions:copied});
+ expect(await stored()).toEqual([{id:first.memberId,role:'owner',permissions:JSON.stringify(copied),membership_revision:2}]);
+
+ // Omitting both restores exactly today's row.
+ await seed();
+ expect(await stored()).toEqual([{id:first.memberId,role:'admin',permissions:'{"e2e":true}',membership_revision:3}]);
+ // Only one of the two: the other keeps its default.
+ await seed({permissions:{}});
+ expect(await read({accountId:first.accountId!})).toMatchObject({role:'admin',permissions:{}});
+
+ expect(await read({accountId:'acct_missing'})).toBeNull();
+ expect(await read({email:'nobody@fixture.invalid'})).toBeNull();
+ expect(await read({memberId:'member_missing'})).toBeNull();
+});
 it('BUG-8 a row an Action writes through its nested Reducer tool is a committed, captured change like any Reducer write',async()=>fixture(async(object,state)=>{
  // apiKeys.create is an Action whose createRecord tool inserts the row; replicas see only committed change-log rows.
  const before=Number(state.storage.sql.exec("SELECT revision FROM _gonvex_sync_clock").one().revision);

@@ -21,6 +21,10 @@ export interface Admission {
   revision: number;
 }
 
+/** The `/dev/internal/e2e/members` row the reference writes (lib.rs:1315-1317), the default when no override is sent. */
+export const E2E_MEMBER_ROLE = "admin";
+export const E2E_MEMBER_PERMISSIONS = '{"e2e":true}';
+
 /** One write to `members`, each the body of one reference tenant transaction. */
 export type MembershipWrite =
   /** control.accounts.provisionMemberLogin (control.rs:780-810), command `member-provision:<acct>`. */
@@ -35,8 +39,11 @@ export type MembershipWrite =
   | { kind: "demoCreate"; commandId: string; accountId: string; displayName: string }
   /** control.demos.delete (control.rs:1504-1517), command `demo-delete:<acct>`. */
   | { kind: "demoDelete"; commandId: string; accountId: string }
-  /** Test seeding, `/dev/internal/e2e/members` (lib.rs:1301-1326), command `e2e-member:<acct>`. */
-  | { kind: "e2eMember"; commandId: string; accountId: string; displayName: string; avatarUrl: string };
+  /**
+   * Test seeding, `/dev/internal/e2e/members` (lib.rs:1301-1326), command `e2e-member:<acct>`. `role` and
+   * `permissions` are DEV-only overrides (contract change 0090); absent, the row is Rust's admin / {"e2e":true}.
+   */
+  | { kind: "e2eMember"; commandId: string; accountId: string; displayName: string; avatarUrl: string; role?: string; permissions?: unknown };
 
 export interface MembershipWriteResult {
   memberId: string;

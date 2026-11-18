@@ -85,7 +85,7 @@ async function main() {
       if (built.source !== source) throw new Error("Container build source differs from the serving Worker checkout");
       const directory = process.env.GONVEX_ASSEMBLY_DEPLOY_DIR;
       if (!directory) throw new Error("GONVEX_ASSEMBLY_DEPLOY_DIR is required");
-      const deployed = await deployAssembly({ name, directory, images: built.images, secrets: {
+      const deployed = await deployAssembly({ name, directory, images: built.images, publicUrl: process.env.GONVEX_ASSEMBLY_PUBLIC_URL, secrets: {
         GONVEX_ADMIN_KEY: randomBytes(32).toString("hex"), GONVEX_DASHBOARD_SESSION_SECRET: randomBytes(32).toString("hex"),
       } });
       const url = deployed.url;

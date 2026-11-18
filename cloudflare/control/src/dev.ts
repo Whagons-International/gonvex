@@ -82,7 +82,7 @@ export async function createTenant(ctx: Ctx, projectId: string, tenantId: string
 /** `/dev/internal/e2e/members` (lib.rs:1156-1360). */
 export async function e2eMember(
   ctx: Ctx,
-  input: { projectId: string; tenantId?: string; email: string; password: string; name?: string; accountOnly?: boolean },
+  input: { projectId: string; tenantId?: string; email: string; password: string; name?: string; accountOnly?: boolean; role?: string; permissions?: Record<string, unknown> },
 ): Promise<Record<string, string>> {
   const email = input.email.trim().toLowerCase();
   const projectId = input.projectId.trim();
@@ -113,7 +113,12 @@ export async function e2eMember(
   const tenantId = (input.tenantId ?? "").trim();
   const route = resolveTenant(ctx, projectId, tenantId);
   const written = await tenantCall(ctx, route, (port) =>
-    port.writeMembership({ kind: "e2eMember", commandId: `e2e-member:${account.id}`, accountId: account.id, displayName: account.name, avatarUrl: account.avatarUrl }),
+    port.writeMembership({
+      kind: "e2eMember", commandId: `e2e-member:${account.id}`, accountId: account.id, displayName: account.name, avatarUrl: account.avatarUrl,
+      // DEV-only overrides (contract change 0090); absent, the reference's admin / {"e2e":true} row.
+      ...(input.role === undefined ? {} : { role: input.role }),
+      ...(input.permissions === undefined ? {} : { permissions: input.permissions }),
+    }),
   );
   ctx.sql.tx(() =>
     ctx.sql.run(
@@ -128,6 +133,44 @@ export async function e2eMember(
     ),
   );
   return { projectId, tenantId, accountId: account.id, memberId: written.memberId };
+}
+
+/** One tenant Member as `GET /dev/internal/e2e/members` reports it. */
+export interface E2eMemberView {
+  projectId: string;
+  tenantId: string;
+  accountId: string;
+  memberId: string;
+  status: string;
+  role: string;
+  permissions: unknown;
+}
+
+/**
+ * `GET /dev/internal/e2e/members` (DEV only, no Rust equivalent; contract change 0090): the role and permissions
+ * of one tenant Member, selected by exactly one of `accountId` (its active Member), `email` (that account's
+ * active Member) or `memberId` (the row, whatever its status). Lets a walkthrough copy a real Member's grants.
+ */
+export async function e2eMemberRead(
+  ctx: Ctx,
+  input: { projectId: string; tenantId: string; accountId?: string; email?: string; memberId?: string },
+): Promise<E2eMemberView | null> {
+  const projectId = input.projectId.trim();
+  const tenantId = input.tenantId.trim();
+  const route = resolveTenant(ctx, projectId, tenantId);
+  let accountId = (input.accountId ?? "").trim();
+  const email = (input.email ?? "").trim().toLowerCase();
+  if (email !== "") {
+    const row = ctx.sql.get("SELECT id FROM accounts WHERE auth_realm_id=$1 AND lower(email)=lower($2) AND disabled_at IS NULL", projectId, email);
+    if (!row) return null;
+    accountId = str(row.id);
+  }
+  const memberId = (input.memberId ?? "").trim();
+  const member = memberId !== ""
+    ? await tenantCall(ctx, route, (port) => port.memberById(memberId))
+    : (await tenantCall(ctx, route, (port) => port.admit(accountId)))?.member ?? null;
+  if (!member) return null;
+  return { projectId, tenantId, accountId: member.accountId, memberId: member.id, status: member.status, role: member.role, permissions: member.permissions };
 }
 
 /** `POST /dev/projects/{p}/members` (operations.rs:474). */
