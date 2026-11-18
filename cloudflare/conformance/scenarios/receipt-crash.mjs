@@ -65,8 +65,16 @@ export function canonicalizeInFlightOutcome(trace) {
     });
     // Where the effect arrives also shifts its aliases: in the reference shape it comes on the reconnect's
     // subscription, and the reconnect's auth id is aliased before the call's command id (first-appearance order).
+    // Only the pre-crash board subscription's own frames move to the reconnect's subscription (review
+    // r4611557477): a delta or ready under any other id or path is a misrouted frame and fails the run.
+    const prior = earlier.findLast((f) => f.frame.type === 'replica.snapshot' || f.frame.type === 'replica.ready')?.frame;
+    const ownFrame = (frame) => frame.type === 'replica.transaction' || frame.type === 'replica.watermark'
+      || (frame.id === prior?.id && (frame.path === undefined || frame.path === prior?.path));
+    if (!prior?.id || prior.path !== snapshot.frame.path || !kBefore.every((f) => ownFrame(f.frame))) {
+      return fail('pre-crash replication frames use an unexpected subscription');
+    }
     const subscription = snapshot.frame.id;
-    const moved = kBefore.map((f) => (f.frame.id !== undefined && f.frame.type !== 'replica.transaction' ? { ...f, frame: { ...f.frame, id: subscription } } : f));
+    const moved = kBefore.map((f) => (f.frame.type === 'replica.delta' || f.frame.type === 'replica.ready' ? { ...f, frame: { ...f.frame, id: subscription } } : f));
     const authId = k[reconnect].frame.id, commandId = e.tx[0].frame.originCommandId;
     const swap = (frames) => (typeof authId === 'string' && typeof commandId === 'string' && authId !== commandId
       ? JSON.parse(JSON.stringify(frames).replaceAll(`"${authId}"`, '"\u0000a"').replaceAll(`"${commandId}"`, `"${authId}"`).replaceAll('"\u0000a"', `"${commandId}"`))

@@ -15,9 +15,11 @@ const snap = (r, bumps) => ({ dir: 'in', frame: { type: 'replica.snapshot', curs
 const reconnect = [{ dir: 'out', frame: { type: 'auth', id: '<id#6>' } }, { dir: 'in', frame: { type: 'session.ready' } }, { dir: 'in', frame: { type: 'auth.result', id: '<id#6>' } }, { dir: 'out', frame: { type: 'replica.openMany', opens: [{ id: '<uuid#3>', path: 'board.all' }] } }];
 const effect = (r, bumps) => [tx(r, bumps), delta(r, bumps), ready(r), mark(r)];
 
+const onOldSubscription = (frames) => frames.map((f) => (f.frame.id === '<uuid#3>' ? { ...f, frame: { ...f.frame, id: '<uuid#2>' } } : f));
 function trace(killedSdk, replaySdk) {
   return { failures: [], steps: [
-    { name: 'after restart: replay, receipt and replica', observations: { sdkRows: [row(2)] }, frames: { sdk: [snap('r2', 2), ready('r2'), mark('r2')] } },
+    // Before the second crash the SDK watches on its pre-crash subscription (<uuid#2>); the reconnect opens <uuid#3>.
+    { name: 'after restart: replay, receipt and replica', observations: { sdkRows: [row(2)] }, frames: { sdk: onOldSubscription([snap('r2', 2), ready('r2'), mark('r2')]) } },
     { name: KILLED, observations: {}, frames: { client: [{ dir: 'out', frame: { type: 'reducer.call', id: '<id#12>' } }], sdk: killedSdk } },
     { name: REPLAY, observations: { replay: { result: { bumps: 3 } }, sdkRows: [row(3)] }, frames: { sdk: replaySdk } },
   ] };
@@ -26,7 +28,6 @@ const afterRestart = () => trace([...reconnect, snap('r2', 2), ready('r2'), mark
 // As normalized from a real run: the early effect arrives on the pre-crash subscription (<uuid#2>), and the
 // call's command id is aliased before the reconnect's auth id (first-appearance order).
 const swapIds = (frames) => JSON.parse(JSON.stringify(frames).replaceAll('"<id#6>"', '"T"').replaceAll('"<id#12>"', '"<id#6>"').replaceAll('"T"', '"<id#12>"'));
-const onOldSubscription = (frames) => frames.map((f) => (f.frame.id === '<uuid#3>' ? { ...f, frame: { ...f.frame, id: '<uuid#2>' } } : f));
 const beforeCrash = () => trace(swapIds([...onOldSubscription(effect('r3', 3)), ...reconnect, snap('r3', 3), ready('r3'), mark('r3')]), []);
 const sorted = (frames) => frames.map((f) => JSON.stringify(f)).sort();
 const sdkOf = (t, name) => sorted(t.steps.find((s) => s.name === name).frames.sdk);
@@ -51,6 +52,10 @@ for (const [label, make] of [
   ['two effects after the restart', () => trace([...reconnect, snap('r2', 2), ready('r2'), mark('r2')], [...effect('r3', 3), ...effect('r4', 4)])],
   ['a bump other than +1', () => trace([...reconnect, snap('r2', 2), ready('r2'), mark('r2')], effect('r3', 4))],
   ['a lost call (no effect at all)', () => trace([...reconnect, snap('r2', 2), ready('r2'), mark('r2')], [])],
+  // Review r4611557477: an early effect on another subscription is misrouted, not the documented outcome.
+  ['an early delta on another subscription', () => trace(swapIds([...onOldSubscription(effect('r3', 3)).map((f) => (f.frame.type === 'replica.delta' ? { ...f, frame: { ...f.frame, id: '<uuid#9>' } } : f)), ...reconnect, snap('r3', 3), ready('r3'), mark('r3')]), [])],
+  ['an early effect on the reconnect subscription before the reconnect', () => trace(swapIds([...effect('r3', 3), ...reconnect, snap('r3', 3), ready('r3'), mark('r3')]), [])],
+  ['an early ready on another path', () => trace(swapIds([...onOldSubscription(effect('r3', 3)).map((f) => (f.frame.type === 'replica.ready' ? { ...f, frame: { ...f.frame, path: 'notes.mine' } } : f)), ...reconnect, snap('r3', 3), ready('r3'), mark('r3')]), [])],
   ['a snapshot that disagrees with the early effect', () => trace([...effect('r3', 3), ...reconnect, snap('r3', 2), ready('r3'), mark('r3')], [])],
 ]) {
   test(`rejected: ${label}`, () => {
