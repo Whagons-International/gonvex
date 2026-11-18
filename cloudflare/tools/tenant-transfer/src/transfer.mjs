@@ -121,10 +121,40 @@ export function fileSchema(path) {
 export async function objectChecksums(client, tables) {
   const out = {};
   for (let i = 0; i < tables.length; i += LIMITS.checksumTables) {
-    const { checksums } = await client.call('checksum', { tables: tables.slice(i, i + LIMITS.checksumTables) });
-    Object.assign(out, checksums);
+    const page = tables.slice(i, i + LIMITS.checksumTables);
+    // The object stops at its CPU budget and returns a cursor (X10); continue until it has none.
+    let cursor = null;
+    do {
+      const { checksums, next = null } = await client.call('checksum', { tables: page, cursor });
+      Object.assign(out, checksums);
+      cursor = next;
+    } while (cursor);
   }
   return out;
+}
+
+/** The object's own checks (quick_check, foreign_key_check, FTS5), continued until complete. */
+export async function objectChecks(client, fts = []) {
+  let cursor = null;
+  for (;;) {
+    const result = await client.call('check', { fts, cursor });
+    if (!result.next) return result;
+    cursor = result.next;
+  }
+}
+
+/** DDL statements; the object handles as many as fit its CPU budget per request (`consumed`). */
+export async function applySchema(client, statements) {
+  const failed = [];
+  let rest = statements;
+  while (rest.length) {
+    const result = await client.call('schema', { statements: rest });
+    failed.push(...result.failed);
+    const consumed = result.consumed ?? rest.length;
+    if (consumed <= 0) throw new Error('schema: the object made no progress');
+    rest = rest.slice(consumed);
+  }
+  return failed;
 }
 
 /** Table-by-table comparison; `tables` defaults to the union of both sides. */
@@ -161,8 +191,7 @@ export async function pushFile(client, path, { log = () => {} } = {}) {
     const schemaFailures = [];
     let t = Date.now();
     for (const batch of batches(before, { maxItems: LIMITS.schemaStatements, maxBytes: LIMITS.schemaBytes, size: (o) => o.sql.length })) {
-      const result = await client.call('schema', { statements: batch.map(({ name, sql }) => ({ name, sql })) });
-      schemaFailures.push(...result.failed);
+      schemaFailures.push(...(await applySchema(client, batch.map(({ name, sql }) => ({ name, sql })))));
     }
     timings.schemaMs = Date.now() - t;
     log(`schema: ${before.length} objects, ${schemaFailures.length} refused`);
@@ -215,13 +244,11 @@ export async function pushFile(client, path, { log = () => {} } = {}) {
     const sequences = readSequences(file.sql);
     if (Object.keys(sequences).length) await client.call('sequence', { sequences });
     for (const batch of batches(after, { maxItems: LIMITS.schemaStatements, maxBytes: LIMITS.schemaBytes, size: (o) => o.sql.length })) {
-      const result = await client.call('schema', { statements: batch.map(({ name, sql }) => ({ name, sql })) });
-      schemaFailures.push(...result.failed);
+      schemaFailures.push(...(await applySchema(client, batch.map(({ name, sql }) => ({ name, sql })))));
     }
     for (const name of fts) {
       const q = `"${name.replaceAll('"', '""')}"`;
-      const result = await client.call('schema', { statements: [{ name: `${name} rebuild`, sql: `INSERT INTO ${q}(${q}) VALUES ('rebuild')` }] });
-      schemaFailures.push(...result.failed);
+      schemaFailures.push(...(await applySchema(client, [{ name: `${name} rebuild`, sql: `INSERT INTO ${q}(${q}) VALUES ('rebuild')` }])));
     }
     await client.call('pragma', { sql: 'PRAGMA foreign_keys = ON' });
     timings.triggersMs = Date.now() - t;

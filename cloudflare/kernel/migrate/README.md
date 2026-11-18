@@ -42,8 +42,16 @@ statements per chunk (`<unit>/<index>`). An object reads the manifest once and o
 
 - Each chunk (A01 T7: ≤ 200 statements, ≤ 1 MB) is one `transactionSync`. Progress lives in `ctx.storage.kv`
   (`gonvex/migrate/progress`) and commits in the same transaction, so a reset loses at most the chunk in flight.
-- Each event runs at most `maxChunksPerEvent` transactions and stops starting new ones after `maxMsPerEvent`. A watchdog
-  alarm is set at the start of every event; when work remains the next alarm is set for now.
+- Each event runs at most `maxChunksPerEvent` transactions. A chunk is never split. CPU budget (0022 §5b, X10): the
+  platform clock does not advance during synchronous work, so the migrator reads it only after a macrotask yield, when
+  it includes the CPU of the transaction just run. Another transaction starts in the same event only if the clock
+  visibly moved and the time so far plus the last transaction's time fits `maxMsPerEvent` (1000 ms); with a frozen
+  clock an event runs one. A transaction that alone exceeds the budget is logged `gonvex.migrate.unsplittable` with its
+  time. A watchdog alarm is set at the start of every event; when work remains the next alarm is set for now.
+- The change-feed install commits whole receipt units, at most `captureStatementsPerTransaction` (50) statements per
+  transaction. Its plan (a whole-catalog read, about a second on the Whagons schema) is reused for the batches while
+  `sqlite_schema` is as the migrator left it (`PRAGMA schema_version` is not authorized), planned again after the
+  infrastructure unit (applied alone), in a new instance and at the end, and gets an event of its own.
 - Before each transactional migration, and before the change-feed install, the object takes a point-in-time bookmark.
   A migration that fails after one of its chunks committed is restored to it: `onNextSessionRestoreBookmark`, then the
   next event aborts the object. Rust's semantics follow: the failing migration rolls back, earlier ones stay.

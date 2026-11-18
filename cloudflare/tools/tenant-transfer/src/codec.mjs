@@ -171,6 +171,20 @@ export class RowHasher {
   digest() {
     return { rows: this.rows, sha256: this.hash.digest('hex') };
   }
+
+  /** Running state, when the hash can export it (sha256.mjs): a checksum that continues in a later request. */
+  save() {
+    if (typeof this.hash.save !== 'function') throw new Error('this hash cannot save its state');
+    return { rows: this.rows, hash: this.hash.save() };
+  }
+
+  /** Continues a saved checksum; `load` is `Sha256.load`. */
+  static resume(state, load) {
+    if (!state || !Number.isSafeInteger(state.rows) || state.rows < 0) throw new Error('invalid checksum state');
+    const hasher = new RowHasher(() => load(state.hash));
+    hasher.rows = state.rows;
+    return hasher;
+  }
 }
 
 /**
