@@ -43,6 +43,9 @@ export interface OperatorObjectEnv extends ControlEnv, OperatorEnv {
 const PRUNE_DUE_KEY = "k19/prune-due";
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
 
+/** The operator identity the admin key acts as (`OperatorAuth`). */
+const ADMIN_KEY_OPERATOR = "admin@gonvex.local";
+
 export class OperatorControlObject extends ControlObject {
   readonly operatorConfig: OperatorConfig;
   readonly syncs: SyncCoordinator;
@@ -119,6 +122,13 @@ export class OperatorControlObject extends ControlObject {
       }
     }catch(cause){if(!(cause instanceof HttpError))throw cause;failure={status:cause.status,error:cause.message};}
     return {frozen:this.syncs.deployments.topologyFrozen(),deployment:this.syncs.deployments.current(),releases:this.syncs.activeReleases(),...failure};
+  }
+  /** X03 dev/test fixture: drop the admin-key operator's REVOKED account tokens (the list keeps revoked tokens,
+   * so a persistent dev deployment would otherwise grow one per conformance run). Active tokens are untouched. */
+  async fixturePurgeRevokedTokens(): Promise<{ deleted: number } | { error: string }> {
+    if (!(this.env as { GONVEX_ASSEMBLY_FIXTURE_KEY?: string }).GONVEX_ASSEMBLY_FIXTURE_KEY) return { error: "assembly fixture control disabled" };
+    const deleted = this.sql.tx(() => this.sql.affected("DELETE FROM gonvex_account_access_tokens WHERE owner_email=$1 AND revoked_at IS NOT NULL", ADMIN_KEY_OPERATOR));
+    return { deleted };
   }
   async publishRelease(syncId: string): Promise<{ready:boolean;error?:string;status?:number}> {
     try { return await this.syncs.publish(syncId); }

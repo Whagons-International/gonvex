@@ -13,6 +13,7 @@ interface Env {
   TENANT: DurableObjectNamespace<any>;
   RUNTIME_CATALOG?:Fetcher;
   GATEWAY: DurableObjectNamespace<any>;
+  CONTROL?: DurableObjectNamespace<any>;
   GATEWAY_CONTROLLER?: DurableObjectNamespace<any>;
   GONVEX_GATEWAY_SHARDS?: string;
   GONVEX_ASSEMBLY_FIXTURE_KEY?: string;
@@ -57,6 +58,11 @@ export async function fixtureControl(request: Request, env: Env): Promise<Respon
   if(request.method==='GET'&&url.pathname==='/__assembly/delivery-state')return Response.json(await rpc<FixtureTenant>(env.TENANT,url.searchParams.get('tenant')??'').fixtureDeliveryState());
   if (request.method === "POST") {
     const body = await request.json<{ tenant: string; holder?:string;hold?:boolean;phase?:'bootstrap'|'challenge';epoch?: string; now?: number; offlineMaxAgeMs?: number | null }>();
+    if (url.pathname === "/__assembly/purge-revoked-tokens") {
+      if (!env.CONTROL) return new Response("control is not bound", { status: 503 });
+      const result = await rpc<{ fixturePurgeRevokedTokens(): Promise<{ deleted: number } | { error: string }> }>(env.CONTROL, "control").fixturePurgeRevokedTokens();
+      return Response.json(result, { status: "error" in result ? 400 : 200 });
+    }
     if(url.pathname==="/__assembly/bootstrap-gate"){
       if(!body.holder||body.holder.length>128||typeof body.hold!=="boolean")return new Response("holder/hold required",{status:400});
       if(body.phase!==undefined&&body.phase!=='bootstrap'&&body.phase!=='challenge')return new Response('invalid gate phase',{status:400});

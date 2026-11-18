@@ -50,6 +50,22 @@ describe("operator authentication (D.3)", () => {
     expect((await call("GET", "/dev/auth/me", { token: dev.body.session.accessToken })).status).toBe(401);
   });
 
+  it("X03 dev fixture: purging drops only the admin operator's revoked tokens", async () => {
+    const before = (await call("GET", "/dev/auth/tokens")).body.tokens.length;
+    const a = await call("POST", "/dev/auth/tokens", { body: { name: "ci", permissions: ["projects:read"] } });
+    const b = await call("POST", "/dev/auth/tokens", { body: { name: "ci", permissions: ["projects:read"] } });
+    expect((await call("DELETE", `/dev/auth/tokens/${a.body.token.id}`)).status).toBe(200);
+    const purge = control() as unknown as { fixturePurgeRevokedTokens(): Promise<{ deleted: number } | { error: string }> };
+    expect(await purge.fixturePurgeRevokedTokens()).toEqual({ deleted: 1 });
+    const ids = (await call("GET", "/dev/auth/tokens")).body.tokens.map((t: { id: string }) => t.id);
+    expect(ids).toContain(b.body.token.id);
+    expect(ids).not.toContain(a.body.token.id);
+    expect(ids.length).toBe(before + 1);
+    expect(await purge.fixturePurgeRevokedTokens()).toEqual({ deleted: 0 });
+    await call("DELETE", `/dev/auth/tokens/${b.body.token.id}`);
+    await purge.fixturePurgeRevokedTokens();
+  });
+
   it("personal access tokens: own list, bounded grants, permission checks, revocation", async () => {
     const created = await call("POST", "/dev/auth/tokens", { body: { name: "ci", permissions: ["projects:read", "PROJECTS:READ", "tokens:*"] } });
     expect(created.status).toBe(201);
