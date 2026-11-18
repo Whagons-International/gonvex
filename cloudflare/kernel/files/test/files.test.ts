@@ -164,6 +164,72 @@ describe("signed proxy uploads", () => {
   });
 });
 
+// BUG-6 (walkthrough 2026-11-17): the browser request shapes of a signed
+// /storage URL fetched from the app origin. See
+// docs/cloudflare/verification/BUG-6-storage-fetch-triage.md.
+describe("signed storage from a browser origin (BUG-6)", () => {
+  const origin = "http://devcopy-stg1117-11.localhost:41784";
+  const cors = (url: string, init: RequestInit = {}) => SELF.fetch(url, {
+    ...init,
+    headers: { origin, "sec-fetch-mode": "cors", "sec-fetch-site": "cross-site", ...(init.headers as Record<string, string> | undefined) },
+  });
+
+  it("allows the upload preflight a browser sends and still checks the upload signature", async () => {
+    const t = tenant();
+    const target = await t.as(t.alice).call("generateUploadUrl", { contentType: "image/png", visibility: "tenant" }) as Upload;
+    const preflight = await cors(target.url, {
+      method: "OPTIONS",
+      headers: { "access-control-request-method": "POST", "access-control-request-headers": "content-type" },
+    });
+    expect(preflight.status).toBe(204);
+    expect(Object.fromEntries(preflight.headers)).toMatchObject({
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+      "access-control-allow-headers": "Content-Type",
+      "access-control-max-age": "600",
+    });
+    const tampered = target.url.replace(/sig=([0-9a-f])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`);
+    const refused = await cors(tampered, { method: "OPTIONS", headers: { "access-control-request-method": "POST" } });
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toBe("invalid or expired storage signature");
+  });
+
+  it("serves a simple cross-origin GET of a valid download URL without a preflight, and refuses a tampered one", async () => {
+    const t = tenant();
+    const fileId = await uploaded(t, t.alice, { visibility: "tenant" });
+    const url = await t.as(t.alice).call("getUrl", { fileId }) as string;
+
+    // fetch(url) from the page: a CORS-mode simple GET. `*` without
+    // Allow-Credentials is readable by credentials "omit" and "same-origin".
+    const ok = await cors(url);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("access-control-allow-origin")).toBe("*");
+    expect(ok.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(new Uint8Array(await ok.arrayBuffer())).toEqual(PNG);
+
+    // The signature is still checked on the actual GET, and the refusal is
+    // readable cross-origin (a 403, not a network error).
+    for (const bad of [
+      url.replace(/sig=([0-9a-f])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`),
+      url.replace(/sig=[0-9a-f]+/, "sig="),
+      url.replace(/exp=\d+/, "exp=1"),
+    ]) {
+      const refused = await cors(bad);
+      expect(refused.status).toBe(403);
+      expect(refused.headers.get("access-control-allow-origin")).toBe("*");
+      expect(await refused.text()).toBe("invalid or expired storage signature");
+    }
+
+    // A browser never preflights that GET. A hand-made GET preflight on a
+    // download URL is 403, exactly as Rust (lib.rs storage_options) and
+    // staging answer it; the actual GET above does not depend on it.
+    const getPreflight = await cors(url, { method: "OPTIONS", headers: { "access-control-request-method": "GET" } });
+    expect(getPreflight.status).toBe(403);
+    expect(getPreflight.headers.get("access-control-allow-origin")).toBe("*");
+    expect(await getPreflight.text()).toBe("invalid or expired storage signature");
+  });
+});
+
 describe("signed downloads", () => {
   it("streams the object with Rust's headers, the inline allowlist and range requests", async () => {
     const t = tenant();
