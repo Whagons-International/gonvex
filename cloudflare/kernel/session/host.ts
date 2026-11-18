@@ -156,7 +156,9 @@ export class SocketHost {
     const work: Array<Promise<void>> = [];
     const revalidate: Session[] = [];
     const admissions = new Map<string, { scope: readonly [string, string]; sessions: Session[] }>();
-    for (const session of this.sessions.values()) {
+    for (const session of [...this.sessions.values()]) {
+      // X07 BUG-5: a socket whose queue is stuck closes here rather than holding this alarm.
+      if (session.checkStall(now)) continue;
       const r = session.record;
       if (r.pendingUntil !== null && now >= r.pendingUntil) work.push(session.deadline(now));
       work.push(session.liveness(now + ALARM_SLACK_MS));

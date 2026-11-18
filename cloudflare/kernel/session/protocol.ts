@@ -17,6 +17,13 @@ export const LIMITS = {
   revalidateMs: 30_000,
   /** 0016 G0-6: a socket with no outbound frame for this long gets a watermark. */
   livenessMs: 20_000,
+  /**
+   * X07 BUG-5: the longest one queued item (a frame, a delivery, an alarm task) may hold a socket's
+   * ordered queue. Past it the socket closes with `CLOSE.stalled` instead of going silent. It is above
+   * the 30 s tenant CPU limit and the ~40 s Control RPCs seen while a publication holds Control, and
+   * equals Rust's 60 s presence liveness timeout (presence.rs `liveness_timeout`).
+   */
+  stallMs: 60_000,
   /** 0016 G0-7 / 0018: the kernel never sends a frame of this many bytes or more. */
   maxOutboundBytes: 32 * 1024 * 1024 - 1024,
   /** Batch limits (A.1.7). */
@@ -45,6 +52,8 @@ export const CLOSE = {
   publicTransportLimit: { code: 1002, reason: "" },
   ended: { code: 1000, reason: "" },
   failed: { code: 1011, reason: "" },
+  /** X07 BUG-5: the socket's ordered queue made no progress for `LIMITS.stallMs`; the SDK reconnects. */
+  stalled: { code: 1012, reason: "session stalled; reconnect" },
 } as const;
 export type CloseFrame = { readonly code: number; readonly reason: string };
 

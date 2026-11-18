@@ -177,6 +177,8 @@ export class ModuleCache {
 }
 
 class AuthTimeout extends Error {}
+/** X07 BUG-5: queued work released because the socket's queue stalled and the socket closed. */
+class SessionStalled extends Error { constructor() { super("session stalled"); } }
 
 export class Session {
   readonly record: SessionRecord;
@@ -192,6 +194,12 @@ export class Session {
   private readonly actionWaiters = new Map<string, { result: Promise<string | null>; resolve(text: string | null): void; delivered: Promise<void>; done(error?: unknown): void }>();
   private queueDepth = 0;
   private queueActive = false;
+  /** X07 BUG-5: when the item now holding the queue started (null: idle). */
+  private queueActiveSince: number | null = null;
+  private stallTimer: (() => void) | undefined;
+  /** One release per waiting or running queue item; each is removed as its item starts or settles. */
+  private readonly stallHandlers = new Set<() => void>();
+  private stalledOut = false;
   closed = false;
   /** Last outbound frame time (memory only; `record.livenessAt` covers hibernation). */
   lastOutboundAt: number;
@@ -316,7 +324,9 @@ export class Session {
   /** Enqueues one inbound message; resolves when it has been handled. */
   receive(message: string | ArrayBuffer): Promise<void> {
     const run = () => (typeof message === "string" ? this.onText(message) : this.onBinary(message));
-    return this.serial(run);
+    // X07 BUG-5: a frame that finds the queue stuck closes the socket at once instead of waiting behind it.
+    this.checkStall();
+    return this.serialQuiet(run);
   }
 
   private async onBinary(bytes: ArrayBuffer): Promise<void> {
@@ -418,7 +428,7 @@ export class Session {
    * in the meantime wins; a failed check revokes and ends the socket.
    */
   admissionMonitored(valid: boolean, now: number): Promise<void> {
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       const admission = this.record.admission;
       if (this.closed || !admission || admission.revoked || now - admission.checkedAt < ADMISSION_MAX_AGE_MS) return;
       if (valid) {
@@ -450,6 +460,8 @@ export class Session {
   // ---- dispatch ----------------------------------------------------------------
 
   private async dispatch(frame: ClientFrame): Promise<void> {
+    // Review r4608168740: a handler resumed after its socket closed (a stall) starts no further port call.
+    if (this.closed) return;
     const tenant = this.record.tenant;
     const control = async (f: ClientFrame) => {
       const replies = await this.forward(this.ports.control.dispatch(this.view(), f));
@@ -491,6 +503,7 @@ export class Session {
       case "query.subscribeMany":
         if (frame.subscribes.length > LIMITS.subscribeMany) return this.send(frames.queryError("", undefined, `query batch cannot contain more than ${LIMITS.subscribeMany} subscribes`));
         for (const subscribe of frame.subscribes) {
+          if (this.closed) return;
           const one: ClientFrame = { type: "query.subscribe", ...subscribe };
           if (subscribe.scope === "control") await control(one);
           else if (tenant) await this.dispatch(one);
@@ -504,6 +517,7 @@ export class Session {
         this.hooks.recoveryChanged?.();
         this.hooks.persist?.();
         if (tenant) await toTenant(frame);
+        if (this.closed) return;
         await control(frame);
         return;
       case "reducer.call":
@@ -511,6 +525,7 @@ export class Session {
       case "reducer.callMany":
         if (frame.calls.length > LIMITS.callMany) return this.send(frames.reducerError("", undefined, `reducer batch cannot contain more than ${LIMITS.callMany} calls`, "rejected"));
         for (const call of frame.calls) {
+          if (this.closed) return;
           // K16: public admission is re-read before each call of a batch (lib.rs:3378-3399).
           if (this.record.admission && !await this.admitted(true)) {
             this.send(frames.reducerError(call.id, call.path, ADMISSION_ERROR, "rejected"));
@@ -526,6 +541,8 @@ export class Session {
         if (tenant) {
           if(!this.prepareAction(frame.id, frame.path))return;
           const replies = await this.forward(this.ports.tenants.dispatch({ ...this.view(), actionGeneration: this.record.actionGenerations?.[frame.id] }, frame));
+          // Review r4608249098: no early return here. `finishAction` starts no port call and must run
+          // on a closed socket too: it settles the waiter that a pending `actionFinished()` awaits.
           await this.finishAction(frame.id, replies.length > 0);
           return;
         }
@@ -613,6 +630,7 @@ export class Session {
 
   /** One Reducer call, with presence's in-memory answers first (`call_reducer_with_presence`, K14). */
   private async reducerCall(call: Extract<ClientFrame, { type: "reducer.call" }>): Promise<void> {
+    if (this.closed) return;
     const tenant = this.record.tenant;
     if (call.scope !== "control" && !tenant) {
       return this.send(frames.reducerError(call.id, call.path, UNAUTHENTICATED.reducer, "unauthenticated", call.trace));
@@ -749,7 +767,7 @@ export class Session {
   /** 0056: resolves only after reset frames and real live-query rebuilds completed on this socket. */
   recoverReplica(tenantId: string, payload: ReplicaDelivery): Promise<readonly InitialCompletionStatus[] | undefined> {
     const epoch = this.record.subscriptionEpoch ?? 0;
-    return this.serial(async () => {
+    return this.serialRecovery(async () => {
       if (this.closed || epoch !== (this.record.subscriptionEpoch ?? 0) || this.record.tenant?.route.tenantId !== tenantId) throw new Error("delivery recovery scope changed");
       const recovery = recoveryOf(payload);
       if (!recovery) throw new Error("recovery marker is required");
@@ -769,7 +787,7 @@ export class Session {
     const epoch = (work as ScopedSocketWork).subscriptionEpoch;
     if (payload.scopeFence !== 1 || epoch === undefined || work.ops.length || work.watermark !== undefined || work.opened || work.removed
       || payload.shared.length || payload.watermark !== undefined || payload.membership || work.initialCompletions?.length || work.initialScope) return Promise.reject(new Error("delivery bootstrap must contain only empty scoped work"));
-    return this.serial(async () => {
+    return this.serialRecovery(async () => {
       this.requireRecoveryScope(tenantId, epoch);
       await this.verifyRecoveryAuth(tenantId, epoch);
       await this.observeRecoveryScope(tenantId, epoch);
@@ -839,7 +857,7 @@ export class Session {
   /** Processing acknowledgment only: no instance/scope/revision authority. */
   failReplicaInitials(tenantId: string, refs: readonly InitialRequestRef[]): Promise<void> {
     if (!Array.isArray(refs) || !refs.every(validInitialRef)) return Promise.reject(new Error("invalid initial request references"));
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       if (this.closed || this.record.tenant?.route.tenantId !== tenantId) return;
       for (const ref of refs) {
         if (!this.currentInitial(ref)) continue;
@@ -861,6 +879,7 @@ export class Session {
     const run = async () => {
       if (this.closed || this.record.connection.projectId !== projectId) return;
       for (const subscription of Object.values(this.record.controlQueries ?? {}).sort((a, b) => a.request.id < b.request.id ? -1 : a.request.id > b.request.id ? 1 : 0)) {
+        if (this.closed) return;
         const request = subscription.request;
         if (reason === "presence-change" && request.path !== "control.support.listTenants") continue;
         const replies = await this.ports.control.dispatch(this.view(), { ...request, type: "query.call" });
@@ -877,7 +896,7 @@ export class Session {
       }
       this.hooks.persist?.();
     };
-    return this.serial(run);
+    return this.serialQuiet(run);
   }
 
   private prepareAction(id: string, path: string): boolean {
@@ -926,7 +945,7 @@ export class Session {
     const waiter = this.actionWaiters.get(id);
     if (waiter) { waiter.resolve(text); await waiter.delivered; return this.closed ? "obsolete" : "enqueued"; }
     let enqueued = false;
-    await this.serial(() => {
+    await this.serialQuiet(() => {
       if (!applicable()) return;
       this.send(text);
       if (this.closed) return;
@@ -1069,6 +1088,7 @@ export class Session {
     if (response.ok && this.hooks.projectAuthenticated) {
       try {
         await withDeadline(this.hooks.projectAuthenticated(connection.projectId), deadline - this.now());
+        if (this.closed) return;
         module = await withDeadline(this.modules.refresh(connection.projectId), deadline - this.now());
         // Refresh only a result that carries the hash: Rust omits it for a tokenless control-only auth.
         if ("artifactHash" in response.result) response.result.artifactHash = module?.artifactHash ?? "";
@@ -1219,14 +1239,69 @@ export class Session {
   /** Runs `fn` after the frames already queued, in the socket's order. */
   private serial<T>(fn: () => T | Promise<T>): Promise<T> {
     this.queueDepth++;
+    const waiting = this.abandonable();
     const run = async () => {
+      waiting.dispose();
+      if (this.stalledOut) { this.queueDepth--; throw new SessionStalled(); }
       this.queueActive = true;
-      try { return await fn(); } finally { this.queueActive = false; this.queueDepth--; }
+      this.queueActiveSince = this.now();
+      this.stallTimer = this.timers.later(LIMITS.stallMs, () => { this.stallTimer = undefined; this.checkStall(); });
+      const active = this.abandonable();
+      try {
+        // X07 BUG-5: an item whose port call never settles must not hold the socket forever. The
+        // abandoned `fn` may still resume; every multi-step handler re-checks `closed` before its
+        // next port call, and nothing is sent on a closed socket.
+        return await Promise.race([fn(), active.promise.then((): never => { throw new SessionStalled(); })]);
+      } finally {
+        active.dispose();
+        this.queueActive = false; this.queueActiveSince = null; this.queueDepth--;
+        this.stallTimer?.(); this.stallTimer = undefined;
+      }
     };
-    const next = this.queue.then(run, run);
+    const next = Promise.race([this.queue, waiting.promise]).then(run, run);
     this.queue = next.then(() => {}, () => {});
     return next;
   }
+
+  /** Settles when the queue is abandoned. `dispose` drops the handler, so settled items leave nothing behind. */
+  private abandonable(): { promise: Promise<void>; dispose(): void } {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => { release = resolve; });
+    if (this.stalledOut) release(); else this.stallHandlers.add(release);
+    return { promise, dispose: () => { this.stallHandlers.delete(release); } };
+  }
+
+  /** Test seam (review r4608168745): stall handlers held by waiting or running items. */
+  pendingStallHandlers(): number { return this.stallHandlers.size; }
+
+  /** `serial` for work whose callers only need it settled: a stalled, closed socket releases it quietly. */
+  private serialQuiet(fn: () => void | Promise<void>): Promise<void> {
+    return this.serial(fn).catch((error) => { if (!(error instanceof SessionStalled)) throw error; });
+  }
+
+  /** `serial` for recovery: a socket closed by a stall is a changed scope to the tenant's delivery. */
+  private serialRecovery<T>(fn: () => Promise<T>): Promise<T> {
+    return this.serial(fn).catch((error) => { throw error instanceof SessionStalled ? new Error("delivery recovery scope changed") : error; });
+  }
+
+  /**
+   * X07 BUG-5 (Rust closes a silent or stuck connection too: presence liveness 4000, send stall RST).
+   * When the item holding this socket's ordered queue has run for `LIMITS.stallMs`, the socket closes
+   * with `CLOSE.stalled` (the SDK reconnects and re-authenticates) and everything queued behind the item
+   * is released. Before this, one port call that never settled (during a publication, while Control or
+   * a tenant was being replaced) left an open socket that answered nothing: no `auth.result`, no close.
+   */
+  checkStall(now: number = this.now()): boolean {
+    if (this.closed || !this.queueActive || this.queueActiveSince === null || now - this.queueActiveSince < LIMITS.stallMs) return false;
+    console.error("session: ordered queue stalled; closing the socket", { stalledMs: now - this.queueActiveSince, queued: this.queueDepth });
+    this.stalledOut = true;
+    this.close(CLOSE.stalled);
+    const handlers = [...this.stallHandlers];
+    this.stallHandlers.clear();
+    for (const release of handlers) release();
+    return true;
+  }
+
 
   /** X01/0054: authoritative quiescent drain check; never interrupts or replays a call. */
   gatewayDrain(): { closed: boolean; blocked?: "inflight" | "direct-action" | "queued" } {
@@ -1242,7 +1317,7 @@ export class Session {
 
   /** The pending-auth deadline passed (A.1.8). */
   deadline(now: number): Promise<void> {
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       if (!this.closed && this.record.pendingUntil !== null && now >= this.record.pendingUntil) this.close(CLOSE.authDeadline);
     });
   }
@@ -1260,7 +1335,7 @@ export class Session {
 
   /** Result of a revalidation round for this socket (lib.rs:2044-2083). */
   revalidated(valid: boolean, now: number): Promise<void> {
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       if (this.closed || !this.record.connection.authToken) return;
       if (valid) {
         this.record.revalidateAt = now + LIMITS.revalidateMs;
@@ -1276,7 +1351,7 @@ export class Session {
 
   /** The session's own Member changed in a commit (C.4 item 5a): discard, then the commit's watermark. */
   membershipChanged(revision: number): Promise<void> {
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       if (this.closed || !this.record.tenant) return;
       this.discardScope();
       this.hooks.persist?.();
@@ -1287,7 +1362,7 @@ export class Session {
 
   /** `RuntimeEvent::ModuleReloaded` for this socket's project (A.1.5 c). */
   moduleReloaded(module: ModuleInfo | null): Promise<void> {
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       if (this.closed) return;
       if (module?.publicationId && this.record.publicationId === module.publicationId) return;
       this.hooks.subscriptionsReset?.();
@@ -1306,7 +1381,7 @@ export class Session {
 
   /** Frames from the tenant for this socket (delivery); `revision` covers them. */
   deliver(texts: readonly string[], revision: number): Promise<void> {
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       if (this.closed) return;
       for (const text of texts) this.send(text);
       if (revision > this.record.sentRevision) this.record.sentRevision = revision;
@@ -1321,7 +1396,7 @@ export class Session {
    * in the `replica.batch` envelope they receive every watermark in (A.0).
    */
   liveness(now: number): Promise<void> {
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       const tenant = this.record.tenant;
       if (this.closed || !tenant || tenant.anonymous || now - this.lastOutboundAt < LIMITS.livenessMs) return;
       const revision = this.record.sentRevision;
@@ -1335,7 +1410,7 @@ export class Session {
 
   /** One ordered presence delivery from the tenant object (K14), in the socket's order. */
   presenceDelivery(delivery: PresenceDelivery): Promise<void> {
-    return this.serial(() => {
+    return this.serialQuiet(() => {
       if (this.closed) return;
       for (const s of delivery.snapshots ?? []) if (s.connectionId === this.record.connectionId) this.presence.snapshot(s.id, s.frame);
       if (delivery.resync) this.presence.resync(id => resyncFrame(id, delivery.resync!));
@@ -1347,6 +1422,8 @@ export class Session {
   nextWake(): number | null {
     if (this.closed) return null;
     const times = [this.record.pendingUntil, this.record.revalidateAt, this.admissionDueAt()];
+    // X07 BUG-5: the stall check also rides the host alarm (the in-memory timer is the fast path).
+    if (this.queueActiveSince !== null) times.push(this.queueActiveSince + LIMITS.stallMs);
     if (this.record.tenant && !this.record.tenant.anonymous) times.push(this.lastOutboundAt + LIMITS.livenessMs);
     const due = times.filter((t): t is number => t !== null);
     return due.length ? Math.min(...due) : null;
@@ -1451,7 +1528,9 @@ export class Session {
   }
 
   close(frame: CloseFrame): void {
-    for (const waiter of this.actionWaiters.values()) waiter.resolve(null);
+    // A closed socket settles every Action waiter, even one whose dispatch was abandoned by a stall
+    // and never resumes (review r4608249098): a waiting `actionFinished()` then answers "obsolete".
+    for (const waiter of this.actionWaiters.values()) { waiter.resolve(null); waiter.done(); }
     if (this.closed) return;
     if (this.delivery.batcher.hasOpen) this.delivery.batcher.flush();
     this.resetSubscriptions(this.record.tenant);
@@ -1465,7 +1544,9 @@ export class Session {
 
   /** The peer closed or the socket failed. Resolves once presence has been told (K14). */
   closedByPeer(): Promise<void> {
-    for (const waiter of this.actionWaiters.values()) waiter.resolve(null);
+    // A closed socket settles every Action waiter, even one whose dispatch was abandoned by a stall
+    // and never resumes (review r4608249098): a waiting `actionFinished()` then answers "obsolete".
+    for (const waiter of this.actionWaiters.values()) { waiter.resolve(null); waiter.done(); }
     if (this.closed) return Promise.resolve();
     this.resetSubscriptions(this.record.tenant);
     this.closed = true;
