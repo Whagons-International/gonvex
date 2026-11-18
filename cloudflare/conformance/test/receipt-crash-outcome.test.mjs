@@ -32,9 +32,14 @@ const beforeCrash = () => trace(swapIds([...onOldSubscription(effect('r3', 3)), 
 const sorted = (frames) => frames.map((f) => JSON.stringify(f)).sort();
 const sdkOf = (t, name) => sorted(t.steps.find((s) => s.name === name).frames.sdk);
 
-test('committed after the restart (the Rust reference shape) is accepted unchanged', () => {
+const noMarks = (frames) => frames.filter((f) => f.frame.type !== 'replica.watermark');
+test('committed after the restart (the Rust reference shape) is accepted unchanged apart from its watermarks', () => {
   const t = afterRestart(), copy = structuredClone(t);
   assert.equal(canonicalizeInFlightOutcome(t), 'committed-after-restart');
+  for (const name of [KILLED, REPLAY]) {
+    const step = copy.steps.find((s) => s.name === name);
+    step.frames.sdk = noMarks(step.frames.sdk);
+  }
   assert.deepEqual(t, copy);
 });
 
@@ -42,7 +47,7 @@ test('committed before the crash is accepted and compares equal to the reference
   const t = beforeCrash();
   assert.equal(canonicalizeInFlightOutcome(t), 'committed-before-crash');
   assert.deepEqual(t.failures, []);
-  const ref = afterRestart();
+  const ref = afterRestart(); canonicalizeInFlightOutcome(ref);
   assert.deepEqual(sdkOf(t, KILLED), sdkOf(ref, KILLED));
   assert.deepEqual(sdkOf(t, REPLAY), sdkOf(ref, REPLAY));
 });
@@ -71,4 +76,32 @@ test('other scenarios and traces without those steps are left alone', () => {
   const t = { failures: [], steps: [{ name: 'something else', frames: {} }] };
   assert.equal(canonicalizeInFlightOutcome(t), undefined);
   assert.deepEqual(t.failures, []);
+});
+
+// Review r4611631438: a watermark is a timing-placed barrier. One at any position of either step, in either
+// accepted outcome, changes neither the classification nor the canonical frames.
+const withMarkAt = (frames, i, r) => [...frames.slice(0, i), mark(r), ...frames.slice(i)];
+for (const [label, make, outcome] of [['committed after the restart', afterRestart, 'committed-after-restart'], ['committed before the crash', beforeCrash, 'committed-before-crash']]) {
+  test(`${label}: a watermark at every position of steps 7 and 8 is accepted and compares equal`, () => {
+    const reference = afterRestart(); canonicalizeInFlightOutcome(reference);
+    for (const name of [KILLED, REPLAY]) {
+      const length = make().steps.find((s) => s.name === name).frames.sdk.length;
+      for (let i = 0; i <= length; i++) for (const r of ['r2', 'r3', 'r4']) {
+        const t = make(), step = t.steps.find((s) => s.name === name);
+        step.frames.sdk = withMarkAt(step.frames.sdk, i, r);
+        assert.equal(canonicalizeInFlightOutcome(t), outcome, `${name} watermark ${r} at ${i}`);
+        assert.deepEqual(t.failures, []);
+        for (const n of [KILLED, REPLAY]) assert.deepEqual(sdkOf(t, n), sdkOf(reference, n), `${n} after a watermark ${r} at ${name}[${i}]`);
+      }
+    }
+  });
+}
+
+test('watermarks do not make a misrouted early delta acceptable', () => {
+  const misrouted = () => trace(swapIds([...onOldSubscription(effect('r3', 3)).map((f) => (f.frame.type === 'replica.delta' ? { ...f, frame: { ...f.frame, id: '<uuid#9>' } } : f)), ...reconnect, snap('r3', 3), ready('r3'), mark('r3')]), [mark('r4')]);
+  for (let i = 0; i < 6; i++) {
+    const t = misrouted(); t.steps[1].frames.sdk = withMarkAt(t.steps[1].frames.sdk, i, 'r3');
+    assert.equal(canonicalizeInFlightOutcome(t), undefined);
+    assert.match(t.failures[0], /unexpected subscription/);
+  }
 });

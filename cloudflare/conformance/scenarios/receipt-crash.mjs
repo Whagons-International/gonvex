@@ -26,7 +26,8 @@ const revisionOf = (frame) => frame.cursor?.revision ?? frame.revision;
  * the replay after the restart; the scenario accepts both (exactly once either way). Rust's SIGKILL lands before
  * the call commits; a deployed backend's restart is a separate request, so the call may commit first. This
  * rewrites ONLY the documented "committed before the crash" shape of the SDK's board frames in the last two steps
- * into the "committed after the restart" shape, so both compare equal. Anything else (two effects, a bump other
+ * into the "committed after the restart" shape, so both compare equal. Watermarks take no part (they are
+ * timing-placed barriers); an accepted run's SDK watermarks in those steps are left out of the comparison. Anything else (two effects, a bump other
  * than +1, no effect, effects in both steps) fails the run and is left untouched. Runs on normalized frames.
  * @returns {'committed-after-restart' | 'committed-before-crash'}
  */
@@ -48,13 +49,21 @@ export function canonicalizeInFlightOutcome(trace) {
   const reconnect = k.findIndex((f) => f.dir === 'out' && f.frame.type === 'auth');
   const snapshot = k.find((f) => f.dir === 'in' && f.frame.type === 'replica.snapshot');
   if (reconnect < 0 || !snapshot) return fail('the SDK did not reconnect with a snapshot');
-  const rBoard = r.filter((f) => f.dir === 'in' && BOARD.has(f.frame.type));
-  const kBefore = k.slice(0, reconnect).filter((f) => f.dir === 'in' && BOARD.has(f.frame.type));
+  // Review r4611631438: watermarks are barriers (compared as sent or not, their values checked per backend by
+  // the raw-frame watermark self-check). How many arrive, and where, in these two steps is timing: they take no
+  // part in the shape checks, and an accepted run's SDK watermarks of steps 7-8 are dropped from the comparison.
+  const isMark = (f) => f.frame.type === 'replica.watermark';
+  const dropMarks = (frames) => frames.filter((f) => !(f.dir === 'in' && isMark(f)));
+  const rBoard = r.filter((f) => f.dir === 'in' && BOARD.has(f.frame.type) && !isMark(f));
+  const kBefore = k.slice(0, reconnect).filter((f) => f.dir === 'in' && BOARD.has(f.frame.type) && !isMark(f));
   // A: committed after the restart (the reference shape).
-  if (!kBefore.length && counterIn(snapshot.frame) === n && revisionOf(snapshot.frame) === p && effect(r).ok) return 'committed-after-restart';
+  if (!kBefore.length && counterIn(snapshot.frame) === n && revisionOf(snapshot.frame) === p && effect(r).ok) {
+    killed.frames.sdk = dropMarks(k); replay.frames.sdk = dropMarks(r);
+    return 'committed-after-restart';
+  }
   // B: committed before the crash.
   const e = effect(kBefore), c = revisionOf(e.deltas[0]?.frame ?? {});
-  if (e.ok && !rBoard.length && kBefore.length === 4 && kBefore.every((f) => revisionOf(f.frame) === c)
+  if (e.ok && !rBoard.length && kBefore.length === 3 && kBefore.every((f) => revisionOf(f.frame) === c)
     && counterIn(snapshot.frame) === n + 1 && revisionOf(snapshot.frame) === c) {
     const after = k.slice(reconnect).map((f) => {
       if (f.dir !== 'in' || !BOARD.has(f.frame.type) || revisionOf(f.frame) !== c) return f;
@@ -68,7 +77,7 @@ export function canonicalizeInFlightOutcome(trace) {
     // Only the pre-crash board subscription's own frames move to the reconnect's subscription (review
     // r4611557477): a delta or ready under any other id or path is a misrouted frame and fails the run.
     const prior = earlier.findLast((f) => f.frame.type === 'replica.snapshot' || f.frame.type === 'replica.ready')?.frame;
-    const ownFrame = (frame) => frame.type === 'replica.transaction' || frame.type === 'replica.watermark'
+    const ownFrame = (frame) => frame.type === 'replica.transaction'
       || (frame.id === prior?.id && (frame.path === undefined || frame.path === prior?.path));
     if (!prior?.id || prior.path !== snapshot.frame.path || !kBefore.every((f) => ownFrame(f.frame))) {
       return fail('pre-crash replication frames use an unexpected subscription');
@@ -79,8 +88,8 @@ export function canonicalizeInFlightOutcome(trace) {
     const swap = (frames) => (typeof authId === 'string' && typeof commandId === 'string' && authId !== commandId
       ? JSON.parse(JSON.stringify(frames).replaceAll(`"${authId}"`, '"\u0000a"').replaceAll(`"${commandId}"`, `"${authId}"`).replaceAll('"\u0000a"', `"${commandId}"`))
       : frames);
-    killed.frames.sdk = swap([...k.slice(0, reconnect).filter((f) => !(f.dir === 'in' && BOARD.has(f.frame.type))), ...after]);
-    replay.frames.sdk = swap([...moved, ...r]);
+    killed.frames.sdk = swap(dropMarks([...k.slice(0, reconnect).filter((f) => !(f.dir === 'in' && BOARD.has(f.frame.type))), ...after]));
+    replay.frames.sdk = swap(dropMarks([...moved, ...r]));
     return 'committed-before-crash';
   }
   return fail('neither committed before the crash nor after the restart (a lost or doubled effect)');

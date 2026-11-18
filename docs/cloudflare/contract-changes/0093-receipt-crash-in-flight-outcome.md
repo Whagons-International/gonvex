@@ -26,6 +26,10 @@ restart applies once"):
   watermark, all at the commit revision) arrives before the reconnect; the reconnect snapshot holds N+1 at that
   revision; step 8 has no board frame.
 
+Watermarks take no part in either shape. They are barriers, compared as sent or not, and their values are
+checked per backend by the raw-frame watermark self-check; how many arrive and where in these two steps is timing.
+An accepted run's SDK watermarks in steps 7–8 are therefore left out of the comparison (review r4611631438).
+
 The second shape is rewritten into the first. The effect block moves to step 8 on the reconnect's subscription,
 and the snapshot is restored to N at the earlier revision. The two command-id aliases that first-appearance order
 swaps are swapped back. **Anything else fails the run and is left unchanged**: two effects, a bump other than +1,
