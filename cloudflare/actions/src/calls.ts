@@ -513,14 +513,20 @@ export class ActionCalls {
     }
     let after = "";
     for (;;) {
-      const page = this.exec(`SELECT id, status, owner, locked_at, dispatched_at, dispatch_count FROM ${RUNS} WHERE state = 'live' AND id > ? AND NOT EXISTS (SELECT 1 FROM ${INPUTS} i WHERE i.id=${RUNS}.id AND i.blocked IS NOT NULL) ORDER BY id LIMIT ${PAGE}`, after) as unknown as Run[];
+      const page = this.exec(`SELECT id, status, owner, attempts, locked_at, dispatched_at, dispatch_count FROM ${RUNS} WHERE state = 'live' AND id > ? AND NOT EXISTS (SELECT 1 FROM ${INPUTS} i WHERE i.id=${RUNS}.id AND i.blocked IS NOT NULL) ORDER BY id LIMIT ${PAGE}`, after) as unknown as Run[];
       const due = page.filter((run) => this.dueAt(run, now) <= now);
       // X13b: an inline runner answers before it records the completion, so a lapsed inline run may
       // already have answered and had its effects. It is never run again: it ends dead, and its error
       // reply is settled like any reply (the gateway answers `obsolete` when the answer was sent).
+      // Review r4617881959: ending an earlier run awaits its reply settlement, and a renewal can extend a
+      // later run meanwhile. Each run is re-read just before it is ended (no await in between) and ended only
+      // if it is still the same attempt with the same lease that was due: a renewed run is never ended.
       for (const run of due.filter(isInline)) {
+        const lease = this.leaseExpiry(run);
         const full = this.load(run.id);
-        if (full?.state === "live" && isInline(full)) { await this.kill(full, INLINE_LAPSED).catch(() => undefined); units++; }
+        if (!full || full.state !== "live" || !isInline(full) || full.attempts !== run.attempts || full.owner !== run.owner) continue;
+        if (this.leaseExpiry(full) !== lease || this.dueAt(full, this.clock()) > this.clock()) continue;
+        await this.kill(full, INLINE_LAPSED).catch(() => undefined); units++;
       }
       units += (await this.dispatchMany(due.filter((run) => !isInline(run)))).size;
       if (page.length < PAGE) break;

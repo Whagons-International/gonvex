@@ -104,6 +104,33 @@ describe("direct agent calls (ActionCalls)", () => {
     });
   });
 
+  it("X13b review r4617881959: a run renewed while the sweep settles an earlier one is not ended", async () => {
+    await withCalls(async (h, state) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const finished: CallFinished[] = [];
+      const calls = new ActionCalls({ storage: state.storage, projectId: "p", tenantId: "t",
+        dispatcher: { dispatch: async (job) => { h.jobs.push(job); } }, wake: () => undefined, clock: () => h.clock.now,
+        randomUUID: (() => { let n = 0; return () => `race-${++n}`; })(),
+        onFinished: async (f) => { await gate; finished.push(f); } });
+      const first = await calls.start({ session, path: "agent.turn", args: {} }, "inline:a");
+      const second = await calls.start({ session, path: "agent.turn", args: {} }, "inline:b");
+      h.clock.now += 300_001;
+      // Both are due. Ending the first waits on its reply settlement; the second's runner renews meanwhile.
+      const sweeping = calls.sweep();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await calls.renew({ v: 1, id: second.id, attempt: 1 })).toMatchObject({ ok: true });
+      release();
+      expect(await sweeping).toBe(1);
+      const states = Object.fromEntries(h.sql.exec<{ id: string; state: string }>(`SELECT id, state FROM ${RUNS}`).toArray().map((r) => [r.id, r.state]));
+      expect(states).toEqual({ [first.id]: "dead", [second.id]: "live" });
+      expect(finished.map((f) => f.id)).toEqual([first.id]);
+      // Its runner still owns it and completes it normally.
+      expect(await calls.complete({ v: 1, id: second.id, attempt: 1, value: '"ok"', inlineReply: true })).toMatchObject({ applied: true });
+      expect(h.jobs).toEqual([]);
+    });
+  });
+
   it("X13b a completion recorded after the answer is idempotent; the run is done and never lapses", async () => {
     await withCalls(async (h) => {
       const claim = await h.calls.start({ session, path: "agent.turn", args: {} }, "inline:a");
