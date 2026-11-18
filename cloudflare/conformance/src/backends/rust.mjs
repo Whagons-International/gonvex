@@ -16,6 +16,7 @@ import { existsSync, createWriteStream } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { startS3Stub } from '../s3-stub.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Backend } from '../backend.mjs';
 import { REPO } from '../paths.mjs';
@@ -73,6 +74,7 @@ export class RustBackend extends Backend {
     this.port ??= await freePort();
     this.httpUrl = `http://127.0.0.1:${this.port}`;
     this.wsUrl = `ws://127.0.0.1:${this.port}/ws`;
+    this.s3 ??= await startS3Stub();
     await this.spawn();
   }
 
@@ -93,6 +95,8 @@ export class RustBackend extends Backend {
         // step its own address. Only the harness (127.0.0.1) is trusted; sockets without the header use the peer.
         GONVEX_TRUSTED_PROXY_CIDRS: '127.0.0.1/32',
         GONVEX_CLIENT_IP_HEADER: 'cf-connecting-ip',
+        // `ctx.storage` like the assembly's R2: an in-harness S3 stub (src/s3-stub.mjs).
+        ...(this.s3 ? { S3_ENDPOINT: this.s3.endpoint, S3_BUCKET: 'conformance', S3_REGION: 'us-east-1', S3_ACCESS_KEY_ID: 'conformance', S3_SECRET_ACCESS_KEY: 'conformance-secret', S3_FORCE_PATH_STYLE: 'true' } : {}),
         ...CONFORMANCE_SECRETS,
         ...firebaseEmulatorEnv(),
         ...(this.servicePrincipals ? { GONVEX_SERVICE_PRINCIPALS: this.servicePrincipals } : {}),
@@ -112,6 +116,11 @@ export class RustBackend extends Backend {
   }
 
   async stop() {
+    await this.stopProcess();
+    await this.s3?.close(); this.s3 = undefined;
+  }
+
+  async stopProcess() {
     if (!this.child || this.child.exitCode !== null || this.child.signalCode !== null) return;
     this.child.kill('SIGTERM');
     const done = await Promise.race([this.exited, delay(10_000).then(() => undefined)]);
@@ -130,8 +139,9 @@ export class RustBackend extends Backend {
   }
 
   async restart({ crash = false } = {}) {
+    // The object store outlives the process, as a real one would.
     if (crash) { this.child.kill('SIGKILL'); await this.exited; }
-    else await this.stop();
+    else await this.stopProcess();
     this.restarts++;
     await this.spawn();
   }
