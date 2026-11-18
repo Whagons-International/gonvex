@@ -1082,6 +1082,30 @@ describe("BUG-10 a live query's initial reply waits for room on a full channel",
     }, MODULE, true, undefined, 60_000);
   });
 
+  it("r4618344019: a deferred initial reply whose receipt is obsolete certifies nothing", { timeout: 120_000 }, async () => {
+    const state = {
+      hold: false, held: [] as Array<() => void>, recoveries: [] as string[],
+      receipt: (payload: ReplicaDelivery) => ({ v: 1, sockets: Object.keys(payload.sockets).length,
+        ...(payload.sockets.Q?.initialCompletions?.length ? { initialCompletions: { Q: payload.sockets.Q.initialCompletions.map((c) => ({ generation: c.request.generation, status: "obsolete" as const })) } } : {}) }) as ReplicaReceipt,
+    };
+    await withEngine(async (h) => {
+      await stuckH1(h, state);
+      const view = { ...socket("Q", {}, "h1"), queryId: "live", initialRequests: [{ kind: "query" as const, id: "live", path: "items.live", epoch: 0, generation: 1 }] };
+      await h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }));
+      expect(deferredOf(h, "h1")).toBeDefined();
+      state.hold = false;
+      state.held.splice(0).forEach((release) => release());
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "Q").some((f) => f.type === "query.result"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      for (let spin = 0; spin < 4000 && deferredOf(h, "h1"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // The holder said obsolete: no watermark may follow for Q, and its floor does not move.
+      expect(h.payloads.filter(([, p]) => p.sockets.Q && !p.sockets.Q.ops.length && p.sockets.Q.watermark !== undefined)).toEqual([]);
+      expect(h.engine.subscriptionFloor(view)).toBe(0);
+      expect(state.recoveries).toEqual([]);
+    }, MODULE, true, undefined, 60_000);
+  });
+
   it("r4618171096: a reused query id settles every superseded generation's initial request; a failed newer reply supersedes nothing", { timeout: 120_000 }, async () => {
     const state = {
       hold: false, held: [] as Array<() => void>, recoveries: [] as string[],

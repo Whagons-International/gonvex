@@ -226,9 +226,14 @@ interface HostBarrier { pending: boolean; retryAt: number; catchup: boolean; owe
  */
 interface Deferred {
   from: number; outbox: Array<{ payload: ReplicaDelivery; revision: number; query?: string; chars?: number }>; waiting: boolean; attempts: number; queryChars: number;
-  /** BUG-10 (r4617948603): certificates of deferred live-query replies, sent once the holder owes no commit before them. */
-  certificates: Map<string, { epoch: number; revision: number }>;
 }
+
+/**
+ * BUG-10 (r4617948603, r4618344019): the certificate of one deferred live-query reply. It is sent as a watermark only
+ * when both hold: the reply's own receipt showed initial progress (accepted completion, `enqueued`, same owner; an
+ * `obsolete` or refused receipt discards it), and the holder's deferral ended (no owed commit is behind it).
+ */
+interface DeferredCertificate { host: string; epoch: number; revision: number; confirmed: boolean; released: boolean }
 /**
  * BUG-10 (r4617948599): materialized live-query replies a deferred holder may keep waiting in its outbox, in characters
  * (one RPC payload's worth). At most one per query (a newer reply replaces a pending one); over this, the holder is
@@ -264,6 +269,8 @@ export class ReplicaDeliveryEngine {
   private readonly fencing = new Map<string, HostBarrier>();
   private readonly deferredQueries = new Map<string, DeferredQuery[]>();
   private readonly behind = new Map<string, Deferred>();
+  /** BUG-10: certificates of deferred live-query replies, by connection and initial generation. */
+  private readonly certificates = new Map<string, Map<number, DeferredCertificate>>();
   /** BUG-4b: stall ticks per holder (consecutive ticks with work and no completed RPC), and the completions seen. */
   private readonly watch = new Map<string, { ticks: number; seen: number }>();
   private ticker: unknown;
@@ -387,9 +394,11 @@ export class ReplicaDeliveryEngine {
     const settled = succeeded ? this.takeDeferredQuery(deferred, key, reply.work.initialScope?.generation) : [];
     // The certificate never travels ahead of commits the holder still owes (BUG-4): it is sent when the deferral ends.
     const { watermark: _ahead, ...work } = reply.work;
-    if (reply.certificate !== undefined) {
-      const previous = deferred.certificates.get(connection.id);
-      deferred.certificates.set(connection.id, { epoch: connection.epoch, revision: previous && previous.epoch === connection.epoch ? Math.min(previous.revision, reply.certificate) : reply.certificate });
+    const generation = reply.work.initialScope?.generation;
+    if (reply.certificate !== undefined && generation !== undefined) {
+      const own = this.certificates.get(connection.id) ?? new Map<number, DeferredCertificate>();
+      own.set(generation, { host, epoch: connection.epoch, revision: reply.certificate, confirmed: false, released: false });
+      this.certificates.set(connection.id, own);
     }
     const payload = this.socketPayload(connection, work), chars = payloadChars(payload);
     if (deferred.queryChars + chars > DEFERRED_QUERY_CHARS) {
@@ -608,6 +617,7 @@ export class ReplicaDeliveryEngine {
   }
 
   private drop(connection: Connection, clearLive = true): void {
+    this.certificates.delete(connection.id);
     for (const subscription of connection.subscriptions.values()) subscription.mask.clear();
     connection.subscriptions.clear();
     if (clearLive) this.options.live?.clear(connection.id);
@@ -698,7 +708,7 @@ export class ReplicaDeliveryEngine {
   private defer(host: string, from: number): Deferred {
     let deferred = this.behind.get(host);
     if (!deferred) {
-      deferred = { from, outbox: [], waiting: false, attempts: 0, queryChars: 0, certificates: new Map() };
+      deferred = { from, outbox: [], waiting: false, attempts: 0, queryChars: 0 };
       this.behind.set(host, deferred);
       this.startTicker();
     }
@@ -831,13 +841,36 @@ export class ReplicaDeliveryEngine {
    * receipt exactly as for an immediate reply. (A catch-up that already certified the socket further makes it a no-op.)
    */
   private certify(host: string, deferred: Deferred): void {
-    for (const [id, certificate] of deferred.certificates) {
-      const connection = this.connections.get(id);
-      if (!connection || connection.host !== host || connection.epoch !== certificate.epoch) continue;
-      if ((this.accepted.get(id) ?? 0) >= certificate.revision || certificate.revision > deferred.from) continue;
-      this.post(connection, { ops: [], watermark: certificate.revision });
+    for (const [id, own] of this.certificates) for (const [generation, certificate] of own) {
+      if (certificate.host !== host || certificate.released) continue;
+      if (certificate.revision > deferred.from) { own.delete(generation); continue; }
+      certificate.released = true;
+      if (certificate.confirmed) this.sendCertificate(id, generation);
     }
-    deferred.certificates.clear();
+  }
+
+  /** r4618344019: the reply's own receipt decides; only an accepted, enqueued initial completion confirms it. */
+  private settleCertificate(id: string, generation: number, progress: boolean): void {
+    const certificate = this.certificates.get(id)?.get(generation);
+    if (!certificate) return;
+    if (!progress) { this.forgetCertificate(id, generation); return; }
+    certificate.confirmed = true;
+    if (certificate.released) this.sendCertificate(id, generation);
+  }
+
+  private sendCertificate(id: string, generation: number): void {
+    const certificate = this.certificates.get(id)?.get(generation);
+    this.forgetCertificate(id, generation);
+    const connection = this.connections.get(id);
+    if (!certificate || !connection || connection.host !== certificate.host || connection.epoch !== certificate.epoch) return;
+    if ((this.accepted.get(id) ?? 0) >= certificate.revision || this.paused(connection.host)) return;
+    this.post(connection, { ops: [], watermark: certificate.revision });
+  }
+
+  private forgetCertificate(id: string, generation: number): void {
+    const own = this.certificates.get(id);
+    own?.delete(generation);
+    if (own && !own.size) this.certificates.delete(id);
   }
 
   /** Appends `payload` to a deferred holder's outbox in parts under the RPC cap; the revision rides the last part. */
@@ -1384,6 +1417,7 @@ export class ReplicaDeliveryEngine {
         if (!progress) {
           const {watermark:_watermark,...without}=work; sockets[id]=without; initialProgress=false;
         }
+        for (const completion of work.initialCompletions!) this.settleCertificate(id, completion.request.generation, progress);
       }
       // No obsolete/refused completion may donate its watermark to another
       // accepted completion in a mixed/split initial payload.
