@@ -41,3 +41,13 @@ test('X13d a changed Action bundle file does not match the artifact hash',async(
  const tampered=await prepare({[ACTION_BUNDLE_FILE]:b64(actionOnly)},true);
  assert.equal(tampered.result.ok,false);
 });
+
+test('X13d review r4620859237: a correctly hashed but undecodable Action bundle is a 422 invalid artifact, and nothing is written',async()=>{
+ for(const bad of ['%','//4=',42]){
+  const out=await prepare({[ACTION_BUNDLE_FILE]:bad});
+  assert.equal(out.result.ok,false,JSON.stringify(out.result));
+  assert.equal(out.result.status,422);
+  assert.match(out.result.error,/invalid module artifact: actions\/bundle\.js/);
+  assert.equal(out.actions,undefined);assert.equal(out.app,undefined);
+ }
+});
