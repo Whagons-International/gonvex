@@ -123,3 +123,18 @@ it('checksums, pages and completes a 100-column serving import with exact values
  });
  expect((await call('check')).status).toBe(200);expect((await call('verify',{checksums})).status).toBe(200);expect((await call('complete')).status).toBe(200);
 });
+
+it('wipes an object whose empty files schema was created while the gate was off, not one with rows (X10, devcopy-stg1117-12x)', async () => {
+ const tenant='devcopy-files-schema', settings={...config,GONVEX_DEV_TRANSFER_TENANTS:tenant};
+ const call=async(op:string,body:unknown={})=>{const r=(await handleTenantTransfer(request(tenant,op,body),{...settings,TENANT:env.TENANT}))!;return {status:r.status,body:await r.json() as Record<string,unknown>};};
+ const { FILES_SCHEMA } = await import('../../files/schema');
+ await runInDurableObject(env.TENANT.getByName(tenant),async(_instance,state)=>{
+  // What the constructor runs when the gate does not admit the name (tenant.ts: files.ensureSchema()).
+  state.storage.transactionSync(()=>{for(const statement of FILES_SCHEMA)state.storage.sql.exec(statement);});
+  expect(state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_schema WHERE type='table' AND name='_gonvex_storage_uploads'").one().n).toBe(1);
+  state.storage.sql.exec("INSERT INTO _gonvex_storage_uploads(object_key) VALUES('k')");
+ });
+ expect(await call('wipe')).toEqual({status:409,body:{error:'tenant storage is not empty'}});
+ await runInDurableObject(env.TENANT.getByName(tenant),async(_instance,state)=>{state.storage.sql.exec('DELETE FROM _gonvex_storage_uploads');});
+ expect(await call('wipe')).toEqual({status:200,body:{wiped:true}});
+});

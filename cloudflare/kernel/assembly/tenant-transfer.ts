@@ -5,6 +5,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { TenantTransfer } from '../../tools/tenant-transfer/src/transport.mjs';
 
 export const IMPORT_KEY = 'assembly/tenant-import';
+/** `_gonvex_files` and `_gonvex_storage_uploads` (files/schema.ts), the ticket table, local workerd's name table. */
+const SELF_CREATED = new Set(['_gonvex_files', '_gonvex_storage_uploads', '_gonvex_storage_tickets', '__miniflare_do_name']);
 export interface TransferEnv {
   GONVEX_DEV_TRANSFER_TARGET?: string;
   GONVEX_DEV_TRANSFER_TOKEN?: string;
@@ -48,7 +50,9 @@ export async function transferIntoTenant(ctx: DurableObjectState, request: Reque
     // First use is permitted only on a fresh serving object. A partial import may be restarted.
     if (!state) {
       const tables = ctx.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'").toArray();
-      if (tables.some(({ name }) => !['_gonvex_files', '_gonvex_storage_tickets', '__miniflare_do_name'].includes(name))) {
+      // Tables an object may create for itself before any import: the files schema (an instance constructed while
+      // the gate was off runs it), the ticket table, local workerd's name table. They must still be empty below.
+      if (tables.some(({ name }) => !SELF_CREATED.has(name))) {
         return Response.json({ error: 'tenant storage is not fresh' }, { status: 409 });
       }
       for (const { name } of tables.filter(({ name }) => name !== '__miniflare_do_name')) {
