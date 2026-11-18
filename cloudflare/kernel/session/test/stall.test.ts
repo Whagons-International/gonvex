@@ -22,7 +22,7 @@ function fixture() {
   const timers: Array<{ at: number; fn: () => void; cancelled: boolean }> = [];
   let tenantAnswers = true;
   const dispatched: string[] = [];
-  const held: Array<() => void> = [];
+  const held: Array<(override?: string[]) => void> = [];
   let hold = false;
   const ports: Ports = {
     control: {
@@ -40,7 +40,7 @@ function fixture() {
         const id = (frame as { id: string }).id;
         dispatched.push(id);
         const reply = [JSON.stringify({ type: "reducer.result", id, result: null })];
-        if (hold) return new Promise<string[]>((resolve) => { held.push(() => resolve(reply)); });
+        if (hold) return new Promise<string[]>((resolve) => { held.push((override) => resolve(override ?? reply)); });
         return tenantAnswers ? Promise.resolve(reply) : new Promise<string[]>(() => {});
       },
       connectionReset: async () => {},
@@ -179,4 +179,27 @@ describe("X07 BUG-5 a socket never goes silent across a publication", () => {
     await Promise.all(inflight);
     expect(f.session.pendingStallHandlers()).toBe(0);
   });
+
+  for (const resumes of [true, false]) {
+    it(`review r4608249098: an Action reply waiting on a stalled socket settles (dispatch ${resumes ? "completes after" : "never completes after"} the close)`, async () => {
+      const f = fixture();
+      await f.auth("login");
+      f.holdTenant();
+      const call = f.session.receive(JSON.stringify({ type: "action.call", id: "act", path: "tasks.generate", args: {} }));
+      await f.tick();
+      expect(f.dispatched).toEqual(["act"]);
+      // The tenant's Action finishes and its reply RPC reaches this socket while the dispatch is still held.
+      const generation = f.session.record.actionGenerations?.act;
+      const reply = f.session.actionFinished("act", "tasks.generate", f.session.record.subscriptionEpoch ?? 0,
+        JSON.stringify({ type: "action.result", id: "act", result: null }), generation);
+      await f.tick();
+      f.advance(LIMITS.stallMs);
+      expect(f.closes).toEqual([CLOSE.stalled]);
+      if (resumes) f.held.shift()!([]);
+      await f.tick();
+      expect(await f.settled(reply)).toBe(true);
+      await expect(reply).resolves.toBe("obsolete");
+      expect(await f.settled(call)).toBe(true);
+    });
+  }
 });

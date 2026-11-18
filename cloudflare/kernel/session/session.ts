@@ -541,7 +541,8 @@ export class Session {
         if (tenant) {
           if(!this.prepareAction(frame.id, frame.path))return;
           const replies = await this.forward(this.ports.tenants.dispatch({ ...this.view(), actionGeneration: this.record.actionGenerations?.[frame.id] }, frame));
-          if (this.closed) return;
+          // Review r4608249098: no early return here. `finishAction` starts no port call and must run
+          // on a closed socket too: it settles the waiter that a pending `actionFinished()` awaits.
           await this.finishAction(frame.id, replies.length > 0);
           return;
         }
@@ -1527,7 +1528,9 @@ export class Session {
   }
 
   close(frame: CloseFrame): void {
-    for (const waiter of this.actionWaiters.values()) waiter.resolve(null);
+    // A closed socket settles every Action waiter, even one whose dispatch was abandoned by a stall
+    // and never resumes (review r4608249098): a waiting `actionFinished()` then answers "obsolete".
+    for (const waiter of this.actionWaiters.values()) { waiter.resolve(null); waiter.done(); }
     if (this.closed) return;
     if (this.delivery.batcher.hasOpen) this.delivery.batcher.flush();
     this.resetSubscriptions(this.record.tenant);
@@ -1541,7 +1544,9 @@ export class Session {
 
   /** The peer closed or the socket failed. Resolves once presence has been told (K14). */
   closedByPeer(): Promise<void> {
-    for (const waiter of this.actionWaiters.values()) waiter.resolve(null);
+    // A closed socket settles every Action waiter, even one whose dispatch was abandoned by a stall
+    // and never resumes (review r4608249098): a waiting `actionFinished()` then answers "obsolete".
+    for (const waiter of this.actionWaiters.values()) { waiter.resolve(null); waiter.done(); }
     if (this.closed) return Promise.resolve();
     this.resetSubscriptions(this.record.tenant);
     this.closed = true;
