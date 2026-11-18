@@ -33,6 +33,17 @@ export function accountApi(credentials) {
   };
 }
 
+/**
+ * 0022 §5b / 0089: CPU limit of the script that hosts tenant objects. It is the only stop for a
+ * synchronous runaway Reducer (workerd cannot interrupt same-isolate JS). Above it, the reset
+ * comes after the conformance wait and the in-flight caller sees a text it must not map.
+ */
+export const TENANT_CPU_LIMIT_MS = 5000;
+export function assertTenantCpuLimit(config) {
+  if (config.limits?.cpu_ms !== TENANT_CPU_LIMIT_MS) throw new Error(`tenant runtime limits.cpu_ms must be ${TENANT_CPU_LIMIT_MS} (0022 §5b, 0089), found ${config.limits?.cpu_ms}`);
+  return config;
+}
+
 export async function servingConfigs(name, directory, { kernelUrl, images = {} } = {}) {
   developmentName(name); await mkdir(directory, { recursive: true, mode: 0o700 });
   const configs = {};
@@ -55,6 +66,7 @@ export async function servingConfigs(name, directory, { kernelUrl, images = {} }
     if (kind === 'builder') Object.assign(config.vars, { GONVEX_KERNEL_SCRIPT: name, GONVEX_KERNEL_URL: kernelUrl });
     configs[kind] = { config, path: join(directory, `${kind}.json`) };
   }
+  assertTenantCpuLimit(configs.runtime.config);
   for (const { config, path } of Object.values(configs)) await writeFile(path, JSON.stringify(config), { mode: 0o600 });
   const bootstrap = { ...configs.kernel.config, services: [], workflows: [], durable_objects: {...configs.kernel.config.durable_objects,bindings:configs.kernel.config.durable_objects.bindings.filter(b=>b.name!=='TENANT')} };
   configs.bootstrap = { config: bootstrap, path: join(directory, 'bootstrap.json') };
