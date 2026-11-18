@@ -20,6 +20,8 @@ export class CloudflareAssemblyBackend extends RustBackend {
     } else {
       this.runtime = await startLocalAssembly({ state: this.workDir, port: this.port, placement: process.env.GONVEX_ASSEMBLY_PLACEMENT ?? 'automatic', vars: {
         GONVEX_ADMIN_KEY: this.adminKey, ...CONFORMANCE_SECRETS, ...firebaseEmulatorEnv(),
+        // `ctx.storage` on local R2, as the deployed assembly and the Rust reference's S3 stub have storage.
+        GONVEX_STORAGE_SECRET: 'conformance-local-storage-secret', GONVEX_STORAGE_BUCKET: 'conformance',
         ...(this.servicePrincipals ? { GONVEX_SERVICE_PRINCIPALS: this.servicePrincipals } : {}),
       } });
       this.httpUrl = this.runtime.url;
