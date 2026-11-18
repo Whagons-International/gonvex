@@ -140,6 +140,26 @@ describe("projects, keys, members, env", () => {
     expect((await call("GET", "/dev/projects")).body.projects.some((p: { id: string }) => p.id === id)).toBe(false);
   });
 
+  it("deleting a project retires its active release: the catalog omits it and its manifest is gone", async () => {
+    await useBuilder();
+    const kept = await createProject("kept-project"), gone = await createProject("deleted-project");
+    for (const p of [kept, gone]) expect((await sync(p.id, await manifest(p.id), p.key)).status).toBe(200);
+    const active = async () => (await runInDurableObject(control(), async (instance: OperatorControlObject) => instance.sql.all("SELECT project_id FROM gonvex_cf_active_releases ORDER BY project_id"))).map((r) => String(r.project_id));
+    expect(await active()).toEqual(expect.arrayContaining([kept.id, gone.id]));
+    expect((await call("GET", `/dev/manifest?project=${gone.id}`)).status).toBe(200);
+    expect((await call("DELETE", `/dev/projects/${gone.id}`)).body).toEqual({ ok: true });
+    expect(await active()).toContain(kept.id);
+    expect(await active()).not.toContain(gone.id);
+    expect((await call("GET", `/dev/manifest?project=${gone.id}`)).status).toBe(404);
+    expect(await sql("SELECT state FROM gonvex_cf_releases WHERE project_id=$1", gone.id)).toEqual([{ state: "retired" }]);
+    expect(await sql("SELECT count(*) AS n FROM gonvex_runtime_manifests WHERE project_id=$1", gone.id)).toEqual([{ n: 0 }]);
+    // The next publication's catalog no longer carries the deleted project.
+    const next = await createProject("after-delete");
+    expect((await sync(next.id, await manifest(next.id), next.key)).status).toBe(200);
+    const topology = await runInDurableObject(control(), async (instance: OperatorControlObject) => instance.runtimeTopology("status"));
+    expect((topology as { releases: { project: string }[] }).releases.map((r) => r.project)).not.toContain(gone.id);
+  });
+
   it("env: the project key reads and writes; dotenv replace; names validated", async () => {
     const project = await createProject("env-project");
     const asKey = { token: project.key };

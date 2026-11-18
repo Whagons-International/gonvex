@@ -487,10 +487,19 @@ const deleteProject: Handler = async (op, request, _url, [project]) => {
   const row = op.ctx.sql.get("SELECT runtime_created FROM gonvex_runtime_projects WHERE id=$1 AND status NOT IN('deleted','disabled')", project);
   if (!row) return error(422, dbError.projectNotFound(project!));
   if (!bool(row.runtime_created)) return error(422, dbError.protocol("only runtime-created projects may be deleted through this operation"));
+  // A publication still in flight would re-activate the project's release after it is retired below.
+  if (op.ctx.sql.value("SELECT 1 FROM gonvex_cf_syncs WHERE project_id=$1 AND state IN('running','publishing')", project) !== undefined)
+    return error(409, "a /dev/sync of this project is still running; finish or abort its publication first");
   const tenants = op.ctx.sql.all("SELECT tenant_id FROM gonvex_runtime_tenants WHERE project_id=$1 AND runtime_created=1 AND database_url<>''", project).map((t) => str(t.tenant_id));
   op.ctx.sql.tx(() => op.ctx.sql.run(`UPDATE gonvex_runtime_projects SET status='deleting',updated_at=${NOW} WHERE id=$1`, project));
   for (const tenant of tenants) await op.deleteTenantStorage(tenant);
-  op.ctx.sql.tx(() => op.ctx.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'", project));
+  op.ctx.sql.tx(() => {
+    op.ctx.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'", project);
+    // Retire its active release: the next publication's Worker catalog omits it and its manifest is no longer served.
+    op.ctx.sql.run("UPDATE gonvex_cf_releases SET state='retired' WHERE project_id=$1 AND state='active'", project);
+    op.ctx.sql.run("DELETE FROM gonvex_cf_active_releases WHERE project_id=$1", project);
+    op.ctx.sql.run("DELETE FROM gonvex_runtime_manifests WHERE project_id=$1", project);
+  });
   return json({ ok: true });
 };
 
