@@ -11,7 +11,11 @@ import { postDevSync } from '../../../../packages/gonvex/src/sync-request.ts';
 import { registerAddressHeaders } from '../client-address.mjs';
 export class CloudflareAssemblyBackend extends RustBackend {
   constructor(options) { super({ ...options, binary: process.execPath }); }
-  get capabilities() { return { ...super.capabilities, orphanReveal: true, tenantRestart: true, receiptExpiry: true }; }
+  get capabilities() {
+    // 0062: one telemetry holder only under the verified static placement (captureEvidence checks gw-0).
+    const oneHolder = process.env.GONVEX_ASSEMBLY_PLACEMENT === 'static-one-holder';
+    return { ...super.capabilities, orphanReveal: true, tenantRestart: true, receiptExpiry: true, singleTelemetryHolder: oneHolder, multiHolderTelemetry: !oneHolder };
+  }
   async start() {
     if (process.env.GONVEX_ASSEMBLY_URL) {
       this.httpUrl = process.env.GONVEX_ASSEMBLY_URL.replace(/\/$/, '');

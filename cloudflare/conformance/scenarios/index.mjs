@@ -41,6 +41,7 @@ import publicLimits from './public-limits.mjs';
 import publicCalls from './public-calls.mjs';
 import bridgeUpstream from './bridge-upstream.mjs';
 import errorTelemetry from './error-telemetry.mjs';
+import errorTelemetryHolders from './error-telemetry-holders.mjs';
 
 export const SCENARIOS = [
   thinSdkParity,
@@ -88,6 +89,7 @@ export const SCENARIOS = [
   publicCalls,
   // K15: error.* acks, envelope limits, rate limits, performance events and the error-triage routes.
   errorTelemetry,
+  errorTelemetryHolders,
   // Restarts the backend: keep last so a failure cannot disturb the others.
   receiptCrash,
 ];
