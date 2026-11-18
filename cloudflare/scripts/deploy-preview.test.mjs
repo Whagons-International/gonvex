@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { previewName } from "./deploy-preview.mjs";
-import { servingConfigs, developmentName } from "../kernel/assembly/deploy.mjs";
+import { servingConfigs, developmentName, TENANT_CPU_LIMIT_MS, assertTenantCpuLimit } from "../kernel/assembly/deploy.mjs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +37,9 @@ test("composes every development service, bucket, workflow and queue under one i
       for (const bucket of config.r2_buckets ?? []) assert.equal(bucket.bucket_name, `${name}-${bucket.binding.toLowerCase()}`);
     }
     assert.equal(configs.kernel.config.limits.cpu_ms, 30000);
+    // 0089: tenant objects live in the runtime script; its CPU limit is what stops `errors.spin`.
+    assert.equal(configs.runtime.config.limits.cpu_ms, TENANT_CPU_LIMIT_MS);
+    assert.equal(TENANT_CPU_LIMIT_MS, 30000);
     // Publication must reach the newly serving Worker through public ingress,
     // including after the builder deploys from this same source configuration.
     for (const kind of ['kernel', 'bootstrap']) {
@@ -50,4 +53,11 @@ test("composes every development service, bucket, workflow and queue under one i
     assert.equal(configs.builder.config.vars.GONVEX_KERNEL_SCRIPT, name);
     assert.throws(() => developmentName('production'));
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("refuses a tenant runtime CPU limit other than the pinned value (0089)", () => {
+  for (const cpu_ms of [5000, 300000, undefined]) {
+    assert.throws(() => assertTenantCpuLimit({ limits: cpu_ms === undefined ? undefined : { cpu_ms } }), /limits\.cpu_ms must be 30000/);
+  }
+  assert.doesNotThrow(() => assertTenantCpuLimit({ limits: { cpu_ms: 30000 } }));
 });
