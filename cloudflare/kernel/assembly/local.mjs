@@ -14,6 +14,11 @@ export const freePort = () => new Promise((ok, fail) => {
   const server = createServer(); server.unref(); server.on('error', fail);
   server.listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => ok(port)); });
 });
+/** The end of a child's log, for the error (CI keeps no state directory). */
+const tail = async (path, lines = 40) => {
+  await delay(200); // the pipe may still be flushing
+  try { return `\n--- last ${lines} lines of ${path} ---\n${(await readFile(path, 'utf8')).split('\n').slice(-lines).join('\n')}`; } catch { return ''; }
+};
 const load = async (path) => JSON.parse((await readFile(path, 'utf8')).replace(/^\s*\/\/.*$/gm, ''));
 export async function startLocalAssembly({ state, port, vars = {}, deferMs = 1500, placement = "automatic" } = {}) {
   if (!state) throw new Error('an owned state directory is required');
@@ -73,8 +78,8 @@ export async function startLocalAssembly({ state, port, vars = {}, deferMs = 150
     const deadline = Date.now() + 60_000;
     for (;;) {
       if(childError)throw childError;
-      if (worker.exitCode !== null) throw new Error(`workerd exited ${worker.exitCode}; see ${join(state, 'workerd.log')}`);
-      if (builder.exitCode !== null) throw new Error(`builder exited ${builder.exitCode}; see ${join(state, 'builder.log')}`);
+      if (worker.exitCode !== null) throw new Error(`workerd exited ${worker.exitCode}; see ${join(state, 'workerd.log')}${await tail(join(state, 'workerd.log'))}`);
+      if (builder.exitCode !== null) throw new Error(`builder exited ${builder.exitCode}; see ${join(state, 'builder.log')}${await tail(join(state, 'builder.log'))}`);
       try { if ((await fetch(`${url}/healthz`)).ok&&(await fetch(`http://127.0.0.1:${builderPort}/healthz`)).ok) break; } catch {}
       if (Date.now() > deadline) throw new Error(`assembly did not become healthy; see ${join(state, 'workerd.log')}`);
       await delay(100);
