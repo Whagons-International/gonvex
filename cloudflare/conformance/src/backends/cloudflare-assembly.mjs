@@ -42,9 +42,28 @@ export class CloudflareAssemblyBackend extends RustBackend {
       if (holders.placement !== 'static' || holders.holders.length !== 1 || holders.holders[0].holder !== 'gw-0') throw new Error('canonical telemetry did not use exactly the actual static gw-0 holder');
     }
   }
-  async restart() {
-    if (process.env.GONVEX_ASSEMBLY_URL) throw new Error('remote assembly restart must deploy a recorded real Worker version');
-    await this.stop(); this.restarts++; await this.start();
+  async createProject(name) { const r = await super.createProject(name); this.scenarioProject = r.projectId; this.scenarioTenants = []; return r; }
+  async createTenant(project, tenantId, name) { const r = await super.createTenant(project, tenantId, name); if (project === this.scenarioProject) this.scenarioTenants.push(tenantId); return r; }
+  /**
+   * Rust restarts its process (`crash` = SIGKILL). On a deployed Worker the same observable restart is the
+   * dev/test fixture abort (X03): every gateway holder with a socket of the scenario's project and every one of
+   * its tenants is reset. Sockets drop abruptly, nothing in memory survives, durable storage stays.
+   */
+  async restart({ crash = false } = {}) {
+    if (!process.env.GONVEX_ASSEMBLY_URL) { await this.stop(); this.restarts++; await this.start(); return; }
+    const project = this.scenarioProject;
+    if (!project) throw new Error('remote assembly restart needs the scenario project');
+    const { holders } = await this.inspectHolders(project);
+    for (const { holder } of holders) await this.request('POST', '/__assembly/gateway-restart', { body: { holder } });
+    for (const tenant of this.scenarioTenants ?? []) await this.restartTenant(project, tenant);
+    this.restarts++;
+    this.lastRestart = { crash, holders: holders.length, tenants: this.scenarioTenants?.length ?? 0 };
+  }
+  /** Rust and local workerd restart with the new `GONVEX_SERVICE_PRINCIPALS`; a deployed Worker takes the dev/test fixture override, then restarts. */
+  async configureServicePrincipals(principals) {
+    if (!process.env.GONVEX_ASSEMBLY_URL) return super.configureServicePrincipals(principals);
+    await this.request('POST', '/__assembly/service-principals', { body: { principals: JSON.stringify(principals) } });
+    await this.restart();
   }
   async deploy(project, manifest) {
     const reply = await postDevSync(this.httpUrl + '/dev/sync', {headers:{authorization:`Bearer ${this.keys.get(project)}`,'content-type':'application/json','x-gonvex-project-id':project},body:JSON.stringify({...manifest,project})});

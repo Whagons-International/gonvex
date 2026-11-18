@@ -41,7 +41,7 @@ import { handleNativeAuth } from "./native-auth";
 import { ServiceError, serviceControlCall } from "./service";
 import { Sql } from "./sql";
 import type { TenantPort } from "./tenant-port";
-import type { ControlConnection, Cost, Member, Outcome, ServiceGrant, TenantRoute } from "./types";
+import type { ControlConnection, Cost, Member, Outcome, ServiceGrant, ServicePrincipalConfig, TenantRoute } from "./types";
 import type { PerformanceRow, PreparedErrorEvent } from "../../kernel/telemetry/envelope";
 import { type ErrorSessionInput, TelemetryStore } from "../../kernel/telemetry/store";
 
@@ -50,6 +50,8 @@ export interface ControlEnv {
   TENANT: DurableObjectNamespace;
   GONVEX_DASHBOARD_SESSION_SECRET?: string;
   GONVEX_SERVICE_PRINCIPALS?: string;
+  /** Dev/test only: enables fixture-only operator hooks (service-principal override). */
+  GONVEX_ASSEMBLY_FIXTURE_KEY?: string;
   GONVEX_AUTH_URL?: string;
   GONVEX_PUBLIC_URL?: string;
   GONVEX_GOOGLE_CLIENT_ID?: string;
@@ -85,6 +87,15 @@ const loopback = (host: string | undefined): boolean => {
   return name === "127.0.0.1" || name === "::1" || name === "localhost";
 };
 
+/** X03, dev/test only: conformance's `configureServicePrincipals` on a deployed Worker (no redeploy). */
+export const FIXTURE_PRINCIPALS_KEY = "fixture/service-principals";
+/** The environment's principals plus the fixture's; a fixture entry replaces an environment entry with its id. */
+export function withFixturePrincipals(base: ServicePrincipalConfig[], fixture: string | undefined): ServicePrincipalConfig[] {
+  if (!fixture) return base;
+  const extra = parseServicePrincipals(fixture), ids = new Set(extra.map((p) => p.id));
+  return [...base.filter((p) => !ids.has(p.id)), ...extra];
+}
+
 export function configFromEnv(env: ControlEnv): ControlConfig {
   const test = env.GONVEX_ENV === "test";
   return {
@@ -115,10 +126,20 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
     super(state, env);
     this.sql = new Sql(state.storage);
     this.config = configFromEnv(env);
+    if (env.GONVEX_ASSEMBLY_FIXTURE_KEY) this.config.servicePrincipals = withFixturePrincipals(this.config.servicePrincipals, state.storage.kv.get<string>(FIXTURE_PRINCIPALS_KEY));
     state.blockConcurrencyWhile(async () => {
       this.sql.script(schema);
       if ((await state.storage.getAlarm()) === null) await state.storage.setAlarm(Date.now() + PRUNE_EVERY_MS);
     });
+  }
+
+  /** X03 dev/test fixture: replace the fixture service principals (validated like the environment's) and apply them now. */
+  async fixtureServicePrincipals(principals: string): Promise<{ count: number } | { error: string }> {
+    if (!(this.env as ControlEnv).GONVEX_ASSEMBLY_FIXTURE_KEY) return { error: "assembly fixture control disabled" };
+    try { parseServicePrincipals(principals); } catch (error) { return { error: (error as Error).message }; }
+    this.ctx.storage.kv.put(FIXTURE_PRINCIPALS_KEY, principals);
+    this.config.servicePrincipals = withFixturePrincipals(configFromEnv(this.env as ControlEnv).servicePrincipals, principals);
+    return { count: this.config.servicePrincipals.length };
   }
 
   /** K15: error envelopes, performance events and their retention (created on first use). */

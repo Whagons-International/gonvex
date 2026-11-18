@@ -97,6 +97,12 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
   async presenceChanged(projectId: string): Promise<void> {
     this.ctx.waitUntil(Promise.all([...this.host.sessions.values()].map((session) => session.controlChanged(projectId, "presence-change"))));
   }
+  /** X03 dev/test fixture: a backend restart for conformance on a deployed Worker (Rust: process restart).
+   * Aborts this holder: every socket drops abruptly and nothing in memory survives; storage stays. */
+  async fixtureRestart(): Promise<void> {
+    if (!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY) throw new Error("assembly fixture control disabled");
+    this.ctx.abort("assembly fixture: gateway restart");
+  }
   /** Private dev evidence only: actual holders and windows, never auth tokens,
    * Member permissions, recovery metadata or an alternative telemetry handler. */
   async fixtureTelemetry(projectId: string) {
