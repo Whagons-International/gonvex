@@ -88,6 +88,17 @@ class RecordingWebSocket extends NativeWebSocket {
 }
 globalThis.WebSocket = RecordingWebSocket;
 
+/** A `ws` client socket recorded like `RecordingWebSocket` (same tag and socket numbering). */
+async function frameRecordingSocket(url, tag, rec) {
+  const { default: WsClient } = await import('ws');
+  const ws = new WsClient(url);
+  const socket = rec?.next(tag) ?? 0;
+  const send = ws.send.bind(ws);
+  ws.send = (data) => { rec?.push(tag, socket, 'out', data); return send(data); };
+  ws.addEventListener('message', (event) => rec?.push(tag, socket, 'in', event.data));
+  return ws;
+}
+
 function tagConnect(client, tag, recorder) {
   const connect = client.connect.bind(client);
   client.connect = (...args) => constructing(tag, recorder, () => connect(...args));
@@ -112,13 +123,25 @@ export function thinClient(wsUrl, tag, recorder, project, options = {}) {
  * unconsumed inbound frame that matches. Frames are recorded like any other.
  */
 export class RawSocket {
-  constructor(wsUrl, tag, recorder) {
+  /**
+   * `closeFrame: true` (contract-changes 0092): the socket also records the moment the server's close FRAME
+   * arrives, with its code and reason, as `closeFrame`. The WHATWG client (Node's built-in, as browsers)
+   * only reports a close EVENT once the connection is torn down, which Cloudflare can delay by seconds after
+   * the frame. Such sockets use the `ws` client, whose receiver reports the frame itself; frames are recorded
+   * exactly like every other socket's.
+   */
+  constructor(wsUrl, tag, recorder, { closeFrame = false } = {}) {
     this.url = wsUrl; this.tag = tag; this.recorder = recorder; this.inbox = []; this.waiters = []; this.closed = false;
+    this.wantsCloseFrame = closeFrame;
     /** `{ code, reason, at }` once the socket closed (the close frame the server sent, or 1006). */
     this.closeEvent = undefined;
+    /** `{ code, reason, at }` when the server's close frame arrived (`closeFrame` sockets only). */
+    this.closeFrame = undefined;
   }
   async open() {
-    this.ws = constructing(this.tag, this.recorder, () => new globalThis.WebSocket(this.url));
+    this.ws = this.wantsCloseFrame ? await frameRecordingSocket(this.url, this.tag, this.recorder)
+      : constructing(this.tag, this.recorder, () => new globalThis.WebSocket(this.url));
+    this.closeFrame = undefined;
     this.inbox = []; this.closed = false; this.closeEvent = undefined; this.openedAt = Date.now();
     this.ws.addEventListener('message', (e) => {
       let m; try { m = JSON.parse(String(e.data)); } catch { return; }
@@ -126,7 +149,19 @@ export class RawSocket {
     });
     this.ws.addEventListener('close', (e) => { this.closed = true; this.closeEvent = { code: e.code, reason: e.reason, at: Date.now() }; this.wake(); });
     await new Promise((resolve, reject) => { this.ws.addEventListener('open', resolve, { once: true }); this.ws.addEventListener('error', () => reject(new Error('raw socket failed to open')), { once: true }); });
+    if (this.wantsCloseFrame) {
+      // ws 8 parses the close frame in its receiver, which emits `conclude(code, reason)` before replying.
+      if (!this.ws._receiver) throw new Error('the ws client exposes no receiver: close-frame timing unavailable');
+      this.ws._receiver.once('conclude', (code, reason) => { this.closeFrame ??= { code, reason: String(reason), at: Date.now() }; this.wake(); });
+    }
     return this;
+  }
+  /** Resolves with `closeFrame` once the server's close frame arrived, or undefined after `timeoutMs`. */
+  async whenCloseFrame(timeoutMs = 15_000) {
+    if (!this.wantsCloseFrame) throw new Error('whenCloseFrame needs a socket opened with { closeFrame: true }');
+    const deadline = Date.now() + timeoutMs;
+    while (!this.closeFrame && Date.now() < deadline) await Promise.race([new Promise(r => this.waiters.push(r)), delay(Math.max(1, deadline - Date.now()))]);
+    return this.closeFrame;
   }
   wake() { const w = this.waiters.splice(0); w.forEach(f => f()); }
   send(frame) { this.ws.send(JSON.stringify(frame)); }
