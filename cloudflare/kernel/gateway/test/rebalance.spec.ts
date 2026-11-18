@@ -432,3 +432,28 @@ it("BUG-9 review: a holder adopts a re-pointed replacement for the drain it alre
   expect(stored).toMatchObject({ replacement: "auto-gw-26-2", replacementEpoch: 4 });
   expect(stored.nextAt).toBeGreaterThan(Date.now() + 5 * 60 * 60_000); // the grace is kept
 });
+
+it("BUG-9 review: a drain tick awaiting an RPC does not overwrite a replacement re-pointed meanwhile", async () => {
+  const holder = bindings.GATEWAY.getByName("auto-gw-26-9");
+  const inHolder = runInDurableObject as unknown as (stub: unknown, fn: (o: any, s: DurableObjectState) => Promise<unknown>) => Promise<unknown>;
+  const stored = await inHolder(holder, async (object, state) => {
+    await state.storage.put("autoscale-placement", { epoch: 9, cell: 26 });
+    // A drain that is due now (its grace is over), still pointing at the old replacement.
+    await state.storage.put("autoscale-drain", { v: 1, epoch: 9, replacement: "auto-gw-26-1", replacementEpoch: 3, notBefore: 0, nextAt: 0 });
+    await object.loadPlacement();
+    expect(object.draining?.replacement).toBe("auto-gw-26-1");
+    // The tick needs a held socket to keep the drain; model one without a client.
+    object.host.sessions.set({} as WebSocket, { record: {}, closed: false } as any);
+    const originalEnv = object.env;
+    Object.defineProperty(object, "env", { configurable: true, value: { ...originalEnv, GATEWAY_CONTROLLER: { getByName() { return {
+      // While the tick awaits the controller, the controller re-points this drain (its replacement drained).
+      async drainReady() { await object.drain({ v: 1, epoch: 9, replacement: "auto-gw-26-2", replacementEpoch: 4, notBefore: 0 }); return false; },
+      async observe() {},
+    }; } } } });
+    try { await object.drainTick(); }
+    finally { Object.defineProperty(object, "env", { configurable: true, value: originalEnv }); object.host.sessions.clear(); }
+    return { stored: await state.storage.get("autoscale-drain"), memory: object.draining };
+  }) as { stored: { replacement: string; replacementEpoch: number }; memory: { replacement: string } };
+  expect(stored.memory.replacement).toBe("auto-gw-26-2");
+  expect(stored.stored).toMatchObject({ replacement: "auto-gw-26-2", replacementEpoch: 4 });
+});

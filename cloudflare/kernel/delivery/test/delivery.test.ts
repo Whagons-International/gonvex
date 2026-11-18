@@ -21,7 +21,7 @@ import { SocketDelivery, type TrackedReplicas } from "../socket.ts";
 import { LiveQueries, snapshotRunner, kernelVisibility, moduleFromManifest } from "../../query/index";
 import { VisibilityRegistry } from "../../visibility";
 import { PAGE_BYTES, PAGE_ROWS } from "../subscription.ts";
-import { keepAliveGrace, KEEPALIVE_GRACE_MS, SubscriberKeepAlive, type KeepAliveClock } from "../keepalive.ts";
+import { keepAliveCheck, KEEPALIVE_CHECK_MS, SubscriberKeepAlive, type KeepAliveClock } from "../keepalive.ts";
 
 let objects = 0;
 
@@ -622,7 +622,7 @@ describe("BUG-2 a subscribed tenant stays in memory between a session's events",
     const { clock, advance } = manualClock();
     let keep: SubscriberKeepAlive | undefined;
     await withEngine(async ({ engine, payloads, commit }) => {
-      keep = new SubscriberKeepAlive(() => engine.holdsSubscriptions(), KEEPALIVE_GRACE_MS, clock);
+      keep = new SubscriberKeepAlive(() => engine.holdsSubscriptions(), KEEPALIVE_CHECK_MS, clock);
       await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
       for (const id of ["A", "B"]) engine.dispatch(socket(id, { batchFrames: true }), { type: "replica.open", id: `sub-${id}`, path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
       await engine.settled();
@@ -653,11 +653,38 @@ describe("BUG-2 a subscribed tenant stays in memory between a session's events",
     }, MODULE, false, () => keep?.touch());
   });
 
+  it("BUG-9 holds a subscribed tenant with no idle expiry: after 10 idle minutes an ordinary commit is still an incremental batch", async () => {
+    const { clock, advance } = manualClock();
+    let keep: SubscriberKeepAlive | undefined;
+    await withEngine(async ({ engine, payloads, commit }) => {
+      keep = new SubscriberKeepAlive(() => engine.holdsSubscriptions(), undefined, clock);
+      await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      for (const id of ["A", "B"]) engine.dispatch(socket(id, { batchFrames: true }), { type: "replica.open", id: `sub-${id}`, path: "items.all", args: {} , keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      const instance = engine.instance;
+      payloads.length = 0;
+      // -04, 2026-11-18 03:58:59Z: both clients idle well past the old 120 s grace, so the tenant hibernated
+      // and the next event reset every replica. No event reaches the engine for 10 minutes here.
+      for (let minute = 0; minute < 10; minute++) {
+        advance(60_000);
+        expect(keep.holding).toBe(true); // a timer stays pending: the platform cannot hibernate this tenant
+      }
+      await commit([["INSERT INTO items VALUES ('late', 50, 'from A')", []]]);
+      const [, payload] = payloads.find(([, p]) => p.sockets.B)!;
+      expect(payload.instance).toBe(instance);
+      expect(payload.sockets.B!.ops.map((op) => op[0])).toEqual(["i", "d", "r"]);
+      expect(engine.stats.resets).toBe(0);
+      for (const id of ["A", "B"]) engine.dispatch(socket(id, { batchFrames: true }), { type: "replica.close", id: `sub-${id}` });
+      await engine.settled();
+      expect(keep.holding).toBe(false); // released only when the last subscription goes
+    }, MODULE, false, () => keep?.touch());
+  });
+
   it("arms the keep-alive for a socket whose only subscription is a live query, once the query is installed", async () => {
     const { clock, advance } = manualClock();
     let keep: SubscriberKeepAlive | undefined;
     await withEngine(async ({ engine, live, commit }) => {
-      keep = new SubscriberKeepAlive(() => engine.holdsSubscriptions(), KEEPALIVE_GRACE_MS, clock);
+      keep = new SubscriberKeepAlive(() => engine.holdsSubscriptions(), KEEPALIVE_CHECK_MS, clock);
       await commit([["INSERT INTO items VALUES ('i1', 1, 'before')", []]]);
       expect(keep.holding).toBe(false); // nothing subscribed yet: the tenant may hibernate
       const view = { ...socket("live-only"), queryId: "live" } as SocketView;
@@ -674,30 +701,31 @@ describe("BUG-2 a subscribed tenant stays in memory between a session's events",
     }, MODULE, true, () => keep?.touch());
   });
 
-  it("lets a subscribed tenant hibernate after the grace with no event, and extends the grace on every event", () => {
+  it("holds while subscribed whatever the idle time, and releases only when the last subscription goes (BUG-9 decision)", () => {
     const { clock, advance } = manualClock();
     let subscribed = true;
     const keep = new SubscriberKeepAlive(() => subscribed, 60_000, clock);
     keep.touch();
-    advance(50_000); keep.touch();
-    advance(50_000);
-    expect(keep.holding).toBe(true); // 100 s after the first event, 50 s after the last
-    advance(10_001);
+    advance(24 * 60 * 60_000); // a day with no event
+    expect(keep.holding).toBe(true);
+    subscribed = false;
+    advance(60_000); // the next check finds no subscription and lets the tenant hibernate
     expect(keep.holding).toBe(false);
+    subscribed = true;
     keep.touch();
     expect(keep.holding).toBe(true);
     subscribed = false;
-    keep.touch();
+    keep.touch(); // an unsubscribe event releases at once
     expect(keep.holding).toBe(false);
     expect(new SubscriberKeepAlive(() => true, 0, clock).holding).toBe(false);
   });
 
-  it("reads GONVEX_TENANT_KEEPALIVE_MS", () => {
-    expect(keepAliveGrace(undefined)).toBe(KEEPALIVE_GRACE_MS);
-    expect(keepAliveGrace("0")).toBe(0);
-    expect(keepAliveGrace("30000")).toBe(30_000);
-    expect(keepAliveGrace("-1")).toBe(KEEPALIVE_GRACE_MS);
-    expect(keepAliveGrace("forever")).toBe(KEEPALIVE_GRACE_MS);
+  it("reads GONVEX_TENANT_KEEPALIVE_MS as the re-check period (0 disables)", () => {
+    expect(keepAliveCheck(undefined)).toBe(KEEPALIVE_CHECK_MS);
+    expect(keepAliveCheck("0")).toBe(0);
+    expect(keepAliveCheck("30000")).toBe(30_000);
+    expect(keepAliveCheck("-1")).toBe(KEEPALIVE_CHECK_MS);
+    expect(keepAliveCheck("forever")).toBe(KEEPALIVE_CHECK_MS);
   });
 });
 
