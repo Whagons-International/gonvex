@@ -60,6 +60,10 @@ export class CloudflareAssemblyBackend extends RustBackend {
       await delay(100);
     }
   }
+  /** cleanup.mjs: the ordinary dev delete path; it also deletes the project's runtime-created tenants. */
+  deleteProject(project) { return this.request('DELETE', `/dev/projects/${encodeURIComponent(project)}`); }
+  /** cleanup.mjs: the open whole-catalog deployment fence, or null. */
+  async openDeployment() { return (await this.request('GET', '/_gonvex/k19/topology')).deployment ?? null; }
   resetEpoch(_project, tenant, epoch) { return this.request('POST', '/__assembly/epoch', { body: { tenant, epoch } }); }
   restartTenant(_project, tenant) { return this.request('POST', '/__assembly/tenant-restart', { body: { tenant } }); }
   async readChangeLog(_project, tenant) {

@@ -94,4 +94,15 @@ export class Backend {
    * @returns {Promise<{ clock: { epoch: string, revision: number, retained_revision: number }, changes: object[], transactions: object[] }>}
    */
   async readChangeLog(project, tenantId) { throw new Error(`readChangeLog() not supported by ${this.name}`); }
+
+  /**
+   * Optional, for backends whose state outlives the run (a deployed Worker). Deletes a fixture project
+   * this run created, with its tenants, through the backend's ordinary dev delete path. The CLI calls it
+   * after the scenario's trace is complete; it is never compared (cleanup.mjs). Leave it undefined when
+   * the state is thrown away with the process.
+   */
+  // async deleteProject(project) {}
+
+  /** Optional, with deleteProject: the open deployment fence ({ id }) or null; cleanup waits for none. */
+  // async openDeployment() {}
 }
