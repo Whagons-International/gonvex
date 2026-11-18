@@ -32,6 +32,11 @@ export const CLIENT_CONTRACT = { version: 1, offlineMaxAgeMs: null };
 const QUIET_MS = 300;
 /** Default `ctx.until` limit. The mutation self-test lowers it to fail fast. */
 const UNTIL_MS = Number(process.env.GONVEX_CONFORMANCE_UNTIL_MS) || 15_000;
+/**
+ * The whole-scenario deadline. A hang (an await nothing can settle) fails that scenario with a clear error and the
+ * run continues, instead of stalling the suite with the lane lock held. The longest scenario takes about 3 min.
+ */
+export const SCENARIO_MS = Number(process.env.GONVEX_CONFORMANCE_SCENARIO_MS) || 10 * 60_000;
 const QUIET_MAX_MS = 5_000;
 
 /** Replaces backend-assigned identifiers with stable aliases, deep. */
@@ -56,7 +61,14 @@ class ExpectationError extends Error {}
  * @param {{ scenario: any, backend: import('./backend.mjs').Backend, fixtures: Record<number, any>, verbose?: boolean, created?: string[] }} options
  *   `created` receives every project id the run creates, even when setup then fails (see cleanup.mjs).
  */
-export async function runScenario({ scenario, backend, fixtures, verbose = false, created = [] }) {
+/** Settles like `work`, or rejects with `message()` once `ms` have passed (the work itself is not cancelled). */
+export async function withDeadline(work, ms, message) {
+  let timer;
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message())), ms); });
+  try { return await Promise.race([work, deadline]); } finally { clearTimeout(timer); }
+}
+
+export async function runScenario({ scenario, backend, fixtures, verbose = false, created = [], scenarioMs = SCENARIO_MS }) {
   const trace = { backend: backend.name, scenario: scenario.name, failures: [], steps: [], checksums: {} };
   const missing = (scenario.requires ?? []).filter(c => !backend.capabilities[c]);
   if (missing.length) { trace.skipped = `backend lacks ${missing.join(', ')}`; return trace; }
@@ -199,7 +211,8 @@ export async function runScenario({ scenario, backend, fixtures, verbose = false
 
   // ---- run ------------------------------------------------------------------
   try {
-    await scenario.run(ctx);
+    await withDeadline(scenario.run(ctx), scenarioMs,
+      () => `exceeded the ${scenarioMs} ms scenario deadline in step ${JSON.stringify(current?.name ?? '(setup)')} on ${backend.name}`);
   } catch (error) {
     trace.failures.push(`scenario aborted: ${error?.stack ?? error}`);
   } finally {

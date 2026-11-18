@@ -16,6 +16,8 @@
  */
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+/** How long a raw socket may take to open before the step fails. */
+const OPEN_MS = Number(process.env.GONVEX_CONFORMANCE_OPEN_MS) || 15_000;
 import { REPO } from './paths.mjs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -148,7 +150,15 @@ export class RawSocket {
       this.inbox.push(m); this.wake();
     });
     this.ws.addEventListener('close', (e) => { this.closed = true; this.closeEvent = { code: e.code, reason: e.reason, at: Date.now() }; this.wake(); });
-    await new Promise((resolve, reject) => { this.ws.addEventListener('open', resolve, { once: true }); this.ws.addEventListener('error', () => reject(new Error('raw socket failed to open')), { once: true }); });
+    // A socket can close before it opens without an `error` event; nothing then settles this wait and the
+    // socket is collected, so the run hung with no I/O left (run10, 2026-11-18). Close and a deadline settle it.
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { reject(new Error(`raw socket ${this.tag} did not open within ${OPEN_MS} ms`)); try { this.ws.close(); } catch {} }, OPEN_MS);
+      const settle = (f) => (...a) => { clearTimeout(timer); f(...a); };
+      this.ws.addEventListener('open', settle(resolve), { once: true });
+      this.ws.addEventListener('error', settle(() => reject(new Error('raw socket failed to open'))), { once: true });
+      this.ws.addEventListener('close', settle((e) => reject(new Error(`raw socket closed before opening (code ${e.code})`))), { once: true });
+    });
     if (this.wantsCloseFrame) {
       // ws 8 parses the close frame in its receiver, which emits `conclude(code, reason)` before replying.
       if (!this.ws._receiver) throw new Error('the ws client exposes no receiver: close-frame timing unavailable');
