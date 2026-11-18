@@ -5,4 +5,5 @@ export interface CatalogPort {
   ready(version:string):Promise<boolean>;
   identity():Promise<{version:string|null;worker:WorkerVersionMetadata|null;releases:Record<string,string>}>;
   tenantId(name:string):Promise<string>;
+  serving(version:string):Promise<{runtime:boolean;actions:boolean}>;
 }

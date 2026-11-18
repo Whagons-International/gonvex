@@ -31,7 +31,7 @@ export class PublicationExecutor {
       let result:{ok:true}|{ok:false;error:string;retain?:true};
       try {
         await this.restore(ref,grant.catalog);
-        result=await this.builder.deploy(ref.version);
+        result=await this.builder.deploy(ref.version,undefined,grant.writeDeadline===undefined?undefined:{deadline:grant.writeDeadline});
       } catch (cause) { result={ok:false,error:(cause as Error).message}; }
       if(!result.ok&&grant.recovery)result={...result,retain:true};
       await this.authority.settle(ref,result);

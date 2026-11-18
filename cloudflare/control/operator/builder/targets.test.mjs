@@ -25,6 +25,15 @@ test('app deployment records the release source label, never the committed devel
  }
  assert.equal(releaseSourceLabel('DEVELOPMENT'),null);
 }));
+test('no component write starts past the grant deadline, so it cannot land after a superseded abort',()=>owned(async dir=>{
+ const files=new Map([['releases.js','export const releases={};'],['action-releases.js','export const releases={};']]);
+ const calls=[];const target=new WranglerTarget(dir,'gonvex-cf-dev-topology',async(_path,name,options)=>calls.push({name,deadline:options?.deadline}));
+ await target.stage(files,'v1');
+ await assert.rejects(target.deploy('v1',{deadline:Date.now()-1}),error=>error.retainPublication===true&&/deadline passed/.test(error.message));
+ assert.deepEqual(calls,[]);
+ const deadline=Date.now()+60_000;await target.deploy('v1',{deadline});
+ assert.deepEqual(calls.map(c=>[c.name,c.deadline]),[['gonvex-cf-dev-topology-actions',deadline],['gonvex-cf-dev-topology-runtime',deadline]]);
+}));
 test('component write failure is uncertain and a retry deploys the same catalog only to Actions/runtime',()=>owned(async dir=>{
  const calls=[];let fail=true;
  const target=new WranglerTarget(dir,'gonvex-cf-dev-topology',async(_path,name)=>{calls.push(name);if(fail&&name.endsWith('-runtime'))throw Error('response lost');});

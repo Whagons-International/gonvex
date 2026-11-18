@@ -10,7 +10,7 @@ DROP INDEX IF EXISTS gonvex_cf_syncs_running;
 CREATE UNIQUE INDEX IF NOT EXISTS gonvex_cf_one_deployment
   ON gonvex_cf_syncs((1)) WHERE state IN ('running','publishing');
 CREATE TABLE IF NOT EXISTS gonvex_cf_topology (singleton INTEGER PRIMARY KEY CHECK(singleton=1), frozen INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS gonvex_cf_target_attempts (sync_id TEXT PRIMARY KEY, uncertain INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS gonvex_cf_target_attempts (sync_id TEXT PRIMARY KEY, uncertain INTEGER NOT NULL, authorized_at INTEGER);
 CREATE TABLE IF NOT EXISTS gonvex_cf_publication_catalogs (
   sync_id TEXT PRIMARY KEY, catalog JSON NOT NULL
 );
@@ -26,11 +26,23 @@ export function installDeploymentSchema(sql:Sql):void {
       sql.run(`UPDATE gonvex_cf_syncs SET state='abandoned',finished_at=${NOW_MS} WHERE state='running'`);
     }
     sql.script(DEPLOYMENT_SCHEMA);
+    // Attempts recorded before the write lease existed start their lease at this migration.
+    if(!sql.all<{name:string}>("SELECT name FROM pragma_table_info('gonvex_cf_target_attempts')").some(c=>c.name==='authorized_at')){
+      sql.run("ALTER TABLE gonvex_cf_target_attempts ADD COLUMN authorized_at INTEGER");
+      sql.run(`UPDATE gonvex_cf_target_attempts SET authorized_at=${NOW_MS}`);
+    }
   });
 }
 
+/** Builders start no target write after the grant's deadline and kill one still running at it. */
+export const TARGET_WRITE_WINDOW_MS = 10 * 60_000;
+/** Past this, no write of an attempt can still land: the write window plus a margin covering the SIGTERM→SIGKILL grace
+ * of the write's process group (DEADLINE_KILL_GRACE_MS, 15 s) and an upload already sent. */
+export const TARGET_ATTEMPT_LEASE_MS = TARGET_WRITE_WINDOW_MS + 5 * 60_000;
+
 export class DeploymentCoordinator {
-  constructor(private sql: Sql, private versionReady: (version: string) => boolean | Promise<boolean>, private preparationMs: number) {}
+  constructor(private sql: Sql, private versionReady: (version: string) => boolean | Promise<boolean>, private preparationMs: number,
+    private versionAbsent: (version: string) => boolean | Promise<boolean> = () => false) {}
 
   private owner():Row|undefined {
     return this.sql.get(`SELECT s.rowid AS fence,s.sync_id,s.project_id,s.state,s.expires_at,p.version
@@ -117,9 +129,10 @@ export class DeploymentCoordinator {
     // Persist before the builder can attempt either component. Re-authorization
     // after a reset cannot assume a previous target write never happened.
     const recovery=this.sql.value("SELECT 1 FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id)!==undefined;
-    this.sql.run(`INSERT INTO gonvex_cf_target_attempts(sync_id,uncertain) VALUES($1,0)
-      ON CONFLICT(sync_id) DO UPDATE SET uncertain=1`,ref.id);
-    return {allowed:true,catalog:JSON.parse(catalog) as ActiveRelease[],...(recovery?{recovery:true as const}:{})};
+    this.sql.run(`INSERT INTO gonvex_cf_target_attempts(sync_id,uncertain,authorized_at) VALUES($1,0,${NOW_MS})
+      ON CONFLICT(sync_id) DO UPDATE SET uncertain=1,authorized_at=${NOW_MS}`,ref.id);
+    const authorizedAt=num(this.sql.value("SELECT authorized_at FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id));
+    return {allowed:true,catalog:JSON.parse(catalog) as ActiveRelease[],writeDeadline:authorizedAt+TARGET_WRITE_WINDOW_MS,...(recovery?{recovery:true as const}:{})};
   }
   /** Caller/RPC failure alone never unlocks a target operation still running. */
   async settle(ref:DeploymentRef,result:{ok:boolean;error?:string;retain?:boolean}):Promise<void> {
@@ -136,16 +149,28 @@ export class DeploymentCoordinator {
       this.sql.run("UPDATE gonvex_cf_syncs SET error=$2 WHERE sync_id=$1",ref.id,(result.error??'component deployment uncertain').slice(0,1500));return;
     }
     this.sql.run("DELETE FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id);
-    this.abort(ref,result.error??'deployment failed');
+    await this.abort(ref,result.error??'deployment failed');
   }
-  /** Only invoked from the real builder's serialized target barrier. */
-  abort(ref:DeploymentRef,error:string):void {
+  /**
+   * Only invoked from the real builder's serialized target barrier. An uncertain component attempt normally
+   * needs same-ID recovery. Recovery can be impossible: e.g. a later builder emits a different catalog format,
+   * so the publication's exact version can never be reproduced. A caller may then abort it as `superseded`.
+   * That is accepted only when (1) the attempt's write lease has expired, so no authorized write can still land
+   * after the abort (builders refuse and kill writes at the grant's deadline), and (2) neither runtime nor
+   * Actions serves that version. A late authorize/settle of the aborted fence is refused as not current.
+   */
+  async abort(ref:DeploymentRef,error:string,{superseded=false}:{superseded?:boolean}={}):Promise<void> {
+    const uncertain=()=>this.sql.value("SELECT 1 FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id)!==undefined;
+    const leaseExpired=()=>this.sql.value(`SELECT 1 FROM gonvex_cf_target_attempts WHERE sync_id=$1 AND authorized_at IS NOT NULL AND authorized_at+$2<=${NOW_MS}`,ref.id,TARGET_ATTEMPT_LEASE_MS)!==undefined;
+    const absent=superseded&&uncertain()?await this.versionAbsent(ref.version):false;
     this.sql.tx(()=>{
       const row=this.publication(ref);
       if(num(row.completed)||row.state==='failed')return;
       if(row.state!=='publishing')throw new HttpError(409,"deployment fence is no longer current");
-      if(this.sql.value("SELECT 1 FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id)!==undefined)
-        throw new HttpError(409,"component deployment requires same-ID recovery before abort");
+      if(uncertain()){
+        if(!absent||!leaseExpired())throw new HttpError(409,"component deployment requires same-ID recovery before abort");
+        this.sql.run("DELETE FROM gonvex_cf_target_attempts WHERE sync_id=$1",ref.id);
+      }
       this.sql.run(`UPDATE gonvex_cf_syncs SET state='failed',error=$2,finished_at=${NOW_MS} WHERE sync_id=$1`,ref.id,error.slice(0,1500));
     });
   }

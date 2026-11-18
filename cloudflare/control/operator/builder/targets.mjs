@@ -54,8 +54,9 @@ export function releaseSourceLabel(value){return /^[0-9a-f]{40}$/.test(value??''
 /** Only the socket-free app runtime and Actions are application deployment targets. */
 export class WranglerTarget extends LocalTarget {
  constructor(dir,script,deploy,source){super(dir,0);this.script=script;this.execute=deploy;this.source=releaseSourceLabel(source);}
- async deploy(version){
+ async deploy(version,options={}){
   const entry=this.staged.get(version);if(!entry)throw new Error(`version ${version} was not staged`);
+  const deadline=options.deadline;
   if(!/^gonvex-cf-dev-[a-z0-9-]+$/.test(this.script))throw new Error('development script name required');
   await writeFile(join(this.dir,RELEASES_ENTRY),entry.kernel);
   if(entry.actions)await writeFile(join(this.dir,ACTION_RELEASES_ENTRY),entry.actions);
@@ -69,7 +70,9 @@ export class WranglerTarget extends LocalTarget {
    targets.push({path,name:config.name});
   }
   for(const {path,name} of targets){
-   try{await this.execute(path,name);}
+   // A write past its grant's deadline could land after Control has aborted the publication.
+   if(deadline!==undefined&&Date.now()>=deadline)throw Object.assign(new Error('target write deadline passed; write refused'),{retainPublication:true});
+   try{await this.execute(path,name,{deadline});}
    catch(cause){throw Object.assign(new Error(`component deployment failed: ${cause.message}`),{retainPublication:true});}
   }
  }
