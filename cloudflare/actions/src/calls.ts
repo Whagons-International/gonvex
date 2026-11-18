@@ -47,6 +47,10 @@ const DISPATCH_CONCURRENCY = 16;
 const MAX_REPLY_FAILURES = 8;
 
 export const RUNS = "_gonvex_st_action_runs";
+/** X13b: the error a lapsed inline run ends with (its runner stopped; whether it answered is unknown here). */
+export const INLINE_LAPSED = "Action runner stopped before its outcome was recorded";
+/** Runs claimed by `start` for an inline runner (`ActionWorker.call`), still held by it. */
+const isInline = (run: Pick<Run, "status" | "owner">): boolean => run.status === "processing" && typeof run.owner === "string" && run.owner.startsWith("inline:");
 
 export const RUNS_SQL = `CREATE TABLE IF NOT EXISTS _gonvex_st_action_runs (
   id TEXT PRIMARY KEY,
@@ -509,9 +513,16 @@ export class ActionCalls {
     }
     let after = "";
     for (;;) {
-      const page = this.exec(`SELECT id, status, locked_at, dispatched_at, dispatch_count FROM ${RUNS} WHERE state = 'live' AND id > ? AND NOT EXISTS (SELECT 1 FROM ${INPUTS} i WHERE i.id=${RUNS}.id AND i.blocked IS NOT NULL) ORDER BY id LIMIT ${PAGE}`, after) as unknown as Run[];
+      const page = this.exec(`SELECT id, status, owner, locked_at, dispatched_at, dispatch_count FROM ${RUNS} WHERE state = 'live' AND id > ? AND NOT EXISTS (SELECT 1 FROM ${INPUTS} i WHERE i.id=${RUNS}.id AND i.blocked IS NOT NULL) ORDER BY id LIMIT ${PAGE}`, after) as unknown as Run[];
       const due = page.filter((run) => this.dueAt(run, now) <= now);
-      units += (await this.dispatchMany(due)).size;
+      // X13b: an inline runner answers before it records the completion, so a lapsed inline run may
+      // already have answered and had its effects. It is never run again: it ends dead, and its error
+      // reply is settled like any reply (the gateway answers `obsolete` when the answer was sent).
+      for (const run of due.filter(isInline)) {
+        const full = this.load(run.id);
+        if (full?.state === "live" && isInline(full)) { await this.kill(full, INLINE_LAPSED).catch(() => undefined); units++; }
+      }
+      units += (await this.dispatchMany(due.filter((run) => !isInline(run)))).size;
       if (page.length < PAGE) break;
       after = page[page.length - 1]!.id;
     }

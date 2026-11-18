@@ -70,6 +70,12 @@ direct action.call (K05/K07) ─► ActionWorker.call ─┬─ standard / publi
   and the registry installs the code as a loader (`ModuleExportsSource`). So reading contracts never
   evaluates an app; an inline agent call on a cold isolate evaluates the bundle (Whagons: ~350-450 ms
   CPU) while the tenant writes the run (`startInline`), not after it. `test/cold.test.ts` measures it.
+- **Reply before completion (X13b, lead decision).** The inline runner returns the answer first and records
+  `completeCall` after it (`ctx.waitUntil`, idempotent), so the durable completion write is off the reply
+  path; Rust persists nothing for a socket's Action. The start record stays. An inline run whose lease lapses
+  may already have answered, so the sweep never runs it again: it ends `dead` ("Action runner stopped before
+  its outcome was recorded") and that reply settles as `obsolete` when the answer was sent. A run that throws
+  before answering is still released to a Workflow.
 
 - **Outbox and scheduled Actions belong to K11.** K11's scheduler claims the row or the job, applies the durable hop and
   the attempt cap, and hands the run over. `WorkflowHandoff` accepts every run: it never runs an Action inline in the

@@ -4,7 +4,7 @@
 // shape: a loader that burns CPU once, and a startCall answered after a delay.
 import { describe, expect, it } from "vitest";
 import { ModuleEngine } from "../../kernel/host/src/index.js";
-import { startInline } from "../src/worker.js";
+import { runInline, startInline } from "../src/worker.js";
 
 const any = { kind: "any" };
 const contracts = [{ path: "ns.run", kind: "action" as const, argsSchema: any, resultSchema: any }];
@@ -38,5 +38,28 @@ describe("X13b cold inline start", () => {
     const broken = new ModuleEngine(contracts, () => { throw new TypeError("bundle failed to evaluate"); });
     expect(await startInline(tenant, request, broken)).toBe("claim");
     expect(broken.loaded).toBe(false);
+  });
+});
+
+describe("X13b reply before completion", () => {
+  it("runInline returns the answer while completeCall is still pending, then records it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const completed: unknown[] = [];
+    const tenant = {
+      call: async () => ({ ok: true as const, value: "null" }),
+      claimCall: async () => { throw new Error("not used"); },
+      renewCall: async () => ({ v: 1 as const, ok: true, persisted: false }),
+      releaseCall: async () => true,
+      completeCall: async (request: unknown) => { await gate; completed.push(request); return { v: 1 as const, applied: true, appliedAttempt: 1 }; },
+    };
+    const runtime = { execute: async () => ({ ok: true as const, value: '"FIXED"', stats: {} as never }) } as unknown as import("../src/runtime.js").ActionRuntime;
+    const claim = { v: 1 as const, ok: true as const, id: "call-1", attempt: 1, path: "agent.rewrite", args: {}, provenance: null, session: {} as never, leaseMs: 300_000, renewMs: 30_000 };
+    const { report, completion } = await runInline({ runtime, tenant: tenant as never }, claim);
+    expect(report).toMatchObject({ ok: true, value: '"FIXED"' });
+    expect(completed).toEqual([]);
+    release();
+    await completion;
+    expect(completed).toEqual([{ v: 1, id: "call-1", attempt: 1, value: '"FIXED"', error: undefined, committedRevision: undefined, inlineReply: true }]);
   });
 });
