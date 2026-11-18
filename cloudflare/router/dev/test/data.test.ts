@@ -109,6 +109,23 @@ async function socket(path: string, headers: Record<string, string> = {}): Promi
   return { ws, next, response };
 }
 
+// X11b (contract-changes/0090): the dev-only file remap. This deployment sets no
+// GONVEX_DEV_TRANSFER_* variables, like staging and production, so it refuses.
+describe("dev-only file remap (X11b)", () => {
+  const path = "/dev/internal/files/remap-tenant";
+  it("needs the admin key, a complete body, and refuses on a non-dev deployment", async () => {
+    const body = { projectId: project.id, tenantId: TENANT, fromTenantId: "tenant_source" };
+    expect(await call("POST", path, { token: project.key, body })).toMatchObject({ status: 403, body: { error: "runtime admin key is required" } });
+    expect(await call("POST", path, { token: null, body })).toMatchObject({ status: 403 });
+    expect(await call("POST", path, { body: { projectId: project.id, tenantId: TENANT } })).toMatchObject({ status: 400, body: { error: "projectId, tenantId and fromTenantId are required" } });
+    expect(await call("POST", path, { body: { ...body, dryRun: "yes" } })).toMatchObject({ status: 400, body: { error: "dryRun must be a boolean" } });
+    for (const tenantId of [TENANT, "devcopy-stg1117-12"]) {
+      expect(await call("POST", path, { body: { ...body, tenantId } })).toMatchObject({ status: 404, body: { error: "file remap is not available on this deployment" } });
+    }
+    expect((await call("GET", path)).status).toBe(405);
+  });
+});
+
 describe("operator sockets", () => {
   it("dashboard: session.ready, auth, subscribe, change on a /dev write, errors", async () => {
     const { ws, next } = await socket("/dev/dashboard/ws");

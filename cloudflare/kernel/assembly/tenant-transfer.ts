@@ -1,5 +1,6 @@
 // Development-only P03 transport into the serving tenant's SQLite, never a second object.
 import { rpc } from '../session/rpc';
+import { devTransferAllowed } from '../../control/operator/config';
 import { timingSafeEqual } from 'node:crypto';
 import { TenantTransfer } from '../../tools/tenant-transfer/src/transport.mjs';
 
@@ -11,9 +12,7 @@ export interface TransferEnv {
   GONVEX_DEV_TRANSFER_TENANTS?: string;
 }
 export function transferAllowed(env: TransferEnv, tenant: string): boolean {
-  return !!env.GONVEX_DEV_TRANSFER_TARGET?.startsWith('gonvex-cf-dev-') &&
-    /^devcopy-[A-Za-z0-9_-]{1,100}$/.test(tenant) &&
-    (env.GONVEX_DEV_TRANSFER_TENANTS ?? '').split(',').includes(tenant);
+  return devTransferAllowed({ target: env.GONVEX_DEV_TRANSFER_TARGET, tenants: env.GONVEX_DEV_TRANSFER_TENANTS }, tenant);
 }
 const operations = new Set(['status', 'schema', 'insert', 'sequence', 'catalog', 'read', 'checksum', 'check', 'pragma', 'wipe', 'verify', 'complete']);
 export async function handleTenantTransfer(request: Request, env: TransferEnv & { TENANT: DurableObjectNamespace<any> }): Promise<Response | null> {

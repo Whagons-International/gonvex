@@ -25,6 +25,26 @@ export interface StoredObject {
   ownerId: string;
 }
 
+/** `POST /dev/internal/files/remap-tenant` (dev only, contract-changes/0090). */
+export interface FilesRemapResult {
+  fromTenantId: string;
+  tenantId: string;
+  projectId: string;
+  bucket: string;
+  dryRun: boolean;
+  /** Rows under `fromTenantId` before the call. */
+  matched: number;
+  /** Rows rewritten by this call (0 on a dry run or a repeat). */
+  remapped: number;
+  /** Rows still under `fromTenantId` after the call. */
+  remaining: number;
+  /** Rows under the tenant's own id, with the native key and this bucket. */
+  native: number;
+  /** Rows under any third tenant id (left alone). */
+  otherTenants: number;
+  total: number;
+}
+
 export type ClaimResult = { ok: true; consumedAt: number } | { ok: false; error: string };
 
 /** What the download proxy needs to verify a URL: the row's visibility and owner (no row: deleted or unknown). */
@@ -241,6 +261,50 @@ export class TenantFiles {
     const row = await this.metadata(session, fileId, true);
     if (row.status !== "uploaded") throw new Error("file is not uploaded");
     return { metadata: metadataOf(row), objectKey: row.object_key };
+  }
+
+  // ---- dev tooling: P03 copies (contract-changes/0090) --------------------------------
+
+  /**
+   * DEV ONLY (the caller enforces the gate). Rewrites the `_gonvex_files` rows a
+   * P03 copy carried over with the source tenant's id. Each row gets this
+   * tenant's id, the key a native upload would get (`objectKey(project, tenant, id)`)
+   * and this deployment's bucket. Its upload ticket follows the key. One
+   * transaction. Idempotent: a second run matches no row.
+   */
+  remapTenant(input: { fromTenantId: string; tenantId: string; projectId: string; dryRun: boolean }): FilesRemapResult {
+    const from = input.fromTenantId.trim();
+    const to = input.tenantId;
+    if (!from) throw new Error("fromTenantId is required");
+    if (from === to) throw new Error("fromTenantId must differ from the tenant's own id");
+    if (!input.projectId) throw new Error("tenant has no project");
+    const bucket = this.config.bucket;
+    this.ensureSchema();
+    const prefix = objectKey(input.projectId, to, "");
+    return this.options.transactionSync((): FilesRemapResult => {
+      const ids = this.exec<{ id: string }>("SELECT id FROM _gonvex_files WHERE tenant_id=? ORDER BY id", from).map((row) => row.id);
+      if (!input.dryRun) {
+        for (const id of ids) {
+          const key = prefix + id;
+          this.exec("UPDATE _gonvex_files SET tenant_id=?,object_key=?,bucket=? WHERE id=? AND tenant_id=?", to, key, bucket, id, from);
+          this.exec("UPDATE _gonvex_storage_uploads SET object_key=?,project_id=? WHERE file_id=?", key, input.projectId, id);
+        }
+      }
+      const count = (sql: string, ...binds: SqlStorageValue[]) => Number(this.exec<{ n: number }>(sql, ...binds)[0]?.n ?? 0);
+      return {
+        fromTenantId: from,
+        tenantId: to,
+        projectId: input.projectId,
+        bucket,
+        dryRun: input.dryRun,
+        matched: ids.length,
+        remapped: input.dryRun ? 0 : ids.length,
+        remaining: count("SELECT count(*) AS n FROM _gonvex_files WHERE tenant_id=?", from),
+        native: count("SELECT count(*) AS n FROM _gonvex_files WHERE tenant_id=? AND bucket=? AND object_key=?||id", to, bucket, prefix),
+        otherTenants: count("SELECT count(*) AS n FROM _gonvex_files WHERE tenant_id NOT IN (?,?)", from, to),
+        total: count("SELECT count(*) AS n FROM _gonvex_files"),
+      };
+    });
   }
 
   // ---- the /storage proxy -------------------------------------------------------------

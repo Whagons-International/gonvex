@@ -14,7 +14,7 @@ import { normalizeRedirect } from "../src/native-auth";
 import { bool, num, optNum, str, type Row } from "../src/sql";
 import { base64url, sha256Hex } from "../src/util";
 import { OperatorAuth, credentialName, globalAdmin, has, type OperatorActor, type SignedSession, serializeSession } from "./auth";
-import type { OperatorConfig } from "./config";
+import { devTransferAllowed, type OperatorConfig } from "./config";
 import { Body, HttpError, PlainError, byteLength, displayName, error, isoTime, isoTimeOrNull, json, normalizeEmail, plainResponse, projectHeaderOrQuery } from "./http";
 import { releaseKey, type ReleaseSummary } from "./release";
 import type { SyncCoordinator } from "./sync";
@@ -1152,6 +1152,32 @@ const e2eMember: Handler = async (op, request) => {
   }
 };
 
+/**
+ * `POST /dev/internal/files/remap-tenant` (DEV ONLY, contract-changes/0090; no
+ * Rust route). Body `{projectId, tenantId, fromTenantId, dryRun?}`. Rewrites the
+ * `_gonvex_files` rows a P03 copy kept under the source tenant id to the copy's
+ * own id, native object key and bucket. Admin key like the other
+ * `/dev/internal` routes, and 404 unless the P03 dev-transfer gate admits the
+ * tenant (a `gonvex-cf-dev-*` deployment, a listed `devcopy-*` name).
+ */
+const remapTenantFiles: Handler = async (op, request) => {
+  if (!op.auth.adminKeyMatches(request.headers)) return error(403, "runtime admin key is required");
+  const body = await Body.read(request);
+  const p = body.object();
+  const field = (name: string) => (typeof p[name] === "string" ? (p[name] as string) : "").trim();
+  const projectId = field("projectId");
+  const tenantId = field("tenantId");
+  const fromTenantId = field("fromTenantId");
+  if (p.dryRun !== undefined && typeof p.dryRun !== "boolean") return error(400, "dryRun must be a boolean");
+  if (projectId === "" || tenantId === "" || fromTenantId === "") return error(400, "projectId, tenantId and fromTenantId are required");
+  if (!devTransferAllowed({ target: op.config.devTransferTarget, tenants: op.config.devTransferTenants }, tenantId)) {
+    return error(404, "file remap is not available on this deployment");
+  }
+  const resolved = resolveTenant(op, projectId, tenantId);
+  if (resolved !== tenantId) return error(404, "tenant database was not found");
+  return json(unwrap(await op.tenant(tenantId).operatorRemapFiles(projectId, fromTenantId, p.dryRun === true)));
+};
+
 // --------------------------------------------------------------------- manifest
 
 const manifest: Handler = async (op, request, url) => {
@@ -1524,6 +1550,7 @@ export const ROUTES: Route[] = [
   { pattern: /^\/dev\/tenants$/, methods: { GET: listTenants, POST: createTenantShard } },
   { pattern: new RegExp(`^/dev/tenants/${SEG}$`), methods: { DELETE: deleteTenantShard } },
   { pattern: /^\/dev\/internal\/e2e\/members$/, methods: { POST: e2eMember } },
+  { pattern: /^\/dev\/internal\/files\/remap-tenant$/, methods: { POST: remapTenantFiles } },
   { pattern: /^\/dev\/errors\/status$/, methods: { GET: errorStatus } },
   { pattern: /^\/dev\/errors\/groups$/, methods: { GET: errorGroups } },
   { pattern: new RegExp(`^/dev/errors/groups/${SEG}$`), methods: { GET: errorGroup, PATCH: updateErrorGroup } },

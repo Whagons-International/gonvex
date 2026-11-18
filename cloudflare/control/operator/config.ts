@@ -26,6 +26,10 @@ export interface OperatorEnv {
   GONVEX_LOCAL_OPERATOR?: string;
   /** Rollout deadline for a held-open `/dev/sync` (0012 R4), default 10 minutes. */
   GONVEX_SYNC_DEADLINE_MS?: string;
+  /** P03 dev transfer: the target deployment's name (must start with `gonvex-cf-dev-`). */
+  GONVEX_DEV_TRANSFER_TARGET?: string;
+  /** P03 dev transfer: comma-separated exact `devcopy-*` tenant object names. */
+  GONVEX_DEV_TRANSFER_TENANTS?: string;
   [binding: string]: unknown;
 }
 
@@ -42,6 +46,21 @@ export interface OperatorConfig {
   googleClient: boolean;
   localAllowed: boolean;
   syncDeadlineMs: number;
+  /** P03 dev-transfer gate (see `devTransferAllowed`). */
+  devTransferTarget: string;
+  devTransferTenants: string;
+}
+
+/**
+ * The P03 dev-transfer gate, shared by `/__tenant-transfer` and the dev-only
+ * operator routes (contract-changes/0090): a `gonvex-cf-dev-*` deployment, a
+ * `devcopy-*` tenant name, and that exact name listed in
+ * `GONVEX_DEV_TRANSFER_TENANTS`. Staging and production set neither variable.
+ */
+export function devTransferAllowed(gate: { target?: string | undefined; tenants?: string | undefined }, tenant: string): boolean {
+  return !!gate.target?.startsWith("gonvex-cf-dev-") &&
+    /^devcopy-[A-Za-z0-9_-]{1,100}$/.test(tenant) &&
+    (gate.tenants ?? "").split(",").includes(tenant);
 }
 
 const nonEmpty = (value: unknown): string | undefined => (typeof value === "string" && value.trim() !== "" ? value : undefined);
@@ -70,5 +89,7 @@ export function operatorConfig(env: OperatorEnv): OperatorConfig {
     googleClient: !!nonEmpty(env.GONVEX_GOOGLE_CLIENT_ID) && !!nonEmpty(env.GONVEX_GOOGLE_CLIENT_SECRET),
     localAllowed: env.GONVEX_LOCAL_OPERATOR === "true",
     syncDeadlineMs: Number.isFinite(deadline) && deadline > 0 ? deadline : 10 * 60 * 1000,
+    devTransferTarget: typeof env.GONVEX_DEV_TRANSFER_TARGET === "string" ? env.GONVEX_DEV_TRANSFER_TARGET : "",
+    devTransferTenants: typeof env.GONVEX_DEV_TRANSFER_TENANTS === "string" ? env.GONVEX_DEV_TRANSFER_TENANTS : "",
   };
 }

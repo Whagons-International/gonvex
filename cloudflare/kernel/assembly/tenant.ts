@@ -17,7 +17,8 @@ import type { SocketView, TenantSession } from "../session/ports";
 import { rpc, type GatewayRpc } from "../session/rpc";
 import { TenantPresence } from "../presence/tenant";
 import { presenceConfig, type ConnectionReport } from "../presence/hub";
-import { TenantFiles } from "../files/tenant-files";
+import { type FilesRemapResult, TenantFiles } from "../files/tenant-files";
+import type { PortResult } from "../../control/operator/tenant/port";
 import { filesRpc, type FilesTenantRpc } from "../files/rpc";
 import { filesConfigFromEnv } from "../files/config";
 import { reducerFiles } from "../files/reducer";
@@ -465,6 +466,21 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   operatorReplaceReferences(replacements: Record<string, string>, dryRun: boolean) { return this.kernel.reducers.serial(() => this.operator.replaceReferences(replacements, dryRun)); }
   async operatorActiveMembers() { return this.operator.activeMembers(); }
   operatorRevokeMember(id: string) { return this.kernel.reducers.serial(() => this.operator.revokeMember(id)); }
+  /** DEV ONLY (contract-changes/0090): the P03 dev-transfer gate is checked here too, on this object's own name. */
+  operatorRemapFiles(projectId: string, fromTenantId: string, dryRun: boolean): Promise<PortResult<FilesRemapResult>> {
+    const tenantId = this.ctx.id.name ?? "";
+    if (!transferAllowed(this.env, tenantId)) return Promise.resolve({ ok: false, status: 404, error: "file remap is not available on this deployment" });
+    const registered = this.ctx.storage.kv.get<string>(PROJECT_KEY) ?? this.kernel.module?.projectId;
+    if (!registered || registered !== projectId) return Promise.resolve({ ok: false, status: 409, error: "tenant does not belong to this project" });
+    if (!this.files.configured) return Promise.resolve({ ok: false, status: 503, error: "storage is not configured" });
+    return this.kernel.reducers.serial(async (): Promise<PortResult<FilesRemapResult>> => {
+      try {
+        return { ok: true, value: this.files.remapTenant({ fromTenantId, tenantId, projectId, dryRun }) };
+      } catch (cause) {
+        return { ok: false, status: 400, error: (cause as Error).message };
+      }
+    });
+  }
 
   filesCall(...args: Parameters<FilesTenantRpc["filesCall"]>) { return this.filePort.filesCall(...args); }
   filesPrepareStore(...args: Parameters<FilesTenantRpc["filesPrepareStore"]>) { return this.filePort.filesPrepareStore(...args); }
