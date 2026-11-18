@@ -23,9 +23,13 @@ import { HttpError } from "./http";
 import type { ActiveRelease, DeploymentRef, ReleaseBuilder, ReleaseSummary, RolloutMessage, RolloutReport } from "./release";
 import { DeploymentCoordinator } from "./deployment";
 
-/** A project whose deletion has begun: no /dev/sync may claim a fence for it again. */
-export function projectDeleted(sql: Sql, project: string): boolean {
-  return sql.value("SELECT 1 FROM gonvex_cf_deleted_projects WHERE project_id=$1", project) !== undefined;
+/**
+ * A project whose deletion is in progress (between the delete's check and its final transaction, while tenant
+ * storage is removed): no /dev/sync may claim a fence for it meanwhile. The fence is cleared when the delete
+ * commits. Like Rust, a later sync of the same id (unknown project, fallback key) installs it again.
+ */
+export function projectDeleting(sql: Sql, project: string): boolean {
+  return sql.value("SELECT 1 FROM gonvex_cf_project_deletions WHERE project_id=$1", project) !== undefined;
 }
 
 /**
@@ -50,7 +54,7 @@ CREATE TABLE IF NOT EXISTS gonvex_cf_releases (
   activated_at INTEGER,
   PRIMARY KEY(project_id, hash)
 );
-CREATE TABLE IF NOT EXISTS gonvex_cf_deleted_projects (project_id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS gonvex_cf_project_deletions (project_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS gonvex_cf_active_releases (
   project_id TEXT PRIMARY KEY, hash TEXT NOT NULL, generation INTEGER NOT NULL, plan_id TEXT NOT NULL,
   version TEXT NOT NULL DEFAULT '',
@@ -191,7 +195,7 @@ export class SyncCoordinator {
     const prior = this.sql.get("SELECT project_id,hash,state FROM gonvex_cf_syncs WHERE sync_id=$1",syncId);
     if (prior && (prior.project_id !== project || (prior.hash && prior.hash !== inspection.hash) || ["finished","failed"].includes(str(prior.state)))) return {ok:false,status:409,error:"sync request id already used"};
     const lock=this.lock(project,syncId);
-    if (lock.kind === "deleted") return { ok: false, status: 410, error: `project ${project} was deleted` };
+    if (lock.kind === "deleted") return { ok: false, status: 409, error: `project ${project} is being deleted`, retryable: true };
     if (lock.kind === "project") return { ok: false, status: 409, error: `a /dev/sync of project ${project} is already running`, ...(lock.recovery?{recovery:lock.recovery}:{}) };
     if (lock.kind === "deployment") return {ok:false,status:503,error:"release deployment waits for another project",retryable:true,...(lock.recovery?{recovery:lock.recovery}:{})};
     const fence=lock.fence;
@@ -325,7 +329,7 @@ export class SyncCoordinator {
   private lock(project: string, syncId: string): {kind:"acquired";fence:number}|{kind:"project";recovery?:DeploymentRef}|{kind:"deployment";recovery?:DeploymentRef}|{kind:"deleted"} {
     return this.sql.tx(() => {
       // Checked in the same transaction that claims the fence, so a sync and a project delete are ordered.
-      if(projectDeleted(this.sql,project))return {kind:"deleted"};
+      if(projectDeleting(this.sql,project))return {kind:"deleted"};
       if(this.waiters.has(`lock:${syncId}`))return {kind:"project"};
       const claim=this.deployments.acquire(project,syncId);
       if(!claim.acquired)return {kind:claim.sameProject?"project":"deployment",...(claim.recovery?{recovery:claim.recovery}:{})};

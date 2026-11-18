@@ -409,6 +409,8 @@ const createProject: Handler = async (op, request) => {
   const projectKey = newProjectKey(projectId);
   const owner = actor.email.trim().toLowerCase();
   op.ctx.sql.tx(() => {
+    // A fresh id never has one; cleared anyway so a stale deletion fence can never block a project created normally.
+    op.ctx.sql.run("DELETE FROM gonvex_cf_project_deletions WHERE project_id=$1", projectId);
     op.ctx.sql.run(
       `INSERT INTO gonvex_runtime_projects
        (id,name,environment,database_name,database_mode,database_url,storage_bucket,status,description,project_key,provisioned,runtime_created,owner_email)
@@ -490,13 +492,14 @@ function retireProjectRelease(op: Op, project: string): void {
 }
 
 /**
- * In one transaction: refuse while any live sync can still deploy a catalog (shared by every project), else tombstone it so
- * no later /dev/sync claims a fence for it (SyncCoordinator.lock checks the tombstone in its own transaction).
+ * In one transaction: refuse while any live sync can still deploy a catalog (shared by every project), else run
+ * `then`. With `fence`, also mark the deletion in progress so no /dev/sync claims a fence for the project until the
+ * delete commits (SyncCoordinator.lock checks it in its own transaction).
  */
-function tombstoneProject(op: Op, project: string, then: () => void = () => {}): boolean {
+function beginProjectDeletion(op: Op, project: string, fence: boolean, then: () => void): boolean {
   return op.ctx.sql.tx(() => {
     if (liveSync(op.ctx.sql)) return false;
-    op.ctx.sql.run(`INSERT INTO gonvex_cf_deleted_projects(project_id,deleted_at) VALUES($1,${NOW}) ON CONFLICT(project_id) DO NOTHING`, project);
+    if (fence) op.ctx.sql.run(`INSERT INTO gonvex_cf_project_deletions(project_id,started_at) VALUES($1,${NOW}) ON CONFLICT(project_id) DO NOTHING`, project);
     then();
     return true;
   });
@@ -511,17 +514,19 @@ const deleteProject: Handler = async (op, request, _url, [project]) => {
     // the orphaned release. With no project row and no active release the project is simply unknown.
     if (op.ctx.sql.value("SELECT 1 FROM gonvex_runtime_projects WHERE id=$1", project) !== undefined
       || op.ctx.sql.value("SELECT 1 FROM gonvex_cf_active_releases WHERE project_id=$1", project) === undefined) return error(422, dbError.projectNotFound(project!));
-    if (!tombstoneProject(op, project!, () => retireProjectRelease(op, project!))) return error(409, SYNC_IN_FLIGHT);
+    if (!beginProjectDeletion(op, project!, false, () => retireProjectRelease(op, project!))) return error(409, SYNC_IN_FLIGHT);
     return json({ ok: true, retiredOrphanRelease: true });
   }
   if (!bool(row.runtime_created)) return error(422, dbError.protocol("only runtime-created projects may be deleted through this operation"));
   // A publication still in flight would re-activate the project's release after it is retired below.
-  if (!tombstoneProject(op, project!, () => op.ctx.sql.run(`UPDATE gonvex_runtime_projects SET status='deleting',updated_at=${NOW} WHERE id=$1`, project))) return error(409, SYNC_IN_FLIGHT);
+  if (!beginProjectDeletion(op, project!, true, () => op.ctx.sql.run(`UPDATE gonvex_runtime_projects SET status='deleting',updated_at=${NOW} WHERE id=$1`, project))) return error(409, SYNC_IN_FLIGHT);
   const tenants = op.ctx.sql.all("SELECT tenant_id FROM gonvex_runtime_tenants WHERE project_id=$1 AND runtime_created=1 AND database_url<>''", project).map((t) => str(t.tenant_id));
   for (const tenant of tenants) await op.deleteTenantStorage(tenant);
   op.ctx.sql.tx(() => {
     op.ctx.sql.run("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'", project);
     retireProjectRelease(op, project!);
+    // Deletion committed: the id is free again, as in Rust (a later sync or create of it proceeds normally).
+    op.ctx.sql.run("DELETE FROM gonvex_cf_project_deletions WHERE project_id=$1", project);
   });
   return json({ ok: true });
 };
