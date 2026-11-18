@@ -41,6 +41,10 @@ export default {
           const client = await ctx.sdk(tag, { member });
           clients.push({ tag, member, client, board: watch(client, api.board.all), notes: watch(client, api.notes.mine) });
         }
+        // X03: write only once both of this member's replicas are complete. Otherwise the note races the
+        // snapshot: a backend may answer either a snapshot that already holds it or an empty snapshot plus a
+        // delta (both correct), and the frames differ by timing rather than by behaviour.
+        await ctx.until(() => clients.slice(-2).every((c) => c.board.ready() && c.notes.ready()), `${member} replicas ready`);
         await call(clients.at(-1).client, api.notes.write, { id: `note-${member}`, body: `${member} first` });
       }
       await converge('seeded', [['w1', 'row w1', 0], ['w2', 'row w2', 0], ['w3', 'row w3', 0]], (m) => [[`note-${m}`, `${m} first`]]);

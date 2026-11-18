@@ -57,10 +57,22 @@ export async function fixtureControl(request: Request, env: Env): Promise<Respon
   if (request.method === "GET" && url.pathname === "/__assembly/changelog") return Response.json(await rpc<FixtureTenant>(env.TENANT, url.searchParams.get("tenant") ?? "").fixtureChangeLog(Math.max(0, Number(url.searchParams.get("offset") ?? 0))));
   if(request.method==='GET'&&url.pathname==='/__assembly/delivery-state')return Response.json(await rpc<FixtureTenant>(env.TENANT,url.searchParams.get('tenant')??'').fixtureDeliveryState());
   if (request.method === "POST") {
-    const body = await request.json<{ tenant: string; holder?:string;hold?:boolean;phase?:'bootstrap'|'challenge';epoch?: string; now?: number; offlineMaxAgeMs?: number | null }>();
+    const body = await request.json<{ tenant: string; principals?: string; holder?:string;hold?:boolean;phase?:'bootstrap'|'challenge';epoch?: string; now?: number; offlineMaxAgeMs?: number | null }>();
     if (url.pathname === "/__assembly/purge-revoked-tokens") {
       if (!env.CONTROL) return new Response("control is not bound", { status: 503 });
       const result = await rpc<{ fixturePurgeRevokedTokens(): Promise<{ deleted: number } | { error: string }> }>(env.CONTROL, "control").fixturePurgeRevokedTokens();
+      return Response.json(result, { status: "error" in result ? 400 : 200 });
+    }
+    if (url.pathname === "/__assembly/gateway-restart") {
+      if (!body.holder || body.holder.length > 128) return new Response("holder required", { status: 400 });
+      // The holder's own abort rejects this call once it has reset: that is the success signal.
+      await rpc<Pick<AssemblyGateway, "fixtureRestart">>(env.GATEWAY, body.holder).fixtureRestart().catch(() => undefined);
+      return Response.json({ ok: true });
+    }
+    if (url.pathname === "/__assembly/service-principals") {
+      if (typeof body.principals !== "string" || body.principals.length > 65_536) return new Response("principals required", { status: 400 });
+      if (!env.CONTROL) return new Response("control is not bound", { status: 503 });
+      const result = await rpc<{ fixtureServicePrincipals(p: string): Promise<{ count: number } | { error: string }> }>(env.CONTROL, "control").fixtureServicePrincipals(body.principals);
       return Response.json(result, { status: "error" in result ? 400 : 200 });
     }
     if(url.pathname==="/__assembly/bootstrap-gate"){

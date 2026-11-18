@@ -301,6 +301,34 @@ it('X03 a tenant whose provisioning was interrupted before its schema exists sti
   expect(tenant.scheduler).toBeDefined();
  });
 });
+it('X03 dev fixture: service principals override merges with the environment and survives a new Control instance',async()=>{
+ const {withFixturePrincipals,FIXTURE_PRINCIPALS_KEY}=await import('../../../control/src/control-object');
+ const envList=[{id:'gateway',tokenSha256:'a'.repeat(64),projects:['p'],functions:['f'],maxDelegationSeconds:0,manifest:false},{id:'app',tokenSha256:'b'.repeat(64),projects:['q'],functions:['g'],maxDelegationSeconds:0,manifest:false}] as never;
+ const fixture=JSON.stringify([{id:'gateway',tokenSha256:'c'.repeat(64),projects:['p2'],functions:['h']},{id:'reader',tokenSha256:'d'.repeat(64),projects:['p2'],functions:['h']}]);
+ const merged=withFixturePrincipals(envList,fixture) as Array<{id:string;tokenSha256:string}>;
+ expect(merged.map(p=>p.id).sort()).toEqual(['app','gateway','reader']);
+ expect(merged.find(p=>p.id==='gateway')!.tokenSha256).toBe('c'.repeat(64));
+ expect(withFixturePrincipals(envList,undefined)).toBe(envList);
+ expect(()=>withFixturePrincipals(envList,'[{"id":""}]')).toThrow(/GONVEX_SERVICE_PRINCIPALS is invalid/);
+ // The real Control object: applied at once, persisted, and read again by a fresh instance.
+ const name='principals-'+crypto.randomUUID();
+ const control=(env as unknown as {REAL_CONTROL:DurableObjectNamespace}).REAL_CONTROL.getByName(name) as unknown as {fixtureServicePrincipals(p:string):Promise<{count:number}|{error:string}>};
+ expect((await control.fixtureServicePrincipals(fixture) as {count:number}).count).toBeGreaterThanOrEqual(2);
+ await runInDurableObject(control as never,(object,state)=>{
+  expect(state.storage.kv.get(FIXTURE_PRINCIPALS_KEY)).toBe(fixture);
+  expect((object as unknown as {config:{servicePrincipals:Array<{id:string}>}}).config.servicePrincipals.map(p=>p.id)).toEqual(expect.arrayContaining(['gateway','reader']));
+ });
+ expect(await control.fixtureServicePrincipals('not json')).toEqual({error:expect.stringMatching(/GONVEX_SERVICE_PRINCIPALS is invalid/)});
+ await runInDurableObject(control as never,(_o,state)=>{expect(state.storage.kv.get(FIXTURE_PRINCIPALS_KEY)).toBe(fixture);});
+});
+it('X03 dev fixture routes: gateway restart and service principals are 404 without the fixture key',async()=>{
+ const {fixtureControl}=await import('../fixture-control');
+ for(const path of ['/__assembly/gateway-restart','/__assembly/service-principals']){
+  const request=()=>new Request('https://local'+path,{method:'POST',headers:{authorization:'Bearer guess'},body:JSON.stringify({holder:'gw-0',principals:'[]'})});
+  expect((await fixtureControl(request(),{TENANT:bindings.TENANT,GATEWAY:bindings.TENANT,GONVEX_ASSEMBLY_FIXTURE_KEY:'real'} as never))!.status).toBe(404);
+  expect((await fixtureControl(request(),{TENANT:bindings.TENANT,GATEWAY:bindings.TENANT} as never))!.status).toBe(404);
+ }
+});
 it('X03 dev fixture route: purging revoked tokens is 404 without the exact fixture key',async()=>{
  const {fixtureControl}=await import('../fixture-control');
  const request=()=>new Request('https://local/__assembly/purge-revoked-tokens',{method:'POST',headers:{authorization:'Bearer guess'},body:'{}'});
