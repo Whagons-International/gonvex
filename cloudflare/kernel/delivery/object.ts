@@ -16,11 +16,11 @@ import { ReducerTenantObject, type ReducerTenantEnv } from "../reducer/object.ts
 import { replicaModule, type ReplicaModule } from "./definition.ts";
 import { ReplicaDeliveryEngine } from "./engine.ts";
 import { GatewayOutlet, type ReplicaHolderRpc } from "./outlet.ts";
-import { keepAliveGrace, SubscriberKeepAlive } from "./keepalive.ts";
+import { keepAliveCheck, SubscriberKeepAlive } from "./keepalive.ts";
 
 export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTenantEnv> extends ReducerTenantObject<E> {
   readonly delivery: ReplicaDeliveryEngine;
-  /** BUG-2: subscriptions live in memory; a subscribed tenant does not hibernate between a session's events. */
+  /** BUG-2/BUG-9: subscriptions live in memory; a subscribed tenant does not hibernate while any subscription exists. */
   readonly keepAlive: SubscriberKeepAlive;
   protected liveQueries(): LiveQueries | undefined { return undefined; }
 
@@ -40,7 +40,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
     const tenantId = ctx.id.name ?? ctx.id.toString();
     const owner = this;
     this.keepAlive = new SubscriberKeepAlive(() => this.delivery.holdsSubscriptions(),
-      keepAliveGrace((env as { GONVEX_TENANT_KEEPALIVE_MS?: string }).GONVEX_TENANT_KEEPALIVE_MS));
+      keepAliveCheck((env as { GONVEX_TENANT_KEEPALIVE_MS?: string }).GONVEX_TENANT_KEEPALIVE_MS));
     this.delivery = new ReplicaDeliveryEngine({
       tenantId,
       serial: (fn) => this.kernel.reducers.serial(fn),

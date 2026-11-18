@@ -1542,6 +1542,8 @@ export class Session {
     // and never resumes (review r4608249098): a waiting `actionFinished()` then answers "obsolete".
     for (const waiter of this.actionWaiters.values()) { waiter.resolve(null); waiter.done(); }
     if (this.closed) return;
+    // BUG-9: every server-initiated close is attributable. Close codes and reasons are fixed protocol strings.
+    console.log("session: server close", { code: frame.code, reason: frame.reason, socket: this.record.tenant ? "tenant" : "control" });
     if (this.delivery.batcher.hasOpen) this.delivery.batcher.flush();
     this.resetSubscriptions(this.record.tenant);
     this.closed = true;

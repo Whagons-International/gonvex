@@ -526,6 +526,12 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     if (!this.draining) {
       this.draining = { ...command, nextAt: Math.max(Date.now(), command.notBefore) + (hashConnection(`${this.gatewayName}:${this.placementEpoch}`) % 1000) };
       await this.ctx.storage.put("autoscale-drain", this.draining);
+    } else if (this.draining.replacement !== command.replacement || this.draining.replacementEpoch !== command.replacementEpoch) {
+      // The controller re-pointed this drain because its old replacement drained or retired (BUG-9 review).
+      // Updated in place, so a tick in flight holding the same object persists the new target too.
+      this.draining.replacement = command.replacement;
+      this.draining.replacementEpoch = command.replacementEpoch;
+      await this.ctx.storage.put("autoscale-drain", this.draining);
     }
     await this.drainTick();
     this.host.reschedule();
@@ -574,6 +580,9 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     } catch { blocked["replacement-or-admission-unavailable"] = this.host.sessions.size; }
     this.drainResult = { closed, blocked, remaining: this.host.sessions.size };
     await this.ctx.storage.put("autoscale-drain-result", this.drainResult);
+    // Review r4609090617: the awaits above may have ended or replaced this drain. Only the drain this tick
+    // started with is advanced or ended; a newer one (or none) is never overwritten with this stale copy.
+    if (this.draining !== drain) return;
     if (!this.host.sessions.size) {
       this.draining = undefined;
       await this.ctx.storage.delete("autoscale-drain");
