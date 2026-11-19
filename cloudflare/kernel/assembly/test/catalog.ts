@@ -17,6 +17,9 @@ export const manifest = { functions: {
  'probe.resultSize':entry('action','resultSize',{internal:true,actionProfile:'standard'}),
  'probe.invite':entry('reducer','invite',{internal:true,interactive:false}),
  'probe.noop':entry('action','noop',{actionProfile:'standard'}),
+ // X13g: socket-initiated agent Actions (the ActionHost path), one with an undeclared-to-runtime secret.
+ 'probe.agentNoop':entry('action','noop',{actionProfile:'agent'}),
+ 'probe.agentSecret':entry('action','noop',{actionProfile:'agent',actionCapabilities:{secrets:['X13G_UNCONFIGURED']}}),
  },schema:{tables:{},controlPlaneTables:{},tenantTables:{}}, module:{language:'typescript',hash:'assembly-boundary-fixture',generation:1,files:Object.fromEntries(Object.entries(files).map(([path,text])=>[path,btoa(text)]))}};
 export const exports = probe as Record<string, unknown>;
 export function registry() { const r = new ModuleRegistry('p'); const module=projectModuleFromManifest('p',manifest);r.install(moduleArtifact(module,1,exports));return r; }

@@ -4,12 +4,24 @@ import { AssemblyTenant } from '../tenant';
 import { SessionControlObject } from '../control';
 import { MemoryPlanStore } from '../../migrate';
 import { configureActions } from '../../../actions/src/worker';
-import { exports, registry } from './catalog';
+import { exports, manifest } from './catalog';
+import { ModuleRegistry } from '../../host/src/index';
+import { moduleArtifact, projectModuleFromManifest } from '../../reducer/module';
 import { fixtureControl } from '../fixture-control';
 import { CAPACITY_PATH } from '../capacity-contract';
 import { GatewayControllerObject } from '../../gateway/controller';
 export { ActionWorker, ActionWorkflow } from '../../../actions/src/worker';
-configureActions({registry});
+export { ActionHost } from '../../../actions/src/host';
+// X13g: as the assembled Actions Worker does (actions.ts), one registry per project per isolate, with the
+// bundle evaluated on first use. `moduleEvaluations` counts those evaluations for the warm-reuse tests.
+let evaluations = 0;
+let cached: ModuleRegistry | undefined;
+export const moduleEvaluations = () => evaluations;
+export function resetActionModule() { cached = undefined; evaluations = 0; }
+configureActions({registry:()=>{
+ if(!cached){cached=new ModuleRegistry('p');const module=projectModuleFromManifest('p',manifest);cached.install(moduleArtifact(module,1,()=>{evaluations++;return exports;}));}
+ return cached;
+}});
 export const plans = new MemoryPlanStore();
 export class CompositionTenant extends AssemblyTenant {
  protected override bundle() { return exports; }

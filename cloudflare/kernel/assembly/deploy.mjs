@@ -53,7 +53,7 @@ export async function servingConfigs(name, directory, { kernelUrl, images = {} }
     config.name = kind === 'kernel' ? name : `${name}-${kind}`;
     config.main = resolve(dir, config.main);
     config.alias = Object.fromEntries(Object.entries(config.alias ?? {}).map(([key, value]) => [key, resolve(dir, value)]));
-    for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) binding.script_name = binding.class_name === 'AssemblyTenant' ? `${name}-runtime` : name;
+    for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) binding.script_name = binding.class_name === 'AssemblyTenant' ? `${name}-runtime` : binding.class_name === 'ActionHost' ? `${name}-actions` : name;
     for (const service of config.services ?? []) service.service = `${name}-${service.binding === 'RELEASE_BUILDER' ? 'builder' : service.binding === 'RUNTIME_CATALOG' ? 'runtime' : service.binding === 'ACTIONS_CATALOG' ? 'actions' : service.binding.toLowerCase()}`;
     for (const workflow of config.workflows ?? []) { workflow.name = `${name}-actions`; if (workflow.script_name) workflow.script_name = `${name}-actions`; }
     for (const bucket of config.r2_buckets ?? []) bucket.bucket_name = `${name}-${bucket.binding.toLowerCase()}`;
