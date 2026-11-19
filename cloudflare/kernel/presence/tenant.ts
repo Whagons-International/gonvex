@@ -12,8 +12,10 @@
  *
  * Publication follows Rust's scheduler: leading edge, then at most one patch
  * per 250 ms window per scope, offline after the 10 s grace. While the object
- * is awake a `setTimeout` runs the window; grace ends are also put on the
- * alarm so a reset object still publishes them. Nothing is written to SQLite.
+ * is awake a `setTimeout` runs the window. Every pending grace end is also on
+ * the object's alarm, read from the hub's Members (`nextAlarm()`), so the
+ * offline is published at the grace end even when no timer runs (505), and a
+ * reset object still publishes it. Nothing is written to SQLite.
  *
  * Delivery: each publication is encoded once and sent once per gateway that
  * holds a subscriber (`PresenceGatewayLink.presence`). Every gateway has one
@@ -78,6 +80,9 @@ export interface TenantPresenceOptions {
   lostPending?(): Promise<boolean>;
   /** Keeps background deliveries alive past the request (`ctx.waitUntil`). */
   waitUntil?(promise: Promise<unknown>): void;
+  /** Timer seam (tests drop timers to prove the alarm alone publishes grace ends). Default `setTimeout`. */
+  setTimer?(fn: () => void, ms: number): unknown;
+  clearTimer?(handle: unknown): void;
   now?: () => number;
   wall?: () => number;
 }
@@ -96,15 +101,16 @@ interface Channel {
 /** Delay before a gateway whose delivery failed is tried again. */
 export const RETRY_MS = 1_000;
 
-/** Grace ends at least this far away also go on the alarm; window ends never do. */
-const ALARM_MIN_DELAY_MS = 1_000;
+/** A window timer this far past its due time is treated as lost and set again (505). */
+export const TIMER_STALE_MS = 1_000;
 
 export class TenantPresence {
   readonly hub: PresenceHub;
   private readonly channels = new Map<string, Channel>();
   private loaded: Promise<void> | null = null;
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private timer: unknown = null;
   private timerAt: number | null = null;
+  /** The grace end last handed to `armAlarm` (the object's alarm is at or before it). */
   private alarmAt: number | null = null;
   private lastSweep = 0;
   private readonly now: () => number;
@@ -198,8 +204,12 @@ export class TenantPresence {
     this.afterChange(true);
   }
 
-  /** The earliest grace end the object's alarm must cover (null: none). */
-  nextAlarm(): number | null { return this.alarmAt; }
+  /**
+   * The earliest grace end the object's alarm must cover (null: none), read from the hub's Members,
+   * not from what was last armed: it stays right when a window was pending at the leave, when the
+   * alarm ran presence just before a grace end, or when no timer ran at all (505).
+   */
+  nextAlarm(): number | null { return this.enabled ? this.hub.nextGraceEnd() : null; }
 
   /** Online Members of this tenant's scope (control's `activeSessions` and tests). */
   async published(projectId: string): Promise<PresenceMember[]> {
@@ -233,26 +243,43 @@ export class TenantPresence {
   private schedule(next: number | null, now: number): void {
     if (next !== null || this.timerAt !== null) this.diag("schedule", { next, timerAt: this.timerAt, alarmAt: this.alarmAt });
     if (next === null) {
-      if (this.timer) clearTimeout(this.timer);
-      this.timer = null;
-      this.timerAt = null;
-      return;
-    }
-    if (this.timerAt === null || next < this.timerAt) {
-      if (this.timer) clearTimeout(this.timer);
+      this.clearTimer();
+    } else if (this.timerAt === null || next < this.timerAt || this.timerAt + TIMER_STALE_MS < now) {
+      // A timer long past its due time never ran: set a new one instead of waiting on it.
+      this.clearTimer();
       this.timerAt = next;
-      this.timer = setTimeout(() => {
+      const fire = () => {
         this.diag("timer", { due: next });
         this.timer = null;
         this.timerAt = null;
         this.afterChange();
-      }, Math.max(0, next - now));
+      };
+      this.timer = this.options.setTimer ? this.options.setTimer(fire, Math.max(0, next - now)) : setTimeout(fire, Math.max(0, next - now));
     }
-    // A grace end also goes on the alarm, so a reset object still publishes it.
-    if (next - now >= ALARM_MIN_DELAY_MS && (this.alarmAt === null || next < this.alarmAt || this.alarmAt <= now)) {
-      this.alarmAt = next;
-      this.diag("armAlarm", { at: next });
-      this.options.armAlarm?.(next);
+    this.armGraceEnd(now);
+  }
+
+  private clearTimer(): void {
+    if (this.timer !== null) {
+      if (this.options.clearTimer) this.options.clearTimer(this.timer); else clearTimeout(this.timer as ReturnType<typeof setTimeout>);
+    }
+    this.timer = null;
+    this.timerAt = null;
+  }
+
+  /**
+   * Every pending grace end goes on the alarm, whatever the next due time is (a 250 ms window may come
+   * first) and however close it is, so the offline never depends on a timer alone (505). Rust's
+   * publisher is a loop that cannot be lost; the alarm is this object's equivalent. Armed only when
+   * it moves earlier or the last one passed: the object multiplexes its alarm and only moves it earlier.
+   */
+  private armGraceEnd(now: number): void {
+    const grace = this.nextAlarm();
+    if (grace === null) return;
+    if (this.alarmAt === null || grace < this.alarmAt || this.alarmAt <= now) {
+      this.alarmAt = grace;
+      this.diag("armAlarm", { at: grace });
+      this.options.armAlarm?.(grace);
     }
   }
 

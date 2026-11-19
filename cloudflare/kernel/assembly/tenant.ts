@@ -61,6 +61,8 @@ import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } fro
 const artifactFormat = (generation: unknown): number => typeof generation === "number" ? generation : 0;
 const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
 const PROJECT_KEY = "assembly/project";
+/** The grace end presence last armed, kept across a memory loss (K14). */
+const PRESENCE_ALARM_KEY = "assembly/presence-alarm";
 /** The tenant plan Control built with this release (builder `module.release.planId`). */
 const bakedPlanId = (release: BakedRelease): string | undefined =>
   ((release.manifest.module as Record<string, unknown> | undefined)?.release as { planId?: string } | undefined)?.planId;
@@ -168,8 +170,8 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     this.presence = new TenantPresence({
       tenantId: ctx.id.name ?? "", config: presenceConfig(env), gateway: (name) => rpc<GatewayRpc>(env.GATEWAY, name),
       registeredGateways: () => this.registeredGateways(), waitUntil: (p) => ctx.waitUntil(p),
-      armAlarm: (at) => { ctx.storage.kv.put("assembly/presence-alarm", at); ctx.waitUntil(this.armEarlier(at)); },
-      lostPending: async () => ctx.storage.kv.get<number>("assembly/presence-alarm") !== undefined,
+      armAlarm: (at) => { ctx.storage.kv.put(PRESENCE_ALARM_KEY, at); ctx.waitUntil(this.armEarlier(at)); },
+      lostPending: async () => ctx.storage.kv.get<number>(PRESENCE_ALARM_KEY) !== undefined,
     });
     this.operator = new TenantOperator({ storage: ctx.storage, tenantStorage: this.kernel.storage, capture: this.kernel.capture.state, wake: this.kernel.capture.wake, migrator: this.kernel.migrator });
     this.memberships = new TenantMemberships(this.kernel, ctx.storage);
@@ -257,8 +259,34 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   override async connectionReset(id: string, epoch: number): Promise<void> { await super.connectionReset(id, epoch); this.queries.live.clear(id); }
   override async alarm(): Promise<void> {
     await this.setupScheduled();
-    if (this.alarms) await this.alarms.fire();
-    else if (this.kernel.migrator.wantsAlarm()) await this.kernel.migrator.alarm();
+    if (this.alarms) {
+      await this.alarms.fire();
+      return;
+    }
+    if (this.kernel.migrator.wantsAlarm()) await this.kernel.migrator.alarm();
+    // 505: without the scheduler (no module or sync schema yet) presence still owns grace ends on this alarm.
+    const due = this.presenceDue();
+    if (due !== null && due <= Date.now()) await this.presenceAlarm();
+    const next = this.presenceDue();
+    if (next !== null) await this.armEarlier(next);
+  }
+  /**
+   * When presence needs the alarm: the hub's earliest pending grace end, or after a memory loss the one
+   * recorded when it was armed (`assembly/presence-alarm`), so a reset object still publishes it.
+   */
+  private presenceDue(): number | null {
+    return this.presence.nextAlarm() ?? this.ctx.storage.kv.get<number>(PRESENCE_ALARM_KEY) ?? null;
+  }
+  /**
+   * The presence alarm source. The record is cleared only after presence ran, and only when no grace end
+   * is pending any more: clearing it first (as before 505) dropped a grace end that the run did not
+   * publish, and with it the alarm's cover for that offline.
+   */
+  private async presenceAlarm(): Promise<void> {
+    await this.presence.alarm();
+    const next = this.presence.nextAlarm();
+    if (next === null) this.ctx.storage.kv.delete(PRESENCE_ALARM_KEY);
+    else this.ctx.storage.kv.put(PRESENCE_ALARM_KEY, next);
   }
 
   /**
@@ -341,8 +369,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       run: async (now) => { const result = await this.kernel.pruneReceipts(now, { force: true, maxPages: 20 }); this.receiptRetry = result && !result.done ? now + 1000 : null; return result?.pages ?? 0; } });
     this.alarms.register({ name: "change-log", nextAt: () => this.logRetry ?? (this.ctx.storage.kv.get<number>("assembly/log-pruned") ?? this.openedAt) + PRUNE_INTERVAL_MS,
       run: async (now) => { const result = await this.kernel.reducers.serial(() => pruneChangeLog(this.ctx.storage, { maxPages: 20 })); this.logRetry = result.done ? null : now + 1000; if (result.done) this.ctx.storage.kv.put("assembly/log-pruned", now); return result.pages; } });
-    this.alarms.register({ name: "presence", nextAt: () => this.presence.nextAlarm() ?? this.ctx.storage.kv.get<number>("assembly/presence-alarm") ?? null,
-      run: async () => { this.ctx.storage.kv.delete("assembly/presence-alarm"); await this.presence.alarm(); return 1; } });
+    this.alarms.register({ name: "presence", nextAt: () => this.presenceDue(), run: async () => { await this.presenceAlarm(); return 1; } });
     this.alarms.register({ name: "memberships", nextAt: (now) => this.membershipRetry ?? (this.hasMemberships() ? now : null),
       run: async (now) => { const n = await this.projectMemberships(); this.membershipRetry = this.hasMemberships() ? now + 1000 : null; return n; } });
 

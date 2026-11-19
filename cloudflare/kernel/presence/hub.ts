@@ -439,6 +439,24 @@ export class PresenceHub {
     scope.due = earliest === null ? null : this.align(scope, earliest);
   }
 
+  /**
+   * The earliest time a graced Member's offline becomes publishable, over every scope (null: no grace
+   * pending). Computed from the Members themselves, so it is right whatever timers ran or were lost:
+   * the tenant object's alarm is kept at or before it (505).
+   */
+  nextGraceEnd(): number | null {
+    let earliest: number | null = null;
+    for (const scope of this.scopes.values()) {
+      for (const id of scope.dirty) {
+        const member = scope.members.get(id);
+        if (!member || member.connections.size !== 0 || member.graceUntil === null) continue;
+        const at = this.align(scope, member.graceUntil);
+        if (earliest === null || at < earliest) earliest = at;
+      }
+    }
+    return earliest;
+  }
+
   /** Online Members of a scope, sorted by id (`published_members`). */
   published(key: string): PresenceMember[] {
     const scope = this.scopes.get(key);

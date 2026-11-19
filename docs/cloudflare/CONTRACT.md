@@ -1649,7 +1649,7 @@ Disposition: the 250 ms coalescing window and the `presence.*` frame shapes are 
 | Aggregate | any connection `active` → active; all `idle` → idle; none → offline (after grace) | `R:presence.rs:191-207` | | **keep** |
 | `presence.set` | Moves the connection if scope/member differs (no grace); `offline` removes this connection now, no grace; else upsert and clear grace; marks dirty | `R:presence.rs:414-474`, `R:lib.rs:3712-3726` | | **keep** |
 | Disconnect / re-auth | Socket close (guard drop) or re-auth: detach with grace; also unsubscribes; support sessions queued for last-seen flush | `R:presence.rs:541-567`, `R:presence.rs:760-775`, `R:presence.rs:871-893`, `R:lib.rs:2742` | `webSocketClose`/`webSocketError` | **adapt** |
-| Publication | Due = max(ready, last publication + window); ready = now or grace end; publish dirty Members whose aggregate differs from published; offline removes Member; one encoded patch shared by all subscribers; no per-connection timer; one scheduler sleeps to earliest due | `R:presence.rs:219-261`, `R:presence.rs:619-638`, `R:presence.rs:803-868`, `R:lib.rs:1648-1669` | | **adapt**: `setTimeout` while awake for the 250 ms window; grace end on the DO alarm (multiplexed) |
+| Publication | Due = max(ready, last publication + window); ready = now or grace end; publish dirty Members whose aggregate differs from published; offline removes Member; one encoded patch shared by all subscribers; no per-connection timer; one scheduler sleeps to earliest due | `R:presence.rs:219-261`, `R:presence.rs:619-638`, `R:presence.rs:803-868`, `R:lib.rs:1648-1669` | | **adapt**: `setTimeout` while awake for the 250 ms window; every pending grace end on the DO alarm (multiplexed), taken from the hub's Members, so the offline lands at the grace end even when no timer runs |
 
 #### E.e.3 Frames
 
@@ -1709,7 +1709,7 @@ Disposition: **replace** (intended, IB3). Rule in `contract-changes/0009-receipt
 
 Disposition: **adapt** (every Rust timer listed here multiplexes onto the tenant DO's single alarm; handlers stay idempotent).
 
-Every periodic task in this section multiplexes onto the single DO alarm, set to the minimum of: next scheduled job `run_at`; next outbox `available_at` or lease expiry; change-feed prune (hourly); completed-job prune (600 s); receipt prune; membership projection backoff (2–10 s); presence grace end (when hibernating); support last-seen flush (5 s close batch, 300 s refresh); targeted-wake flush (5 s). DO alarms are at-least-once, so every handler must be idempotent (the Rust handlers already are: claims, revision guards, conditional deletes).
+Every periodic task in this section multiplexes onto the single DO alarm, set to the minimum of: next scheduled job `run_at`; next outbox `available_at` or lease expiry; change-feed prune (hourly); completed-job prune (600 s); receipt prune; membership projection backoff (2–10 s); presence grace end (every pending one, whatever the next window is); support last-seen flush (5 s close batch, 300 s refresh); targeted-wake flush (5 s). DO alarms are at-least-once, so every handler must be idempotent (the Rust handlers already are: claims, revision guards, conditional deletes).
 
 ## F. Decision log and open decisions
 

@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { DEFAULT_PRESENCE_CONFIG, type ConnectionReport, type PresenceConfig } from "../hub";
-import { type PresenceDelivery, type PresenceGatewayLink, TenantPresence, resyncFrame } from "../tenant";
+import { type PresenceDelivery, type PresenceGatewayLink, TenantPresence, TIMER_STALE_MS, resyncFrame } from "../tenant";
 import type { PresenceSocketView } from "../socket";
 import type { TenantSession } from "../../session/ports";
 
@@ -50,7 +50,7 @@ class FakeGateway implements PresenceGatewayLink {
   }
 }
 
-function setup(over: Partial<PresenceConfig> = {}, extra: { lostPending?: boolean; gateways?: string[] } = {}) {
+function setup(over: Partial<PresenceConfig> = {}, extra: { lostPending?: boolean; gateways?: string[]; setTimer?: (fn: () => void, ms: number) => unknown } = {}) {
   const gateways = new Map<string, FakeGateway>();
   const gw = (name: string) => { let g = gateways.get(name); if (!g) gateways.set(name, g = new FakeGateway()); return g; };
   const alarms: number[] = [];
@@ -61,6 +61,7 @@ function setup(over: Partial<PresenceConfig> = {}, extra: { lostPending?: boolea
     registeredGateways: async () => extra.gateways ?? [...gateways.keys()],
     armAlarm: (at) => alarms.push(at),
     ...(extra.lostPending === undefined ? {} : { lostPending: async () => extra.lostPending! }),
+    ...(extra.setTimer ? { setTimer: extra.setTimer, clearTimer: (h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>) } : {}),
   });
   return { presence, gw, alarms };
 }
@@ -266,3 +267,96 @@ describe("TenantPresence", () => {
     for (const line of lines) for (const key of Object.keys(line)) expect(allowed.has(key), key).toBe(true);
   });
 });
+
+/**
+ * 505: on the dev deployment a Member's offline was sometimes never published at the grace end (-12 never
+ * in 66 s, -11 27 s), and no tenant alarm covered the grace end. The grace end went on the alarm only from
+ * `schedule()`, only when it was the next due time, at least 1 s away and earlier than the last armed
+ * time; otherwise it rested on a `setTimeout` alone. These run with every timer dropped (`noTimers`), so
+ * the alarm is the only thing that can publish: what a lost timer leaves.
+ */
+describe("TenantPresence grace end on the alarm (505)", () => {
+  const noTimers = () => null;
+  const viewer: ConnectionReport = { connectionId: "v", projectId: PROJECT, memberId: "viewer", state: null, subscriptionId: "s" };
+
+  it("puts the grace end on the alarm when a 250 ms window is pending at the leave", async () => {
+    const { presence, gw, alarms } = setup({ tickMs: 250, offlineGraceMs: 400 }, { setTimer: noTimers });
+    await presence.frame(socket("v", "viewer"), { type: "presence.subscribe", id: "s" });
+    gw("gw-a").reports = [viewer]; // the alarm sweeps: the viewer's socket is still there
+    await presence.frame(socket("c1", "m1"), { type: "presence.set", state: "active" }); // leading edge
+    await presence.frame(socket("c1", "m1"), { type: "presence.set", state: "idle" }); // trailing: a window is pending
+    const left = Date.now();
+    await presence.leave("c1"); // the page hides (Away), then its socket closes inside the window
+    expect(alarms.length).toBe(1);
+    expect(alarms[0]! - left).toBeGreaterThanOrEqual(390);
+    expect(presence.nextAlarm()).toBe(alarms[0]);
+    await sleep(Math.max(0, alarms[0]! - Date.now()) + 5);
+    await presence.alarm();
+    await presence.flushed();
+    expect(types(gw("gw-a").frames("s"))).toEqual(["snapshot[]", "m1:active", "m1:offline"]);
+    expect(presence.nextAlarm()).toBeNull();
+  });
+
+  it("keeps a grace end on the alarm when the alarm runs presence less than a second before it", async () => {
+    const { presence, gw, alarms } = setup({ offlineGraceMs: 1_200 }, { setTimer: noTimers });
+    await presence.frame(socket("v", "viewer"), { type: "presence.subscribe", id: "s" });
+    gw("gw-a").reports = [viewer]; // the alarm sweeps: the viewer's socket is still there
+    await presence.frame(socket("c1", "m1"), { type: "presence.set", state: "active" });
+    await sleep(60); // past the window: m2 is published on its own leading edge
+    await presence.frame(socket("c2", "m2"), { type: "presence.set", state: "active" });
+    await presence.leave("c1");
+    await sleep(500);
+    const left2 = Date.now();
+    await presence.leave("c2"); // its grace ends 500 ms after m1's: covered by m1's alarm until it fires
+    expect(alarms).toHaveLength(1);
+    await sleep(Math.max(0, alarms[0]! - Date.now()) + 5);
+    await presence.alarm(); // m1's grace end: m2's is < 1 s away and must stay on the alarm
+    await presence.flushed();
+    expect(types(gw("gw-a").frames("s")).at(-1)).toBe("m1:offline");
+    const g2 = presence.nextAlarm()!;
+    expect(g2 - left2).toBeGreaterThanOrEqual(1_190);
+    expect(g2 - Date.now()).toBeLessThan(1_000);
+    expect(alarms.at(-1)).toBe(g2); // armed again, although it is less than a second away
+    await sleep(Math.max(0, g2 - Date.now()) + 5);
+    await presence.alarm();
+    await presence.flushed();
+    expect(types(gw("gw-a").frames("s")).at(-1)).toBe("m2:offline");
+    expect(presence.nextAlarm()).toBeNull();
+  });
+
+  it("reports a later grace end even when an earlier one was armed and then cancelled by a reconnect", async () => {
+    const { presence, gw } = setup({ offlineGraceMs: 600 }, { setTimer: noTimers });
+    await presence.frame(socket("v", "viewer"), { type: "presence.subscribe", id: "s" });
+    gw("gw-a").reports = [viewer]; // the alarm sweeps: the viewer's socket is still there
+    await presence.frame(socket("c1", "m1"), { type: "presence.set", state: "active" });
+    await presence.leave("c1"); // armed at t+600
+    await presence.frame(socket("c1b", "m1"), { type: "presence.set", state: "active" }); // back within the grace
+    expect(presence.nextAlarm()).toBeNull();
+    await sleep(300);
+    await presence.leave("c1b"); // its grace end is after the armed one
+    const g = presence.nextAlarm()!;
+    expect(g - Date.now()).toBeGreaterThan(500);
+    await sleep(Math.max(0, g - Date.now()) + 5);
+    await presence.alarm();
+    await presence.flushed();
+    expect(types(gw("gw-a").frames("s"))).toEqual(["snapshot[]", "m1:active", "m1:offline"]);
+  });
+
+  it("sets a new timer when the pending one never ran", async () => {
+    let lost = false;
+    // The first short (window) timer is lost; every other timer runs.
+    const setTimer = (fn: () => void, ms: number) => (!lost && ms < 1_000 ? (lost = true, null) : setTimeout(fn, ms));
+    const { presence, gw } = setup({ tickMs: 40, offlineGraceMs: 60_000 }, { setTimer });
+    await presence.frame(socket("v", "viewer"), { type: "presence.subscribe", id: "s" });
+    await presence.frame(socket("c3", "m3"), { type: "presence.set", state: "active" });
+    await presence.leave("c3"); // a grace end stays pending: the next due time is never null below
+    await presence.frame(socket("c1", "m1"), { type: "presence.set", state: "active" }); // trailing window: its timer is lost
+    await sleep(TIMER_STALE_MS + 100);
+    await presence.frame(socket("c2", "m2"), { type: "presence.set", state: "active" }); // publishes m1 and m2
+    await presence.frame(socket("c2", "m2"), { type: "presence.set", state: "idle" }); // a new window: needs a live timer
+    await sleep(150);
+    await presence.flushed();
+    expect(types(gw("gw-a").frames("s"))).toEqual(["snapshot[]", "m3:active", "m1:active,m2:active", "m2:idle"]);
+  });
+});
+
