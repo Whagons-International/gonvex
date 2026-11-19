@@ -174,6 +174,29 @@ export class ModuleCache {
     return entry;
   }
   set(projectId: string, info: ModuleInfo | null): void { this.entries.set(projectId, Promise.resolve(info)); }
+
+  /**
+   * X17: the replica epoch of (project, database, module). Control derives it from the deployed manifest, whose module
+   * hash covers the functions and schema the epoch hashes, so one read per module is enough; it was a serial Control
+   * round trip (~34 ms on dev) in every tenant auth. A module without a hash, or a failed read, is not kept.
+   */
+  private readonly epochs = new Map<string, Promise<string>>();
+  async epoch(projectId: string, databaseUrl: string): Promise<string> {
+    const hash = (await this.get(projectId).catch(() => null))?.artifactHash;
+    if (!hash) return this.ports.modules.epoch(projectId, databaseUrl);
+    const key = `${projectId}\u0000${databaseUrl}\u0000${hash}`;
+    let entry = this.epochs.get(key);
+    if (!entry) {
+      if (this.epochs.size >= 256) this.epochs.clear();
+      entry = this.ports.modules.epoch(projectId, databaseUrl).catch((error) => { this.epochs.delete(key); throw error; });
+      this.epochs.set(key, entry);
+    }
+    return entry;
+  }
+  /** A deploy changed the project's module: its epochs are read again. */
+  invalidate(projectId: string): void {
+    for (const key of [...this.epochs.keys()]) if (key.startsWith(`${projectId}\u0000`)) this.epochs.delete(key);
+  }
   async refresh(projectId: string): Promise<ModuleInfo | null> {
     return this.refreshWith(projectId, () => this.ports.modules.module(projectId));
   }
@@ -1276,7 +1299,7 @@ export class Session {
     const module = await this.modules.get(session.identity.projectId);
     if (!module) return null;
     const epochStarted = this.now();
-    const epoch = await this.ports.modules.epoch(session.identity.projectId, session.route.databaseUrl);
+    const epoch = await this.modules.epoch(session.identity.projectId, session.route.databaseUrl);
     this.authTimes.epochMs = this.now() - epochStarted;
     return replicaDirective({
       projectId: session.identity.projectId, tenantId: session.route.tenantId, accountId: session.identity.account.id,

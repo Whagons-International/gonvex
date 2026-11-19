@@ -23,6 +23,14 @@ interface Slot {
 interface Lease { assignment: GatewayAssignment; claimed: boolean }
 interface ScaleEvent { at: number; action: "allocate" | "drain" | "retire"; gateway: string; epoch: number }
 interface State { v: 1; epoch: number; slots: Slot[]; leases: Lease[]; events?: ScaleEvent[] }
+const UNCONFIRMED = { allowUnconfirmed: true } as const;
+/**
+ * X17: a holder's own capacity report this recent stands in for a live probe at admission. Every admission to the holder
+ * goes through this cell and is counted as a lease until it expires, so `sample.sockets + pending` over-counts (a claimed
+ * lease is also in a later sample) and never under-counts; sockets that left only lower the real number. The probe was a
+ * Durable Object round trip that could wake a hibernated holder (50-190 ms of the connect on dev).
+ */
+export const FRESH_SAMPLE_MS = 10_000;
 interface ControllerEnv { GATEWAY: DurableObjectNamespace; GONVEX_SPAN_TIMING?: string }
 
 /**
@@ -64,9 +72,17 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
     return Number(match[1]);
   }
   private pending(s: Slot): number { return this.state.leases.filter(l => l.assignment.gateway === s.name && l.assignment.epoch === s.epoch).length; }
-  private async save(): Promise<void> {
+  /**
+   * X17: `confirmed: false` for a lease-only change (a new lease on an existing slot, a claim, a release). The reply does
+   * not wait for the write's replication (27-65 ms per call on dev). A lost write resets the object to an earlier state:
+   * a lost lease makes the gateway's `claim` fail, so the upgrade is refused and the client reconnects; a lost claim or
+   * release leaves an unclaimed lease that expires within LEASE_MS. Slot changes (allocation, drains, retirement) stay
+   * confirmed.
+   */
+  private async save(confirmed = true): Promise<void> {
     if (new TextEncoder().encode(JSON.stringify(this.state)).byteLength > 120 * 1024) throw new Error("gateway routing state byte ceiling reached");
-    await this.ctx.storage.put("placement", this.state);
+    const options = confirmed ? undefined : UNCONFIRMED;
+    await this.ctx.storage.put("placement", this.state, options);
     // Only finite lease cleanup / scale-in deadlines. A stable idle cell has no alarm.
     const deadlines = this.state.leases.map(l => l.assignment.expiresAt);
     for (const s of this.state.slots) {
@@ -75,8 +91,8 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
         && !this.state.slots.some(s => s.mode === "draining")
         && this.state.slots.filter(s => s.mode === "active").length > 1) deadlines.push(Math.max(s.quietSince + SCALE_IN_MS, s.changedAt + COOLDOWN_MS));
     }
-    if (deadlines.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + 100, Math.min(...deadlines)));
-    else await this.ctx.storage.deleteAlarm();
+    if (deadlines.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + 100, Math.min(...deadlines)), options);
+    else await this.ctx.storage.deleteAlarm(options);
   }
   private async probe(s: Slot): Promise<CapacitySample> {
     const rpc = this.env.GATEWAY.getByName(s.name) as unknown as GatewayCapacityRpc;
@@ -151,6 +167,9 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       let chosen: Slot | undefined;
       // At most two probes per admission, even with a failed/pressured fleet.
       for (const s of active.slice(0, 2)) {
+        // A fresh report that admits stands in for the probe; one that refuses is checked live, as before.
+        if (s.sample && s.sample.epoch === s.epoch && now - s.sample.at <= FRESH_SAMPLE_MS && s.sample.at <= now + 1_000
+          && !pressured(s.sample) && s.sample.sockets + this.pending(s) < MAX_SOCKETS) { chosen = s; break; }
         const probed = Date.now(); probes++;
         try {
           const sample = await this.probe(s);
@@ -158,11 +177,12 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
           if (!pressured(sample) && sample.sockets + this.pending(s) < MAX_SOCKETS) { chosen = s; break; }
         } catch { probeMs += Date.now() - probed; /* Faulted holder retains ownership, but receives no new admission. */ }
       }
+      const allocated = !chosen;
       if (!chosen) chosen = this.allocate(now);
       const assignment: GatewayAssignment = { v: 1, cell, gateway: chosen.name, epoch: chosen.epoch, token: crypto.randomUUID(), connectionId, expiresAt: now + LEASE_MS };
       this.state.leases.push({ assignment, claimed: false });
       const saved = Date.now();
-      await this.save(); // Durable before the router can use it.
+      await this.save(allocated); // A new slot is durable before the router can use it; a lease alone need not be (see save).
       span("controller.acquire", { waitMs: now - queued, probes, probeMs, saveMs: Date.now() - saved, totalMs: Date.now() - queued });
       this.dispatchDrains();
       return assignment;
@@ -178,7 +198,7 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       if (!lease || lease.claimed || slot?.mode !== "active") return false;
       lease.claimed = true;
       const saved = Date.now();
-      await this.save();
+      await this.save(false);
       span("controller.claim", { saveMs: Date.now() - saved, totalMs: Date.now() - queued });
       return true;
     });
@@ -188,7 +208,7 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       // Claimed leases remain until expiry: a lost upgrade response must never free a live socket's budget.
       this.state.leases = this.state.leases.filter(l => l.assignment.token !== a.token || l.assignment.connectionId !== a.connectionId
         || l.assignment.gateway !== a.gateway || l.assignment.epoch !== a.epoch || l.assignment.cell !== a.cell || l.claimed);
-      await this.save();
+      await this.save(false);
     });
   }
   drainReady(name: string, epoch: number, replacement: string): Promise<boolean> {
