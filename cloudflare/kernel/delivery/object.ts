@@ -86,7 +86,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
    * "none" (the loop only), "resolve" (clock, visibility resolution, scan plan) or "open" (the whole open, frames
    * discarded, nothing installed). The caller reads each call's CPU from Workers Logs.
    */
-  async devOpenCost(phase: "none" | "resolve" | "open", rounds = 1): Promise<{ paths: number; frames: number; errors: number }> {
+  async devOpenCost(phase: "none" | "resolve" | "open", rounds = 1, only?: string[]): Promise<{ paths: number; frames: number; errors: number; failed?: string }> {
     if ((this.env as { GONVEX_SPAN_TIMING?: string }).GONVEX_SPAN_TIMING !== "1") throw new Error("dev profiling is disabled");
     const module = this.replicaModule();
     const active = this.kernel.module;
@@ -101,7 +101,8 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
       route: { projectId: active.projectId, tenantId: this.ctx.id.name ?? "", databaseUrl: "" },
       member, admissionRevision, delegation: null, developerSession: null, anonymous: false,
     } as unknown as Parameters<typeof resolveCollection>[1]["session"];
-    const paths = [...module.functions].filter(([, fn]) => fn.kind === "query" && fn.delivery === "replica" && fn.replica).map(([path]) => path);
+    const paths = [...module.functions].filter(([path, fn]) => fn.kind === "query" && fn.delivery === "replica" && fn.replica && (!only || only.includes(path))).map(([path]) => path);
+    let failed: string | undefined;
     const read = snapshotRunner(this.kernel.storage);
     let frames = 0, errors = 0;
     await this.kernel.reducers.serial(async () => {
@@ -120,13 +121,14 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
               const resolved = resolveCollection(db, context, definition, plan, clock.revision);
               return scanPlan(definition, plan, resolved, {}, db.catalogOf(definition.table).columns);
             });
-          } catch { errors++; }
+          } catch (error) { errors++; failed ??= `${path}: ${String((error as Error)?.message ?? error).slice(0, 200)}`; }
         } else {
-          await openReplica({ id: `dev-${path}`, path, args: {}, keys: [], hashes: {}, fullIntegrity: false } as never, context as never);
+          try { await openReplica({ id: `dev-${path}`, path, args: {}, keys: [], hashes: {}, fullIntegrity: false } as never, context as never); }
+          catch (error) { errors++; failed ??= `${path}: ${String((error as Error)?.message ?? error).slice(0, 200)}`; }
         }
       }
     });
-    return { paths: paths.length, frames, errors };
+    return { paths: paths.length, frames, errors, ...(failed ? { failed } : {}) };
   }
 
   /** The replica view of the active generation, rebuilt when the generation changes. */
