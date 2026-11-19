@@ -47,8 +47,8 @@ export function attachmentRecord(record: SessionRecord): AttachmentRecord {
  * RPC's receipt) until the record is replicated. That wait was ~40-70 ms per client step on dev.
  *
  * Why this is safe: the record only matters to a socket that outlives this object's memory. The durable state is
- * always a prefix of the committed turns, and every turn's writes are atomic (`transactionSync`, or one turn's implicit
- * transaction). If an unconfirmed write is lost, the object is reset; a socket that survives the reset restores from
+ * always a prefix of the committed turns, and every turn's writes are atomic (one turn's coalesced writes; X17: not
+ * `transactionSync`, which makes them confirmed). If an unconfirmed write is lost, the object is reset; a socket that survives the reset restores from
  * its attachment, whose reference names the newest generation. That generation's manifest is then missing, so
  * `restore` throws and the host closes the socket with 1012 ("session recovery requires reconnect"), exactly as for
  * any other unavailable record. A generation that is durable but not yet committed is the `pending` case `restore`
@@ -62,15 +62,37 @@ export type RecoveryStorage = Pick<DurableObjectStorage, "kv" | "transactionSync
 export class HolderRecoveryStore {
   constructor(private readonly storage: RecoveryStorage) {}
 
-  private put(key: string, value: unknown): void { this.storage.put(key, value, UNCONFIRMED).catch(ignore); }
-  private del(key: string): void { this.storage.delete(key, UNCONFIRMED).catch(ignore); }
+  /**
+   * X17: the writes of one publication, in one synchronous turn, WITHOUT `transactionSync`. Inside `transactionSync` the
+   * platform commits the transaction as a confirmed write and ignores `allowUnconfirmed` (minimal repro, X17: a put
+   * with `allowUnconfirmed` inside `transactionSync` held the reply 32-52 ms and gated a concurrent read on the same
+   * object as long; the same puts outside it took 5 ms). All writes issued in one turn with no await are still
+   * committed together (the platform's write coalescing), so a publication is atomic as before. A synchronous throw in
+   * the middle is rolled back here: every key written in this scope gets its previous value (or none) back.
+   */
+  private undo: Array<[string, unknown]> | undefined;
+  private atomic(fn: () => void): void {
+    if (this.undo) { fn(); return; }
+    this.undo = [];
+    try { fn(); }
+    catch (error) {
+      for (const [key, previous] of this.undo.reverse()) {
+        if (previous === undefined) this.storage.delete(key, UNCONFIRMED).catch(ignore);
+        else this.storage.put(key, previous, UNCONFIRMED).catch(ignore);
+      }
+      throw error;
+    } finally { this.undo = undefined; }
+  }
+  private remember(key: string): void { this.undo?.push([key, this.storage.kv.get(key)]); }
+  private put(key: string, value: unknown): void { this.remember(key); this.storage.put(key, value, UNCONFIRMED).catch(ignore); }
+  private del(key: string): void { this.remember(key); this.storage.delete(key, UNCONFIRMED).catch(ignore); }
 
   write(record: SessionRecord, previous?: RecoveryReference, socketOwner = previous?.socketOwner ?? crypto.randomUUID()): RecoveryReference {
     assertInitialState(record);
     const generation = crypto.randomUUID(), scope = recoveryScope(record);
     let chunks = 0, hash = "";
     // A failed partial write cannot publish a manifest or a usable attachment reference.
-    this.storage.transactionSync(() => {
+    this.atomic(() => {
       const owner = this.storage.kv.get<Owner>(ownerKey(socketOwner));
       if (owner && (owner.connectionId !== record.connectionId || !previous || (owner.current !== previous.generation && owner.pending !== previous.generation))) throw new Error("holder recovery publication ownership changed");
       const append = (text: string) => {
@@ -107,7 +129,7 @@ export class HolderRecoveryStore {
     const owner = this.storage.kv.get<Owner>(ownerKey(ref.socketOwner));
     if (!manifest || !owner || owner.connectionId !== manifest.owner || (owner.current !== ref.generation && owner.pending !== ref.generation)) throw new Error("holder recovery publication ownership changed");
     if (owner.current === ref.generation && owner.pending === undefined) return;
-    this.storage.transactionSync(() => {
+    this.atomic(() => {
       this.put(ownerKey(ref.socketOwner), { v: 2, connectionId: owner.connectionId, current: ref.generation } satisfies Owner);
       for (const generation of [owner.current, owner.pending]) if (generation && generation !== ref.generation) {
         const old = this.storage.kv.get<Manifest>(manifestKey(generation));
@@ -158,7 +180,7 @@ export class HolderRecoveryStore {
   discard(ref: RecoveryReference): void {
     const owner = this.storage.kv.get<Owner>(ownerKey(ref.socketOwner));
     if (owner?.current === ref.generation || owner?.pending === ref.generation) return;
-    this.storage.transactionSync(() => this.deleteGeneration(ref));
+    this.atomic(() => this.deleteGeneration(ref));
   }
 
   private deleteGeneration(ref: RecoveryReference): void {
@@ -171,7 +193,7 @@ export class HolderRecoveryStore {
   abandon(socketOwner: string): void {
     const owner = this.storage.kv.get<Owner>(ownerKey(socketOwner));
     if (!owner) return;
-    this.storage.transactionSync(() => {
+    this.atomic(() => {
       this.del(ownerKey(socketOwner));
       this.del(`${CONNECTION_OWNERS}${owner.connectionId}/${socketOwner}`);
       for (const generation of [owner.current, owner.pending]) if (generation) {

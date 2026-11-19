@@ -166,8 +166,10 @@ describe("holder recovery metadata", () => {
     await withStore((storage) => {
       const options: unknown[] = [];
       const gated: string[] = [];
+      let transactions = 0;
       const spy: RecoveryStorage = {
-        transactionSync: (fn) => storage.transactionSync(fn),
+        // X17: a transactionSync commits as a confirmed write even when its puts say allowUnconfirmed.
+        transactionSync: (fn) => { transactions++; return storage.transactionSync(fn); },
         kv: new Proxy(storage.kv, { get: (target, name) => name === "put" || name === "delete"
           ? (...args: unknown[]) => { gated.push(String(name)); return (target[name] as (...a: unknown[]) => unknown).apply(target, args); }
           : (target as unknown as Record<string | symbol, unknown>)[name] instanceof Function ? ((target as unknown as Record<string | symbol, (...a: unknown[]) => unknown>)[name]!).bind(target) : (target as unknown as Record<string | symbol, unknown>)[name] }),
@@ -185,6 +187,7 @@ describe("holder recovery metadata", () => {
       store.abandon(next.socketOwner);
       expect([...storage.kv.list({ prefix: "session-recovery" })]).toEqual([]);
       expect(gated).toEqual([]);
+      expect(transactions).toBe(0);
       expect(options.length).toBeGreaterThan(5);
       expect(options.every((o) => (o as { allowUnconfirmed?: boolean } | undefined)?.allowUnconfirmed === true)).toBe(true);
     });
