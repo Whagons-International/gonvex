@@ -1,7 +1,7 @@
 // Real workerd KV/transaction coverage for 0058's holder metadata exception.
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { HolderRecoveryStore, attachmentRecord, withoutRecovery } from "../recovery-store";
+import { HolderRecoveryStore, attachmentRecord, withoutRecovery, type RecoveryStorage } from "../recovery-store";
 import { Session, type SessionRecord } from "../session";
 import type { Ports } from "../ports";
 
@@ -9,6 +9,16 @@ function record(): SessionRecord {
   return Session.open({ connectionId: crypto.randomUUID(), publicTransport: false, host: "h", ports: {} as Ports,
     ready: { presence: false, runtimeVersion: "test" }, sink: { send: () => {}, close: () => {} }, timers: { later: () => () => {} },
   }).record;
+}
+/** A store whose writes go through `kv` (failure injection). X16: the store writes through `put`/`delete`. */
+type FakeKv = { get(key: string): unknown; list(options: DurableObjectListOptions): Iterable<[string, unknown]>; put(key: string, value: unknown): void; delete(key: string): unknown };
+function unconfirmed(storage: DurableObjectStorage, kv: FakeKv): RecoveryStorage {
+  return {
+    transactionSync: (fn) => storage.transactionSync(fn),
+    kv: { get: kv.get, list: kv.list, put: kv.put, delete: kv.delete } as unknown as DurableObjectStorage["kv"],
+    put: ((key: string, value: unknown) => { kv.put(key, value); return Promise.resolve(); }) as DurableObjectStorage["put"],
+    delete: ((key: string) => { kv.delete(key); return Promise.resolve(true); }) as DurableObjectStorage["delete"],
+  };
 }
 async function withStore(body: (storage: DurableObjectStorage, store: HolderRecoveryStore) => void) {
   await runInDurableObject(env.HELLO.getByName(`recovery-${crypto.randomUUID()}`), (_instance, state) => body(state.storage, new HolderRecoveryStore(state.storage)));
@@ -106,10 +116,11 @@ describe("holder recovery metadata", () => {
       const r = record(); r.pendingActions = { a: "agent.run" };
       const old = store.write(r);
       let puts = 0;
-      const failing = new HolderRecoveryStore({ transactionSync: (fn) => storage.transactionSync(fn), kv: {
-        get: (key) => storage.kv.get(key), list: (options) => storage.kv.list(options), delete: (key) => storage.kv.delete(key),
-        put: (key, value) => { if (++puts === 2) throw new Error("injected partial write"); storage.kv.put(key, value); },
-      } });
+      const kv = {
+        get: (key: string) => storage.kv.get(key), list: (options: DurableObjectListOptions) => storage.kv.list(options), delete: (key: string) => storage.kv.delete(key),
+        put: (key: string, value: unknown) => { if (++puts === 2) throw new Error("injected partial write"); storage.kv.put(key, value); },
+      };
+      const failing = new HolderRecoveryStore(unconfirmed(storage, kv));
       expect(() => failing.write(r)).toThrow("injected partial write");
       expect(store.restore(withoutRecovery(r), old).pendingActions).toEqual({ a: "agent.run" });
       // A published (or uncertain pending) socket owner remains protected even
@@ -151,16 +162,44 @@ describe("holder recovery metadata", () => {
     });
   });
 
+  it("X16: writes the record without holding the output gate (allowUnconfirmed), visible at once", async () => {
+    await withStore((storage) => {
+      const options: unknown[] = [];
+      const gated: string[] = [];
+      const spy: RecoveryStorage = {
+        transactionSync: (fn) => storage.transactionSync(fn),
+        kv: new Proxy(storage.kv, { get: (target, name) => name === "put" || name === "delete"
+          ? (...args: unknown[]) => { gated.push(String(name)); return (target[name] as (...a: unknown[]) => unknown).apply(target, args); }
+          : (target as unknown as Record<string | symbol, unknown>)[name] instanceof Function ? ((target as unknown as Record<string | symbol, (...a: unknown[]) => unknown>)[name]!).bind(target) : (target as unknown as Record<string | symbol, unknown>)[name] }),
+        put: ((key: string, value: unknown, opts?: unknown) => { options.push(opts); return storage.put(key, value, opts as DurableObjectPutOptions); }) as DurableObjectStorage["put"],
+        delete: ((key: string, opts?: unknown) => { options.push(opts); return storage.delete(key, opts as DurableObjectPutOptions); }) as DurableObjectStorage["delete"],
+      };
+      const store = new HolderRecoveryStore(spy);
+      const r = record(); r.replicas = { a: "items.all" };
+      const first = store.write(r); store.commit(first);
+      r.replicas = { a: "items.all", b: "items.other" };
+      const next = store.write(r, first); store.commit(next);
+      // Readable in the same turn, and the old generation is gone.
+      expect(store.restore(withoutRecovery(r), next).replicas).toEqual(r.replicas);
+      expect([...storage.kv.list({ prefix: `session-recovery/${first.generation}/` })]).toEqual([]);
+      store.abandon(next.socketOwner);
+      expect([...storage.kv.list({ prefix: "session-recovery" })]).toEqual([]);
+      expect(gated).toEqual([]);
+      expect(options.length).toBeGreaterThan(5);
+      expect(options.every((o) => (o as { allowUnconfirmed?: boolean } | undefined)?.allowUnconfirmed === true)).toBe(true);
+    });
+  });
+
   it("indexes a failed obsolete-generation deletion and stops cleanup alarms after bounded reclamation", async () => {
     await withStore((storage, store) => {
       const r = record(), old = store.write(r); store.commit(old);
       r.pendingActions = { waiting: "agent.run" };
       const next = store.write(r, old);
       let failDelete = true;
-      const failing = new HolderRecoveryStore({ transactionSync: (fn) => storage.transactionSync(fn), kv: {
-        get: (key) => storage.kv.get(key), list: (options) => storage.kv.list(options), put: (key, value) => storage.kv.put(key, value),
-        delete: (key) => { if (failDelete && key.startsWith(`session-recovery/${old.generation}/`)) throw new Error("injected obsolete deletion failure"); return storage.kv.delete(key); },
-      } });
+      const failing = new HolderRecoveryStore(unconfirmed(storage, {
+        get: (key: string) => storage.kv.get(key), list: (options: DurableObjectListOptions) => storage.kv.list(options), put: (key: string, value: unknown) => storage.kv.put(key, value),
+        delete: (key: string) => { if (failDelete && key.startsWith(`session-recovery/${old.generation}/`)) throw new Error("injected obsolete deletion failure"); return storage.kv.delete(key); },
+      }));
       failing.commit(next);
       expect([...storage.kv.list({ prefix: "session-recovery-orphan/" })]).toHaveLength(1);
       expect(store.restore(withoutRecovery(r), next).pendingActions).toEqual(r.pendingActions);
