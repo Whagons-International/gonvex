@@ -43,7 +43,7 @@ import { setSpanTiming, spanTimingFromEnv } from "../../delivery/spans";
  * (X02 entry tracking); an unlisted helper only makes the gate more conservative.
  */
 const INTERNAL_METHODS: ReadonlySet<string> = new Set([
-  "accept", "applyReplica", "loadPlacement", "drainTick", "reportCapacity", "index", "tenantChanged", "link",
+  "accept", "applyReplica", "applyReplicaNow", "applyRecovery", "receiveReplica", "replicaGate", "loadPlacement", "drainTick", "reportCapacity", "index", "tenantChanged", "link",
   "bindings", "alarmEntry", "refreshControlWatches",
 ]);
 const tracked = new WeakSet<object>();
@@ -104,6 +104,11 @@ export interface TenantLink {
 export interface GatewayBindings {
   ports(env: unknown): Ports;
   projectAuthenticated?(env: unknown, projectId: string, holderId: string): Promise<void>;
+  /**
+   * X15: `projectAuthenticated` and the module read after it in ONE Control call (the holder is registered
+   * first, in the same Control turn as the read). Absent: the two separate calls.
+   */
+  projectAuthenticatedModule?(env: unknown, projectId: string, holderId: string): Promise<ModuleInfo | null>;
   tenantLink(env: unknown, route: TenantRoute): TenantLink;
   /** K16: public-function limits and the address budgets (absent: default payload cap only). */
   publicGuard?(env: unknown): PublicGuard;
@@ -192,6 +197,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       ready: { runtimeVersion: env.GONVEX_RUNTIME_VERSION || "development", presence: presence.enabled },
       tenantChanged: (ws, previous, next) => this.tenantChanged(ws, previous, next),
       projectAuthenticated: (project) => this.bindings().projectAuthenticated?.(env, project, ctx.id.toString()) ?? Promise.resolve(),
+      ...(this.bindings().projectAuthenticatedModule
+        ? { projectAuthenticatedModule: (project: string) => this.bindings().projectAuthenticatedModule!(env, project, ctx.id.toString()) } : {}),
     });
     // Restored sockets: rebuild the tenant index only (the tenant already has this gateway registered).
     for (const [ws, session] of this.host.sessions) {
@@ -398,30 +405,66 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   async deliverReplicaBatch(tenantId: string, payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]> {
     if (!Array.isArray(payloads)) throw new Error("invalid replica batch");
     const results: ReplicaBatchResult[] = [];
-    for (const payload of payloads) {
-      try {
-        const receipt = payload.initialFailure ? await this.deliverInitialFailures(tenantId, payload)
-          : Object.values(payload.sockets).some(work => work.initialScope || work.initialCompletions?.length) ? await this.deliverReplicaInitial(tenantId, payload)
-          : await this.deliverReplica(tenantId, payload);
-        results.push({ receipt });
-      } catch (error) {
-        const failure = error as (Error & { code?: unknown }) | undefined;
-        results.push({ error: String(failure?.message ?? error), ...(failure?.name ? { name: failure.name } : {}),
-          ...(typeof failure?.code === "string" ? { code: failure.code } : {}) });
+    const failed = (error: unknown): ReplicaBatchResult => {
+      const failure = error as (Error & { code?: unknown }) | undefined;
+      return { error: String(failure?.message ?? error), ...(failure?.name ? { name: failure.name } : {}),
+        ...(typeof failure?.code === "string" ? { code: failure.code } : {}) };
+    };
+    // X15: consecutive items that apply without I/O run in one synchronous turn, so the recovery writes their
+    // completions need are coalesced into one per socket (`SocketHost.batchPersists`), issued in that same turn
+    // as their frames. An item that has to wait (initial failures, recovery, a bootstrap, the dev fixture gate)
+    // ends the run: the run's write is issued before that wait, and the item continues alone.
+    let next = 0;
+    while (next < payloads.length) {
+      let waiting: Promise<ReplicaReceipt> | undefined;
+      this.host.batchPersists(() => {
+        while (next < payloads.length && !waiting) {
+          const payload = payloads[next++]!;
+          try {
+            const receipt = this.receiveReplica(tenantId, payload);
+            if (receipt instanceof Promise) waiting = receipt;
+            else results.push({ receipt });
+          } catch (error) {
+            results.push(failed(error));
+          }
+        }
+      });
+      if (waiting) {
+        try { results.push({ receipt: await waiting }); } catch (error) { results.push(failed(error)); }
       }
     }
     return results;
   }
 
+  /** The receiver the item's own single RPC would reach; a receipt when it applied without waiting. */
+  private receiveReplica(tenantId: string, payload: ReplicaDelivery): ReplicaReceipt | Promise<ReplicaReceipt> {
+    if (payload.initialFailure) return this.deliverInitialFailures(tenantId, payload);
+    if (Object.values(payload.sockets).some(work => work.initialScope || work.initialCompletions?.length)) {
+      if (!initialDeliveryOnly(payload)) throw new Error("invalid initial-only delivery");
+    }
+    const gate = this.replicaGate(tenantId, payload);
+    return gate ? gate.then(() => this.applyReplicaNow(tenantId, payload)) : this.applyReplicaNow(tenantId, payload);
+  }
+
+  /** Dev fixture seam: a promise holds this delivery until it settles (the base never holds one). */
+  protected replicaGate(_tenantId: string, _payload: ReplicaDelivery): Promise<void> | undefined {
+    return undefined;
+  }
+
   async deliverReplicaInitial(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt> {
     if(!initialDeliveryOnly(payload))throw new Error("invalid initial-only delivery");
-    return this.applyReplica(tenantId,payload);
+    const gate = this.replicaGate(tenantId, payload);
+    if (gate) await gate;
+    return this.applyReplicaNow(tenantId,payload);
   }
   async deliverReplica(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt> {
     if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length))throw new Error("initial work requires the initial-only receiver");
-    return this.applyReplica(tenantId,payload);
+    const gate = this.replicaGate(tenantId, payload);
+    if (gate) await gate;
+    return this.applyReplicaNow(tenantId,payload);
   }
-  private async applyReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
+  /** Applies one delivery. Synchronous unless it has to wait (recovery, a bootstrap); then a promise. */
+  private applyReplicaNow(tenantId: string, payload: ReplicaDelivery): ReplicaReceipt | Promise<ReplicaReceipt> {
     if (payload.initialFailure) throw new Error("initial failures require the marker-only receiver");
     if (!validRecoveryInitialDelivery(payload)) throw new Error("invalid recovery initial offer");
     if (Object.values(payload.sockets).some(work=>!validInitialCompletions(work))) throw new Error("invalid initial completion metadata");
@@ -429,24 +472,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     const started = performance.now();
     const sockets = this.byTenant.get(tenantId);
     const seen = new Set<string>();
-    if (payload.recovery) {
-      const sessions = [...(sockets ?? [])].map(ws => this.host.sessions.get(ws))
-        .filter((session): session is NonNullable<typeof session> => Boolean(session && !session.record.tenant?.anonymous && session.record.tenant?.route.tenantId === tenantId));
-      const scopes=sessions.map(session=>session.record.subscriptionEpoch??0);
-      const receivers = sessions.map(session => session as unknown as {
-        recoverReplica?: (tenantId: string, payload: ReplicaDelivery) => Promise<readonly InitialCompletionStatus[]|void>;
-      });
-      // Skew is fail-closed: an old session must not be mistaken for an applied whole-holder barrier.
-      if (receivers.some(session => typeof session.recoverReplica !== "function")) return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length };
-      const facts=await Promise.all(receivers.map(session => session.recoverReplica!(tenantId, payload)));
-      if(sessions.some((session,i)=>session.closed||session.record.tenant?.route.tenantId!==tenantId||(session.record.subscriptionEpoch??0)!==scopes[i]))throw new Error("delivery recovery scope changed");
-      for(let i=0;i<sessions.length;i++)if(facts[i]?.length)initialCompletions[sessions[i]!.record.connectionId]=facts[i]!;
-      this.host.reschedule();
-      this.metrics.delivery(performance.now() - started, payload.pressure?.queueAgeMs, payload.pressure?.rpcMs);
-      this.reportCapacity();
-      return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length, recoveryAck: 1,
-        ...(Object.keys(initialCompletions).length?{initialCompletions:Object.fromEntries(Object.entries(initialCompletions))}:{}) };
-    }
+    if (payload.recovery) return this.applyRecovery(tenantId, payload, sockets, started);
     const membership = payload.membership;
     const work: Array<Promise<void>> = [];
     const scopeRequired: Record<string, number> = {};
@@ -496,7 +522,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       const completed = session.replicaDelivery(payload, own);
       if (own?.initialCompletions?.length) initialCompletions[id] = completed;
     }
-    await Promise.all(bootstraps);
+    const finish = (): ReplicaReceipt => {
     for(const [id,{session,epoch}] of bootstrapScopes){
       if(session.closed||session.record.tenant?.route.tenantId!==tenantId||(session.record.subscriptionEpoch??0)!==epoch){
         delete scopeAck[id];delete initialCompletions[id];
@@ -524,6 +550,29 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     return { v: REPLICA_DELIVERY_VERSION, sockets: seen.size, ...(missing.length ? { missing } : {}),
       ...(Object.keys(scopeRequired).length ? { scopeRequired } : {}), ...(Object.keys(scopeAck).length ? { scopeAck } : {}),
       ...(Object.keys(initialCompletions).length ? { initialCompletions: Object.fromEntries(Object.entries(initialCompletions)) } : {}) };
+    };
+    // Only a bootstrap waits; everything else was applied in this turn.
+    return bootstraps.length ? Promise.all(bootstraps).then(finish) : finish();
+  }
+
+  private async applyRecovery(tenantId: string, payload: ReplicaDelivery, sockets: ReadonlySet<WebSocket> | undefined, started: number): Promise<ReplicaReceipt> {
+    const initialCompletions: Record<string, readonly InitialCompletionStatus[]> = Object.create(null);
+    const sessions = [...(sockets ?? [])].map(ws => this.host.sessions.get(ws))
+      .filter((session): session is NonNullable<typeof session> => Boolean(session && !session.record.tenant?.anonymous && session.record.tenant?.route.tenantId === tenantId));
+    const scopes=sessions.map(session=>session.record.subscriptionEpoch??0);
+    const receivers = sessions.map(session => session as unknown as {
+      recoverReplica?: (tenantId: string, payload: ReplicaDelivery) => Promise<readonly InitialCompletionStatus[]|void>;
+    });
+    // Skew is fail-closed: an old session must not be mistaken for an applied whole-holder barrier.
+    if (receivers.some(session => typeof session.recoverReplica !== "function")) return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length };
+    const facts=await Promise.all(receivers.map(session => session.recoverReplica!(tenantId, payload)));
+    if(sessions.some((session,i)=>session.closed||session.record.tenant?.route.tenantId!==tenantId||(session.record.subscriptionEpoch??0)!==scopes[i]))throw new Error("delivery recovery scope changed");
+    for(let i=0;i<sessions.length;i++)if(facts[i]?.length)initialCompletions[sessions[i]!.record.connectionId]=facts[i]!;
+    this.host.reschedule();
+    this.metrics.delivery(performance.now() - started, payload.pressure?.queueAgeMs, payload.pressure?.rpcMs);
+    this.reportCapacity();
+    return { v: REPLICA_DELIVERY_VERSION, sockets: sessions.length, recoveryAck: 1,
+      ...(Object.keys(initialCompletions).length?{initialCompletions:Object.fromEntries(Object.entries(initialCompletions))}:{}) };
   }
 
   /** K16: which of these connections are open here (the address limiter's audit of leaked slots). */

@@ -8,6 +8,7 @@ import type { ControlConnection } from "../../control/src/types";
 import type { ClientFrame, Json } from "../session/decode";
 import { echoTrace } from "../session/protocol";
 import { replicaEpoch } from "../session/directive";
+import { deployedManifest, derivedOf } from "../../control/src/manifest-cache";
 import type { Failure, FailureKind, Impersonation, ModuleInfo, Outcome, RevalidationItem, ServiceAuthOutcome, SessionIdentity, SocketView, TenantRoute, TenantSession } from "../session/ports";
 import { type GatewayRpc, rpc } from "../session/rpc";
 import type { ServiceControlOutcome } from "../principals/frames";
@@ -180,9 +181,9 @@ export class SessionControlObject extends OperatorControlObject {
 
   // ---- K05 ModulePort -------------------------------------------------------------------------
 
+  /** X15: parsed once per manifest row version (`control/src/manifest-cache.ts`). Shared: never mutate it. */
   protected manifestOf(projectId: string): Record<string, unknown> | null {
-    const text = this.sql.value<string>("SELECT manifest FROM gonvex_runtime_manifests WHERE project_id=$1", projectId);
-    return typeof text === "string" ? (JSON.parse(text) as Record<string, unknown>) : null;
+    return deployedManifest(this.sql, projectId)?.manifest ?? null;
   }
 
   /** The deployed manifest (`/dev/manifest`). */
@@ -191,19 +192,37 @@ export class SessionControlObject extends OperatorControlObject {
   }
 
   async moduleInfo(projectId: string): Promise<ModuleInfo | null> {
-    const manifest = this.manifestOf(projectId);
-    if (!manifest) return null;
-    const module = (manifest.module ?? {}) as { hash?: string; files?: Record<string, string> };
-    const contract = module.files?.["client-contract.json"];
-    return { artifactHash: String(module.hash ?? ""), clientContract: contract ? (JSON.parse(atob(contract)) as { version: number }).version : null };
+    const deployed = deployedManifest(this.sql, projectId);
+    if (!deployed) return null;
+    return derivedOf(deployed, "moduleInfo", (): ModuleInfo => {
+      const module = (deployed.manifest.module ?? {}) as { hash?: string; files?: Record<string, string> };
+      const contract = module.files?.["client-contract.json"];
+      return { artifactHash: String(module.hash ?? ""), clientContract: contract ? (JSON.parse(atob(contract)) as { version: number }).version : null };
+    });
+  }
+
+  /**
+   * X15: a gateway's `watch` and the module read that must follow it, in one call. The holder is registered
+   * before the read in this same turn, so a publication after the read still notifies it.
+   */
+  async watchModule(projectId: string, binding: string, id: string): Promise<ModuleInfo | null> {
+    await this.watch(projectId, binding, id);
+    return this.moduleInfo(projectId);
   }
 
   async moduleEpoch(projectId: string, databaseUrl: string): Promise<string> {
-    const manifest = this.manifestOf(projectId) ?? {};
-    const module = (manifest.module ?? {}) as { hash?: string };
-    return replicaEpoch({
-      projectId, databaseUrl, functions: (manifest.functions ?? null) as Json, schema: (manifest.schema ?? null) as Json, moduleHash: String(module.hash ?? ""),
-    });
+    const deployed = deployedManifest(this.sql, projectId);
+    const epoch = (manifest: Record<string, unknown>) => {
+      const module = (manifest.module ?? {}) as { hash?: string };
+      return replicaEpoch({
+        projectId, databaseUrl, functions: (manifest.functions ?? null) as Json, schema: (manifest.schema ?? null) as Json, moduleHash: String(module.hash ?? ""),
+      });
+    };
+    if (!deployed) return epoch({});
+    // A rejected hash is not kept: the next call computes it again.
+    const key = `epoch\u0000${databaseUrl}`;
+    const pending = derivedOf(deployed, key, () => epoch(deployed.manifest));
+    return pending.catch((error) => { deployed.derived.delete(key); throw error; });
   }
 
   async tenantSessionForAccount(projectId: string, tenantId: string, accountId: string) {

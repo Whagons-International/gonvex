@@ -8,7 +8,7 @@
 // is part of the Worker version) and its plan store (K02/K19).
 
 import { DurableObject } from "cloudflare:workers";
-import type { ModuleExports } from "../host/src/index.js";
+import type { ModuleExportsSource } from "../host/src/index.js";
 import type { PlanStore } from "../migrate/index.ts";
 import type { ClientFrame, Json } from "../session/decode";
 import { type DeliveryBatch, TenantGateways } from "../session/placement/gateway";
@@ -43,7 +43,7 @@ export abstract class ReducerTenantObject<E extends ReducerTenantEnv = ReducerTe
   outboxWakes = 0;
 
   /** The bundle of an artifact hash in this Worker version. */
-  protected abstract bundle(artifactHash: string): ModuleExports | undefined;
+  protected abstract bundle(artifactHash: string): ModuleExportsSource | undefined;
   /** Where this Worker version reads release plans. */
   protected abstract plans(): PlanStore;
 

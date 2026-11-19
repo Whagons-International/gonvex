@@ -40,22 +40,25 @@ function bind(value: unknown): SqlValue {
 export class Sql {
   rowsRead = 0;
   rowsWritten = 0;
+  /** X15: bumped by every statement that wrote `gonvex_runtime_manifests` (`manifest-cache.ts`). */
+  manifestWrites = 0;
   constructor(private readonly storage: DurableObjectStorage) {}
 
   private cursor<T extends Row>(query: string, args: unknown[]): SqlStorageCursor<T> {
     return this.storage.sql.exec<T>(rewrite(query), ...args.map(bind));
   }
 
-  private count(cursor: SqlStorageCursor<Row>): void {
+  private count(cursor: SqlStorageCursor<Row>, query: string): void {
     this.rowsRead += cursor.rowsRead;
     this.rowsWritten += cursor.rowsWritten;
+    if (cursor.rowsWritten > 0 && query.includes("gonvex_runtime_manifests")) this.manifestWrites++;
   }
 
   /** Every row. */
   all<T extends Row = Row>(query: string, ...args: unknown[]): T[] {
     const cursor = this.cursor<T>(query, args);
     const rows = cursor.toArray();
-    this.count(cursor);
+    this.count(cursor, query);
     return rows;
   }
 
@@ -74,7 +77,7 @@ export class Sql {
   run(query: string, ...args: unknown[]): void {
     const cursor = this.cursor(query, args);
     for (const _ of cursor) { /* drain */ }
-    this.count(cursor);
+    this.count(cursor, query);
   }
 
   /**
@@ -90,7 +93,7 @@ export class Sql {
   script(text: string): void {
     const cursor = this.storage.sql.exec(text);
     for (const _ of cursor) { /* drain */ }
-    this.count(cursor);
+    this.count(cursor, text);
   }
 
   /**

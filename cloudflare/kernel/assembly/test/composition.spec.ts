@@ -433,3 +433,35 @@ it('X14 a woken tenant whose stored module came from this baked release neither 
   });
  } finally { fixtureSpans(false); delete releases[project]; }
 });
+it('X15 a woken tenant answers admit without evaluating the app bundle; the first Reducer call evaluates it once',async()=>{
+ // Each sign-in re-admits the account on every tenant it belongs to. A cold tenant used to evaluate the release's
+ // whole app bundle (several MB on dev) in its constructor before `admit`, one indexed SELECT, could answer.
+ const {releases}=await import('../releases');
+ const {exports}=await import('./catalog');
+ const project=`lazy-${crypto.randomUUID()}`;let evaluated=0;
+ releases[project]={project,hash:(manifest as {module:{hash:string}}).module.hash,generation:1,manifest,get exports(){evaluated++;return exports;}};
+ const stub=bindings.TENANT.getByName(`assembly-lazy-${crypto.randomUUID()}`);
+ try {
+  await runInDurableObject(stub,async(object,state)=>{
+   const release=await buildReleasePlan(await migrationsFromFiles(files)); plans.add(release);
+   await (object as CompositionTenant).activate(project,manifest,release.id);
+   state.storage.kv.put('assembly/project',project);
+   // The test class serves a fixed bundle; this wake uses AssemblyTenant's own release lookup.
+   const {AssemblyTenant}=await import('../tenant');
+   const real=(AssemblyTenant.prototype as unknown as {bundle(hash:string):unknown}).bundle;
+   const Ctor=object.constructor as new(ctx:DurableObjectState,env:unknown)=>CompositionTenant;
+   class Woken extends Ctor { protected override bundle(hash?:string){ return real.call(this,hash!) as never; } }
+   evaluated=0;
+   const woken=new Woken(state,(object as unknown as {env:unknown}).env);
+   await new Promise(r=>setTimeout(r,50));
+   expect(await woken.admit('no-such-account')).toBeNull();
+   expect(evaluated).toBe(0);
+   const session=systemSession(project,state.id.name!);
+   const report=await woken.call({v:1,function:'probe.write',kind:'reducer',args:{id:'x15-lazy'},session,provenance:directProvenance(session,'agent','x15-lazy',manifest.module.hash),allowInternal:true});
+   expect(report).toMatchObject({ok:true});
+   expect(evaluated).toBe(1);
+   await woken.call({v:1,function:'probe.write',kind:'reducer',args:{id:'x15-lazy-2'},session,provenance:directProvenance(session,'agent','x15-lazy-2',manifest.module.hash),allowInternal:true});
+   expect(evaluated).toBe(1);
+  });
+ } finally { delete releases[project]; }
+});

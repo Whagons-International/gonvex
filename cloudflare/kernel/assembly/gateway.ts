@@ -6,14 +6,14 @@ import { rpc, type TenantRpc } from "../session/rpc";
 import { publicGuard, type PublicGuardEnv } from "../public/guard";
 import { controlTelemetryPort, type TelemetryControlRpc } from "../telemetry/port";
 import type { SessionControlObject } from "./control";
-import type { ReplicaDelivery, ReplicaReceipt } from "../delivery/protocol";
+import type { ReplicaDelivery } from "../delivery/protocol";
 import { telemetrySubject } from "../telemetry/limiter";
 import { fixtureSpans } from "../delivery/spans";
 
 type Control = Pick<SessionControlObject,
   "sessionProject" | "sessionIdentity" | "sessionAuthenticate" | "sessionImpersonation" |
   "sessionPublicTenant" | "sessionRevalidate" | "sessionDispatch" | "serviceAuthenticate" |
-  "serviceControl" | "moduleInfo" | "moduleEpoch" | "connectionState" | "watch" | "runtimeInstance"> & TelemetryControlRpc;
+  "serviceControl" | "moduleInfo" | "moduleEpoch" | "connectionState" | "watch" | "watchModule" | "runtimeInstance"> & TelemetryControlRpc;
 
 export interface AssemblyGatewayEnv extends GatewayEnv, PublicGuardEnv {
   GATEWAY: DurableObjectNamespace<any>;
@@ -62,9 +62,27 @@ export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
 const bindings: GatewayBindings = {
   ports: (env) => assemblyPorts(env as AssemblyGatewayEnv),
   projectAuthenticated: (env, project, holder) => rpc<Control>((env as AssemblyGatewayEnv).CONTROL, "control").watch(project, "GATEWAY", holder),
+  // X15: one Control call instead of `watch` then `moduleInfo`. A Control version without it (rollout skew)
+  // answers with workerd's missing-method error: then the same two calls, in order.
+  projectAuthenticatedModule: async (env, project, holder) => {
+    const control = () => rpc<Control>((env as AssemblyGatewayEnv).CONTROL, "control");
+    try {
+      return await control().watchModule(project, "GATEWAY", holder);
+    } catch (error) {
+      if (!missingMethod(error, "watchModule")) throw error;
+      await control().watch(project, "GATEWAY", holder);
+      return control().moduleInfo(project);
+    }
+  },
   tenantLink: (env, route) => rpc<Pick<TenantRpc, "attachGateway" | "detachGateway">>((env as AssemblyGatewayEnv).TENANT, route.tenantId),
   publicGuard: (env) => publicGuard(env as AssemblyGatewayEnv),
 };
+
+/** workerd's error for an RPC method the callee's version does not have. */
+export function missingMethod(error: unknown, method: string): boolean {
+  const message = String((error as Error | undefined)?.message ?? "");
+  return message.includes("does not implement") && message.includes(`"${method}"`);
+}
 
 export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
   private controlInstance: string | undefined;
@@ -122,18 +140,18 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
         window: this.host.telemetry.limiter.inspect(subject.key) };
     }) };
   }
-  /** Dev-only fault gate on the actual existing ordered RPC. It never
+  /** Dev-only fault gate on the actual existing ordered delivery (single or batched). It never
    * supplies a reply or substitutes a handler; release runs the real base. */
-  override async deliverReplica(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt>{
+  protected override replicaGate(_tenantId:string,payload:ReplicaDelivery):Promise<void>|undefined{
     const gate=this.env.GONVEX_ASSEMBLY_FIXTURE_KEY?this.fixtureBootstrapGate:undefined;
     if(gate&&payload.scopeFence===1&&!payload.recovery&&!payload.initialFailure&&!payload.shared.length
       &&payload.watermark===undefined&&!payload.membership
       &&(gate.phase==='bootstrap'?Object.keys(payload.sockets).length>0:Object.keys(payload.sockets).length===0)
       &&Object.values(payload.sockets).every(work=>!work.ops.length&&work.watermark===undefined&&work.opened===undefined&&work.removed===undefined&&!work.initialScope&&!work.initialCompletions)){
-      if(gate.entered>=8)throw new Error("assembly fixture bootstrap gate exhausted");
-      gate.entered++;await gate.promise;
+      if(gate.entered>=8)return Promise.reject(new Error("assembly fixture bootstrap gate exhausted"));
+      gate.entered++;return gate.promise;
     }
-    return super.deliverReplica(tenantId,payload);
+    return undefined;
   }
   async fixtureBootstrapControl(hold?:boolean,phase:'bootstrap'|'challenge'='bootstrap'){
     if(!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY)throw new Error("assembly fixture control disabled");

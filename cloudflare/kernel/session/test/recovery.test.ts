@@ -91,6 +91,35 @@ describe("K22 session delivery scope", () => {
     }
   });
 
+  it("X15 one registration+read call replaces the two, overlaps the epoch read, and still gates the auth result", async () => {
+    let release!:()=>void;
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    const order:string[]=[];
+    const f=fixture({
+      projectAuthenticated:async()=>{order.push("separate-watch");},
+      projectAuthenticatedModule:async(project)=>{order.push(`watch+read ${project}`);await gate;return {artifactHash:"published",clientContract:null};},
+    });
+    f.ports.modules.module=async()=>{order.push("separate-read");return {artifactHash:"stale",clientContract:null};};
+    f.ports.modules.epoch=async()=>{order.push("epoch");return "db-epoch";};
+    const auth=f.auth();
+    await new Promise(resolve=>setTimeout(resolve,0));
+    // Started as soon as the session was known, before the epoch read; no separate watch or read.
+    expect(order.indexOf("watch+read p")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("watch+read p")).toBeLessThan(order.indexOf("epoch"));
+    expect(order).not.toContain("separate-watch");
+    expect(f.sent.some(text=>JSON.parse(text).type==="auth.result")).toBe(false);
+    release();await auth;
+    expect(JSON.parse(f.sent.at(-1)!)).toMatchObject({type:"auth.result",result:{artifactHash:"published"}});
+    expect(order.filter(entry=>entry==="watch+read p")).toHaveLength(1);
+  });
+
+  it("X15 a failed registration+read closes the socket as the separate registration did", async () => {
+    const f=fixture({projectAuthenticated:async()=>{},projectAuthenticatedModule:async()=>{throw new Error("control unavailable");}});
+    await f.auth();
+    expect(f.closes).toHaveLength(1);
+    expect(f.sent.some(text=>JSON.parse(text).type==="auth.result")).toBe(false);
+  });
+
   it("deduplicates publication retry after attachment restore without suppressing a new same-artifact publication", async () => {
     const f=fixture();await f.auth();
     const reload={artifactHash:"a",clientContract:null,publicationId:"publication-1"};

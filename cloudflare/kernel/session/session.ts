@@ -115,6 +115,8 @@ export interface SocketSink {
 export interface SessionHooks {
   /** Register this holder for project publications before acknowledging auth. */
   projectAuthenticated?(projectId: string): Promise<void>;
+  /** X15: `projectAuthenticated`, then the module read that follows it, in one call. */
+  projectAuthenticatedModule?(projectId: string): Promise<ModuleInfo | null>;
   /** Semantic recovery metadata changed; generic attachment writes never dirty it. */
   recoveryChanged?(): void;
   /** The tenant data session changed (feed subscription in Rust): placement registers the socket with the tenant. */
@@ -123,6 +125,11 @@ export interface SessionHooks {
   subscriptionsReset?(): void;
   /** The record changed in a way that must survive hibernation. */
   persist?(): void;
+  /**
+   * X15: runs `fn` (synchronous) with this host's `persist()` calls coalesced into one write per socket at
+   * its end, still in the same synchronous turn as every frame `fn` sent (the output gate holds them all).
+   */
+  batchPersists?<T>(fn: () => T): T;
   /** Keeps work started outside a frame (presence leave on close) alive (`ctx.waitUntil`). */
   waitUntil?(promise: Promise<unknown>): void;
   /** K16: the socket authenticated for the first time; its pending slot is freed (`pending_connection.take()`). */
@@ -168,8 +175,12 @@ export class ModuleCache {
   }
   set(projectId: string, info: ModuleInfo | null): void { this.entries.set(projectId, Promise.resolve(info)); }
   async refresh(projectId: string): Promise<ModuleInfo | null> {
+    return this.refreshWith(projectId, () => this.ports.modules.module(projectId));
+  }
+  /** `refresh` with the read supplied (X15: one Control call that also registered the holder). */
+  async refreshWith(projectId: string, read: () => Promise<ModuleInfo | null>): Promise<ModuleInfo | null> {
     const previous = this.entries.get(projectId);
-    const info = await this.ports.modules.module(projectId);
+    const info = await read();
     // An awaited reload can advance this cache while auth reads Control.
     if (this.entries.get(projectId) !== previous) return this.get(projectId);
     this.set(projectId, info);
@@ -625,11 +636,15 @@ export class Session {
       return [];
     }
     const origins = initial ? (Array.isArray(initial) ? [...initial] : [initial as InitialRequestRef]) : [];
-    for (const text of out) {
-      const at=origins.findIndex(ref=>!!initialCompletion(ref,["f",text],0));
-      const ref=at<0?undefined:origins.splice(at,1)[0];
-      this.send(text,ref?initialCompletion(ref,["f",text],0):undefined);
-    }
+    // X15: an openMany reply completes many initials in this one synchronous loop; one recovery write covers them.
+    const sendAll = () => {
+      for (const text of out) {
+        const at=origins.findIndex(ref=>!!initialCompletion(ref,["f",text],0));
+        const ref=at<0?undefined:origins.splice(at,1)[0];
+        this.send(text,ref?initialCompletion(ref,["f",text],0):undefined);
+      }
+    };
+    if (this.hooks.batchPersists) this.hooks.batchPersists(sendAll); else sendAll();
     return out;
   }
 
@@ -1066,11 +1081,24 @@ export class Session {
     };
   }
 
+  /** X15: an `auth`'s holder registration + module read, started by `authenticate` (see `auth`). */
+  private publication: { projectId: string; refreshed: Promise<ModuleInfo | null> } | undefined;
+
+  private publish(projectId: string): Promise<ModuleInfo | null> {
+    // The entry `authenticate` reads (artifactHash) exists first, so this read replaces it, as a refresh after it did.
+    this.modules.get(projectId).catch(() => {});
+    const refreshed = this.modules.refreshWith(projectId, () => this.hooks.projectAuthenticatedModule!(projectId));
+    refreshed.catch(() => {}); // awaited by `auth`; an auth that fails first must not leave it unhandled
+    return refreshed;
+  }
+
   private async auth(frame: AuthFrame): Promise<void> {
     const record = this.record;
     const tenantRequest = controlAuthTenant(frame.controlOnly, frame.capabilities, frame.tenant);
     const deadline = record.pendingUntil ?? this.now() + LIMITS.authTimeoutMs;
     let outcome: { response: AuthResponse; connection: Connection };
+    this.publication = undefined;
+    let early: Session["publication"];
     try {
       outcome = await withDeadline(this.authenticate(frame, tenantRequest), deadline - this.now());
     } catch (error) {
@@ -1078,6 +1106,9 @@ export class Session {
       // lib.rs:2809: the loop breaks and the socket closes without a frame.
       return this.close(CLOSE.failed);
     }
+    // Only this auth's own `authenticate` can have started it (frames are handled one at a time).
+    early = this.publication as Session["publication"]; // set by `authenticate` while awaited
+    this.publication = undefined;
     if (this.closed) return;
     const { response, connection } = outcome;
     // lib.rs:2826: every auth drops the connection's presence (with grace); the client re-announces.
@@ -1105,9 +1136,16 @@ export class Session {
     let module = await this.modules.get(connection.projectId);
     if (response.ok && this.hooks.projectAuthenticated) {
       try {
-        await withDeadline(this.hooks.projectAuthenticated(connection.projectId), deadline - this.now());
-        if (this.closed) return;
-        module = await withDeadline(this.modules.refresh(connection.projectId), deadline - this.now());
+        if (this.hooks.projectAuthenticatedModule) {
+          // X15: registration and the module read are one Control call, started as soon as the session was known.
+          const refreshed = early?.projectId === connection.projectId ? early.refreshed : this.publish(connection.projectId);
+          module = await withDeadline(refreshed, deadline - this.now());
+          if (this.closed) return;
+        } else {
+          await withDeadline(this.hooks.projectAuthenticated(connection.projectId), deadline - this.now());
+          if (this.closed) return;
+          module = await withDeadline(this.modules.refresh(connection.projectId), deadline - this.now());
+        }
         // Refresh only a result that carries the hash: Rust omits it for a tokenless control-only auth.
         if ("artifactHash" in response.result) response.result.artifactHash = module?.artifactHash ?? "";
       } catch {
@@ -1199,6 +1237,10 @@ export class Session {
     const authenticated = await control.authenticateSession(token, project, tenant);
     if (!authenticated.ok) return failed(authenticated);
     const session = authenticated.value;
+    // X15: the holder registration + module read (`auth` awaits it) overlaps the replica epoch read below.
+    if (this.hooks.projectAuthenticatedModule && this.hooks.projectAuthenticated) {
+      this.publication = { projectId: session.identity.projectId, refreshed: this.publish(session.identity.projectId) };
+    }
     const result: Record<string, unknown> = {
       projectId: session.identity.projectId, accountId: session.identity.account.id, tenantId: session.route.tenantId,
       artifactHash: await artifactHash(session.identity.projectId),

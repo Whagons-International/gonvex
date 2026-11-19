@@ -10,6 +10,8 @@ import {X13_PROJECT,x13Registry} from './x13-fixture';
 // X13: the Action Worker serves the X13 fixture app (its other fixtures run no Actions here).
 configureActions({registry:(_env,projectId)=>{if(projectId!==X13_PROJECT)throw new Error(`project ${JSON.stringify(projectId)} has no active TypeScript module`);return x13Registry();}});
 export class TestControl extends SessionControlObject {
+ /** X15 test seam: the stored GATEWAY watchers of a project. */
+ async fixtureWatchers(project:string){ return this.ctx.storage.kv.get<Array<{binding:string;name:string}>>(`control/watchers/${project}`)??[]; }
  async fixtureTenant(project:string,tenant:string){
   this.sql.run("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_name,database_url,status,description,provisioned,runtime_created) VALUES ($1,$2,$1,'Fixture','fixture',$3,'active','synthetic',1,1)",tenant,project,'do://tenant/'+tenant);
  }
