@@ -1493,3 +1493,95 @@ describe("X17 a live query's initial reply goes ahead of its holder's backlog", 
   });
 });
 
+
+
+describe("X17d snapshot cache", () => {
+  it("serves the same pages, rows and digest as a fresh scan, and misses after a write to the table", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 600; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 300)]]);
+      await h.commit(insert);
+      const { snapshotCache } = await import("../snapshot-cache.ts");
+      const open = async (id: string) => {
+        h.engine.dispatch(socket(id), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+        for (let spin = 0; spin < 4000 && !frames(h.payloads, id).some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+        await h.engine.settled();
+        const fs = frames(h.payloads, id);
+        const pages = fs.filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot");
+        return { rows: pages.flatMap((p) => p.result ?? p.rows ?? []), digests: pages.map((p) => p.digest ?? null), count: pages.length };
+      };
+      const hits = snapshotCache.stats.hits, misses = snapshotCache.stats.misses;
+      const fresh = await open("S1");
+      expect(snapshotCache.stats.misses).toBe(misses + 1);
+      const served = await open("S2");
+      expect(snapshotCache.stats.hits).toBe(hits + 1);
+      expect(served.rows).toEqual(fresh.rows);
+      expect(served.digests).toEqual(fresh.digests);
+      expect(served.count).toBe(fresh.count);
+      expect(fresh.rows.length).toBe(600);
+      await h.commit([["UPDATE items SET label = 'changed' WHERE id = 'i000001'", []]]);
+      const after = await open("S3");
+      expect(snapshotCache.stats.misses).toBe(misses + 2);
+      expect(JSON.stringify(after.rows)).toContain("changed");
+      expect(after.digests).not.toEqual(fresh.digests);
+    }, MODULE, true);
+  });
+});
+
+describe("X17d snapshot cache: ACL, membership and a write during a populating open", () => {
+  const openRows = async (h: Harness, view: SocketView) => {
+    h.engine.dispatch(view, { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 4000 && !frames(h.payloads, view.connectionId).some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    await h.engine.settled();
+    const pages = frames(h.payloads, view.connectionId).filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot");
+    return { text: JSON.stringify(pages.map((p) => p.result ?? p.rows ?? [])), digests: JSON.stringify(pages.map((p) => p.digest ?? null)) };
+  };
+  const seed = async (h: Harness) => {
+    const insert: Array<[string, unknown[]]> = [];
+    for (let i = 0; i < 200; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 100)]]);
+    await h.commit(insert);
+  };
+
+  it("a members (ACL) change is a miss; the next open matches a fresh scan", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await seed(h);
+      const { snapshotCache } = await import("../snapshot-cache.ts");
+      const first = await openRows(h, socket("A1"));
+      const hits = snapshotCache.stats.hits, misses = snapshotCache.stats.misses;
+      await h.commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
+      const after = await openRows(h, socket("A2"));
+      expect(snapshotCache.stats.hits).toBe(hits);
+      expect(snapshotCache.stats.misses).toBe(misses + 1);
+      expect(after.text).toBe(first.text); // same data; served by a fresh scan
+      expect(after.digests).toBe(first.digests);
+    }, MODULE, true);
+  });
+
+  it("another member identity (role, permissions, membership revision) never shares an entry", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await seed(h);
+      const { snapshotCache } = await import("../snapshot-cache.ts");
+      await openRows(h, socket("B1"));
+      const misses = snapshotCache.stats.misses;
+      const base = socket("B2");
+      const tenant = { ...base.tenant!, member: { ...base.tenant!.member, membershipRevision: 7 } };
+      await openRows(h, { ...base, tenant, connection: { ...base.connection, tenant } } as SocketView);
+      expect(snapshotCache.stats.misses).toBe(misses + 1);
+    }, MODULE, true);
+  });
+
+  it("a write committed while a populating open is in flight is never hidden by the entry", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await seed(h);
+      // The commit is issued while the first open runs; whichever order the invocation queue gives them, the second
+      // open must show the write, exactly as a fresh scan does.
+      h.engine.dispatch(socket("C1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      const write = h.commit([["UPDATE items SET label = 'raced' WHERE id = 'i000005'", []]]);
+      for (let spin = 0; spin < 4000 && !frames(h.payloads, "C1").some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await write;
+      await h.engine.settled();
+      const served = await openRows(h, socket("C2"));
+      expect(served.text).toContain("raced");
+    }, MODULE, true);
+  });
+});
