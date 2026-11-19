@@ -45,6 +45,10 @@
    {
     "name": "CAPACITY_GATEWAY",
     "class_name": "CapacityGateway"
+   },
+   {
+    "name": "ACTION_HOST",
+    "class_name": "ActionHost"
    }
   ]
  },
@@ -65,6 +69,12 @@
    "new_sqlite_classes": [
     "CapacityController",
     "CapacityGateway"
+   ]
+  },
+  {
+   "tag": "x13g-action-host",
+   "new_sqlite_classes": [
+    "ActionHost"
    ]
   }
  ],
@@ -99,7 +109,8 @@
   "GONVEX_DEV_TRANSFER_TARGET": "gonvex-cf-dev-test",
   "GONVEX_DEV_TRANSFER_TOKEN": "test-only",
   "GONVEX_DEV_TRANSFER_TENANTS": "devcopy-test,devcopy-refusal,devcopy-large,devcopy-wide,devcopy-budget,devcopy-files-schema",
-  "GONVEX_ASSEMBLY_FIXTURE_KEY": "capacity-local-only"
+  "GONVEX_ASSEMBLY_FIXTURE_KEY": "capacity-local-only",
+  "GONVEX_ACTION_HOST_CHECK_MS": "200"
  },
  "rules": [
   {

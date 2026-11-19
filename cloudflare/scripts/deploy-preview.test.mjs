@@ -33,7 +33,7 @@ test("composes every development service, bucket, workflow and queue under one i
     for (const kind of ['kernel', 'runtime', 'actions', 'sandbox', 'builder']) {
       const config = configs[kind].config;
       assert.ok(config.name.length <= 63);
-      for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) assert.equal(binding.script_name, binding.class_name==='AssemblyTenant'?`${name}-runtime`:name);
+      for (const binding of config.durable_objects?.bindings ?? []) if (binding.script_name) assert.equal(binding.script_name, binding.class_name==='AssemblyTenant'?`${name}-runtime`:binding.class_name==='ActionHost'?`${name}-actions`:name);
       for (const bucket of config.r2_buckets ?? []) assert.equal(bucket.bucket_name, `${name}-${bucket.binding.toLowerCase()}`);
     }
     assert.equal(configs.kernel.config.limits.cpu_ms, 30000);

@@ -69,7 +69,15 @@ export interface AssemblyTenantEnv extends AssemblyGatewayEnv, TransferEnv {
   FILES: R2Bucket;
   ACTIONS: { call(input: DirectCall): Promise<ActionReport | { pending: true; id: string }> };
   ACTION_WORKFLOW: Workflow<CallJob | HandoffJob>;
+  /** X13g (0094 B): the per-tenant ActionHost in the Actions Worker script; absent on an older topology. */
+  ACTION_HOST?: DurableObjectNamespace;
   [key: string]: unknown;
+}
+
+interface ActionHostStub {
+  call(input: DirectCall): Promise<ActionReport | { pending: true; id: string }>;
+  hold(request: { v: 1; projectId: string; tenantId: string }): Promise<unknown>;
+  release(): Promise<unknown>;
 }
 
 /** X13c: one log line per Reducer that waited or ran long (path only; never arguments), to split its wall time. */
@@ -236,7 +244,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     if (frame.type === "action.call" && socket.tenant) {
       const session = actionSession(socket.tenant);
       session.reply = { host: socket.host, connectionId: socket.connectionId, epoch: socket.subscriptionEpoch ?? 0, id: frame.id, path: frame.path, ...(socket.actionGeneration === undefined ? {} : { generation: socket.actionGeneration }), ...(frame.trace ? { traceJson: JSON.stringify(echoTrace(frame.trace)) } : {}) };
-      const result = await this.env.ACTIONS.call({ session, path: frame.path, args: frame.args });
+      const result = await this.socketAction({ session, path: frame.path, args: frame.args });
       if ("pending" in result) return [];
       return [this.actionFrame(frame.id, frame.path, result, frame.trace)];
     }
@@ -250,6 +258,33 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     else if (this.kernel.migrator.wantsAlarm()) await this.kernel.migrator.alarm();
   }
 
+  /**
+   * X13g (0094 B): a socket's `profile: "agent"` Action runs in this tenant's resident ActionHost, whose
+   * isolate keeps the evaluated module while the tenant has subscribers (Rust's module host is resident);
+   * every other Action keeps the stateless ActionWorker. A host the Actions script does not have yet
+   * (deploy skew) is answered by the ActionWorker; an error after the host took the call is not retried.
+   */
+  private async socketAction(input: DirectCall): Promise<ActionReport | { pending: true; id: string }> {
+    const host = this.actionHost();
+    if (host && this.kernel.module?.functions.get(input.path)?.raw.actionProfile === "agent") {
+      try { return await host.call(input); }
+      catch (error) { if (!/does not implement the method/i.test(String((error as Error)?.message ?? error))) throw error; }
+    }
+    return this.env.ACTIONS.call(input);
+  }
+  private actionHost(): ActionHostStub | undefined {
+    const namespace = this.env.ACTION_HOST;
+    return namespace ? (namespace as unknown as { getByName(name: string): ActionHostStub }).getByName(this.ctx.id.name ?? "") : undefined;
+  }
+  /** X13g: hold the ActionHost while this tenant has live subscribers; evaluate its module at the first one. */
+  protected override subscribersChanged(holding: boolean): void {
+    const host = this.actionHost(), projectId = this.kernel.module?.projectId;
+    if (!host || !projectId) return;
+    const work = holding ? host.hold({ v: 1, projectId, tenantId: this.ctx.id.name ?? "" }) : host.release();
+    this.ctx.waitUntil(Promise.resolve(work).then(() => undefined, (error) => console.error("action host: hold/release failed", { holding, error: String((error as Error)?.message ?? error).slice(0, 200) })));
+  }
+  /** X13g: the ActionHost's periodic check: still wanted while this tenant holds subscribers. */
+  async actionHostWanted(): Promise<boolean> { return this.keepAlive.holding; }
   private actionFrame(id: string, path: string, result: ActionReport, trace?: MessageTrace): string {
     if (!result.ok) return frames.actionError(id, path, result.error, trace);
     return `{"type":"action.result","id":${JSON.stringify(id)},"path":${JSON.stringify(path)},"result":${result.value}`

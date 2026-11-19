@@ -4,6 +4,7 @@ import {SessionControlObject} from '../control';
 import type {ReleaseSummary} from '../../../control/operator/release';
 import {AssemblyGateway} from '../gateway';
 export {ActionWorker,ActionWorkflow} from '../../../actions/src/worker';
+export {ActionHost} from '../../../actions/src/host';
 import {configureActions} from '../../../actions/src/worker';
 import {X13_PROJECT,x13Registry} from './x13-fixture';
 // X13: the Action Worker serves the X13 fixture app (its other fixtures run no Actions here).
