@@ -5,6 +5,7 @@
 import type { Ctx } from "./context";
 import { FANOUT, mapLimit } from "./context";
 import { admitMember } from "./directory";
+import type { Member } from "./types";
 import { invalid } from "./errors";
 import { NOW_MS, json, num, optNum, str } from "./sql";
 import { randomId, secureToken, sha256Hex } from "./util";
@@ -155,13 +156,19 @@ export function sessionResult(grant: SessionGrant, account: AuthAccount, request
  * routing projection: every candidate is re-admitted against its tenant
  * object, at most 32 RPCs in flight (0012 R15), order kept.
  */
+/** X17f: last admissions per (project, tenant, account), validated against the directory's membership revision. */
+const admissionCache = new Map<string, Member>();
+const ADMISSION_CACHE_MAX = 4096;
+/** Test seam. */
+export function clearAdmissionCache(): void { admissionCache.clear(); }
+
 export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, result: Record<string, unknown>): Promise<Record<string, unknown>> {
   const account = (result.account ?? {}) as Record<string, unknown>;
   const accountId = typeof account.id === "string" ? account.id : "";
   const requested = typeof result.activeTenantId === "string" ? result.activeTenantId : "";
   const rows = ctx.sql.all(
     `SELECT tenant.tenant_id,tenant.name,tenant.domain,tenant.timezone,
-            tenant.description,tenant.profile,directory.member_id
+            tenant.description,tenant.profile,directory.member_id,directory.tenant_membership_revision
      FROM account_tenant_index directory
      JOIN gonvex_runtime_tenants tenant ON tenant.tenant_id=directory.tenant_id
      WHERE tenant.project_id=$1 AND directory.account_id=$2
@@ -172,9 +179,21 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
     accountId,
   );
   const admitted = await mapLimit(rows, FANOUT, async (row) => {
+    // X17f: a tenant's last admission of this account, while the directory still shows the same active membership
+    // revision (every role/permission change bumps it), is what the tenant would answer now; an idle tenant is not
+    // woken for the sign-in's tenant list (a cold tenant cost 0.3-1.8 s of the exchange on dev). The tenant the
+    // session then authenticates to is admitted live by `auth`, as before.
+    const key = `${projectId}\u0000${str(row.tenant_id)}\u0000${accountId}`;
+    const revision = Number(row.tenant_membership_revision ?? -1);
+    const cached = admissionCache.get(key);
+    if (cached && revision >= 0 && cached.membershipRevision === revision && cached.status === "active") return cached;
     try {
-      return (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
+      const member = (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
+      admissionCache.set(key, member);
+      if (admissionCache.size > ADMISSION_CACHE_MAX) admissionCache.delete(admissionCache.keys().next().value!);
+      return member;
     } catch {
+      admissionCache.delete(key);
       return null;
     }
   });

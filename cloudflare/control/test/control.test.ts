@@ -276,6 +276,25 @@ describe("external tokens (C.3.4)", () => {
   });
 });
 
+describe("X17f sign-in tenant list uses the last admission while the membership revision is unchanged", () => {
+  it("admits live, then serves from the cache, then admits live again after a membership change", async () => {
+    const { fixtureSpans } = await import("../../kernel/delivery/spans");
+    (await import("../src/sessions")).clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"] });
+    const admits = async () => {
+      fixtureSpans(true);
+      try { await login(seeded.project, seeded.members.sid!.email); return fixtureSpans(false).find((line) => line.name === "control.auth")!.fields.admits; }
+      finally { fixtureSpans(false); }
+    };
+    expect(await admits()).toBe(1);
+    expect(await admits()).toBe(0);
+    await runInDurableObject(env.CONTROL.getByName("control"), (instance: any) => {
+      instance.sql.run("UPDATE account_tenant_index SET tenant_membership_revision=tenant_membership_revision+1");
+    });
+    expect(await admits()).toBe(1);
+  });
+});
+
 describe("X14 sign-in spans", () => {
   it("emit control.auth per sign-in only when span timing is on", async () => {
     const { fixtureSpans } = await import("../../kernel/delivery/spans");
@@ -286,6 +305,7 @@ describe("X14 sign-in spans", () => {
     console.log = (...args: unknown[]) => { logged.push(args); };
     try { await login(seeded.project, seeded.members.sid!.email); } finally { console.log = log; }
     expect(logged.filter((args) => String(args[0]).includes("control.auth"))).toEqual([]);
+    (await import("../src/sessions")).clearAdmissionCache(); // X17f: this sign-in admits live again
     fixtureSpans(true);
     try {
       await login(seeded.project, seeded.members.sid!.email);
