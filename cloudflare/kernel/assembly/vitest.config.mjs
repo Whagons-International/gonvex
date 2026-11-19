@@ -18,6 +18,7 @@ export default defineConfig(async()=>{
  plugins:[{name:'module-prelude',enforce:'pre',transform(code,id){return id.split('?')[0].endsWith('.module.js')?{code:wrapBundle(code,globals),map:null}:null;}},cloudflareTest({wrangler:{configPath:'./test/wrangler.jsonc'},miniflare:{workers:[{
   name:'gonvex-cf-dev-k22-test-runtime',modules:bundle,compatibilityDate:'2026-10-23',compatibilityFlags:['nodejs_compat'],
   durableObjects:{TENANT:{className:'AssemblyTenant',useSQLite:true},OTHER_TENANT:{className:'WrongTenant',useSQLite:true},
+   ACTION_HOST:{className:'ActionHost',scriptName:'gonvex-cf-dev-k22-test-stable'},
    CONTROL:{className:'TestControl',scriptName:'gonvex-cf-dev-k22-test-stable'},GATEWAY:{className:'TestGateway',scriptName:'gonvex-cf-dev-k22-test-stable'}},
   r2Buckets:{RELEASES:'gonvex-cf-dev-k22-composition-releases',FILES:'gonvex-cf-dev-k22-composition-files'},
   serviceBindings:{ACTIONS:{name:'gonvex-cf-dev-k22-test-stable',entrypoint:'ActionWorker'},ACTIONS_CATALOG:{name:'gonvex-cf-dev-k22-test-actions',entrypoint:'TestActionCatalog'}},
@@ -26,7 +27,7 @@ export default defineConfig(async()=>{
   workflows:{ACTION_WORKFLOW:{name:'gonvex-cf-dev-k22-test-actions-workflow',className:'ActionWorkflow',scriptName:'gonvex-cf-dev-k22-test-stable'}},
  },{
   name:'gonvex-cf-dev-k22-test-stable',modules:stable,compatibilityDate:'2026-10-23',compatibilityFlags:['nodejs_compat'],
-  durableObjects:{CONTROL:{className:'TestControl',useSQLite:true},GATEWAY:{className:'TestGateway',useSQLite:true},TENANT:{className:'AssemblyTenant',scriptName:'gonvex-cf-dev-k22-test-runtime'}},
+  durableObjects:{CONTROL:{className:'TestControl',useSQLite:true},GATEWAY:{className:'TestGateway',useSQLite:true},TENANT:{className:'AssemblyTenant',scriptName:'gonvex-cf-dev-k22-test-runtime'},ACTION_HOST:{className:'ActionHost',useSQLite:true}},
   bindings:{GONVEX_DASHBOARD_SESSION_SECRET:'synthetic-publication-secret',GONVEX_ASSEMBLY_FIXTURE_KEY:'synthetic-inspection'},
   serviceBindings:{RUNTIME_CATALOG:{name:'gonvex-cf-dev-k22-test-runtime',entrypoint:'TestRuntimeCatalog'}},
  },{

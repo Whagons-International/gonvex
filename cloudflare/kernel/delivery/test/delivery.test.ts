@@ -639,6 +639,21 @@ function manualClock() {
 const PLATFORM_HIBERNATION_IDLE_MS = 10_000;
 
 describe("BUG-2 a subscribed tenant stays in memory between a session's events", () => {
+  it("X13g reports when the hold starts (first subscriber) and ends (last one went, or released), once each", () => {
+    const { clock, advance } = manualClock();
+    let active = false;
+    const events: boolean[] = [];
+    const keep = new SubscriberKeepAlive(() => active, 60_000, clock, (holding) => events.push(holding));
+    keep.touch();
+    expect(events).toEqual([]); // nothing to hold
+    active = true; keep.touch(); keep.touch(); advance(60_000); keep.touch();
+    expect(events).toEqual([true]); // one start, kept across re-arms
+    active = false; advance(60_000);
+    expect(events).toEqual([true, false]); // the check found no subscription: the hold ended
+    active = true; keep.touch(); keep.release(); keep.release();
+    expect(events).toEqual([true, false, true, false]);
+  });
+
   it("two sockets, ordinary commits after idle pauses: incremental batches, no reset, never hibernatable while subscribed", async () => {
     const { clock, advance } = manualClock();
     let keep: SubscriberKeepAlive | undefined;

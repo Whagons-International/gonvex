@@ -59,6 +59,12 @@
         "name": "INGRESS",
         "class_name": "IngressObject",
         "script_name": "gonvex-cf-dev-k22"
+      },
+      {
+        // X13g (0094 B): the per-tenant ActionHost, in the Actions Worker script.
+        "name": "ACTION_HOST",
+        "class_name": "ActionHost",
+        "script_name": "gonvex-cf-dev-k22-actions"
       }
     ]
   },

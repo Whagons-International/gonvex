@@ -170,42 +170,65 @@ export interface DirectCall {
   allowInternal?: boolean;
   /** K18 provider/share requests await the actual result, including agent Actions. */
   inline?: boolean;
+  /**
+   * X13g review: the inline run's owner, chosen by the caller (the tenant), so the caller can tell
+   * whether a failed host call started a run (and must not be retried) or never did.
+   */
+  inlineOwner?: string;
 }
 
 export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
   /** Inline for standard and public Actions; a Workflow run for agent Actions (`{ pending: id }`). */
   async call(input: DirectCall): Promise<ActionReport | { pending: true; id: string }> {
-    const { runtime, tenant } = runtimeFor(this.env, input.session.tenantId, input.session.projectId);
-    const active = runtime.options.registry.activeGeneration;
-    const contract = active?.engine.functions.get(input.path);
-    if (contract?.kind === "action" && profileOf(contract) === "agent" && input.session.account.id !== "" && input.inline !== true) {
-      const { executionAccess: _oldAccess, ...identity } = input.session;
-      const session: ActionSession = input.allowInternal === true ? { ...identity, executionAccess: { allowInternal: true } } : identity;
-      const request = { v: 1 as const, session, path: input.path, args: input.args, provenance: input.provenance };
-      // X13: run it here, as Rust runs it inline on the socket loop. A Workflow create and its first
-      // step cost seconds on the platform, and the socket's next frame (a `tasks.create` after the
-      // AI rewrite, say) waits for this Action's answer, in Rust too. The run is still durable: the
-      // tenant claims it for this runner, and if this runner dies its lease expires and the sweep
-      // hands it to a Workflow, as for any dead runner.
-      let claim: Awaited<ReturnType<TenantStub["startCall"]>>;
-      try {
-        claim = await startInline(tenant, { ...request, owner: `inline:${crypto.randomUUID()}` }, active?.engine);
-      } catch (error) {
-        // Deploy skew: an older tenant object has no `startCall`. Hand the call to a Workflow as before.
-        if (!/does not implement the method/i.test(String((error as Error)?.message ?? error))) throw error;
-        const id = await tenantRpc("beginCall", () => tenant.beginCall(request));
-        return { pending: true, id };
-      }
-      // The answer goes back in this call, so the socket sends it from the dispatch it is waiting on,
-      // as for a standard Action. Through the tenant's reply RPC instead, the gateway would defer the
-      // socket's next tenant call to its next fresh event (X02's depth rule): one alarm per Action.
-      const { report, completion } = await runInline({ runtime, tenant, renewMs: (config as unknown as ActionWorkerConfig<ActionEnv> | undefined)?.renewMs }, claim);
-      // X13b: the completion is persisted after the answer leaves, never on the reply path.
-      this.ctx.waitUntil(completion);
-      return report ?? { pending: true, id: claim.id };
-    }
-    return runtime.execute({ session: input.session, path: input.path, args: input.args, provenance: input.provenance, allowInternal: input.allowInternal === true });
+    return serveCall(this.env, (work) => this.ctx.waitUntil(work), input);
   }
+}
+
+/**
+ * `ActionWorker.call`'s body, shared with the per-tenant `ActionHost` (X13g). `waitUntil` keeps the
+ * completion that is recorded after the answer (X13b) alive.
+ */
+export async function serveCall(env: ActionEnv, waitUntil: (work: Promise<unknown>) => void, input: DirectCall): Promise<ActionReport | { pending: true; id: string }> {
+  const { runtime, tenant } = runtimeFor(env, input.session.tenantId, input.session.projectId);
+  const active = runtime.options.registry.activeGeneration;
+  const contract = active?.engine.functions.get(input.path);
+  if (contract?.kind === "action" && profileOf(contract) === "agent" && input.session.account.id !== "" && input.inline !== true) {
+    const { executionAccess: _oldAccess, ...identity } = input.session;
+    const session: ActionSession = input.allowInternal === true ? { ...identity, executionAccess: { allowInternal: true } } : identity;
+    const request = { v: 1 as const, session, path: input.path, args: input.args, provenance: input.provenance };
+    // X13: run it here, as Rust runs it inline on the socket loop. A Workflow create and its first
+    // step cost seconds on the platform, and the socket's next frame (a `tasks.create` after the
+    // AI rewrite, say) waits for this Action's answer, in Rust too. The run is still durable: the
+    // tenant claims it for this runner, and if this runner dies its lease expires and the sweep
+    // ends it (X13b).
+    let claim: Awaited<ReturnType<TenantStub["startCall"]>>;
+    try {
+      const owner = typeof input.inlineOwner === "string" && input.inlineOwner.startsWith("inline:") ? input.inlineOwner : `inline:${crypto.randomUUID()}`;
+      claim = await startInline(tenant, { ...request, owner }, active?.engine);
+    } catch (error) {
+      // Deploy skew: an older tenant object has no `startCall`. Hand the call to a Workflow as before.
+      if (!/does not implement the method/i.test(String((error as Error)?.message ?? error))) throw error;
+      const id = await tenantRpc("beginCall", () => tenant.beginCall(request));
+      return { pending: true, id };
+    }
+    // The answer goes back in this call, so the socket sends it from the dispatch it is waiting on,
+    // as for a standard Action. Through the tenant's reply RPC instead, the gateway would defer the
+    // socket's next tenant call to its next fresh event (X02's depth rule): one alarm per Action.
+    const { report, completion } = await runInline({ runtime, tenant, renewMs: (config as unknown as ActionWorkerConfig<ActionEnv> | undefined)?.renewMs }, claim);
+    // X13b: the completion is persisted after the answer leaves, never on the reply path.
+    waitUntil(completion);
+    return report ?? { pending: true, id: claim.id };
+  }
+  return runtime.execute({ session: input.session, path: input.path, args: input.args, provenance: input.provenance, allowInternal: input.allowInternal === true });
+}
+
+/** X13g: evaluates the project's active module in this isolate now (the ActionHost's prewarm). */
+export function prewarm(env: ActionEnv, tenantId: string, projectId: string): boolean {
+  const { runtime } = runtimeFor(env, tenantId, projectId);
+  const engine = runtime.options.registry.activeGeneration?.engine;
+  if (!engine) return false;
+  engine.load();
+  return engine.loaded;
 }
 
 /**

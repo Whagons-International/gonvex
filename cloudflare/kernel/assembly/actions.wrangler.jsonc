@@ -11,6 +11,9 @@
     { "name": "TENANT", "class_name": "AssemblyTenant", "script_name": "gonvex-cf-dev-k22-runtime" },
     { "name": "CONTROL", "class_name": "SessionControlObject", "script_name": "gonvex-cf-dev-k22" }
   ] },
+  // X13g (0094 B): the per-tenant ActionHost runs a socket's agent Actions in a resident isolate,
+  // under this script's CPU limit and bindings. It stores nothing.
+  "exports": { "ActionHost": { "type": "durable-object", "storage": "sqlite" } },
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "gonvex-cf-dev-k22-files" }],
   "services": [{ "binding": "SANDBOX", "service": "gonvex-cf-dev-k22-sandbox", "entrypoint": "SandboxWorker" }],
   "workflows": [{ "binding": "ACTION_WORKFLOW", "name": "gonvex-cf-dev-k22-actions", "class_name": "ActionWorkflow" }],
