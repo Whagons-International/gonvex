@@ -4,8 +4,10 @@
  * 503s of 2026-11-17 18:55:29 had no log line and no header to tell which step
  * missed its deadline.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { handleWebSocketUpgrade, refusalCause, type WebSocketRouteEnv } from "../router";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { handleWebSocketUpgrade, resetWarmCell, refusalCause, type WebSocketRouteEnv } from "../router";
+// X17g: each test starts without a warm holder, so an earlier test's admission does not route this one directly.
+beforeEach(() => resetWarmCell());
 import { ADMISSION_REASON_HEADER } from "../placement/gateway";
 
 const upgrade = () => new Request("https://gonvex.test/ws", { headers: { upgrade: "websocket" } });

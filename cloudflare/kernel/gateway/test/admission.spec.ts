@@ -1,9 +1,11 @@
 import { env, evictDurableObject, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { ASSIGNMENT_HEADER, controllerCell, type GatewayAssignment } from "../placement";
 import { ADMISSION_REASON_HEADER, UPGRADE_HEADERS } from "../../session/placement/gateway";
 import { GatewayRoutingIdentity, ROUTING_IDENTITY_KEY } from "../../session/placement/routing-identity";
-import { handleWebSocketUpgrade } from "../../session/router";
+import { handleWebSocketUpgrade, resetWarmCell } from "../../session/router";
+// X17g: each test starts without a warm holder, so an earlier test's admission does not route this one directly.
+beforeEach(() => resetWarmCell());
 import type { GatewayControllerObject } from "../controller";
 import type { GatewayObject } from "../../session";
 

@@ -9,9 +9,11 @@
  */
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vitest";
+import { beforeEach, afterEach, describe, expect, it } from "vitest";
 import type { SocketHost } from "../host";
-import { handleWebSocketUpgrade, validExtensionsField } from "../router";
+import { handleWebSocketUpgrade, resetWarmCell, validExtensionsField } from "../router";
+// X17g: each test starts without a warm holder, so an earlier test's admission does not route this one directly.
+beforeEach(() => resetWarmCell());
 import { HolderRecoveryStore, attachmentRecord } from "../recovery-store";
 
 const BASE = "https://gonvex.test";

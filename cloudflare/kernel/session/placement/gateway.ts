@@ -18,7 +18,7 @@
  * ignored and every method tolerates older callers.
  */
 import { setDeliveryTiming } from "../../delivery/batcher";
-import { ASSIGNMENT_HEADER, MAX_SOCKETS, controller, withDeadline, parseAssignment, type AutoscaleEnv, type CapacitySample, type DrainCommand, type DrainResult, pressured, hashConnection } from "../../gateway/placement";
+import { ASSIGNMENT_HEADER, DIRECT_HEADER, MAX_SOCKETS, controller, withDeadline, parseAssignment, parseDirect, type DirectAdmission, type AutoscaleEnv, type CapacitySample, type DrainCommand, type DrainResult, pressured, hashConnection } from "../../gateway/placement";
 import { GatewayMetrics } from "../../gateway/metrics";
 import { DurableObject } from "cloudflare:workers";
 import type { ModuleInfo, Ports, TenantRoute, TenantSession } from "../ports";
@@ -30,7 +30,7 @@ import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt 
 import { validRecoveryInitialDelivery, initialDeliveryOnly, initialFailureOnly, validInitialCompletions, REPLICA_DELIVERY_VERSION, type InitialCompletionStatus, type ReplicaDelivery, type ReplicaReceipt, type SocketWork } from "../../delivery/protocol";
 import type { ReplicaBatchResult } from "../../delivery/outlet";
 import { UNKNOWN_ADDRESS } from "../../public/address";
-import type { PublicGuard } from "../../public/guard";
+import { type PublicGuard, admitUpgrade, publicGuard, LIMITER_UNAVAILABLE } from "../../public/guard";
 import { publicLimits } from "../../public/config";
 import { limiterFor } from "../../public/limiter";
 import type { SlotKind } from "../../public/limiter";
@@ -127,7 +127,11 @@ export const UPGRADE_HEADERS = {
 /** Content-free, finite diagnostics. Never echo the assignment or its identifiers. */
 export const ADMISSION_REASON_HEADER = "x-gonvex-admission-reason";
 type AdmissionReason = "parse-invalid" | "holder-identity" | "connection-mismatch" | "identity-unavailable"
-  | "admission-busy" | "capacity" | "claim-refused" | "epoch-busy";
+  | "admission-busy" | "capacity" | "claim-refused" | "epoch-busy"
+  /** X17g: a direct upgrade this holder does not take; the router falls back to the controller's `acquire`. */
+  | "direct-invalid" | "direct-identity" | "direct-unavailable" | "direct-busy" | "direct-refused";
+/** X17g: the router retries a refusal with this prefix through the controller (it is not the client's answer). */
+export const DIRECT_REFUSAL_PREFIX = "direct-";
 function refusedAdmission(reason: AdmissionReason, body = "gateway assignment required"): Response {
   return new Response(body, { status: 503, headers: { [ADMISSION_REASON_HEADER]: reason } });
 }
@@ -245,6 +249,10 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket upgrade", { status: 400 });
     const headers = request.headers;
     if (this.env.GATEWAY_CONTROLLER) {
+      if (headers.has(DIRECT_HEADER)) {
+        const direct = parseDirect(headers.get(DIRECT_HEADER));
+        return direct ? this.admitDirect(direct, headers) : refusedAdmission("direct-invalid");
+      }
       const assignment = parseAssignment(headers.get(ASSIGNMENT_HEADER));
       if (!assignment) return refusedAdmission("parse-invalid");
       if (!this.routingIdentity!.matches(assignment.gateway)) return refusedAdmission("holder-identity");
@@ -282,6 +290,54 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       return accepted;
     }
     return this.accept(headers);
+  }
+
+  /**
+   * X17g: an upgrade the router sent straight here (`DIRECT_HEADER`): this holder already serves this cell at this
+   * epoch, so one controller call (`admitDirect`: acquire and claim at once) admits it, while the address limiter
+   * reserves its slots in parallel (the router did neither). Anything this holder does not take is refused with a
+   * `direct-*` reason and the router falls back to `acquire`. A limiter refusal is the client's answer (429/503, as
+   * the router sends it); a lease the controller granted for it stays claimed until it expires (LEASE_MS), counted
+   * as pending, like any lost upgrade.
+   */
+  private admitDirect(direct: DirectAdmission, headers: Headers): Promise<Response> | Response {
+    const identity = this.routingIdentity!;
+    if (!identity.known || !identity.matches(direct.gateway)) return refusedAdmission("direct-identity");
+    const connectionId = headers.get(UPGRADE_HEADERS.connectionId);
+    if (!connectionId || direct.connectionId !== connectionId) return refusedAdmission("direct-invalid");
+    if (this.admissionWaiting >= 16) return refusedAdmission("direct-busy", "gateway admission busy");
+    this.admissionWaiting++;
+    const queued = Date.now();
+    const accepted = this.admissionTail.then(async () => {
+      const started = Date.now();
+      await this.loadPlacement();
+      if (direct.epoch !== this.placementEpoch || direct.cell !== this.placementCell || this.draining
+        || this.host.sessions.size >= MAX_SOCKETS) return refusedAdmission("direct-unavailable", "gateway full");
+      const address = headers.get(UPGRADE_HEADERS.address) ?? UNKNOWN_ADDRESS;
+      const publicTransport = headers.get(UPGRADE_HEADERS.publicTransport) === "1";
+      const kinds: SlotKind[] = this.env.PUBLIC_LIMITER ? (publicTransport ? ["pending", "public"] : ["pending"]) : [];
+      const admissionMs = 2_000;
+      const [granted, limited] = await Promise.all([
+        withDeadline(controller(this.env, direct.cell).admitDirect(direct, this.host.sessions.size)).catch((error: unknown) => {
+          console.error("gateway: direct admission failed", { cause: String((error as Error)?.message ?? error).slice(0, 120) });
+          return null;
+        }),
+        withDeadline(admitUpgrade(this.env, { address, connectionId, gateway: direct.gateway, publicTransport, expiresAt: Date.now() + admissionMs }), admissionMs)
+          .catch(() => new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [ADMISSION_REASON_HEADER]: "limiter-unavailable" } })),
+      ]);
+      const release = () => kinds.length ? publicGuard(this.env).release(address, connectionId, kinds) : Promise.resolve();
+      if (limited) return limited;
+      if (!granted) { await release(); return refusedAdmission("direct-refused", "gateway assignment expired"); }
+      queueMicrotask(() => span("gateway.admitDirect", { waitMs: started - queued, admitMs: Date.now() - started, totalMs: Date.now() - queued, sockets: this.host.sessions.size }));
+      identity.claimed(direct.gateway);
+      try {
+        const response = this.host.accept(publicTransport, connectionId, address, kinds);
+        this.reportCapacity();
+        return response;
+      } catch (error) { await release(); throw error; }
+    }).finally(() => { this.admissionWaiting--; });
+    this.admissionTail = accepted.catch(() => undefined);
+    return accepted;
   }
 
   private accept(headers: Headers): Response {
