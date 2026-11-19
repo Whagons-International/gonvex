@@ -63,6 +63,8 @@ interface Pending {
   recovery: boolean;
   /** Its credits were returned already: on completion, or (BUG-4b) when its RPC stopped progressing. */
   released?: boolean;
+  /** X14 review: the engine reset its holder for a stall (`abandon`): its work is given up, not just its credits. */
+  abandoned?: boolean;
   enqueued: number;
   resolve(value: ReplicaReceipt | undefined): void;
   reject(error: unknown): void;
@@ -228,7 +230,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   /** BUG-4b: the engine reset `host` for a stall: its in-flight RPC's credits are returned now, not when it settles. */
   abandon(host: string): void {
     const queue = this.queues.get(host);
-    if (queue?.current && !queue.current.recovery) for (const item of queue.inflight) this.release(queue, item);
+    if (queue?.current && !queue.current.recovery) for (const item of queue.inflight) { item.abandoned = true; this.release(queue, item); }
   }
 
   /**
@@ -332,12 +334,13 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       queue.current = undefined;
       queue.inflight = [];
       if (requeue) {
-        // Items the engine meanwhile gave up on (a recovery barrier was set or is queued, or a stall returned their
-        // credits) are settled as discarded, as `discard` settles pending work; only the rest go back, in order.
+        // Items the engine meanwhile gave up on (a recovery barrier was set or is queued, or `abandon` reset the
+        // holder for a stall) are settled as discarded, as `discard` settles pending work. Items whose credits a
+        // claim tick only returned early (BUG-4b, no engine reset) are still owed: they go back, in order.
         const discarded = queue.recoveryRequired || queue.recovery !== undefined;
         const back: Pending[] = [];
         for (const item of items) {
-          if (discarded || item.released) { this.release(queue, item); item.resolve(undefined); }
+          if (discarded || item.abandoned) { this.release(queue, item); item.resolve(undefined); }
           else back.push(item);
         }
         queue.pending.unshift(...back);
@@ -477,8 +480,9 @@ export class LocalOutlet extends OrderedOutlet {
 /** X14: the holder's Worker version predates `deliverReplicaBatch` (Workers RPC: the receiver does not implement it). */
 export function batchUnsupported(error: unknown): boolean {
   const message = String((error as Error | undefined)?.message ?? error);
-  // workerd's exact wording for a method the receiving class does not define.
-  return message.includes('does not implement the method "deliverReplicaBatch"');
+  // workerd's wording for a method the receiving class does not define. workerd 1.20261023 says
+  // 'The RPC receiver does not implement "deliverReplicaBatch".'; other versions add "the method".
+  return /does not implement (the method )?"deliverReplicaBatch"/.test(message);
 }
 
 /** Conservative text/copy credits (UTF16 plus two worst-case UTF8 copies), no second JSON encoding of the delivery payload. */

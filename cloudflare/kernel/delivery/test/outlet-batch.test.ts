@@ -165,10 +165,64 @@ describe("X14 gateway outlet batching", () => {
     expect(results[2]).toMatchObject({ receipt: { v: REPLICA_DELIVERY_VERSION, sockets: 0 } });
   });
 
+  it("falls back to single RPCs on workerd's real missing-method error (a real stub without the method)", async () => {
+    // HELLO's class has no deliverReplicaBatch: the error below is the platform's own, not a hand-written message.
+    const old = (env as unknown as { HELLO: DurableObjectNamespace }).HELLO.getByName(`x14-old-gateway-${crypto.randomUUID()}`) as unknown as ReplicaHolderRpc;
+    let real: unknown;
+    try { await old.deliverReplicaBatch!("t", []); } catch (error) { real = error; }
+    expect(String((real as Error).message)).toMatch(/does not implement/);
+    expect(batchUnsupported(real)).toBe(true);
+    const h = holder(false);
+    const rpc: ReplicaHolderRpc = { ...h.rpc, deliverReplicaBatch: (t, ps) => old.deliverReplicaBatch!(t, ps) };
+    const outlet = new GatewayOutlet("t", () => rpc, async () => ["g"]);
+    const sent = [1, 2, 3].map((n) => outlet.send("g", payload(n)));
+    for (let i = 0; i < 8; i++) { await tick(); await h.release(); }
+    expect((await Promise.all(sent)).map((r) => r?.sockets)).toEqual([1, 2, 3]);
+    expect(h.calls.map((c) => [c.kind, c.items[0]])).toEqual([["single", 1], ["single", 2], ["single", 3]]);
+  });
+
+  it("requeues batch items whose credits a claim tick returned early; discards only abandoned ones", async () => {
+    for (const mode of ["claimTick", "abandon"] as const) {
+      const h = holder(false);
+      let gate!: () => void;
+      const rpc = { ...h.rpc, async deliverReplicaBatch() {
+        await new Promise<void>((resolve) => { gate = resolve; });
+        throw new TypeError('The RPC receiver does not implement "deliverReplicaBatch".');
+      } };
+      const outlet = new GatewayOutlet("t", () => rpc, async () => ["g", "h"]);
+      const sent = [1, 2, 3].map((n) => outlet.send("g", payload(n)));
+      await tick();
+      expect(outlet.queued("g")).toBe(3);
+      if (mode === "claimTick") {
+        // Holder h needs the whole isolate for an oversize payload: it claims it, and its ticks return the credits
+        // of g's stuck batch (BUG-4b) without any engine reset of g.
+        expect(outlet.admits("h", big(50))).toBe(false);
+        let freed = false;
+        for (let i = 0; i < 10 && !freed; i++) freed = outlet.claimTick("h", 2);
+        expect(freed).toBe(true);
+        outlet.unclaim("h");
+      } else {
+        outlet.abandon("g");
+      }
+      gate();
+      for (let i = 0; i < 8; i++) { await tick(); await h.release(); }
+      const results = (await Promise.all(sent)).map((r) => r?.sockets);
+      if (mode === "claimTick") {
+        expect(results).toEqual([1, 2, 3]); // still owed: resent singly, in order
+        expect(h.calls.map((c) => c.items[0])).toEqual([1, 2, 3]);
+      } else {
+        expect(results).toEqual([undefined, undefined, undefined]); // the engine gave them up
+        expect(h.calls).toEqual([]);
+      }
+    }
+  });
+
   it("recognizes the platform's missing-method error only for the batch method", () => {
     expect(batchUnsupported(new TypeError('The RPC receiver does not implement the method "deliverReplicaBatch".'))).toBe(true);
     expect(batchUnsupported(new Error("delivery recovery scope changed"))).toBe(false);
     expect(batchUnsupported(new TypeError('The RPC receiver does not implement the method "deliverReplica".'))).toBe(false);
+    expect(batchUnsupported(new TypeError('The RPC receiver does not implement "deliverReplicaBatch".'))).toBe(true);
+    expect(batchUnsupported(new TypeError('The RPC receiver does not implement "deliverReplica".'))).toBe(false);
     expect(batchUnsupported(new Error("deliverReplicaBatch is not a function"))).toBe(false);
   });
 });
