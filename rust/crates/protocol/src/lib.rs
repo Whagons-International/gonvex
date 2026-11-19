@@ -153,7 +153,10 @@ pub fn client_error_text(error: &str) -> String {
     }
     let message = lines.join("\n");
     let message = message.trim_end();
-    message.strip_prefix("Error: ").unwrap_or(message).to_owned()
+    message
+        .strip_prefix("Error: ")
+        .unwrap_or(message)
+        .to_owned()
 }
 
 impl ReducerErrorClass {
@@ -986,13 +989,19 @@ mod client_error_text_tests {
     #[test]
     fn application_errors_keep_only_their_message() {
         let raw = "TypeScript module host returned execution_failed: module 6d89ca2f-144b function roles.reseedRoles: Error: Only the tenant owner may change the built-in admin role\n    at Object.assertCanManageRole (file:///gonvex/6d89/module.js:1625:316704)\n    at async gonvex:bootstrap.js:788:15";
-        assert_eq!(client_error_text(raw), "Only the tenant owner may change the built-in admin role");
+        assert_eq!(
+            client_error_text(raw),
+            "Only the tenant owner may change the built-in admin role"
+        );
     }
 
     #[test]
     fn multi_line_messages_and_named_errors_survive() {
         let raw = "TypeScript module host returned execution_failed: module m function a.b: TypeError: x is undefined\nsecond line\n    at f (file:///gonvex/m/module.js:1:1)";
-        assert_eq!(client_error_text(raw), "TypeError: x is undefined\nsecond line");
+        assert_eq!(
+            client_error_text(raw),
+            "TypeError: x is undefined\nsecond line"
+        );
     }
 
     #[test]
