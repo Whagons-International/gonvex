@@ -4,6 +4,7 @@ import {
   controllerCell, pressured, quiet, withDeadline, checkedCapacitySample, completedWindow, windowPressured, freshWindow, WINDOW_FIELDS,
   type CapacitySample, type GatewayAssignment, type GatewayCapacityRpc,
 } from "./placement";
+import { setSpanTiming, span, spanTimingFromEnv } from "../delivery/spans";
 
 interface Slot {
   name: string;
@@ -22,7 +23,7 @@ interface Slot {
 interface Lease { assignment: GatewayAssignment; claimed: boolean }
 interface ScaleEvent { at: number; action: "allocate" | "drain" | "retire"; gateway: string; epoch: number }
 interface State { v: 1; epoch: number; slots: Slot[]; leases: Lease[]; events?: ScaleEvent[] }
-interface ControllerEnv { GATEWAY: DurableObjectNamespace }
+interface ControllerEnv { GATEWAY: DurableObjectNamespace; GONVEX_SPAN_TIMING?: string }
 
 /**
  * One durable owner per pre-auth hash cell, never one fleet-wide allocation DO.
@@ -35,6 +36,7 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
   private waiting = 0;
   constructor(ctx: DurableObjectState, env: ControllerEnv) {
     super(ctx, env);
+    if (spanTimingFromEnv(env)) setSpanTiming(true);
     ctx.blockConcurrencyWhile(async () => {
       this.state = await ctx.storage.get<State>("placement") ?? { v: 1, epoch: 0, slots: [], leases: [] };
       if (this.state.v !== 1) throw new Error("unsupported placement state");
@@ -134,8 +136,10 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
 
   acquire(connectionId: string): Promise<GatewayAssignment> {
     if (typeof connectionId !== "string" || connectionId.length > 100) return Promise.reject(new Error("invalid placement key"));
+    const queued = Date.now();
     return this.serial(async () => {
       const now = Date.now(), cell = this.cell();
+      let probeMs = 0, probes = 0;
       if (typeof connectionId !== "string" || connectionId.length > 100 || controllerCell(connectionId) !== cell) throw new Error("invalid placement key");
       this.prune(now);
       // Retrying the same acquire does not leak another reservation.
@@ -147,20 +151,25 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       let chosen: Slot | undefined;
       // At most two probes per admission, even with a failed/pressured fleet.
       for (const s of active.slice(0, 2)) {
+        const probed = Date.now(); probes++;
         try {
           const sample = await this.probe(s);
+          probeMs += Date.now() - probed;
           if (!pressured(sample) && sample.sockets + this.pending(s) < MAX_SOCKETS) { chosen = s; break; }
-        } catch { /* Faulted holder retains ownership, but receives no new admission. */ }
+        } catch { probeMs += Date.now() - probed; /* Faulted holder retains ownership, but receives no new admission. */ }
       }
       if (!chosen) chosen = this.allocate(now);
       const assignment: GatewayAssignment = { v: 1, cell, gateway: chosen.name, epoch: chosen.epoch, token: crypto.randomUUID(), connectionId, expiresAt: now + LEASE_MS };
       this.state.leases.push({ assignment, claimed: false });
+      const saved = Date.now();
       await this.save(); // Durable before the router can use it.
+      span("controller.acquire", { waitMs: now - queued, probes, probeMs, saveMs: Date.now() - saved, totalMs: Date.now() - queued });
       this.dispatchDrains();
       return assignment;
     });
   }
   claim(a: GatewayAssignment): Promise<boolean> {
+    const queued = Date.now();
     return this.serial(async () => {
       this.prune(Date.now());
       const lease = this.state.leases.find(l => l.assignment.token === a.token && l.assignment.connectionId === a.connectionId
@@ -168,7 +177,9 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       const slot = this.state.slots.find(s => s.name === a.gateway && s.epoch === a.epoch);
       if (!lease || lease.claimed || slot?.mode !== "active") return false;
       lease.claimed = true;
+      const saved = Date.now();
       await this.save();
+      span("controller.claim", { saveMs: Date.now() - saved, totalMs: Date.now() - queued });
       return true;
     });
   }

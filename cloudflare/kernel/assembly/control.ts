@@ -7,6 +7,7 @@ import type { AuthOutcome } from "../../control/src/auth";
 import type { ControlConnection } from "../../control/src/types";
 import type { ClientFrame, Json } from "../session/decode";
 import { echoTrace } from "../session/protocol";
+import { span } from "../delivery/spans";
 import { replicaEpoch } from "../session/directive";
 import { deployedManifest, derivedOf } from "../../control/src/manifest-cache";
 import type { Failure, FailureKind, Impersonation, ModuleInfo, Outcome, RevalidationItem, ServiceAuthOutcome, SessionIdentity, SocketView, TenantRoute, TenantSession } from "../session/ports";
@@ -102,7 +103,9 @@ export class SessionControlObject extends OperatorControlObject {
 
   async sessionAuthenticate(token: string, projectId: string | undefined, tenant: string | undefined): Promise<Outcome<TenantSession>> {
     // An empty tenant asks for the first admitted one (`first_admitted_tenant`), as in K06's own branch.
+    const started = Date.now();
     const outcome = await this.auth({ token, ...(projectId !== undefined ? { project: projectId } : {}), ...(tenant !== undefined ? { tenant } : {}) });
+    span("control.rpc", { method: "sessionAuthenticate", ms: Date.now() - started });
     if (outcome.message.type !== "auth.result" || !outcome.connection.tenant) return failed(outcome);
     return { ok: true, value: sessionOf(outcome.connection.tenant) };
   }
@@ -148,6 +151,12 @@ export class SessionControlObject extends OperatorControlObject {
    * `control.watermark`). Subscriptions answer their initial result only.
    */
   async sessionDispatch(socket: SocketView, frame: ClientFrame): Promise<string[]> {
+    const started = Date.now();
+    try { return await this.dispatchFrame(socket, frame); }
+    finally { span("control.rpc", { method: "sessionDispatch", type: frame.type, path: "path" in frame && typeof frame.path === "string" ? frame.path : "", ms: Date.now() - started }); }
+  }
+
+  private async dispatchFrame(socket: SocketView, frame: ClientFrame): Promise<string[]> {
     const connection = connectionOf(socket);
     const j = JSON.stringify;
     switch (frame.type) {

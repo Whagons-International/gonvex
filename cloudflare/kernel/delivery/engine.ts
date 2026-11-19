@@ -11,6 +11,7 @@
 // that land while a task runs coalesce into the next wake, as Rust's feed
 // task does. Nothing here is written to SQLite (brief: nothing ephemeral).
 
+import { span, spanTimingOn } from "./spans";
 import { captureRecoveryInitials, recoveryInitialCleanup, type RecoveryInitialCapture } from "./recovery-initials";
 import { AuthorityAdmission } from "./authority";
 import { type RecoveryDelivery, type RecoveryReceipt, type ScopedSocketWork } from "./recovery";
@@ -417,7 +418,19 @@ export class ReplicaDeliveryEngine {
   /** Initial LQ snapshots and their enqueue share the reducer/commit serialization turn. */
   querySubscribe(socket: SocketView, snapshot: (db: StorageSession) => string, recovery = false): Promise<string[]> {
     // BUG-2: the snapshot installs the live query; arm/extend the keep-alive only after it is held.
-    return this.options.serial(async () => { try { return await this.subscribeQuery(socket, snapshot, recovery); } finally { this.options.activity?.(); } });
+    const queued = Date.now();
+    return this.options.serial(async () => {
+      const started = Date.now();
+      try { return await this.subscribeQuery(socket, snapshot, recovery); }
+      finally {
+        this.options.activity?.();
+        // X17: time-only (no ids): the serial wait, the run, and whether the reply went out or was kept for a replay.
+        if (spanTimingOn()) {
+        const kept = (this.deferredQueries.get(socket.connectionId) ?? []).some((q) => q.socket === socket);
+        span("tenant.query", { waitMs: started - queued, runMs: Date.now() - started, kept, behind: this.behind.has(socket.host), queuedAhead: this.options.outlet.queued(socket.host), recovery });
+        }
+      }
+    });
   }
 
   private subscribeQuery(socket: SocketView, snapshot: (db: StorageSession) => string, recovery: boolean): Promise<string[]> {
@@ -828,6 +841,14 @@ export class ReplicaDeliveryEngine {
 
   private async processOpen(connection: Connection, request: OpenRequest): Promise<void> {
     if (this.connections.get(connection.id) !== connection) return;
+    if (!spanTimingOn()) return this.processOpenTimed(connection, request, () => {});
+    const openStarted = Date.now();
+    let drainMs = 0, drains = 0;
+    try { await this.processOpenTimed(connection, request, (ms) => { drainMs += ms; drains++; }); }
+    finally { span("tenant.open", { path: request.path, runMs: Date.now() - openStarted, drainMs, drains, pending: connection.pending.length, queuedAfter: this.options.outlet.queued(connection.host) }); }
+  }
+
+  private async processOpenTimed(connection: Connection, request: OpenRequest, drained: (ms: number) => void): Promise<void> {
     // Every commit up to now is delivered before the snapshot is read, so the subscription joins at the clock.
     await this.deliverCommits();
     if (this.behind.has(connection.host) && this.connections.get(connection.id) === connection) {
@@ -853,7 +874,7 @@ export class ReplicaDeliveryEngine {
       registry: this.registry,
       read: this.options.read,
       emit: (frames) => { for (const text of frames) ops.push(["f", text]); },
-      drain: async () => { await flush(); await this.options.outlet.idle(connection.host); },
+      drain: async () => { const t = Date.now(); await flush(); await this.options.outlet.idle(connection.host); drained(Date.now() - t); },
       progress,
     });
     this.stats.opens += 1;

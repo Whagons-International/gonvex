@@ -487,7 +487,9 @@ export class Session {
     if (this.closed) return;
     const tenant = this.record.tenant;
     const control = async (f: ClientFrame) => {
+      const turnWaitMs = this.turnWaitMs, called = this.now();
       const replies = await this.forward(this.ports.control.dispatch(this.view(), f));
+      span("gateway.control", { type: f.type, path: "path" in f && typeof f.path === "string" ? f.path : "", turnWaitMs, rpcMs: this.now() - called });
       if (f.type === "query.subscribe") {
         const reply = replies.map((text) => JSON.parse(text)).find((value) => value.type === "query.result");
         if (reply) { (this.record.controlQueries ??= Object.create(null))[f.id] = { request: f, last: JSON.stringify(reply.result) }; this.hooks.recoveryChanged?.(); }
@@ -1097,8 +1099,13 @@ export class Session {
     return refreshed;
   }
 
+  /** X17: wall-time parts of the current auth (spans only; time-only, no identifiers). */
+  private authTimes: { sessionMs?: number; epochMs?: number } = {};
+
   private async auth(frame: AuthFrame): Promise<void> {
     const record = this.record;
+    const authStarted = this.now(), authTurnWaitMs = this.turnWaitMs;
+    this.authTimes = {};
     const tenantRequest = controlAuthTenant(frame.controlOnly, frame.capabilities, frame.tenant);
     const deadline = record.pendingUntil ?? this.now() + LIMITS.authTimeoutMs;
     let outcome: { response: AuthResponse; connection: Connection };
@@ -1138,6 +1145,7 @@ export class Session {
     }
     record.clientContract = frame.clientContract === undefined ? null : frame.clientContract.toString();
 
+    const authenticatedAt = this.now();
     let module = await this.modules.get(connection.projectId);
     if (response.ok && this.hooks.projectAuthenticated) {
       try {
@@ -1189,6 +1197,9 @@ export class Session {
     this.hooks.persist?.();
     this.send(response.ok ? frames.authResult(response.id, response.result as Json) : frames.authError(response.id, response.error, response.code));
     this.reportConnection();
+    span("gateway.auth", { kind: frame.public ? "public" : frame.token === undefined ? (frame.controlOnly ? "control-anon" : "anon") : frame.controlOnly ? "control" : "tenant",
+      ok: response.ok, turnWaitMs: authTurnWaitMs, totalMs: this.now() - authStarted, authenticateMs: authenticatedAt - authStarted,
+      publishWaitMs: this.now() - authenticatedAt, ...this.authTimes });
   }
 
   /** `authenticate` (lib.rs:4475-4780). */
@@ -1239,7 +1250,9 @@ export class Session {
       const result = { projectId, accountId: identity.value.account.id, tenantId: "", artifactHash: await artifactHash(projectId) };
       return { response: { ok: true, id, result }, connection: { projectId, identity: identity.value, tenant: null, impersonationId: "", authToken: token } };
     }
+    const sessionStarted = this.now();
     const authenticated = await control.authenticateSession(token, project, tenant);
+    this.authTimes.sessionMs = this.now() - sessionStarted;
     if (!authenticated.ok) return failed(authenticated);
     const session = authenticated.value;
     // X15: the holder registration + module read (`auth` awaits it) overlaps the replica epoch read below.
@@ -1262,7 +1275,9 @@ export class Session {
   private async directive(session: TenantSession) {
     const module = await this.modules.get(session.identity.projectId);
     if (!module) return null;
+    const epochStarted = this.now();
     const epoch = await this.ports.modules.epoch(session.identity.projectId, session.route.databaseUrl);
+    this.authTimes.epochMs = this.now() - epochStarted;
     return replicaDirective({
       projectId: session.identity.projectId, tenantId: session.route.tenantId, accountId: session.identity.account.id,
       permissions: session.member.permissions, epoch,
