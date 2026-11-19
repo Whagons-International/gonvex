@@ -159,14 +159,15 @@ export function sessionResult(grant: SessionGrant, account: AuthAccount, request
 /**
  * X17f: last admissions per (project, tenant, account). An entry is used only while the directory row it was admitted
  * under is unchanged: same member id, membership revision and projection time (`updated_at`). The revision alone is
- * not complete (#530 review): application Reducers change `role`/`permissions` without bumping it, but the members
- * trigger still projects every update, and each projection rewrites `updated_at`. Entries also expire after
- * `ADMISSION_CACHE_TTL_MS`.
+ * not complete (#530 review): application Reducers change `role`/`permissions`/`status` without bumping it. The members
+ * trigger queues every update in the tenant's projection outbox, whose push only acks rows no write touched while it
+ * was in flight (kernel/assembly/tenant.ts `projectMemberships`, #530 re-review), and every projection rewrites
+ * `updated_at`. Entries also expire after `ADMISSION_CACHE_TTL_MS`.
  */
 interface CachedAdmission { readonly member: Member; readonly memberId: string; readonly revision: number; readonly projectedAt: number; readonly at: number }
 const admissionCache = new Map<string, CachedAdmission>();
 const ADMISSION_CACHE_MAX = 4096;
-export const ADMISSION_CACHE_TTL_MS = 60 * 60 * 1000;
+export const ADMISSION_CACHE_TTL_MS = 30 * 1000;
 /** Test seam. */
 export function clearAdmissionCache(): void { admissionCache.clear(); }
 

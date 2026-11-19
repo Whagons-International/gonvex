@@ -363,6 +363,46 @@ describe("review #530: the sign-in tenant list stays a live admission", () => {
   });
 });
 
+describe("re-review #530: a Reducer write committed while the tenant's projection push is in flight", () => {
+  it.each([
+    ["a role change", "role='viewer',permissions='{}'", { role: "viewer", permissions: {} }],
+    ["a revocation (status write, as whagons members.ts:1340)", "status='revoked'", null],
+  ] as const)("%s still shows on the next sign-in (the outbox ack deletes it unprojected, so updated_at never moves)", async (_label, write, expected) => {
+    ((await import("../src/sessions")) as { clearAdmissionCache?: () => void }).clearAdmissionCache?.();
+    const seeded = await seed({ a: ["sid"], b: ["sid"] });
+    const email = seeded.members.sid!.email;
+    const account = seeded.members.sid!.accountId;
+    const b = seeded.tenants.b!;
+    const roleIn = async () => ((await login(seeded.project, email)).session.tenants as Array<Record<string, unknown>>).find((t) => t.id === b);
+    expect(await roleIn()).toMatchObject({ role: "admin" });
+    // Reducer write 1 in tenant b (no membership_revision bump), queued in b's projection outbox.
+    await runInDurableObject(tenantStub(b), (instance: StubTenantObject) => {
+      (instance as unknown as { sql: { run(q: string, ...a: unknown[]): void } }).sql.run("UPDATE members SET role='member' WHERE account_id=$1", account);
+    });
+    // b pushes it. While that RPC is in flight (Control has applied it, b has not processed the ack yet): a sign-in
+    // admits b live under the new updated_at, then Reducer write 2 commits in b with the same revision.
+    await runInDurableObject(tenantStub(b), async (instance: StubTenantObject) => {
+      const self = instance as unknown as { env: { CONTROL: DurableObjectNamespace }; sql: { run(q: string, ...a: unknown[]): void }; flushMemberships(): Promise<void> };
+      const real = self.env.CONTROL;
+      self.env = { ...self.env, CONTROL: { getByName: (name: string) => {
+        const stub = real.getByName(name) as unknown as { projectMemberships(...args: unknown[]): Promise<number> };
+        return { projectMemberships: async (...args: unknown[]) => {
+          const applied = await stub.projectMemberships(...args);
+          expect(await roleIn()).toMatchObject({ role: "member" });
+          self.sql.run(`UPDATE members SET ${write} WHERE account_id=$1`, account);
+          return applied;
+        } };
+      } } as unknown as DurableObjectNamespace };
+      try { await self.flushMemberships(); } finally { self.env = { ...self.env, CONTROL: real }; }
+    });
+    // Base admits every candidate live and shows write 2. With the cache, the directory row never changed again, so
+    // the admission cached between the two writes ('member', active) is served until the 1 h TTL.
+    await tenantStub(b).flushMemberships();
+    if (expected) expect(await roleIn()).toMatchObject(expected);
+    else expect(await roleIn()).toBeUndefined();
+  });
+});
+
 describe("X14 sign-in spans", () => {
   it("emit control.auth per sign-in only when span timing is on", async () => {
     const { fixtureSpans } = await import("../../kernel/delivery/spans");

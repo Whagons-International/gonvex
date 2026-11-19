@@ -465,3 +465,23 @@ it('X15 a woken tenant answers admit without evaluating the app bundle; the firs
   });
  } finally { delete releases[project]; }
 });
+it('X17f the membership projection ack keeps a write committed while the push was in flight (#530 re-review)',async()=>fixture(async(object,state)=>{
+ const sql=state.storage.sql;
+ sql.exec("INSERT INTO members(id,account_id,status,role,membership_revision) VALUES('m-x17f','acct-x17f','active','admin',1)");
+ const self=object as unknown as {env:{CONTROL:unknown};projectMemberships():Promise<number>};
+ const real=self.env.CONTROL;
+ const pushed:unknown[][]=[];
+ const control=(during?:()=>void)=>({getByName:()=>({projectMemberships:async(_p:string,_t:string,rows:unknown[])=>{pushed.push(rows);during?.();return rows.length;}})});
+ const outbox=()=>sql.exec("SELECT status,membership_revision FROM _gonvex_control_plane_membership_outbox WHERE account_id='acct-x17f'").toArray();
+ try{
+  // A Reducer write (no revision bump) commits while the push is in flight: its outbox row must survive the ack.
+  self.env.CONTROL=control(()=>sql.exec("UPDATE members SET status='revoked' WHERE id='m-x17f'"));
+  await self.projectMemberships();
+  expect(outbox()).toEqual([{status:'revoked',membership_revision:1}]);
+  // The next push carries it, and an untouched push is acked.
+  self.env.CONTROL=control();
+  await self.projectMemberships();
+  expect(pushed.at(-1)).toContainEqual({accountId:'acct-x17f',memberId:'m-x17f',status:'revoked',membershipRevision:1});
+  expect(outbox()).toEqual([]);
+ }finally{self.env.CONTROL=real;}
+}));
