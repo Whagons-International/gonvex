@@ -405,7 +405,9 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
           : await this.deliverReplica(tenantId, payload);
         results.push({ receipt });
       } catch (error) {
-        results.push({ error: String((error as Error | undefined)?.message ?? error) });
+        const failure = error as (Error & { code?: unknown }) | undefined;
+        results.push({ error: String(failure?.message ?? error), ...(failure?.name ? { name: failure.name } : {}),
+          ...(typeof failure?.code === "string" ? { code: failure.code } : {}) });
       }
     }
     return results;
