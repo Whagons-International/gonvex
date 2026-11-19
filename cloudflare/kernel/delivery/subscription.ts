@@ -92,10 +92,6 @@ export interface OpenContext {
 }
 
 /**
- * X17d: the snapshot cache key: what a cold scan's rows depend on besides the data (the table versions are checked
- * separately). Undefined when the session has no member (nothing is cached).
- */
-/**
  * X17d: only plans whose visibility does not inherit from parent rows are cached. A child's visibility also depends on
  * parent rows, `via` rows and the parents' own principal tables, which the validity check does not cover (#528 review).
  */
@@ -126,6 +122,10 @@ function moduleId(module: object | undefined): number {
   return id;
 }
 
+/**
+ * X17d: the snapshot cache key: what a cold scan's rows depend on besides the data (the table versions are checked
+ * separately). Undefined when the session has no member (nothing is cached).
+ */
 function snapshotKey(request: OpenRequest, context: OpenContext): string | undefined {
   const member = context.session.member;
   if (!member?.id) return undefined;
@@ -266,16 +266,29 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
 
   if (!resumable) {
     // X17d: the same member's last cold snapshot of this collection, if nothing it reads has changed since.
-    const key = cacheableVisibility(plan) ? snapshotKey(request, context) : undefined;
+    let key = cacheableVisibility(plan) ? snapshotKey(request, context) : undefined;
     const fingerprint = key === undefined ? "" : visibilityFingerprintOf(resolved);
     const tables = [...new Set([...resolvedDependencyColumns(plan, resolved).tables(), definition.table, "members"])].sort();
     let cached = key === undefined ? undefined : snapshotCache.get(context.registry, key);
     let why = cached ? "" : "absent";
     if (cached && cached.fingerprint !== fingerprint) { cached = undefined; why = "fingerprint"; }
     if (cached && (cached.epoch !== clock.epoch || cached.revision < clock.retained || cached.revision > clock.revision)) { cached = undefined; why = "history"; }
-    if (cached && cached.revision < clock.revision) {
-      const since = cached.revision;
-      if (await context.read((db) => tablesChanged(db, since, clock.revision, tables))) { cached = undefined; why = "changed"; }
+    if (key !== undefined) {
+      // #528 re-review: the change-log probe only sees tables the log records under their own name. A table with
+      // capture `metadata`/`derived`, `owned` storage or logical-record storage changes without a row under its name
+      // (a legacy bounded plan keeps its sets in SQL, so the fingerprint cannot see them either): such a collection is
+      // neither stored nor served, as the principal cache refuses the same inputs (principal-cache.ts `store`).
+      const since = cached?.revision;
+      const verdict = await context.read((db) => {
+        const captured = context.registry.principals.capturedTables(db);
+        if (!tables.every((table) => captured.has(table))) return "uncaptured";
+        if (since === undefined || since >= clock.revision) return "ok";
+        // Re-read the retention bound in the probe's own read: a prune since the first read may have removed rows.
+        if (since < readClock(sqlOf(db)).retained) return "history";
+        return tablesChanged(db, since, clock.revision, tables) ? "changed" : "ok";
+      });
+      if (verdict === "uncaptured") { key = undefined; cached = undefined; }
+      else if (verdict !== "ok" && cached) { cached = undefined; why = verdict; }
     }
     if (cached) snapshotCache.stats.hits++; else if (key !== undefined) snapshotCache.stats.misses++;
     span("tenant.snapshotCache", { path: request.path, result: cached ? "hit" : key === undefined ? "uncacheable" : `miss:${why}` });

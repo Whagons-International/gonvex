@@ -1700,3 +1700,103 @@ describe("X17d snapshot cache review (#528): every way the rows can change is a 
     }, GRANTED);
   });
 });
+
+describe("X17d re-review (#528): gaps", () => {
+  const opener = (h: Harness) => async (id: string, path: string) => {
+    const s = socket(id);
+    h.engine.dispatch(s, { type: "replica.open", id: "c", path, args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 4000 && !frames(h.payloads, s.connectionId).some((f) => f.type === "replica.ready" || f.type === "replica.error"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    await h.engine.settled();
+    const fs = frames(h.payloads, s.connectionId);
+    return fs.filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot").flatMap((p) => p.result ?? p.rows ?? []).map((r: { id: string }) => r.id);
+  };
+
+  // A legacy (unversioned) plan on a bounded collection keeps its sets in SQL (resolveMember materialize=false), so the
+  // fingerprint holds no tokens and only the change-log probe can see a grant change. A set table whose writes the log
+  // does not record under its own name (capture 'metadata' here; 'derived'/'owned' and record storage likewise) is
+  // never seen. The principal cache refuses such inputs (principal-cache.ts capturedTables); the snapshot cache does not.
+  const LEGACY: ReplicaModule = {
+    projectId: "p",
+    artifactHash: "h-legacy",
+    functions: new Map([
+      ["tasks.granted", { path: "tasks.granted", kind: "query", delivery: "replica", replica: parseDefinition({ table: "tasks", key: "id", columns: ["id", "state"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 10000 }) }],
+    ]),
+    visibility: new Map([
+      ["tasks", parsePlan({ table: "tasks", key: "id", sets: { mine: { table: "grants", select: "task_id", joins: [], where: [{ table: "grants", column: "member_id", context: "member.id" }] } }, where: { operator: "inSet", column: "id", set: "mine" } })],
+    ]),
+  };
+
+  it("a revoked grant on an uncaptured set table is served from the cache (fresh scan hides the row)", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.sql((sql) => {
+        sql.run("CREATE TABLE IF NOT EXISTS _gonvex_table_options(name TEXT PRIMARY KEY, capture TEXT NOT NULL, owner_table TEXT, owner_column TEXT, owner_direction TEXT NOT NULL DEFAULT 'outbound')");
+        sql.run("CREATE TABLE grants (id TEXT PRIMARY KEY, task_id TEXT, member_id TEXT)");
+        sql.run("INSERT INTO _gonvex_table_options(name, capture) VALUES ('grants', 'metadata')");
+        installChangeFeed(sql);
+      });
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tasks VALUES ('t2', 'open')", []],
+        ["INSERT INTO grants VALUES ('g1', 't1', 'm-alice')", []], ["INSERT INTO grants VALUES ('g2', 't2', 'm-alice')", []]]);
+      const open = opener(h);
+      expect(await open("L1", "tasks.granted")).toEqual(["t1", "t2"]);
+      await h.commit([["DELETE FROM grants WHERE id = 'g2'", []]]);
+      // A fresh scan (what Rust and the uncached path return) no longer shows t2.
+      expect(await open("L2", "tasks.granted")).toEqual(["t1"]);
+    }, LEGACY);
+  });
+
+  // inheritsAny reads `via` rows and the parent's plan; the refusal is shared with `inherits` but no test pins it.
+  const VIA: ReplicaModule = {
+    projectId: "p",
+    artifactHash: "h-via",
+    functions: new Map([
+      ["notes.via", { path: "notes.via", kind: "query", delivery: "replica", replica: parseDefinition({ table: "tnotes", key: "id", columns: ["id", "task_id", "body"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 10000 }) }],
+    ]),
+    visibility: new Map([
+      ["tasks", parsePlan({ version: 2, table: "tasks", key: "id", sets: {}, where: { operator: "eq", column: "state", value: { literal: "open" } } })],
+      ["tnotes", parsePlan({ version: 2, table: "tnotes", key: "id", sets: {}, where: { operator: "inheritsAny", column: "id", table: "tasks", key: "id", via: { table: "links", childColumn: "note_id", parentColumn: "task_id" } } })],
+    ]),
+  };
+
+  it("inheritsAny: removing the via row hides the child; never served from the cache", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.sql((sql) => { sql.run("CREATE TABLE links (_id TEXT PRIMARY KEY, note_id TEXT, task_id TEXT)"); sql.run("CREATE INDEX links_note ON links (note_id)"); sql.run("CREATE INDEX links_task ON links (task_id)"); installChangeFeed(sql); });
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tnotes VALUES ('n1', 'x', 'a')", []], ["INSERT INTO links VALUES ('l1', 'n1', 't1')", []]]);
+      const { snapshotCache } = await import("../snapshot-cache.ts");
+      const stores = snapshotCache.stats.stores;
+      const open = opener(h);
+      expect(await open("V1", "notes.via")).toEqual(["n1"]);
+      await h.commit([["DELETE FROM links WHERE _id = 'l1'", []]]);
+      expect(await open("V2", "notes.via")).toEqual([]);
+      expect(snapshotCache.stats.stores).toBe(stores);
+    }, VIA);
+  });
+});
+
+describe("X17d re-review (#528): v2 control", () => {
+  const V2: ReplicaModule = {
+    projectId: "p", artifactHash: "h-v2g",
+    functions: new Map([["tasks.granted", { path: "tasks.granted", kind: "query", delivery: "replica", replica: parseDefinition({ table: "tasks", key: "id", columns: ["id", "state"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 10000 }) }]]),
+    visibility: new Map([["tasks", parsePlan({ version: 2, table: "tasks", key: "id", sets: { mine: { kind: "grant", table: "grants", select: "task_id", joins: [], where: [{ table: "grants", column: "member_id", context: "member.id" }] } }, where: { operator: "inSet", column: "id", set: "mine" } })]]),
+  };
+  it("v2 grant on an uncaptured table: the fingerprint catches the revocation", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.sql((sql) => {
+        sql.run("CREATE TABLE IF NOT EXISTS _gonvex_table_options(name TEXT PRIMARY KEY, capture TEXT NOT NULL, owner_table TEXT, owner_column TEXT, owner_direction TEXT NOT NULL DEFAULT 'outbound')");
+        sql.run("CREATE TABLE grants (id TEXT PRIMARY KEY, task_id TEXT, member_id TEXT)");
+        sql.run("INSERT INTO _gonvex_table_options(name, capture) VALUES ('grants', 'metadata')");
+        installChangeFeed(sql);
+      });
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tasks VALUES ('t2', 'open')", []],
+        ["INSERT INTO grants VALUES ('g1', 't1', 'm-alice')", []], ["INSERT INTO grants VALUES ('g2', 't2', 'm-alice')", []]]);
+      const ids = async (id: string) => {
+        h.engine.dispatch(socket(id), { type: "replica.open", id: "c", path: "tasks.granted", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+        for (let spin = 0; spin < 4000 && !frames(h.payloads, id).some((f) => f.type === "replica.ready" || f.type === "replica.error"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+        await h.engine.settled();
+        return frames(h.payloads, id).filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot").flatMap((p) => p.result ?? p.rows ?? []).map((r: { id: string }) => r.id);
+      };
+      expect(await ids("W1")).toEqual(["t1", "t2"]);
+      await h.commit([["DELETE FROM grants WHERE id = 'g2'", []]]);
+      expect(await ids("W2")).toEqual(["t1"]);
+    }, V2);
+  });
+});

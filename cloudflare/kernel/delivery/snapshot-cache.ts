@@ -48,7 +48,6 @@ export class SnapshotCache {
   private readonly maps = new Map<number, Map<string, CachedSnapshot>>();
   /** LRU order of `${ownerId}\u0001${key}` -> bytes. */
   private readonly order = new Map<string, number>();
-  private readonly ownerBytes = new Map<number, number>();
   private readonly finalizer = new FinalizationRegistry<number>((id) => this.dropOwner(id));
   private total = 0;
   private next = 0;
@@ -80,7 +79,6 @@ export class SnapshotCache {
     this.remove(record.id, record.entries, key);
     record.entries.set(key, entry);
     this.order.set(`${record.id}\u0001${key}`, entry.bytes);
-    this.ownerBytes.set(record.id, (this.ownerBytes.get(record.id) ?? 0) + entry.bytes);
     this.total += entry.bytes;
     this.stats.stores++;
     while (this.total > this.maxBytes && this.order.size) {
@@ -105,14 +103,12 @@ export class SnapshotCache {
     this.order.delete(slot);
     entries?.delete(key);
     this.total -= bytes;
-    this.ownerBytes.set(id, (this.ownerBytes.get(id) ?? bytes) - bytes);
   }
 
   /** A collected owner: its entries are unreachable, so their bytes leave the budget now. */
   private dropOwner(id: number): void {
     const prefix = `${id}\u0001`;
     for (const [slot, bytes] of [...this.order]) if (slot.startsWith(prefix)) { this.order.delete(slot); this.total -= bytes; }
-    this.ownerBytes.delete(id);
     this.maps.delete(id);
   }
 }
