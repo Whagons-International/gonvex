@@ -9,7 +9,7 @@
 
 import type { DeliveryOutlet } from "./engine.ts";
 import { initialRefBytes, validRecoveryInitialDelivery, initialDeliveryOnly, initialFailureOnly, type InitialRequestRef, type ReplicaDelivery, type ReplicaReceipt } from "./protocol.ts";
-import { span } from "./spans.ts";
+import { span, spanTimingOn } from "./spans.ts";
 
 const pressureCounts = { capacityRejections: 0, unsupportedRecoveries: 0 };
 export const DELIVERY_CAPACITY_CODE = "GONVEX_DELIVERY_CAPACITY";
@@ -301,7 +301,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
 
   private async run(host: string, queue: Queue, items: Pending[]): Promise<void> {
     const started = Date.now();
-    const pressure = (item: Pending) => ({ ...item.payload, pressure: { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs } });
+    const pressure = (item: Pending) => ({ ...item.payload, pressure: { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs, ...(spanTimingOn() ? { sentAt: started } : {}) } });
     let requeue = false;
     try {
       if (items.length === 1) {

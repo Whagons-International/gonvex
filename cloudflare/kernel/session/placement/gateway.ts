@@ -409,6 +409,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
    */
   async deliverReplicaBatch(tenantId: string, payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]> {
     if (!Array.isArray(payloads)) throw new Error("invalid replica batch");
+    const sentAt = payloads[0]?.pressure?.sentAt;
+    if (typeof sentAt === "number") span("gateway.receive", { transitMs: Date.now() - sentAt, items: payloads.length });
     const results: ReplicaBatchResult[] = [];
     const failed = (error: unknown): ReplicaBatchResult => {
       const failure = error as (Error & { code?: unknown }) | undefined;
