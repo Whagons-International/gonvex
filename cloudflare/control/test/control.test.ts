@@ -288,7 +288,7 @@ describe("X17f sign-in tenant list uses the last admission while the membership 
     };
     expect(await admits()).toBe(1);
     expect(await admits()).toBe(0);
-    await runInDurableObject(env.CONTROL.getByName("control"), (instance: any) => {
+    await (runInDurableObject as (stub: unknown, fn: (instance: any) => void) => Promise<void>)((env as any).CONTROL.getByName("control"), (instance: any) => {
       instance.sql.run("UPDATE account_tenant_index SET tenant_membership_revision=tenant_membership_revision+1");
     });
     expect(await admits()).toBe(1);
