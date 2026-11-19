@@ -27,6 +27,12 @@ const MAX_HOSTS = 32 * 64 + 8; // finite automatic fleet plus the legacy pool du
 const MAX_PENDING = 256;
 const MAX_RPCS = 8;
 /**
+ * X17: a `sendFirst` payload this small is admitted beyond the holder's and the isolate's byte budgets (a first load's
+ * snapshot pages fill them, which is exactly when a live query reply has to overtake them). The count cap and a
+ * holder in recovery still refuse it.
+ */
+export const FIRST_BYTES = 1024 * 1024;
+/**
  * X14: payloads waiting for one holder go in ONE ordered RPC (`deliverReplicaBatch`), up to these bounds. Every
  * delivery RPC is held by the gateway's output gate until its socket-recovery write is durable (~20-30 ms on dev),
  * and the channel carries one RPC at a time, so one RPC per snapshot page made a cold load's ~60-90 opens a serial
@@ -182,7 +188,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     let queue: Queue;
     try { queue = this.queue(host); } catch (error) { return Promise.reject(error); }
     const bytes = retainedBytes(payload);
-    if (!OrderedOutlet.fits(queue, bytes)) {
+    if (!OrderedOutlet.fitsFirst(queue, bytes)) {
       queue.recoveryRequired = true;
       this.settleEmpty(host, queue);
       return Promise.reject(new DeliveryCapacityError());
@@ -204,6 +210,19 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     // RPC must not hold back the singleton forever (BUG-4b r4609198131). Peak: the singleton plus that reserve.
     const singleton = credits.normal === 0 && !queue?.running && !queue?.pending.length;
     return singleton || ((queue?.bytes ?? 0) + bytes <= HOST_PENDING_BYTES && credits.normal + bytes <= NORMAL_BYTES);
+  }
+
+  /** X17: `fits` for a `sendFirst` payload: within `FIRST_BYTES` it needs no byte room. */
+  private static fitsFirst(queue: Queue | undefined, bytes: number): boolean {
+    if (bytes <= FIRST_BYTES) return !queue?.recoveryRequired && credits.count < MAX_PENDING;
+    return OrderedOutlet.fits(queue, bytes);
+  }
+
+  /** X17: whether `sendFirst` would accept `payload` now (no side effects). */
+  admitsFirst(host: string, payload: ReplicaDelivery): boolean {
+    // A holder that claimed the quiet isolate for a large payload (BUG-4b) still goes before anyone else.
+    if (claim && claim.owner.deref() && !(claim.owner.deref() === this && claim.host === host)) return false;
+    return OrderedOutlet.fitsFirst(this.queues.get(host), retainedBytes(payload));
   }
 
   /** BUG-4: whether `send` would accept `payload` now (no side effects); the engine waits for room instead of tripping recovery. */

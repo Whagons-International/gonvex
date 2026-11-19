@@ -1,7 +1,7 @@
 // X17: `sendFirst` puts a payload ahead of the ordinary payloads waiting for a holder (a live query's initial reply
 // ahead of a first load's snapshot pages), never ahead of the RPC in flight, and keeps earlier priority payloads first.
 import { describe, expect, it } from "vitest";
-import { GatewayOutlet, type ReplicaBatchResult, type ReplicaHolderRpc } from "../outlet.ts";
+import { FIRST_BYTES, GatewayOutlet, type ReplicaBatchResult, type ReplicaHolderRpc } from "../outlet.ts";
 import { REPLICA_DELIVERY_VERSION, type ReplicaDelivery, type ReplicaReceipt } from "../protocol.ts";
 
 const payload = (n: number): ReplicaDelivery => ({
@@ -46,5 +46,22 @@ describe("X17 outlet priority lane", () => {
     await tick(); await h.release();
     expect((await sent)?.sockets).toBe(7);
     expect(h.calls).toEqual([[7]]);
+  });
+
+  it("admits a small sendFirst payload when the holder's byte budget is full, as send would not", async () => {
+    const h = holder();
+    const outlet = new GatewayOutlet("t", () => h.rpc, async () => ["g"]);
+    const big = (n: number): ReplicaDelivery => ({ ...payload(n), sockets: { c1: { ops: [["f", `{"type":"replica.snapshotPage","n":${n},"pad":"${"x".repeat(1_100_000)}"}`]], subscriptionEpoch: 0 } as never } });
+    const sent: Array<Promise<unknown>> = [];
+    for (let n = 1; outlet.admits("g", big(n)); n++) sent.push(outlet.send("g", big(n)));
+    expect(outlet.admits("g", payload(99))).toBe(false);
+    expect(outlet.admitsFirst("g", payload(99))).toBe(true);
+    expect(JSON.stringify(payload(99)).length).toBeLessThan(FIRST_BYTES);
+    const first = outlet.sendFirst("g", payload(99));
+    await tick();
+    for (let i = 0; i < 20 && h.calls.flat().length <= sent.length; i++) await h.release();
+    expect((await first)?.sockets).toBe(99);
+    await Promise.all(sent);
+    expect(h.calls.flat().indexOf(99)).toBeLessThanOrEqual(1);
   });
 });

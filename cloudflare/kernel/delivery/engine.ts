@@ -132,6 +132,8 @@ export interface DeliveryOutlet {
    * `sendFirst` payloads). Only a live query's initial reply uses it, without a watermark certificate.
    */
   sendFirst?(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
+  /** X17: whether `sendFirst` would accept `payload` now (a small payload needs no byte room). */
+  admitsFirst?(host: string, payload: ReplicaDelivery): boolean;
   /** X01: holder-specific byte/count pressure; the reset still uses this engine's ordered channel. */
   backlogged?(host: string): boolean;
   /** BUG-4: whether `send` would accept `payload` now, without queueing it or tripping recovery. */
@@ -379,9 +381,11 @@ export class ReplicaDeliveryEngine {
     // reply ahead of that backlog, as Rust's socket loop lets a query result overtake the remaining pages. The client
     // is waiting on it (a grid's first window waited 1-3 s behind a 40-55 replica cohort on -12). It then carries no
     // watermark: a certificate goes only with the replica commits it certifies, in order.
-    const first = !!outlet.sendFirst && (this.behind.has(host) || outlet.queued(host) > 0);
+    // Never ahead of a query this connection already kept: its replies keep request order (reused ids, generations).
+    const first = !!outlet.sendFirst && (this.behind.has(host) || outlet.queued(host) > 0) && !this.deferredQueries.get(connection.id)?.length;
     const work = first ? withoutWatermark(reply.work) : reply.work;
-    if (outlet.admits && !splitPayload(this.socketPayload(connection, work)).every((part) => outlet.admits!(host, part))) {
+    const admits = first && outlet.admitsFirst ? outlet.admitsFirst.bind(outlet) : outlet.admits?.bind(outlet);
+    if (admits && !splitPayload(this.socketPayload(connection, work)).every((part) => admits(host, part))) {
       this.options.live?.unsubscribe(connection.id, queryIdOf(socket));
       if (!this.behind.has(host)) this.defer(host, this.delivered?.revision ?? 0);
       return false;
@@ -470,7 +474,7 @@ export class ReplicaDeliveryEngine {
       await this.deliverCommits();
       // A holder without room keeps the request, in order behind any it already keeps (BUG-10).
       // X17: with a priority lane a holder that is behind still gets the reply now (ahead of its backlog, see runQuery).
-      if ((this.behind.has(socket.host) && !this.options.outlet.sendFirst) || !(await this.runQuery(socket, snapshot))) this.keepQuery(socket, snapshot);
+      if ((this.behind.has(socket.host) && (!this.options.outlet.sendFirst || this.deferredQueries.get(socket.connectionId)?.length)) || !(await this.runQuery(socket, snapshot))) this.keepQuery(socket, snapshot);
       return [];
     })();
   }
