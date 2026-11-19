@@ -136,6 +136,9 @@ export class ControlSocketObject extends DurableObject<SocketEnv> {
   /** X17e tests: the notifications this object received, and how many of the next ones fail. */
   private readonly noticeLog: string[] = [];
   private failNotices = 0;
+  /** Review test: the next notification takes this long to answer (a slow or cold watcher). */
+  private holdNoticeMs = 0;
+  async fixtureHoldNotice(ms: number): Promise<void> { this.holdNoticeMs = ms; }
   async fixtureNotices(fail?: number): Promise<string[]> {
     if (fail !== undefined) this.failNotices = fail;
     return [...this.noticeLog];
@@ -143,6 +146,7 @@ export class ControlSocketObject extends DurableObject<SocketEnv> {
 
   /** `RuntimeEvent::ControlChanged` for this socket's project. */
   async controlChanged(projectId: string): Promise<void> {
+    if (this.holdNoticeMs > 0) { const ms = this.holdNoticeMs; this.holdNoticeMs = 0; this.noticeLog.push(`held:${projectId}`); await new Promise((resolve) => setTimeout(resolve, ms)); }
     if (this.failNotices > 0) { this.failNotices--; this.noticeLog.push(`fail:${projectId}`); throw new Error("fixture notice failure"); }
     this.noticeLog.push(projectId);
     this.enqueue(async () => {

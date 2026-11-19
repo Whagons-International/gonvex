@@ -122,7 +122,8 @@ export const NOTICE_ATTEMPTS = 6;
 /** X17e: first retry delay of a failed notification; each further retry waits 4x longer. */
 export const NOTICE_RETRY_MS = 250;
 type NoticeKind = "control" | "presence";
-interface PendingNotice { binding: string; name: string; projects: Map<string, NoticeKind>; attempts: number; dueAt: number }
+/** `attempts`: consecutive failed control notices (they unregister the watcher); `presenceAttempts`: presence ones (never do). */
+interface PendingNotice { binding: string; name: string; projects: Map<string, NoticeKind>; attempts: number; presenceAttempts?: number; dueAt: number }
 
 export class ControlObject extends DurableObject<ControlEnv> implements LiveConnections {
   readonly sql: Sql;
@@ -489,17 +490,23 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
   }
 
   private noticeFailed(key: string, pending: PendingNotice, projectId: string, kind: NoticeKind, error: unknown): void {
-    const attempts = pending.attempts + 1;
+    // #532 review: presence failures (e.g. a gateway build without `presenceChanged` during a rollout) are counted apart
+    // and never unregister the watcher; only consecutive failed control notices do.
+    const presence = kind === "presence";
+    const attempts = (presence ? pending.presenceAttempts ?? 0 : pending.attempts) + 1;
     if (attempts >= NOTICE_ATTEMPTS) {
+      if (presence) { console.error("control: presence notice failed; giving up", { watcher: key, attempts, error: String(error) }); return; }
       console.error("control: watcher dropped after failed notifications", { watcher: key, attempts, error: String(error) });
-      if (kind === "control") { this.watchers.get(projectId)?.delete(key); this.ctx.storage.kv.put(`control/watchers/${projectId}`, [...this.watchersFor(projectId).values()]); }
+      this.watchers.get(projectId)?.delete(key);
+      this.ctx.storage.kv.put(`control/watchers/${projectId}`, [...this.watchersFor(projectId).values()]);
       return;
     }
-    console.error("control: notification failed; retrying", { watcher: key, attempts, error: String(error) });
+    console.error("control: notification failed; retrying", { watcher: key, kind, attempts, error: String(error) });
     let retry = this.outbox.get(key);
     if (!retry) this.outbox.set(key, retry = { binding: pending.binding, name: pending.name, projects: new Map(), attempts: 0, dueAt: 0 });
     if (retry.projects.get(projectId) !== "control") retry.projects.set(projectId, kind);
-    retry.attempts = Math.max(retry.attempts, attempts);
+    if (presence) retry.presenceAttempts = Math.max(retry.presenceAttempts ?? 0, attempts);
+    else retry.attempts = Math.max(retry.attempts, attempts);
     const at = Date.now() + NOTICE_RETRY_MS * 4 ** (attempts - 1);
     retry.dueAt = retry.dueAt ? Math.min(retry.dueAt, at) : at;
     this.armNotices(retry.dueAt);
@@ -539,11 +546,12 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
   override async alarm(): Promise<void> {
     this.noticeAlarmAt = undefined;
     const now = Date.now();
-    const sent = this.sendNotices(now);
+    // Started now (depth 1), not awaited (#532 review): one slow watcher must not hold back the next batch, the prune
+    // or the operator's socket ticks. A failed send arms its own retry (`noticeFailed`).
+    this.ctx.waitUntil(this.sendNotices(now));
     try {
       await this.alarmWork(now);
     } finally {
-      await sent;
       await this.armAlarm();
     }
   }

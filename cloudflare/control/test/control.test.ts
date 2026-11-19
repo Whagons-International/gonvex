@@ -508,6 +508,10 @@ describe("X17e: Control notifications leave from Control's alarm (#529 review)",
       expect(internals.outbox.get(key)!.dueAt).toBeGreaterThanOrEqual(before + 250 * 16);
       expect(internals.watchersFor(project).has(key)).toBe(true);
       internals.outbox.delete(key);
+      // Presence failures are counted apart and never unregister the watcher (#532 review).
+      internals.noticeFailed(key, { ...pending(0), presenceAttempts: 5 }, project, "presence", new Error("no presenceChanged"));
+      expect(internals.watchersFor(project).has(key)).toBe(true);
+      internals.outbox.delete(key);
       internals.noticeFailed(key, pending(5), project, "control", new Error("gone"));
       expect(internals.outbox.has(key)).toBe(false);
       expect(internals.watchersFor(project).has(key)).toBe(false);
@@ -527,5 +531,31 @@ describe("X17e: Control notifications leave from Control's alarm (#529 review)",
       // The next alarm is the hourly prune again.
       expect((await state.storage.getAlarm())!).toBeGreaterThan(Date.now() + 3_000_000);
     });
+  });
+});
+
+describe("review #532: one slow watcher does not hold back every other watcher's notices", () => {
+  it("a second write's notice reaches a healthy watcher while the previous batch's send to a slow watcher is still open", async () => {
+    type Owner = { fixtureNotices(fail?: number): Promise<string[]>; fixtureHoldNotice(ms: number): Promise<void> };
+    const owners = env.CONTROL_SOCKETS as unknown as DurableObjectNamespace;
+    const stub = env.CONTROL.getByName(unique("r532-control")) as DurableObjectStub<ControlObject>;
+    const project = unique("r532-project");
+    const slowId = owners.idFromName(unique("r532-slow")), fastId = owners.idFromName(unique("r532-fast"));
+    const slow = owners.get(slowId) as unknown as Owner, fast = owners.get(fastId) as unknown as Owner;
+    await stub.watch(project, "CONTROL_SOCKETS", slowId.toString());
+    await stub.watch(project, "CONTROL_SOCKETS", fastId.toString());
+    await slow.fixtureHoldNotice(3000);
+    const notify = () => runInDurableObject(stub, (instance: ControlObject) => { (instance as unknown as { notify(p: string): void }).notify(project); });
+    const until = async (read: () => Promise<string[]>, n: number, ms: number) => {
+      const end = Date.now() + ms;
+      for (;;) { const log = await read(); if (log.length >= n || Date.now() > end) return log; await new Promise((r) => setTimeout(r, 25)); }
+    };
+    await notify();
+    expect(await until(() => fast.fixtureNotices(), 1, 2000)).toEqual([project]);
+    // The slow watcher is still answering the first notice (3 s). A new write notifies again.
+    const second = Date.now();
+    await notify();
+    expect(await until(() => fast.fixtureNotices(), 2, 1000)).toEqual([project, project]);
+    expect(Date.now() - second).toBeLessThan(1000);
   });
 });
