@@ -8,6 +8,7 @@ import { controlTelemetryPort, type TelemetryControlRpc } from "../telemetry/por
 import type { SessionControlObject } from "./control";
 import type { ReplicaDelivery, ReplicaReceipt } from "../delivery/protocol";
 import { telemetrySubject } from "../telemetry/limiter";
+import { fixtureSpans } from "../delivery/spans";
 
 type Control = Pick<SessionControlObject,
   "sessionProject" | "sessionIdentity" | "sessionAuthenticate" | "sessionImpersonation" |
@@ -96,6 +97,11 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
   }
   async presenceChanged(projectId: string): Promise<void> {
     this.ctx.waitUntil(Promise.all([...this.host.sessions.values()].map((session) => session.controlChanged(projectId, "presence-change"))));
+  }
+  /** X13i fixture: switch dev spans in this isolate; returns the lines captured since the last call. */
+  async fixtureSpans(on: boolean) {
+    if (!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY) throw new Error("assembly fixture control disabled");
+    return fixtureSpans(on === true);
   }
   /** X03 dev/test fixture: a backend restart for conformance on a deployed Worker (Rust: process restart).
    * Aborts this holder: every socket drops abruptly and nothing in memory survives; storage stays. */

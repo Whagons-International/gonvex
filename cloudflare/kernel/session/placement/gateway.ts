@@ -35,6 +35,7 @@ import { limiterFor } from "../../public/limiter";
 import type { SlotKind } from "../../public/limiter";
 import { GatewayRoutingIdentity } from "./routing-identity";
 import { CallOrigin, gatedEnv, trackEntries, type OriginStats } from "./origin";
+import { setSpanTiming, spanTimingFromEnv } from "../../delivery/spans";
 
 /**
  * Helpers only the gateway itself calls. Every other method is an inbound request
@@ -161,7 +162,9 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     this.origin = origin;
     const env = this.env;
     // X13e: time-only per-batch send log on dev (GONVEX_DELIVERY_TIMING=1); slow batches are always logged.
-    setDeliveryTiming((rawEnv as { GONVEX_DELIVERY_TIMING?: string }).GONVEX_DELIVERY_TIMING === "1");
+    // X13i: GONVEX_SPAN_TIMING=1 adds the per-call spans (kernel/delivery/spans.ts) and every batch's send line.
+    if (spanTimingFromEnv(rawEnv)) setSpanTiming(true);
+    setDeliveryTiming((rawEnv as { GONVEX_DELIVERY_TIMING?: string }).GONVEX_DELIVERY_TIMING === "1" || spanTimingFromEnv(rawEnv));
     const proto = new.target.prototype as object;
     if (!tracked.has(proto)) {
       tracked.add(proto);

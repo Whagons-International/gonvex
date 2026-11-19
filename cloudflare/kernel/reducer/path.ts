@@ -32,6 +32,7 @@ import type { PermissionBits } from "./permissions.ts";
 import { AmbiguousReceiptsError, ensureReceipts, readReceipt, receiptTables, RECEIPT_QUERY, storeReceipt } from "./receipts.ts";
 import type { ReducerStorage } from "./storage.ts";
 import { writeAdmissionError } from "./admission.ts";
+import { span } from "../delivery/spans";
 
 /** Rust's Q/R execution deadline (GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS), installed into the provenance. */
 export const EXECUTION_TIMEOUT_MS = 10_000;
@@ -208,6 +209,7 @@ export class ReducerPath {
     // wait is the rest of the tenant event's wall). Path only, never arguments.
     const now = this.clock();
     if (now - queued >= 100) console.log("reducer: slow call", { kind: "client", path: request.path, waitMs: started - queued, runMs: now - started, totalMs: now - queued });
+    else span("tenant.reducer", { kind: "client", path: request.path, waitMs: started - queued, runMs: now - started, totalMs: now - queued });
     if (!outcome.ok) return [reducerError(request.id, request.path, outcome.failure, request.trace)];
     const out = [reducerResult(request.id, request.path, outcome.result, outcome.committedRevision, request.trace)];
     this.complete(socket, session, outcome.committedRevision, out);
