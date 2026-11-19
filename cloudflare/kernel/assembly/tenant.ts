@@ -5,7 +5,7 @@ import { validateValue } from "../host/src/index";
 import { ReplicaTenantObject } from "../delivery/object";
 import { R2PlanStore, type PlanStore } from "../migrate/plan";
 import { QueryEngine, moduleFromManifest, snapshotRunner, kernelVisibility, type Manifest, type LiveQueries, type QueryModule } from "../query/index";
-import { MODULE_KEY, type StoredModule } from "../reducer/tenant";
+import { MODULE_KEY, storedManifest, type StoredModule } from "../reducer/tenant";
 import { RECEIPT_PRUNE_KEY } from "../reducer/tenant";
 import { RECEIPT_PRUNE_INTERVAL_MS } from "../reducer/receipts";
 import { pruneChangeLog, PRUNE_INTERVAL_MS } from "../capture/index";
@@ -61,6 +61,15 @@ import { fixtureSpans, setSpanTiming, span, spanTimingFromEnv, spanTimingOn } fr
 // Match projectModuleFromManifest: an omitted/null artifact format becomes 0.
 const artifactFormat = (generation: unknown): number => typeof generation === "number" ? generation : 0;
 const releases = (generated as { releases: Record<string, BakedRelease> }).releases;
+/**
+ * X14: the exact baked release a stored module was written from. A wake whose stored module carries this marker
+ * already holds `storedManifest(release.manifest)` and needs neither a rewrite nor a second activation: on dev each
+ * cold wake rewrote the whole manifest twice and parsed it twice before the first RPC (e.g. Control's `admit`
+ * during sign-in) could run.
+ */
+export function releaseSource(release: BakedRelease): string {
+  return JSON.stringify([(generated as { version?: string }).version ?? "", release.project, release.hash, release.generation]);
+}
 const PROJECT_KEY = "assembly/project";
 /** The grace end presence last armed, kept across a memory loss (K14). */
 const PRESENCE_ALARM_KEY = "assembly/presence-alarm";
@@ -130,12 +139,16 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
         // validate it. The constructor has verified this exact retained pin.
         if (this.env.GONVEX_TOPOLOGY_TRANSITION === "1") return stored;
         const release = releases[stored.projectId];
-        return release ? { projectId: stored.projectId, manifest: release.manifest } : stored;
+        if (!release) return stored;
+        const source = releaseSource(release);
+        // Same release as stored: keep it (no rewrite). Otherwise store the form `activate` stores, marked.
+        return stored.source === source ? stored : { projectId: stored.projectId, manifest: storedManifest(release.manifest), source };
       },
     };
   }
 
   constructor(ctx: DurableObjectState, env: AssemblyTenantEnv) {
+    const constructedAt = Date.now();
     if (spanTimingFromEnv(env)) setSpanTiming(true);
     if (env.GONVEX_TOPOLOGY_TRANSITION === "1") {
       // The legacy Control freeze API itself needs a framework bridge deploy.
@@ -153,6 +166,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
         throw new Error("topology bridge does not contain the retained active Tenant release");
     }
     super(ctx, env);
+    const restoreMs = Date.now() - constructedAt; // KernelTenant.restore runs synchronously inside super()
     this.queries = new QueryEngine({
       module: () => this.activeQueryModule(),
       visibility: kernelVisibility(this.delivery.registry),
@@ -186,7 +200,18 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       const project = ctx.storage.kv.get<string>(PROJECT_KEY);
       const release = project && releases[project];
       if (release) {
-        if (env.GONVEX_TOPOLOGY_TRANSITION !== "1") await super.activate(project, release.manifest, null);
+        if (env.GONVEX_TOPOLOGY_TRANSITION !== "1") {
+          const stored = ctx.storage.kv.get<StoredModule>(MODULE_KEY);
+          const active = this.kernel.module;
+          const wakeAt = Date.now();
+          // `restore()` installed and stored exactly this release: activation would install the same code and
+          // write the same value. Only its receipt-expiry alarm is still owed to a fresh object.
+          const current = !!active && active.projectId === project && stored?.projectId === project && stored.source === releaseSource(release);
+          if (current) await this.armReceiptExpiry();
+          else await super.activate(project, release.manifest, null);
+          // X14: cold-wake cost before the first RPC runs (opt-in dev spans only).
+          span("tenant.wake", { restoreMs, activated: !current, activateMs: Date.now() - wakeAt });
+        }
         await this.setupScheduled();
       }
     });

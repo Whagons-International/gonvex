@@ -21,6 +21,7 @@
  * Every RPC returns plain JSON; errors come back as `Outcome` values because
  * thrown errors lose their class across RPC.
  */
+import { setSpanTiming, spanTimingFromEnv } from "../../kernel/delivery/spans";
 import { DurableObject } from "cloudflare:workers";
 import schema from "../../../rust/crates/store/src/control_schema.sql";
 import { type AuthOutcome, type AuthRequest, authenticate, parseServicePrincipals } from "./auth";
@@ -124,6 +125,8 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
 
   constructor(state: DurableObjectState, env: ControlEnv) {
     super(state, env);
+    // X13i/X14: opt-in time-only spans (GONVEX_SPAN_TIMING=1), e.g. the per-part sign-in timings (`control.auth`).
+    if (spanTimingFromEnv(env)) setSpanTiming(true);
     this.sql = new Sql(state.storage);
     this.config = configFromEnv(env);
     if (env.GONVEX_ASSEMBLY_FIXTURE_KEY) this.config.servicePrincipals = withFixturePrincipals(this.config.servicePrincipals, state.storage.kv.get<string>(FIXTURE_PRINCIPALS_KEY));

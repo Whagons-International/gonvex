@@ -61,6 +61,8 @@ export interface KernelTenantOptions {
 export interface StoredModule {
   readonly projectId: string;
   readonly manifest: Record<string, unknown>;
+  /** X14: which baked release this stored form was written from (Worker composition marker; absent for other writers). */
+  readonly source?: string;
 }
 
 export const MODULE_KEY = "gonvex/reducer/module";

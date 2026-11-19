@@ -4,7 +4,7 @@ import schema from "../../../rust/crates/store/src/control_schema.sql";
 import type { ControlConfig } from "../src/context";
 import type { ControlObject } from "../src/control-object";
 import { DEFINITION_NAMES } from "../src/definitions";
-import { clearJwksCache, verifyExternalToken, type ExternalAuthConfiguration } from "../src/external-auth";
+import { clearJwksCache, verifyExternalToken, type ExchangeTimings, type ExternalAuthConfiguration } from "../src/external-auth";
 import { PASSWORD_ROUNDS, derive, hashPassword, verifyPassword } from "../src/password";
 import { pbkdf2Sha256 } from "../src/pbkdf2";
 import { pbkdf2Sync } from "node:crypto";
@@ -225,6 +225,74 @@ describe("external tokens (C.3.4)", () => {
     user = { localId: "uid-1", disabled: true };
     await expect(verifyExternalToken(lookupConfig, fetcher, firebase, token)).rejects.toThrow("Firebase account is disabled or its sessions were revoked");
     await expect(verifyExternalToken(lookupConfig, fetcher, { ...firebase, firebaseAdminCredentials: "{}" }, token)).rejects.toThrow("Firebase account status is unavailable");
+  });
+
+  it("X14: reuses the service-account access token until it expires; the lookup still runs every time", async () => {
+    clearJwksCache();
+    const { pair, jwk } = await keyPair("k1");
+    const service = (await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair;
+    const pkcs8 = Buffer.from(await crypto.subtle.exportKey("pkcs8", service.privateKey)).toString("base64");
+    const credentials = JSON.stringify({ project_id: "demo-x", client_email: "svc@demo-x.iam.test", private_key: `-----BEGIN PRIVATE KEY-----\n${pkcs8}\n-----END PRIVATE KEY-----\n` });
+    let issued = 0;
+    let rejectToken: string | undefined;
+    const lookups: string[] = [];
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === JWKS) return Response.json({ keys: [jwk] });
+      if (url === "https://token.gonvex.test") return Response.json({ access_token: `access-${++issued}`, expires_in: 3599 });
+      if (url === "https://identity.gonvex.test/v1/projects/demo-x/accounts:lookup") {
+        const bearer = String(new Headers(init?.headers).get("authorization")).slice("Bearer ".length);
+        lookups.push(bearer);
+        if (bearer === rejectToken) return new Response("expired", { status: 401 });
+        return Response.json({ users: [{ localId: "uid-1", disabled: false, validSince: "0" }] });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as typeof fetch;
+    const firebase: ExternalAuthConfiguration = {
+      ...oidc, provider: "firebase", issuer: "https://securetoken.google.com/demo-x", audience: "demo-x", firebaseProjectId: "demo-x", firebaseAdminCredentials: credentials,
+    };
+    const lookupConfig: ControlConfig = { ...config, googleTokenUrl: "https://token.gonvex.test", identityToolkitUrl: "https://identity.gonvex.test" };
+    const now = Math.floor(Date.now() / 1000);
+    const token = await sign(pair.privateKey, "k1", { iss: firebase.issuer, aud: "demo-x", sub: "uid-1", iat: now, exp: now + 600, auth_time: now - 100, firebase: { sign_in_provider: "google.com" } });
+    const first: ExchangeTimings = {}, second: ExchangeTimings = {};
+    await verifyExternalToken(lookupConfig, fetcher, firebase, token, first);
+    await verifyExternalToken(lookupConfig, fetcher, firebase, token, second);
+    expect(issued).toBe(1);
+    expect(lookups).toEqual(["access-1", "access-1"]);
+    expect([first.accessTokenCached, second.accessTokenCached]).toEqual([false, true]);
+    expect(typeof second.lookupMs).toBe("number");
+    // Google stops accepting the cached token: it is dropped and the lookup retried once with a fresh one.
+    rejectToken = "access-1";
+    await verifyExternalToken(lookupConfig, fetcher, firebase, token);
+    expect(issued).toBe(2);
+    expect(lookups.slice(2)).toEqual(["access-1", "access-2"]);
+    // Other credentials (a rotated key) never reuse that token.
+    await verifyExternalToken(lookupConfig, fetcher, { ...firebase, firebaseAdminCredentials: credentials.replace("svc@", "svc2@") }, token);
+    expect(issued).toBe(3);
+  });
+});
+
+describe("X14 sign-in spans", () => {
+  it("emit control.auth per sign-in only when span timing is on", async () => {
+    const { fixtureSpans } = await import("../../kernel/delivery/spans");
+    const seeded = await seed({ a: ["sid"] });
+    fixtureSpans(false);
+    const logged: unknown[][] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { logged.push(args); };
+    try { await login(seeded.project, seeded.members.sid!.email); } finally { console.log = log; }
+    expect(logged.filter((args) => String(args[0]).includes("control.auth"))).toEqual([]);
+    fixtureSpans(true);
+    try {
+      await login(seeded.project, seeded.members.sid!.email);
+      const lines = fixtureSpans(false).filter((line) => line.name === "control.auth");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.fields).toMatchObject({ path: "control.auth.passwordLogin", totalMs: expect.any(Number), admitMs: expect.any(Number), admits: 1 });
+    } finally { fixtureSpans(false); }
   });
 });
 
