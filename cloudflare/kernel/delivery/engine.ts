@@ -36,6 +36,7 @@ export const OPEN_BATCH_LIMIT = 256;
 /** Opens waiting in one tenant object (Rust: process-wide admission, `GONVEX_REPLICA_OPEN_MAX_WAITING`). */
 export const MAX_WAITING_OPENS = 4096;
 /** X17: one macrotask, so requests that arrived meanwhile are delivered to the object. */
+export const OPEN_YIELD_EVERY = 8;
 const yieldToEvents = (): Promise<void> => new Promise((resolve) => { globalThis.setTimeout(resolve, 0); });
 
 /** X17: the same socket work without its watermark certificate (a reply sent ahead of its holder's backlog). */
@@ -643,6 +644,8 @@ export class ReplicaDeliveryEngine {
 
   /** A wake that arrived while the loop was finishing; the loop runs once more (BUG-4: a holder's room signal). */
   private again = false;
+  /** X17: opens run since the loop last yielded to the event loop. */
+  private opensSinceYield = 0;
 
   private kick(): void {
     if (this.running) { this.again = true; return; }
@@ -671,7 +674,9 @@ export class ReplicaDeliveryEngine {
         // without returning to the event loop (one -04 invocation: 440 ms wall, 367 ms CPU). Nothing else reached the
         // object meanwhile: the grid's live query, other sockets' frames, the outlet's RPC completions. Between opens
         // the loop now yields one macrotask, so those run (a waiting query takes the next serial turn).
-        if (this.waitingOpens > 0) await yieldToEvents();
+        // A macrotask costs a few ms in workerd, so it is taken every OPEN_YIELD_EVERY opens (warm loads regressed
+        // ~1 s on -12 with one per open).
+        if (this.waitingOpens > 0 && ++this.opensSinceYield >= OPEN_YIELD_EVERY) { this.opensSinceYield = 0; await yieldToEvents(); }
         continue;
       }
       if (this.delivered !== undefined && this.wanted <= this.delivered.revision) return;
