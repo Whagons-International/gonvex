@@ -3810,7 +3810,7 @@ async fn websocket(
                                 code: None,
                                 id,
                                 path: Some(path),
-                                error: error.to_string(),
+                                error: gonvex_protocol::client_error_text(&error.to_string()),
                                 trace,
                             },
                         }
