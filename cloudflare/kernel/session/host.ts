@@ -28,6 +28,12 @@ import { HolderRecoveryStore, recoveryScope, attachmentRecord, type AttachmentRe
 
 /** Liveness and revalidation due within this window run in the same alarm (deadlines never run early). */
 const ALARM_SLACK_MS = 2_000;
+/**
+ * X16: the host's alarm writes do not hold the output gate. The alarm is a liveness timer only: a lost write resets
+ * the object, and a woken object rebuilds its sessions and re-arms the alarm from them (`reschedule` on wake).
+ * The CallOrigin wake (`wakeNow`) was a gated write on every deferred gateway call.
+ */
+const ALARM_UNCONFIRMED = { allowUnconfirmed: true } as const;
 
 export interface HostOptions {
   ctx: DurableObjectState;
@@ -220,13 +226,13 @@ export class SocketHost {
     if (this.scheduled != null && this.scheduled <= next) return;
     this.scheduled = next;
     // A pending wake keeps the platform alarm at now; the wake re-arms `scheduled` when it fires.
-    void this.options.ctx.storage.setAlarm(this.wakePending ? Date.now() : Math.max(next, Date.now() + 10));
+    void this.options.ctx.storage.setAlarm(this.wakePending ? Date.now() : Math.max(next, Date.now() + 10), ALARM_UNCONFIRMED);
   }
 
   /** X02: arms the alarm now. The host's own due time is kept and re-armed by `wakeOnly`. */
   wakeNow(): void {
     this.wakePending = true;
-    void this.options.ctx.storage.setAlarm(Date.now());
+    void this.options.ctx.storage.setAlarm(Date.now(), ALARM_UNCONFIRMED);
   }
 
   /** X02: the platform consumed an alarm without host work; arm the earliest host need again. */
@@ -241,7 +247,7 @@ export class SocketHost {
     this.wakePending = false;
     const due = this.scheduled;
     if (due != null && due <= Date.now() + ALARM_SLACK_MS) return false;
-    if (due != null) void this.options.ctx.storage.setAlarm(Math.max(due, Date.now() + 10));
+    if (due != null) void this.options.ctx.storage.setAlarm(Math.max(due, Date.now() + 10), ALARM_UNCONFIRMED);
     return true;
   }
 

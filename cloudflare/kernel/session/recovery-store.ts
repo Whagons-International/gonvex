@@ -42,8 +42,28 @@ export function attachmentRecord(record: SessionRecord): AttachmentRecord {
   return { ...state, privateIdentity: 1 };
 }
 
+/**
+ * X16: every write here is `allowUnconfirmed`, so the output gate does not hold the socket's frames (or a delivery
+ * RPC's receipt) until the record is replicated. That wait was ~40-70 ms per client step on dev.
+ *
+ * Why this is safe: the record only matters to a socket that outlives this object's memory. The durable state is
+ * always a prefix of the committed turns, and every turn's writes are atomic (`transactionSync`, or one turn's implicit
+ * transaction). If an unconfirmed write is lost, the object is reset; a socket that survives the reset restores from
+ * its attachment, whose reference names the newest generation. That generation's manifest is then missing, so
+ * `restore` throws and the host closes the socket with 1012 ("session recovery requires reconnect"), exactly as for
+ * any other unavailable record. A generation that is durable but not yet committed is the `pending` case `restore`
+ * already accepts. The writes still apply to the object's SQLite at once (reads in the same turn see them).
+ */
+const UNCONFIRMED = { allowUnconfirmed: true } as const;
+const ignore = (): void => {}; // A failed unconfirmed write resets the object; nothing here can recover it.
+
+export type RecoveryStorage = Pick<DurableObjectStorage, "kv" | "transactionSync" | "put" | "delete">;
+
 export class HolderRecoveryStore {
-  constructor(private readonly storage: Pick<DurableObjectStorage, "kv" | "transactionSync">) {}
+  constructor(private readonly storage: RecoveryStorage) {}
+
+  private put(key: string, value: unknown): void { this.storage.put(key, value, UNCONFIRMED).catch(ignore); }
+  private del(key: string): void { this.storage.delete(key, UNCONFIRMED).catch(ignore); }
 
   write(record: SessionRecord, previous?: RecoveryReference, socketOwner = previous?.socketOwner ?? crypto.randomUUID()): RecoveryReference {
     assertInitialState(record);
@@ -56,7 +76,7 @@ export class HolderRecoveryStore {
       const append = (text: string) => {
         for (let offset = 0; offset < text.length; offset += CHARS) {
           const chunk = { text: text.slice(offset, offset + CHARS), end: offset + CHARS >= text.length };
-          this.storage.kv.put(key(generation, chunks++), chunk);
+          this.put(key(generation, chunks++), chunk);
           hash = sha256Hex(hash + JSON.stringify(chunk));
         }
       };
@@ -73,11 +93,11 @@ export class HolderRecoveryStore {
         }
         append(JSON.stringify([group, id, semantic]));
       }
-      this.storage.kv.put(manifestKey(generation), { v: 2, socketOwner, owner: record.connectionId, generation, scope, chunks, hash, initialSequence: record.initialSequence ?? 0, createdAt: Date.now() } satisfies Manifest);
+      this.put(manifestKey(generation), { v: 2, socketOwner, owner: record.connectionId, generation, scope, chunks, hash, initialSequence: record.initialSequence ?? 0, createdAt: Date.now() } satisfies Manifest);
       // Protect both the old published generation and this uncertain transition
       // BEFORE a socket attachment can reference the new one.
-      this.storage.kv.put(ownerKey(socketOwner), { v: 2, connectionId: record.connectionId, ...(previous ? { current: previous.generation } : {}), pending: generation } satisfies Owner);
-      this.storage.kv.put(`${CONNECTION_OWNERS}${record.connectionId}/${socketOwner}`, 1);
+      this.put(ownerKey(socketOwner), { v: 2, connectionId: record.connectionId, ...(previous ? { current: previous.generation } : {}), pending: generation } satisfies Owner);
+      this.put(`${CONNECTION_OWNERS}${record.connectionId}/${socketOwner}`, 1);
     });
     return { v: 2, socketOwner, generation, scope, chunks, hash };
   }
@@ -88,10 +108,10 @@ export class HolderRecoveryStore {
     if (!manifest || !owner || owner.connectionId !== manifest.owner || (owner.current !== ref.generation && owner.pending !== ref.generation)) throw new Error("holder recovery publication ownership changed");
     if (owner.current === ref.generation && owner.pending === undefined) return;
     this.storage.transactionSync(() => {
-      this.storage.kv.put(ownerKey(ref.socketOwner), { v: 2, connectionId: owner.connectionId, current: ref.generation } satisfies Owner);
+      this.put(ownerKey(ref.socketOwner), { v: 2, connectionId: owner.connectionId, current: ref.generation } satisfies Owner);
       for (const generation of [owner.current, owner.pending]) if (generation && generation !== ref.generation) {
         const old = this.storage.kv.get<Manifest>(manifestKey(generation));
-        if (old) this.storage.kv.put(`${ORPHANS}${generation}`, { ...old, orphanedAt: Date.now() });
+        if (old) this.put(`${ORPHANS}${generation}`, { ...old, orphanedAt: Date.now() });
       }
     });
     for (const generation of [owner.current, owner.pending]) if (generation && generation !== ref.generation) {
@@ -142,9 +162,9 @@ export class HolderRecoveryStore {
   }
 
   private deleteGeneration(ref: RecoveryReference): void {
-    for (const [name] of this.storage.kv.list({ prefix: base(ref.generation) })) this.storage.kv.delete(name);
-    this.storage.kv.delete(manifestKey(ref.generation));
-    this.storage.kv.delete(`${ORPHANS}${ref.generation}`);
+    for (const [name] of this.storage.kv.list({ prefix: base(ref.generation) })) this.del(name);
+    this.del(manifestKey(ref.generation));
+    this.del(`${ORPHANS}${ref.generation}`);
   }
 
   /** The actual close/error callback owns this physical socket token. */
@@ -152,8 +172,8 @@ export class HolderRecoveryStore {
     const owner = this.storage.kv.get<Owner>(ownerKey(socketOwner));
     if (!owner) return;
     this.storage.transactionSync(() => {
-      this.storage.kv.delete(ownerKey(socketOwner));
-      this.storage.kv.delete(`${CONNECTION_OWNERS}${owner.connectionId}/${socketOwner}`);
+      this.del(ownerKey(socketOwner));
+      this.del(`${CONNECTION_OWNERS}${owner.connectionId}/${socketOwner}`);
       for (const generation of [owner.current, owner.pending]) if (generation) {
         const ref = this.storage.kv.get<Manifest>(manifestKey(generation));
         if (ref) this.deleteGeneration(ref);
@@ -179,20 +199,20 @@ export class HolderRecoveryStore {
     for (const [name, value] of page) {
       const owner = this.storage.kv.get<Owner>(ownerKey(value.socketOwner));
       if (active.has(value.generation) || owner?.current === value.generation || owner?.pending === value.generation) {
-        if (value.orphanedAt !== undefined) { const { orphanedAt: _orphaned, ...live } = value; this.storage.kv.put(name, live); }
+        if (value.orphanedAt !== undefined) { const { orphanedAt: _orphaned, ...live } = value; this.put(name, live); }
         continue;
       }
       const first = value.orphanedAt ?? now;
       if (first + ORPHAN_GRACE_MS <= now) orphaned.push(value.generation);
       else {
-        if (value.orphanedAt === undefined) this.storage.kv.put(name, { ...value, orphanedAt: first });
+        if (value.orphanedAt === undefined) this.put(name, { ...value, orphanedAt: first });
         next = Math.min(next ?? Infinity, first + ORPHAN_GRACE_MS);
       }
     }
     for (const generation of orphaned) {
       const ref = this.storage.kv.get<Manifest>(manifestKey(generation));
       if (ref) this.discard(ref);
-      else this.storage.kv.delete(`${ORPHANS}${generation}`);
+      else this.del(`${ORPHANS}${generation}`);
     }
     if (page.length === 128) next = Math.min(next ?? Infinity, now + ORPHAN_GRACE_MS);
     return next;

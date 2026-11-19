@@ -587,13 +587,18 @@ export class Session {
         if (frame.opens.length > LIMITS.openMany) return this.send(frames.replicaError("", undefined, `replica batch cannot contain more than ${LIMITS.openMany} opens`));
         if (tenant) {
           const initials: InitialRequestRef[] = [], opens: typeof frame.opens[number][] = [];
-          for (const open of frame.opens) {
-            const initial = this.beginInitial("replica", open.id, open.path);
-            if (!initial) continue;
-            this.forgetInitials("replica", open.id, initial.generation);
-            this.delivery.opening(open.id, open.path);
-            initials.push(initial); opens.push(open);
-          }
+          // X16: each open changes the recovery record; one write covers the whole frame (was one per open,
+          // O(opens x subscriptions): 278 ms gateway CPU for a 42-open frame on dev -12). Same turn, same content.
+          const register = () => {
+            for (const open of frame.opens) {
+              const initial = this.beginInitial("replica", open.id, open.path);
+              if (!initial) continue;
+              this.forgetInitials("replica", open.id, initial.generation);
+              this.delivery.opening(open.id, open.path);
+              initials.push(initial); opens.push(open);
+            }
+          };
+          if (this.hooks.batchPersists) this.hooks.batchPersists(register); else register();
           if (this.closed || (frame.opens.length && !opens.length)) return;
           return void await this.forward(this.ports.tenants.dispatch({ ...this.view(), initialRequests: initials }, { ...frame, opens }), initials);
         }
