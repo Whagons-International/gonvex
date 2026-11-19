@@ -26,6 +26,8 @@
  * entry and anything newer than it.
  */
 
+import { span } from "../../delivery/spans";
+
 export type InboundKind = "fresh" | "peer";
 
 interface Entry { readonly fresh: boolean; running: boolean }
@@ -140,7 +142,12 @@ export class CallOrigin {
 
   /** Launches waiting calls while it is safe, in their original order, in this turn. */
   flush(): void {
-    while (this.queue.length && this.safe()) this.queue.shift()!.launch();
+    while (this.queue.length && this.safe()) {
+      const item = this.queue.shift()!;
+      // X13i: how long this call waited for a fresh event (dev spans only).
+      span("gateway.deferred", { call: item.label, waitedMs: this.now() - item.since });
+      item.launch();
+    }
     if (!this.queue.length) { this.watchdog?.(); this.watchdog = undefined; }
   }
 

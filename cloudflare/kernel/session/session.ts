@@ -38,6 +38,7 @@ import { type PublicGuard, validatePublicScope } from "../public/guard";
 import type { SlotKind } from "../public/limiter";
 import { allowCalls, type CallWindow, newWindow } from "../public/window";
 import { type ErrorSessionRecord, SocketTelemetry, type TelemetryFrame, type TelemetryHostState, telemetryHostState } from "../telemetry/socket";
+import { span } from "../delivery/spans";
 
 export const SERVICE_TOKEN_PREFIX = "gvx_svc_";
 
@@ -202,6 +203,8 @@ export class Session {
   private queueActive = false;
   /** X07 BUG-5: when the item now holding the queue started (null: idle). */
   private queueActiveSince: number | null = null;
+  /** X13i: how long the running queue item waited for its turn (dev spans only). */
+  private turnWaitMs = 0;
   /** X07b: what holds the queue (frame type and path, or the internal task), for the stall log. */
   private activeLabel = "";
   private stallTimer: (() => void) | undefined;
@@ -548,8 +551,11 @@ export class Session {
       case "action.call":
         if (frame.scope === "control") return control(frame);
         if (tenant) {
+          const turnWaitMs = this.turnWaitMs;
           if(!this.prepareAction(frame.id, frame.path))return;
+          const called = this.now();
           const replies = await this.forward(this.ports.tenants.dispatch({ ...this.view(), actionGeneration: this.record.actionGenerations?.[frame.id] }, frame));
+          span("gateway.call", { kind: "action", path: frame.path, turnWaitMs, rpcMs: this.now() - called });
           // Review r4608249098: no early return here. `finishAction` starts no port call and must run
           // on a closed socket too: it settles the waiter that a pending `actionFinished()` awaits.
           await this.finishAction(frame.id, replies.length > 0);
@@ -650,7 +656,10 @@ export class Session {
       if (short.after) await this.guard(short.after());
       return;
     }
+    const turnWaitMs = this.turnWaitMs, called = this.now();
     const replies = await this.forward(call.scope === "control" ? this.ports.control.dispatch(this.view(), call) : this.ports.tenants.dispatch(this.view(), call));
+    // X13i: gateway side of one Reducer call: queue turn, then the port call (deferral + hops + tenant) to send.
+    span("gateway.call", { kind: "reducer", path: call.path, turnWaitMs, rpcMs: this.now() - called });
     if (call.scope !== "control") this.awaitWatermark(replies);
     if (!this.closed) await this.guard(this.presence.afterCall(call, replies));
   }
@@ -1248,12 +1257,14 @@ export class Session {
   /** Runs `fn` after the frames already queued, in the socket's order. */
   private serial<T>(fn: () => T | Promise<T>, label = "internal"): Promise<T> {
     this.queueDepth++;
+    const enqueued = this.now();
     const waiting = this.abandonable();
     const run = async () => {
       waiting.dispose();
       if (this.stalledOut) { this.queueDepth--; throw new SessionStalled(); }
       this.queueActive = true;
       this.queueActiveSince = this.now();
+      this.turnWaitMs = this.queueActiveSince - enqueued;
       this.activeLabel = label;
       this.stallTimer = this.timers.later(LIMITS.stallMs, () => { this.stallTimer = undefined; this.checkStall(); });
       const active = this.abandonable();

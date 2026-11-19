@@ -56,6 +56,7 @@ import { retryable } from "../reducer/errors";
 
 
 import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } from "./tenant-transfer";
+import { fixtureSpans, setSpanTiming, span, spanTimingFromEnv, spanTimingOn } from "../delivery/spans";
 
 // Match projectModuleFromManifest: an omitted/null artifact format becomes 0.
 const artifactFormat = (generation: unknown): number => typeof generation === "number" ? generation : 0;
@@ -84,6 +85,7 @@ interface ActionHostStub {
 export function slowCallLog(kind: string, path: string, queued: number, started: number, now = Date.now()): void {
   const waitMs = started - queued, totalMs = now - queued;
   if (totalMs >= SLOW_CALL_MS) console.log("reducer: slow call", { kind, path, waitMs, runMs: now - started, totalMs });
+  else span("tenant.reducer", { kind, path, waitMs, runMs: now - started, totalMs });
 }
 const SLOW_CALL_MS = 100;
 
@@ -132,6 +134,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   }
 
   constructor(ctx: DurableObjectState, env: AssemblyTenantEnv) {
+    if (spanTimingFromEnv(env)) setSpanTiming(true);
     if (env.GONVEX_TOPOLOGY_TRANSITION === "1") {
       // The legacy Control freeze API itself needs a framework bridge deploy.
       // Refuse stale captures BEFORE KernelTenant.restore can install code or
@@ -207,6 +210,16 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     return this.queryModule.module;
   }
   override async dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]> {
+    if (!spanTimingOn() || (frame.type !== "reducer.call" && frame.type !== "reducer.callMany")) return this.dispatchFrame(socket, frame);
+    // X13i (dev spans only): the tenant's whole dispatch, then how long its writes took to become durable
+    // after the reply was returned (the platform holds the reply and deliveries until then: the output gate).
+    const arrived = Date.now();
+    const out = await this.dispatchFrame(socket, frame);
+    const returned = Date.now();
+    this.ctx.waitUntil(this.ctx.storage.sync().then(() => span("tenant.dispatch", { type: frame.type, dispatchMs: returned - arrived, durableAfterMs: Date.now() - returned }), () => undefined));
+    return out;
+  }
+  private async dispatchFrame(socket: SocketView, frame: ClientFrame): Promise<string[]> {
     // Every real caller supplies its current server-owned scope, including a
     // writer with no subscriptions. Its no-op commit watermark is scoped too.
     try {
@@ -602,6 +615,11 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     return {...this.delivery.stats,pendingInitials:this.delivery.pendingInitialCount()};
   }
   /** X13 fixture: how direct agent runs were run (no arguments, sessions or results). */
+  /** X13i fixture: switch dev spans in this isolate; returns the lines captured since the last call. */
+  async fixtureSpans(on: boolean) {
+    if (!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY) throw new Error("assembly fixture inspection disabled");
+    return fixtureSpans(on === true);
+  }
   async fixtureActionRuns(){
     if(!this.env.GONVEX_ASSEMBLY_FIXTURE_KEY)throw new Error('assembly fixture control disabled');
     return this.ctx.storage.sql.exec("SELECT state,attempts,substr(owner,1,7) AS owner,dispatch_count FROM _gonvex_st_action_runs ORDER BY created_at").toArray();

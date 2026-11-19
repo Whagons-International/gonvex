@@ -9,6 +9,7 @@
 
 import type { DeliveryOutlet } from "./engine.ts";
 import { initialRefBytes, validRecoveryInitialDelivery, initialDeliveryOnly, initialFailureOnly, type InitialRequestRef, type ReplicaDelivery, type ReplicaReceipt } from "./protocol.ts";
+import { span } from "./spans.ts";
 
 const pressureCounts = { capacityRejections: 0, unsupportedRecoveries: 0 };
 export const DELIVERY_CAPACITY_CODE = "GONVEX_DELIVERY_CAPACITY";
@@ -262,6 +263,8 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     } catch (error) { item.reject(error); }
     finally {
       queue.rpcMs = Date.now() - started;
+      // X13i: tenant -> holder delivery: wait behind this holder's earlier payload, then the RPC (dev spans only).
+      span("tenant.delivery", { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs });
       this.completed.set(host, (this.completed.get(host) ?? 0) + 1);
       queue.current = undefined;
       this.release(queue, item);
