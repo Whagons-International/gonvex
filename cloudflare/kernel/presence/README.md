@@ -14,7 +14,7 @@ client ◀─snapshot/patch── gateway.presence(delivery)          ◀──o
 | File | What |
 | --- | --- |
 | `hub.ts` | `PresenceHub`: the port of Rust's hub for the scopes of one tenant object. Aggregation, grace, leading edge, 250 ms window, `publish_scope`, snapshot and patch encoding in serde order, `parse_state`, config from Rust's environment names. Pure: no I/O, no timers. |
-| `tenant.ts` | `TenantPresence`, embedded by the tenant object: scheduling (`setTimeout` while awake, grace ends also on the alarm), the per-gateway delivery channel, rebuild after a memory loss, the sweep of restarted gateways. |
+| `tenant.ts` | `TenantPresence`, embedded by the tenant object: scheduling (`setTimeout` while awake for windows; every pending grace end on the alarm, from the hub's Members), the per-gateway delivery channel, rebuild after a memory loss, the sweep of restarted gateways. |
 | `socket.ts` | `SocketPresence`, owned by each K05 `Session`: per-socket state in the attachment, `presence.*` frames, leave on auth / discard / close, the short-circuits of `call_reducer_with_presence`, deliveries to the socket. |
 | `bench/dead-peer.mjs`, `bench/run-dead-peer.sh` | Dead-peer detection for an idle socket (G0-6): a victim whose packets vanish (no FIN, no RST), timed to the watcher's offline. Runs unprivileged in a network namespace. |
 | `test/` | Hub (Rust's unit tests), tenant side (channel, merge, resync, rebuild, sweep, alarm), socket side (through a real `Session`), end to end in workerd (evicted tenant and gateway objects). |
@@ -25,7 +25,11 @@ client ◀─snapshot/patch── gateway.presence(delivery)          ◀──o
   subscription id, whether its snapshot arrived, and the time its state last changed live in the socket's
   `SessionRecord` (`presence`), written only when they change. Nothing is written to SQLite.
 - **Publication.** As Rust: a change in a scope quiet for 250 ms is published at once; later changes in the
-  window coalesce into one trailing patch; offline lands when the 10 s grace ends. Each publication is
+  window coalesce into one trailing patch; offline lands when the 10 s grace ends. A `setTimeout` runs the
+  window while the object is awake; every pending grace end is also on the object's alarm, read from the hub's
+  Members (`nextAlarm()`), however close it is and whatever window comes first, so the offline is published at
+  the grace end even if no timer runs (505). A window timer more than 1 s past its due time is treated as lost
+  and set again. Each publication is
   encoded once by the tenant and sent **once per gateway** that holds a subscriber; the gateway sends the same
   string to each subscribed socket (inside `replica.batch` for batch-frame sockets, as Rust drains presence
   into the batch). Subscribe snapshots are sent bare, as in Rust.
