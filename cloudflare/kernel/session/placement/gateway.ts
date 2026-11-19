@@ -28,6 +28,7 @@ import { type ConnectionReport, type PresenceEnv, presenceConfig } from "../../p
 import { type TelemetryEnv, telemetryHostFromEnv } from "../../telemetry/env";
 import { PRESENCE_PROTOCOL_VERSION, type PresenceDelivery, type PresenceReceipt } from "../../presence/tenant";
 import { validRecoveryInitialDelivery, initialDeliveryOnly, initialFailureOnly, validInitialCompletions, REPLICA_DELIVERY_VERSION, type InitialCompletionStatus, type ReplicaDelivery, type ReplicaReceipt, type SocketWork } from "../../delivery/protocol";
+import type { ReplicaBatchResult } from "../../delivery/outlet";
 import { UNKNOWN_ADDRESS } from "../../public/address";
 import type { PublicGuard } from "../../public/guard";
 import { publicLimits } from "../../public/config";
@@ -386,6 +387,28 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     this.host.reschedule();
     return { v: REPLICA_DELIVERY_VERSION, sockets: work.length, initialFailureAck: 1,
       ...(pending.size ? { missing: [...pending] } : {}) };
+  }
+
+  /**
+   * X14: the tenant's queued payloads for this holder in one ordered RPC. Each is applied in order through the
+   * receiver its single RPC would have reached (initial failures, initial work, ordinary work), so every check and
+   * effect is that RPC's; one failing item is answered with its error and does not stop the ones after it, as
+   * separate RPCs did not. The output gate then holds ONE reply for the whole batch instead of one per page.
+   */
+  async deliverReplicaBatch(tenantId: string, payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]> {
+    if (!Array.isArray(payloads)) throw new Error("invalid replica batch");
+    const results: ReplicaBatchResult[] = [];
+    for (const payload of payloads) {
+      try {
+        const receipt = payload.initialFailure ? await this.deliverInitialFailures(tenantId, payload)
+          : Object.values(payload.sockets).some(work => work.initialScope || work.initialCompletions?.length) ? await this.deliverReplicaInitial(tenantId, payload)
+          : await this.deliverReplica(tenantId, payload);
+        results.push({ receipt });
+      } catch (error) {
+        results.push({ error: String((error as Error | undefined)?.message ?? error) });
+      }
+    }
+    return results;
   }
 
   async deliverReplicaInitial(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt> {
