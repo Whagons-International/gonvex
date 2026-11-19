@@ -233,6 +233,22 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       return assignment;
     });
   }
+  /**
+   * X17g follow-up (#533 re-review): the holder's deadline fired before `admitDirect` answered, so it refused the
+   * upgrade and the router admits it elsewhere. Removes the lease that grant wrote, claimed or not (the connection id
+   * is the router's fresh UUID, never reused). Serialized behind the grant, so a late grant is removed too.
+   */
+  cancelDirect(request: DirectAdmission): Promise<boolean> {
+    return this.serial(async () => {
+      if (!request || request.v !== 1 || typeof request.connectionId !== "string") return false;
+      const before = this.state.leases.length;
+      this.state.leases = this.state.leases.filter(l => l.assignment.connectionId !== request.connectionId
+        || l.assignment.gateway !== request.gateway || l.assignment.epoch !== request.epoch || l.assignment.cell !== request.cell);
+      if (this.state.leases.length === before) return false;
+      await this.save(false);
+      return true;
+    });
+  }
   release(a: GatewayAssignment): Promise<void> {
     return this.serial(async () => {
       // Claimed leases remain until expiry: a lost upgrade response must never free a live socket's budget.

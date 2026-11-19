@@ -82,6 +82,8 @@ export interface ControllerRpc {
   claim(assignment: GatewayAssignment): Promise<boolean>;
   /** X17g: a claimed lease on `gateway` at `epoch` for `connectionId`, or null when that holder must not take it. */
   admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | null>;
+  /** X17g follow-up: removes a lease `admitDirect` granted for `request` after the holder had given up on it. */
+  cancelDirect(request: DirectAdmission): Promise<boolean>;
   drainReady(gateway: string, epoch: number, replacement: string): Promise<boolean>;
   observe(gateway: string, sample: CapacitySample): Promise<void>;
 }
