@@ -81,7 +81,7 @@ export function scanPlan(
 type Position = readonly [SqlStorageValue, SqlStorageValue];
 
 /** The page after `after` (keyset on `(order, key)`, SQLite's NULL placement). */
-function pageStatement(scan: ScanPlan, after: Position | undefined, limit: number): { sql: string; parameters: unknown[] } {
+export function pageStatement(scan: ScanPlan, after: Position | undefined, limit: number): { sql: string; parameters: unknown[] } {
   const parameters: unknown[] = [...scan.parameters];
   const order = `r.${quote(scan.orderColumn ?? scan.keyColumn)}`;
   const key = `r.${quote(scan.keyColumn)}`;

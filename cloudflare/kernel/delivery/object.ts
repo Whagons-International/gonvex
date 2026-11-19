@@ -17,7 +17,7 @@ import { replicaModule, type ReplicaModule } from "./definition.ts";
 import { ReplicaDeliveryEngine } from "./engine.ts";
 import { openReplica, resolveCollection, sqlOf } from "./subscription.ts";
 import { readClock } from "./log.ts";
-import { scanPlan, scanWindow } from "./scan.ts";
+import { pageStatement, scanPlan, scanWindow, STATEMENT_ROWS } from "./scan.ts";
 import { GatewayOutlet, type ReplicaHolderRpc } from "./outlet.ts";
 import { keepAliveCheck, SubscriberKeepAlive } from "./keepalive.ts";
 
@@ -86,7 +86,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
    * "none" (the loop only), "resolve" (clock, visibility resolution, scan plan) or "open" (the whole open, frames
    * discarded, nothing installed). The caller reads each call's CPU from Workers Logs.
    */
-  async devOpenCost(phase: "none" | "resolve" | "open" | "light" | "scan", rounds = 1, only?: string[]): Promise<{ paths: number; frames: number; errors: number; failed?: string }> {
+  async devOpenCost(phase: "none" | "resolve" | "open" | "light" | "scan" | "explain", rounds = 1, only?: string[]): Promise<{ paths: number; frames: number; errors: number; failed?: string; explain?: unknown[] }> {
     if ((this.env as { GONVEX_SPAN_TIMING?: string }).GONVEX_SPAN_TIMING !== "1") throw new Error("dev profiling is disabled");
     const module = this.replicaModule();
     const active = this.kernel.module;
@@ -103,6 +103,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
     } as unknown as Parameters<typeof resolveCollection>[1]["session"];
     const paths = [...module.functions].filter(([path, fn]) => fn.kind === "query" && fn.delivery === "replica" && fn.replica && (!only || only.includes(path))).map(([path]) => path);
     let failed: string | undefined;
+    const explain: unknown[] = [];
     const read = snapshotRunner(this.kernel.storage);
     let frames = 0, errors = 0;
     await this.kernel.reducers.serial(async () => {
@@ -114,6 +115,17 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
         if (!plan) { errors++; continue; }
         const context = { session, module, sumNegotiated: true, paged: true, scope: "dev", visibilityScope: "dev", registry: this.delivery.registry, read,
           emit: (out: string[]) => { frames += out.length; if (out.some((f) => f.includes('"replica.error"'))) errors++; }, drain: async () => {} };
+        if (phase === "explain") {
+          await read((db) => {
+            const clock = readClock(sqlOf(db));
+            const resolved = resolveCollection(db, context, definition, plan, clock.revision);
+            const scan = scanPlan(definition, plan, resolved, {}, db.catalogOf(definition.table).columns);
+            const statement = pageStatement(scan, undefined, STATEMENT_ROWS);
+            const qp = db.run(`EXPLAIN QUERY PLAN ${statement.sql}`, statement.parameters as never).rows.map((r) => r[r.length - 1]);
+            explain.push({ path, sql: statement.sql.slice(0, 1500), plan: qp });
+          });
+          continue;
+        }
         if (phase === "light" || phase === "scan") {
           try {
             const scan = await read((db) => {
@@ -139,7 +151,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
         }
       }
     });
-    return { paths: paths.length, frames, errors, ...(failed ? { failed } : {}) };
+    return { paths: paths.length, frames, errors, ...(failed ? { failed } : {}), ...(explain.length ? { explain } : {}) };
   }
 
   /** The replica view of the active generation, rebuilt when the generation changes. */
