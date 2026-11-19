@@ -1,3 +1,4 @@
+import { span as diagSpan } from "../../kernel/delivery/spans";
 // `ctx.fetch` for Actions (CONTRACT.md B.2a `fetch`, `fetchRead`,
 // `fetchCancel`; rust/crates/runtime/src/action_calls.rs `fetch`,
 // `OpenFetchBodies`). Kept from Rust:
@@ -136,10 +137,16 @@ export class NetworkHost {
   async fetch(value: unknown): Promise<unknown> {
     if (this.inFlight >= MAX_CONCURRENT_FETCHES) throw new ConcurrencyLimit();
     this.inFlight++;
+    const diagStarted = Date.now();
+    let diagOrigin = "";
     try {
-      return await this.request(decodeRequest(value));
+      const request = decodeRequest(value);
+      try { diagOrigin = new URL((request as unknown as { url: string }).url).host; } catch { /* diag only */ }
+      return await this.request(request);
     } finally {
       this.inFlight--;
+      // DEV DIAG (not for merge): outbound fetch wall time (headers received).
+      diagSpan("action.fetch", { origin: diagOrigin, ms: Date.now() - diagStarted });
     }
   }
 

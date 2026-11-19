@@ -1,3 +1,4 @@
+import { span as diagSpan } from "../../kernel/delivery/spans";
 // Runs one Action: the Cloudflare counterpart of
 // `Runtime::execute_tenant_action_with_access` (rust/crates/runtime/src/execution.rs)
 // and `ActionHostCalls` (action_calls.rs), on K04's module engine.
@@ -437,11 +438,15 @@ class ActionHost implements ModuleHost {
     const stats = this.execution.stats;
     stats.hostCalls++;
     stats.byKind[payload.kind] = (stats.byKind[payload.kind] ?? 0) + 1;
+    const diagStarted = Date.now();
     try {
       return await this.handle(payload);
     } catch (error) {
       if (error instanceof ConcurrencyLimit) throw new HostFailure(error.message);
       throw new HostFailure(hostErrors.wrapped(capability, String((error as Error)?.message ?? error)));
+    } finally {
+      // DEV DIAG (not for merge): each host call's wall time.
+      diagSpan("action.host", { kind: payload.kind, name: String(payload["tool"] ?? payload["path"] ?? ""), ms: Date.now() - diagStarted });
     }
   }
 

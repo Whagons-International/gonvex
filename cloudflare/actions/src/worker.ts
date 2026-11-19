@@ -1,3 +1,4 @@
+import { span as diagSpan, setSpanTiming as diagSetSpanTiming, spanTimingFromEnv as diagSpanTimingFromEnv } from "../../kernel/delivery/spans";
 // The Action Worker (CONTRACT.md "Action Worker", 0016 G0-8):
 //
 // - `ActionWorkflow` runs every handed-off Action as a Workflow step: no
@@ -189,6 +190,14 @@ export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
  * completion that is recorded after the answer (X13b) alive.
  */
 export async function serveCall(env: ActionEnv, waitUntil: (work: Promise<unknown>) => void, input: DirectCall): Promise<ActionReport | { pending: true; id: string }> {
+  if (diagSpanTimingFromEnv(env)) diagSetSpanTiming(true);
+  const diagStarted = Date.now();
+  const diagRuntime = runtimeFor(env, input.session.tenantId, input.session.projectId);
+  const diagLoaded = diagRuntime.runtime.options.registry.activeGeneration?.engine.loaded ?? "none";
+  try { return await serveCallInner(env, waitUntil, input); }
+  finally { diagSpan("action.serve", { path: input.path, loadedBefore: diagLoaded, runtimeMs: 0, totalMs: Date.now() - diagStarted }); }
+}
+async function serveCallInner(env: ActionEnv, waitUntil: (work: Promise<unknown>) => void, input: DirectCall): Promise<ActionReport | { pending: true; id: string }> {
   const { runtime, tenant } = runtimeFor(env, input.session.tenantId, input.session.projectId);
   const active = runtime.options.registry.activeGeneration;
   const contract = active?.engine.functions.get(input.path);
@@ -202,6 +211,7 @@ export async function serveCall(env: ActionEnv, waitUntil: (work: Promise<unknow
     // tenant claims it for this runner, and if this runner dies its lease expires and the sweep
     // ends it (X13b).
     let claim: Awaited<ReturnType<TenantStub["startCall"]>>;
+    const diagClaim = Date.now();
     try {
       const owner = typeof input.inlineOwner === "string" && input.inlineOwner.startsWith("inline:") ? input.inlineOwner : `inline:${crypto.randomUUID()}`;
       claim = await startInline(tenant, { ...request, owner }, active?.engine);
@@ -214,7 +224,10 @@ export async function serveCall(env: ActionEnv, waitUntil: (work: Promise<unknow
     // The answer goes back in this call, so the socket sends it from the dispatch it is waiting on,
     // as for a standard Action. Through the tenant's reply RPC instead, the gateway would defer the
     // socket's next tenant call to its next fresh event (X02's depth rule): one alarm per Action.
+    diagSpan("action.claim", { ms: Date.now() - diagClaim, loadedAfter: active?.engine.loaded ?? "none" });
+    const diagRun = Date.now();
     const { report, completion } = await runInline({ runtime, tenant, renewMs: (config as unknown as ActionWorkerConfig<ActionEnv> | undefined)?.renewMs }, claim);
+    diagSpan("action.run", { ms: Date.now() - diagRun });
     // X13b: the completion is persisted after the answer leaves, never on the reply path.
     waitUntil(completion);
     return report ?? { pending: true, id: claim.id };
