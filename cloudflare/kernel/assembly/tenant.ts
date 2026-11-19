@@ -192,7 +192,10 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   }
   private async armEarlier(at: number): Promise<void> {
     const existing = await this.ctx.storage.getAlarm();
-    if (existing === null || at < existing) await this.ctx.storage.setAlarm(at);
+    const set = existing === null || at < existing;
+    if (set) await this.ctx.storage.setAlarm(at);
+    // 505 presence diagnostics: times only.
+    console.log(JSON.stringify({ diag: "presence", event: "armEarlier", tenant: this.ctx.id.name ?? "", now: Date.now(), at, existing, set }));
   }
   private activeQueryModule(): QueryModule | null {
     const active = this.kernel.module;

@@ -465,6 +465,26 @@ export class PresenceHub {
     return out;
   }
 
+  /** Diagnostics (ids and times only): a Member's connections, grace, published state, and its scope's due time. */
+  memberDiag(key: string, memberId: string): { connections: string[]; graceUntil: number | null; published: PresenceState | null; dirty: boolean; due: number | null; subscribers: number } | null {
+    const scope = this.scopes.get(key);
+    if (!scope) return null;
+    const member = scope.members.get(memberId);
+    return {
+      connections: member ? [...member.connections.keys()] : [],
+      graceUntil: member?.graceUntil ?? null,
+      published: member?.published?.state ?? null,
+      dirty: scope.dirty.has(memberId),
+      due: scope.due,
+      subscribers: scope.subscribers.size,
+    };
+  }
+
+  /** Diagnostics: the scope key of a registered connection. */
+  scopeOf(connection: string): string | null {
+    return this.connections.get(connection)?.scope ?? null;
+  }
+
   trackedMembers(): number {
     let n = 0;
     for (const scope of this.scopes.values()) n += scope.members.size;
