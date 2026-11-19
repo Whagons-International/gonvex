@@ -160,6 +160,9 @@ export interface SessionTimers {
   later(ms: number, fn: () => void): () => void;
 }
 
+/** X17: how long a host's watcher registration and module read stand in for another one at auth. */
+export const REGISTERED_MS = 60_000;
+
 /** Per-host cache of each project's active module (one RPC per project, refreshed on reload). */
 export class ModuleCache {
   private entries = new Map<string, Promise<ModuleInfo | null>>();
@@ -195,6 +198,7 @@ export class ModuleCache {
   }
   /** A deploy changed the project's module: its epochs are read again. */
   invalidate(projectId: string): void {
+    this.registered.delete(projectId);
     for (const key of [...this.epochs.keys()]) if (key.startsWith(`${projectId}\u0000`)) this.epochs.delete(key);
   }
   async refresh(projectId: string): Promise<ModuleInfo | null> {
@@ -209,6 +213,19 @@ export class ModuleCache {
     this.set(projectId, info);
     return info;
   }
+
+  /**
+   * X17: when this host registered as the project's watcher (and read its module) less than `REGISTERED_MS` ago, an
+   * auth reuses that instead of another Control round trip (each auth waited 70-145 ms for it on dev). Publications
+   * still reach the host as `moduleReloaded` (which drops this), a Control restart is caught by the host's watch
+   * refresh, and a watcher Control dropped is registered again at most `REGISTERED_MS` later.
+   */
+  private readonly registered = new Map<string, number>();
+  recentlyRegistered(projectId: string, now: number): boolean {
+    const at = this.registered.get(projectId);
+    return at !== undefined && now - at < REGISTERED_MS && this.entries.has(projectId);
+  }
+  noteRegistered(projectId: string, now: number): void { this.registered.set(projectId, now); }
 }
 
 class AuthTimeout extends Error {}
@@ -1115,10 +1132,12 @@ export class Session {
   private publication: { projectId: string; refreshed: Promise<ModuleInfo | null> } | undefined;
 
   private publish(projectId: string): Promise<ModuleInfo | null> {
+    if (this.modules.recentlyRegistered(projectId, this.now())) return this.modules.get(projectId);
     // The entry `authenticate` reads (artifactHash) exists first, so this read replaces it, as a refresh after it did.
     this.modules.get(projectId).catch(() => {});
+    const started = this.now();
     const refreshed = this.modules.refreshWith(projectId, () => this.hooks.projectAuthenticatedModule!(projectId));
-    refreshed.catch(() => {}); // awaited by `auth`; an auth that fails first must not leave it unhandled
+    refreshed.then(() => this.modules.noteRegistered(projectId, started), () => {}); // awaited by `auth`; a failed auth must not leave it unhandled
     return refreshed;
   }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ModuleCache } from "../session";
+import { ModuleCache, REGISTERED_MS } from "../session";
 import type { Ports } from "../ports";
 
 function ports(hash: { current: string | null }, calls: string[], fail = { next: false }) {
@@ -47,5 +47,20 @@ describe("X17 replica epoch cache (one Control read per project, database and mo
     await bare.epoch("q", "db"); await bare.epoch("q", "db");
     expect(noneCalls).toHaveLength(2);
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe("X17 recent watcher registration", () => {
+  it("stands in for another registration within REGISTERED_MS of a successful one, until a reload", async () => {
+    const hash = { current: "h1" as string | null }, calls: string[] = [];
+    const cache = new ModuleCache(ports(hash, calls));
+    expect(cache.recentlyRegistered("p", 1_000)).toBe(false);
+    await cache.refreshWith("p", async () => ({ artifactHash: "h1", clientContract: null }));
+    cache.noteRegistered("p", 1_000);
+    expect(cache.recentlyRegistered("p", 1_000 + REGISTERED_MS - 1)).toBe(true);
+    expect(cache.recentlyRegistered("p", 1_000 + REGISTERED_MS)).toBe(false);
+    expect(cache.recentlyRegistered("q", 1_000)).toBe(false);
+    cache.invalidate("p"); // a deploy (moduleReloaded)
+    expect(cache.recentlyRegistered("p", 1_001)).toBe(false);
   });
 });
