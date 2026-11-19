@@ -38,27 +38,35 @@ export class SubscriberKeepAlive {
     private readonly active: () => boolean,
     private readonly checkMs = KEEPALIVE_CHECK_MS,
     private readonly clock: KeepAliveClock = platformClock,
+    /** X13g: called when the hold starts (first subscriber) and when it ends (last one went). */
+    private readonly changed?: (holding: boolean) => void,
   ) {}
 
   /** Subscription state may have changed: hold the tenant while any subscription exists, else let it go. */
   touch(): void {
     if (this.checkMs <= 0 || !this.active()) return this.release();
-    if (this.timer === undefined) this.arm();
+    if (this.timer === undefined) { this.arm(); this.notify(true); }
   }
 
   /** True while a timer keeps the object from hibernating. */
   get holding(): boolean { return this.timer !== undefined; }
 
   release(): void {
-    if (this.timer !== undefined) this.clock.clear(this.timer);
+    const was = this.timer !== undefined;
+    if (was) this.clock.clear(this.timer);
     this.timer = undefined;
+    if (was) this.notify(false);
   }
 
   private arm(): void {
     this.timer = this.clock.set(() => {
       this.timer = undefined;
-      if (this.active()) this.arm();
+      if (this.active()) this.arm(); else this.notify(false);
     }, this.checkMs);
+  }
+
+  private notify(holding: boolean): void {
+    try { this.changed?.(holding); } catch (error) { console.error("keepalive: change hook failed", error); }
   }
 }
 

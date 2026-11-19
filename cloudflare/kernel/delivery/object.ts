@@ -23,6 +23,8 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
   /** BUG-2/BUG-9: subscriptions live in memory; a subscribed tenant does not hibernate while any subscription exists. */
   readonly keepAlive: SubscriberKeepAlive;
   protected liveQueries(): LiveQueries | undefined { return undefined; }
+  /** X13g: the tenant gained its first live subscriber (true) or lost its last one (false). */
+  protected subscribersChanged(_holding: boolean): void {}
 
   private cachedModule: { key: string; module: ReplicaModule } | undefined;
   private dataChangedScheduled = false;
@@ -40,7 +42,8 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
     const tenantId = ctx.id.name ?? ctx.id.toString();
     const owner = this;
     this.keepAlive = new SubscriberKeepAlive(() => this.delivery.holdsSubscriptions(),
-      keepAliveCheck((env as { GONVEX_TENANT_KEEPALIVE_MS?: string }).GONVEX_TENANT_KEEPALIVE_MS));
+      keepAliveCheck((env as { GONVEX_TENANT_KEEPALIVE_MS?: string }).GONVEX_TENANT_KEEPALIVE_MS), undefined,
+      (holding) => this.subscribersChanged(holding));
     this.delivery = new ReplicaDeliveryEngine({
       tenantId,
       serial: (fn) => this.kernel.reducers.serial(fn),
