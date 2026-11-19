@@ -35,6 +35,13 @@ import { openReplica, sqlOf, type OpenRequest, type Subscription } from "./subsc
 export const OPEN_BATCH_LIMIT = 256;
 /** Opens waiting in one tenant object (Rust: process-wide admission, `GONVEX_REPLICA_OPEN_MAX_WAITING`). */
 export const MAX_WAITING_OPENS = 4096;
+/** X17: the same socket work without its watermark certificate (a reply sent ahead of its holder's backlog). */
+function withoutWatermark(work: SocketWork): SocketWork {
+  if (work.watermark === undefined) return work;
+  const { watermark: _certificate, ...rest } = work;
+  return rest;
+}
+
 /** One open request: `json_len * 2 + 1024 <= 32 MiB` (replica_open_queue.rs `MAX_BYTES`). */
 export const OPEN_REQUEST_MAX_BYTES = 32 * 1024 * 1024;
 /** Payloads queued to one holder before its sockets are reset `change-feed-lagged`. */
@@ -120,6 +127,11 @@ export interface DeliveryOutlet {
   send(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
   /** Payloads queued for `host` and not yet accepted. */
   queued(host: string): number;
+  /**
+   * X17: like `send`, but ahead of every payload still waiting for `host` (after the RPC in flight and after earlier
+   * `sendFirst` payloads). Only a live query's initial reply uses it, without a watermark certificate.
+   */
+  sendFirst?(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined>;
   /** X01: holder-specific byte/count pressure; the reset still uses this engine's ordered channel. */
   backlogged?(host: string): boolean;
   /** BUG-4: whether `send` would accept `payload` now, without queueing it or tripping recovery. */
@@ -363,12 +375,19 @@ export class ReplicaDeliveryEngine {
     const reply = this.queryWork(socket, replies);
     if (!reply) return true;
     const { connection } = reply, host = connection.host, outlet = this.options.outlet;
-    if (outlet.admits && !splitPayload(this.socketPayload(connection, reply.work)).every((part) => outlet.admits!(host, part))) {
+    // X17: a holder with a backlog (a first load's snapshot pages, or commits deferred while it is behind) gets this
+    // reply ahead of that backlog, as Rust's socket loop lets a query result overtake the remaining pages. The client
+    // is waiting on it (a grid's first window waited 1-3 s behind a 40-55 replica cohort on -12). It then carries no
+    // watermark: a certificate goes only with the replica commits it certifies, in order.
+    const first = !!outlet.sendFirst && (this.behind.has(host) || outlet.queued(host) > 0);
+    const work = first ? withoutWatermark(reply.work) : reply.work;
+    if (outlet.admits && !splitPayload(this.socketPayload(connection, work)).every((part) => outlet.admits!(host, part))) {
       this.options.live?.unsubscribe(connection.id, queryIdOf(socket));
       if (!this.behind.has(host)) this.defer(host, this.delivered?.revision ?? 0);
       return false;
     }
-    this.post(connection, reply.work);
+    if (first) void this.sendOne(host, this.socketPayload(connection, work), 0, false, true);
+    else this.post(connection, work);
     return true;
   }
 
@@ -450,7 +469,8 @@ export class ReplicaDeliveryEngine {
       // The snapshot joins at the delivered clock (as an open's does): no commit before it is owed to this socket.
       await this.deliverCommits();
       // A holder without room keeps the request, in order behind any it already keeps (BUG-10).
-      if (this.behind.has(socket.host) || !(await this.runQuery(socket, snapshot))) this.keepQuery(socket, snapshot);
+      // X17: with a priority lane a holder that is behind still gets the reply now (ahead of its backlog, see runQuery).
+      if ((this.behind.has(socket.host) && !this.options.outlet.sendFirst) || !(await this.runQuery(socket, snapshot))) this.keepQuery(socket, snapshot);
       return [];
     })();
   }
@@ -1321,11 +1341,12 @@ export class ReplicaDeliveryEngine {
     }).catch(error => this.barrierFailed(host, state, this.recovering, error));
   }
 
-  private sendOne(host: string, payload: ReplicaDelivery, revision: number, membershipOnly = false): Promise<void> {
+  private sendOne(host: string, payload: ReplicaDelivery, revision: number, membershipOnly = false, first = false): Promise<void> {
     if (!membershipOnly && this.paused(host)) return Promise.resolve();
     this.stats.payloads += 1;
     const owners = new Map(Object.keys(payload.sockets).map(id => [id, this.connections.get(id)]));
-    return this.options.outlet.send(host, payload).then((receipt) => {
+    const outlet = this.options.outlet;
+    return (first && outlet.sendFirst ? outlet.sendFirst(host, payload) : outlet.send(host, payload)).then((receipt) => {
       if (Object.keys(receipt?.scopeRequired ?? {}).length) { this.requestScopeFence(host, receipt!.scopeRequired); return; }
       if (!receipt) return; // discarded work certifies nothing
       const expected = new Map(Object.entries(payload.sockets).filter(([,work])=>work.initialCompletions?.length));

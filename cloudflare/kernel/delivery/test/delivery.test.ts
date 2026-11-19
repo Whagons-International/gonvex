@@ -1451,3 +1451,44 @@ describe("BUG-4b one large commit is delivered, never reset lagged", () => {
     expect(await bulk(6_000, ["h1", "h2", "h3"], 20)).toEqual({ recoveries: 0, delivered: 3 });
   });
 });
+
+describe("X17 a live query's initial reply goes ahead of its holder's backlog", () => {
+  it("is delivered right after the RPC in flight, before payloads queued earlier, and carries no watermark", { timeout: 60_000 }, async () => {
+    let hold = false;
+    const held: Array<() => void> = [];
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 40; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 10)]]);
+      await h.commit(insert);
+      h.receiver.deliver = async (_host, payload) => {
+        if (hold) await new Promise<void>((resolve) => held.push(resolve));
+        return { v: 1, sockets: Object.keys(payload.sockets).length } as ReplicaReceipt;
+      };
+      h.engine.dispatch(socket("S1"), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      for (let spin = 0; spin < 2000 && !frames(h.payloads, "S1").some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      // One commit's delta is in flight on h1 and held; a second one waits behind it.
+      hold = true;
+      await h.commit([["UPDATE items SET label = 'first' WHERE rank = 1", []]], false);
+      for (let spin = 0; spin < 2000 && !held.length; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.commit([["UPDATE items SET label = 'second' WHERE rank = 2", []]], false);
+      for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+      const before = h.payloads.length;
+      const view = { ...socket("Q"), queryId: "live" };
+      expect(await h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }))).toEqual([]);
+      hold = false;
+      for (let round = 0; round < 50 && held.length; round++) { held.splice(0).forEach((release) => release()); await new Promise((resolve) => setTimeout(resolve, 5)); }
+      for (let spin = 0; spin < 2000 && !frames(h.payloads, "Q").some((f) => f.type === "query.result"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      const later = h.payloads.slice(before);
+      const at = (pred: (p: ReplicaDelivery) => boolean) => later.findIndex(([, p]) => pred(p));
+      const reply = at((p) => !!p.sockets.Q);
+      const second = at((p) => JSON.stringify(p.sockets.S1 ?? {}).includes("second"));
+      expect(reply).toBeGreaterThanOrEqual(0);
+      expect(second).toBeGreaterThan(reply);
+      expect(later[reply]![1].sockets.Q!.watermark).toBeUndefined();
+      expect(frames(h.payloads, "Q").filter((f) => f.type === "query.result").map((f) => f.reason)).toEqual(["initial"]);
+      expect(h.conflicts).toEqual([]);
+    }, MODULE, true);
+  });
+});

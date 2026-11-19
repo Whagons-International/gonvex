@@ -66,6 +66,8 @@ interface Pending {
   /** X14 review: the engine reset its holder for a stall (`abandon`): its work is given up, not just its credits. */
   abandoned?: boolean;
   enqueued: number;
+  /** X17: sent ahead of the ordinary payloads waiting for this holder (`sendFirst`). */
+  first?: boolean;
   resolve(value: ReplicaReceipt | undefined): void;
   reject(error: unknown): void;
 }
@@ -170,6 +172,29 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
 
   /**
+   * X17: `send`, placed ahead of every ordinary payload still waiting for `host` (never ahead of the RPC in flight, a
+   * recovery barrier, or an earlier `sendFirst` payload). The same admission and credits as `send`.
+   */
+  sendFirst(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined> {
+    if (!validRecoveryInitialDelivery(payload)) return Promise.reject(new Error("invalid recovery initial offer"));
+    if (payload.initialFailure && !initialFailureOnly(payload)) return Promise.reject(new Error("invalid initial-failure-only delivery"));
+    if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length)&&!initialDeliveryOnly(payload))return Promise.reject(new Error("invalid initial-only delivery"));
+    let queue: Queue;
+    try { queue = this.queue(host); } catch (error) { return Promise.reject(error); }
+    const bytes = retainedBytes(payload);
+    if (!OrderedOutlet.fits(queue, bytes)) {
+      queue.recoveryRequired = true;
+      this.settleEmpty(host, queue);
+      return Promise.reject(new DeliveryCapacityError());
+    }
+    let at = 0;
+    while (at < queue.pending.length && (queue.pending[at]!.first || queue.pending[at]!.recovery)) at++;
+    const sent = this.enqueue(host, queue, payload, bytes, false, at);
+    this.unclaim(host);
+    return sent;
+  }
+
+  /**
    * A legal large singleton is allowed when it is the only retained normal delivery. Never impose
    * the pending budget as a smaller wire/frame limit. Its real isolate peak remains a V04 gate.
    */
@@ -253,12 +278,13 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     return recovery;
   }
 
-  private enqueue(host: string, queue: Queue, payload: ReplicaDelivery, bytes: number, recovery: boolean): Promise<ReplicaReceipt | undefined> {
+  private enqueue(host: string, queue: Queue, payload: ReplicaDelivery, bytes: number, recovery: boolean, at?: number): Promise<ReplicaReceipt | undefined> {
     if (!queue.running && !queue.pending.length) {
       queue.idle = new Promise<void>(resolve => { queue.drained = resolve; });
     }
     const next = new Promise<ReplicaReceipt | undefined>((resolve, reject) => {
-      queue.pending.push({ payload, bytes, recovery, enqueued: Date.now(), resolve, reject });
+      const item: Pending = { payload, bytes, recovery, enqueued: Date.now(), resolve, reject, ...(at === undefined ? {} : { first: true }) };
+      if (at === undefined) queue.pending.push(item); else queue.pending.splice(at, 0, item);
     });
     if (recovery) credits.recovery += bytes;
     else { queue.bytes += bytes; credits.normal += bytes; credits.count++; }
