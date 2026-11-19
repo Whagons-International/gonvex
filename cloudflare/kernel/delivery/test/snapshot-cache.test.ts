@@ -4,7 +4,7 @@ import { ROW_OVERHEAD_BYTES, SnapshotCache, retainedRowBytes, type CachedSnapsho
 
 const entry = (rows: number, text = "x".repeat(100)): CachedSnapshot => {
   const list = Array.from({ length: rows }, (_, i) => ({ key: `k${i}`, text, hash: "h".repeat(64), value: {}, bytes: text.length }));
-  return { epoch: "e", revision: 1, fingerprint: "f", rows: list, window: { rows, bytes: 0, truncated: false } as never, bytes: retainedRowBytes(list) };
+  return { epoch: "e", revision: 1, fingerprint: "f", schema: 0, rows: list, window: { rows, bytes: 0, truncated: false } as never, bytes: retainedRowBytes(list) };
 };
 
 describe("X17d snapshot cache accounting", () => {

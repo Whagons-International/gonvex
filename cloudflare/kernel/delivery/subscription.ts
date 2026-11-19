@@ -113,6 +113,9 @@ function tablesChanged(db: StorageSession, since: number, through: number, table
   return db.run(`SELECT 1 FROM _gonvex_sync_changes WHERE revision > $1 AND revision <= $2 AND table_name IN (${marks}) LIMIT 1`, [since, through, ...tables] as never).rows.length > 0;
 }
 
+/** #528 re-review 3: the schema generation each registry's schema-derived caches were last checked against. */
+const schemaSeen = new WeakMap<object, number>();
+
 const moduleIds = new WeakMap<object, number>();
 let nextModuleId = 0;
 function moduleId(module: object | undefined): number {
@@ -273,6 +276,7 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
     let why = cached ? "" : "absent";
     if (cached && cached.fingerprint !== fingerprint) { cached = undefined; why = "fingerprint"; }
     if (cached && (cached.epoch !== clock.epoch || cached.revision < clock.retained || cached.revision > clock.revision)) { cached = undefined; why = "history"; }
+    let schema = -1;
     if (key !== undefined) {
       // #528 re-review: the change-log probe only sees tables the log records under their own name. A table with
       // capture `metadata`/`derived`, `owned` storage or logical-record storage changes without a row under its name
@@ -280,14 +284,22 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
       // neither stored nor served, as the principal cache refuses the same inputs (principal-cache.ts `store`).
       const since = cached?.revision;
       const verdict = await context.read((db) => {
+        // #528 re-review 3: a release's migrations (capture changes, rebuilds) run while the previous module stays
+        // active, so the registry's cached captured set can be stale. The tenant's schema generation moves on every
+        // committed schema change (the migrator's `schemaChanged`, module DDL): a change forgets the registry's
+        // schema-derived caches (principal cache included), and an entry from another generation is a miss.
+        schema = db.schemaGeneration;
+        if (schemaSeen.get(context.registry) !== schema) { context.registry.invalidateSchema(); schemaSeen.set(context.registry, schema); }
         const captured = context.registry.principals.capturedTables(db);
         if (!tables.every((table) => captured.has(table))) return "uncaptured";
+        if (cached && cached.schema !== schema) return "schema";
         if (since === undefined || since >= clock.revision) return "ok";
         // Re-read the retention bound in the probe's own read: a prune since the first read may have removed rows.
         if (since < readClock(sqlOf(db)).retained) return "history";
         return tablesChanged(db, since, clock.revision, tables) ? "changed" : "ok";
       });
       if (verdict === "uncaptured") { key = undefined; cached = undefined; }
+      else if (verdict === "schema") { cached = undefined; why = "schema"; }
       else if (verdict !== "ok" && cached) { cached = undefined; why = verdict; }
     }
     if (cached) snapshotCache.stats.hits++; else if (key !== undefined) snapshotCache.stats.misses++;
@@ -295,7 +307,7 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
     window = await coldSnapshot(request, context, scanAll, digest, cursor, meta, cached,
       key === undefined ? undefined : (rows) => {
         const slim = rows.map((row) => ({ key: row.key, text: row.text, hash: row.hash, value: {}, bytes: row.bytes }));
-        return (scanned) => snapshotCache.set(context.registry, key, { epoch: clock.epoch, revision: clock.revision, fingerprint, rows: slim, window: scanned, bytes: retainedRowBytes(slim) });
+        return (scanned) => snapshotCache.set(context.registry, key, { epoch: clock.epoch, revision: clock.revision, fingerprint, schema, rows: slim, window: scanned, bytes: retainedRowBytes(slim) });
       });
   } else if (requested === "aggregate") {
     const after = request.cursor?.revision ?? 0;

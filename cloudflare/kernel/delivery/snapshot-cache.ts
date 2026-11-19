@@ -26,6 +26,8 @@ export interface CachedSnapshot {
   readonly epoch: string;
   readonly revision: number;
   readonly fingerprint: string;
+  /** #528 re-review 3: the tenant's schema generation when the entry was checked; any schema change since is a miss. */
+  readonly schema: number;
   readonly rows: readonly ScannedRow[];
   readonly window: ReplicaWindow;
   readonly bytes: number;

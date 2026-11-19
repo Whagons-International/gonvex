@@ -57,6 +57,10 @@ const MODULE: ReplicaModule = {
 
 interface Harness {
   engine: ReplicaDeliveryEngine;
+  /** X17d: redeploys the module in this engine and registry. */
+  setModule(next: ReplicaModule): void;
+  /** X17d: what the migrator does after each committed schema change (`schemaChanged` -> K01 `invalidateSchema`). */
+  schemaChanged(): void;
   live: LiveQueries;
   payloads: Array<[string, ReplicaDelivery]>;
   receiver: { deliver?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt> };
@@ -113,6 +117,8 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     };
     const live = new LiveQueries({ run: (body) => serial(() => snapshotRunner(storage)(body)), module: () => liveModule, visibility: kernelVisibility(new VisibilityRegistry()) });
     const receive = (host:string,payload:ReplicaDelivery) => { payloads.push([host,payload]); return (receiver.deliver?.(host,payload) ?? {v:1,sockets:Object.keys(payload.sockets).length}) as ReplicaReceipt; };
+    // X17d: a redeploy of the module in the same engine and registry (`setModule`).
+    let current = module;
     const engine = new ReplicaDeliveryEngine({
       ...(composeLive ? { live } : {}),
       tenantId: "t",
@@ -124,7 +130,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
         if (!r.ok) throw r.error;
         return r.value;
       },
-      module: () => module,
+      module: () => current,
       outlet: new LocalOutlet(receive, () => hosts, undefined, receive),
       ...(activity ? { activity } : {}),
       ...(stallMs !== undefined ? { stallMs } : {}),
@@ -133,6 +139,8 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     let commands = 0;
     return body({
       sql: (fn) => serial(async () => { fn(sql); }),
+      setModule: (next: ReplicaModule) => { current = next; },
+      schemaChanged: () => storage.invalidateSchema(),
       engine, live, payloads, receiver, delivered, conflicts,
       async commit(statements, settle = true) {
         const commandId = `c${++commands}`;
@@ -1798,5 +1806,153 @@ describe("X17d re-review (#528): v2 control", () => {
       await h.commit([["DELETE FROM grants WHERE id = 'g2'", []]]);
       expect(await ids("W2")).toEqual(["t1"]);
     }, V2);
+  });
+});
+
+describe("X17d re-review 3 (#528): the captured set is checked against the live schema", () => {
+  const LEGACY3: ReplicaModule = {
+    projectId: "p",
+    artifactHash: "h-legacy3",
+    functions: new Map([
+      ["tasks.granted", { path: "tasks.granted", kind: "query", delivery: "replica", replica: parseDefinition({ table: "tasks", key: "id", columns: ["id", "state"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 10000 }) }],
+    ]),
+    visibility: new Map([
+      ["tasks", parsePlan({ table: "tasks", key: "id", sets: { mine: { table: "grants", select: "task_id", joins: [], where: [{ table: "grants", column: "member_id", context: "member.id" }] } }, where: { operator: "inSet", column: "id", set: "mine" } })],
+    ]),
+  };
+  const ids = (h: Harness) => async (id: string) => {
+    const s = socket(id);
+    h.engine.dispatch(s, { type: "replica.open", id: "c", path: "tasks.granted", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 4000 && !frames(h.payloads, s.connectionId).some((f) => f.type === "replica.ready" || f.type === "replica.error"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    await h.engine.settled();
+    return frames(h.payloads, s.connectionId).filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot").flatMap((p) => p.result ?? p.rows ?? []).map((r: { id: string }) => r.id);
+  };
+
+  // Production: operatorApplyRelease runs the migrations and the capture install while the previous module stays
+  // active; the migrator's schemaChanged reaches K01 storage only. delivery.registry.invalidateSchema() runs on
+  // activate (object.ts:96), so until operatorActivateRelease the registry's cached capturedTables still lists a table
+  // the release just made uncaptured, and the snapshot cache's capture check passes on that stale set.
+  it("a migration that stops capturing a set table (no activate yet): a later revocation is not served from the cache", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.sql((sql) => {
+        sql.run("CREATE TABLE IF NOT EXISTS _gonvex_table_options(name TEXT PRIMARY KEY, capture TEXT NOT NULL, owner_table TEXT, owner_column TEXT, owner_direction TEXT NOT NULL DEFAULT 'outbound')");
+        sql.run("CREATE TABLE grants (id TEXT PRIMARY KEY, task_id TEXT, member_id TEXT)");
+        installChangeFeed(sql);
+      });
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tasks VALUES ('t2', 'open')", []],
+        ["INSERT INTO grants VALUES ('g1', 't1', 'm-alice')", []], ["INSERT INTO grants VALUES ('g2', 't2', 'm-alice')", []]]);
+      const open = ids(h);
+      const { snapshotCache } = await import("../snapshot-cache.ts");
+      const stores = snapshotCache.stats.stores;
+      expect(await open("M1")).toEqual(["t1", "t2"]);
+      expect(snapshotCache.stats.stores).toBe(stores + 1); // grants is captured: the entry is stored
+      // The release's capture phase: grants becomes metadata-only (its _gonvex_sync_ triggers are dropped).
+      await h.sql((sql) => {
+        sql.run("INSERT INTO _gonvex_table_options(name, capture) VALUES ('grants', 'metadata')");
+        installChangeFeed(sql);
+        expect(sql.run("SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '\\_gonvex\\_sync\\_grants\\_%' ESCAPE '\\'").rows[0]?.[0]).toBe(0);
+      });
+      // The migrator reports the committed schema change (kernel/reducer/tenant.ts `schemaChanged`); no activate follows.
+      h.schemaChanged();
+      await h.commit([["DELETE FROM grants WHERE id = 'g2'", []]]);
+      // A fresh scan no longer shows t2.
+      expect(await open("M2")).toEqual(["t1"]);
+    }, LEGACY3);
+  });
+});
+
+describe("X17d re-review 3 (#528): every key part is pinned", () => {
+  const moduleWith = (columns: string[], hash: string): ReplicaModule => ({
+    projectId: "p", artifactHash: hash,
+    functions: new Map([["tasks.open", { path: "tasks.open", kind: "query", delivery: "replica", replica: parseDefinition({ table: "tasks", key: "id", columns, orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 10000 }) }]]),
+    visibility: new Map([["tasks", parsePlan({ version: 2, table: "tasks", key: "id", sets: {}, where: { operator: "eq", column: "state", value: { literal: "open" } } })]]),
+  });
+  const rows = (h: Harness) => async (id: string, scope?: { scope: string; visibilityScope: string }) => {
+    const s = socket(id);
+    if (scope) (s as { replica: unknown }).replica = scope;
+    h.engine.dispatch(s, { type: "replica.open", id: "c", path: "tasks.open", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 4000 && !frames(h.payloads, s.connectionId).some((f) => f.type === "replica.ready" || f.type === "replica.error"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    await h.engine.settled();
+    return frames(h.payloads, s.connectionId).filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot").flatMap((p) => p.result ?? p.rows ?? []);
+  };
+
+  it("a redeploy with the same plan but other columns does not serve the old projection (module id in the key)", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []]]);
+      const open = rows(h);
+      expect(await open("K1")).toEqual([{ id: "t1" }]);
+      h.setModule(moduleWith(["id", "state"], "h-cols-2"));
+      expect(await open("K2")).toEqual([{ id: "t1", state: "open" }]);
+    }, moduleWith(["id"], "h-cols-1"));
+  });
+
+  it("another replica scope or visibility scope is a different entry", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []]]);
+      const { snapshotCache } = await import("../snapshot-cache.ts");
+      const open = rows(h);
+      await open("S1", { scope: "scope-a", visibilityScope: "vscope-a" });
+      const hits = snapshotCache.stats.hits;
+      await open("S2", { scope: "scope-b", visibilityScope: "vscope-a" });
+      await open("S3", { scope: "scope-a", visibilityScope: "vscope-b" });
+      expect(snapshotCache.stats.hits).toBe(hits);
+      await open("S4", { scope: "scope-a", visibilityScope: "vscope-a" });
+      expect(snapshotCache.stats.hits).toBe(hits + 1);
+    }, moduleWith(["id"], "h-scope"));
+  });
+});
+
+describe("X17d re-review 3 (#528): the captured set is re-read after a schema change", () => {
+  const LEGACY4: ReplicaModule = {
+    projectId: "p", artifactHash: "h-legacy4",
+    functions: new Map([["tasks.granted", { path: "tasks.granted", kind: "query", delivery: "replica", replica: parseDefinition({ table: "tasks", key: "id", columns: ["id", "state"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 10000 }) }]]),
+    visibility: new Map([["tasks", parsePlan({ table: "tasks", key: "id", sets: { mine: { table: "grants", select: "task_id", joins: [], where: [{ table: "grants", column: "member_id", context: "member.id" }] } }, where: { operator: "inSet", column: "id", set: "mine" } })]]),
+  };
+  it("an entry first stored after the change (another scope) is checked against the new capture classes", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.sql((sql) => {
+        sql.run("CREATE TABLE IF NOT EXISTS _gonvex_table_options(name TEXT PRIMARY KEY, capture TEXT NOT NULL, owner_table TEXT, owner_column TEXT, owner_direction TEXT NOT NULL DEFAULT 'outbound')");
+        sql.run("CREATE TABLE grants (id TEXT PRIMARY KEY, task_id TEXT, member_id TEXT)");
+        installChangeFeed(sql);
+      });
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tasks VALUES ('t2', 'open')", []],
+        ["INSERT INTO grants VALUES ('g1', 't1', 'm-alice')", []], ["INSERT INTO grants VALUES ('g2', 't2', 'm-alice')", []]]);
+      const open = async (id: string, scope: string) => {
+        const s = socket(id);
+        (s as { replica: unknown }).replica = { scope, visibilityScope: "v" };
+        h.engine.dispatch(s, { type: "replica.open", id: "c", path: "tasks.granted", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+        for (let spin = 0; spin < 4000 && !frames(h.payloads, id).some((f) => f.type === "replica.ready" || f.type === "replica.error"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+        await h.engine.settled();
+        return frames(h.payloads, id).filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot").flatMap((p) => p.result ?? p.rows ?? []).map((r: { id: string }) => r.id);
+      };
+      expect(await open("N1", "scope-a")).toEqual(["t1", "t2"]); // the registry's captured set now lists grants
+      await h.sql((sql) => { sql.run("INSERT INTO _gonvex_table_options(name, capture) VALUES ('grants', 'metadata')"); installChangeFeed(sql); });
+      h.schemaChanged();
+      expect(await open("N2", "scope-b")).toEqual(["t1", "t2"]); // a new key: must not be stored (grants is uncaptured now)
+      await h.commit([["DELETE FROM grants WHERE id = 'g2'", []]]);
+      expect(await open("N3", "scope-b")).toEqual(["t1"]);
+    }, LEGACY4);
+  });
+});
+
+describe("X17d re-review 3 (#528): a schema change with the same capture classes is a miss", () => {
+  it("an entry stored before a committed schema change (a rebuild, say) is not served after it", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.commit([["INSERT INTO items VALUES ('a', 1, 'x')", []]]);
+      const { snapshotCache } = await import("../snapshot-cache.ts");
+      const open = async (id: string) => {
+        h.engine.dispatch(socket(id), { type: "replica.open", id: "c", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+        await h.engine.settled();
+      };
+      await open("G1");
+      const hits = snapshotCache.stats.hits;
+      await open("G2");
+      expect(snapshotCache.stats.hits).toBe(hits + 1);
+      h.schemaChanged();
+      await open("G3");
+      expect(snapshotCache.stats.hits).toBe(hits + 1);
+      await open("G4");
+      expect(snapshotCache.stats.hits).toBe(hits + 2);
+    });
   });
 });
