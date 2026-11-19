@@ -22,7 +22,10 @@ import { deltaFrame, errorFrame, needHashesFrame, readyFrame, snapshotFrame, sna
 import { CollapsedChanges, readChangeRows, readClock, type LogChange, type LogSql } from "./log.ts";
 import { scanPlan, scanWindow, type ScannedRow, type ScanProgress } from "./scan.ts";
 import { collectionFiltersAdmit, errors, projectRow, ReplicaError, visible, type ReplicaWindow } from "./window.ts";
-import { canonical } from "./canonical.ts";
+import { canonical, stableJson } from "./canonical.ts";
+import { retainedRowBytes, snapshotCache, type CachedSnapshot } from "./snapshot-cache.ts";
+import { inheritedTables } from "../visibility/plan.ts";
+import { span } from "./spans.ts";
 
 /** Legacy snapshot pages (replica.rs `SNAPSHOT_PAGE_BYTES`, `SNAPSHOT_PAGE_ROWS`). */
 export const PAGE_BYTES = 256 * 1024;
@@ -86,6 +89,56 @@ export interface OpenContext {
   /** Resolves when what was emitted has left this object (backpressure between chunks). */
   readonly drain: () => Promise<void>;
   readonly progress?: ScanProgress;
+}
+
+/**
+ * X17d: only plans whose visibility does not inherit from parent rows are cached. A child's visibility also depends on
+ * parent rows, `via` rows and the parents' own principal tables, which the validity check does not cover (#528 review).
+ */
+function cacheableVisibility(plan: VisibilityPlan): boolean {
+  return plan.version !== 2 || inheritedTables(plan).length === 0;
+}
+
+/** X17d: the resolution the rows were admitted under, parents included (defence in depth: a missed table is a miss). */
+function visibilityFingerprintOf(resolved: ResolvedVisibility): string {
+  const parts = [resolved.fingerprint];
+  for (const [table, parent] of [...resolved.inherited].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) parts.push(`${table}=${visibilityFingerprintOf(parent.resolved)}`);
+  return parts.join("|");
+}
+
+/** X17d: whether any transaction in (since, through] wrote one of `tables` (one indexed probe, no change rows read). */
+function tablesChanged(db: StorageSession, since: number, through: number, tables: readonly string[]): boolean {
+  if (!tables.length) return false;
+  const marks = tables.map((_, index) => `$${index + 3}`).join(",");
+  return db.run(`SELECT 1 FROM _gonvex_sync_changes WHERE revision > $1 AND revision <= $2 AND table_name IN (${marks}) LIMIT 1`, [since, through, ...tables] as never).rows.length > 0;
+}
+
+/** #528 re-review 3: the schema generation each registry's schema-derived caches were last checked against. */
+const schemaSeen = new WeakMap<object, number>();
+function noteSchema(registry: VisibilityRegistry, generation: number): void {
+  if (schemaSeen.get(registry) === generation) return;
+  registry.principals.invalidateSchema();
+  schemaSeen.set(registry, generation);
+}
+
+const moduleIds = new WeakMap<object, number>();
+let nextModuleId = 0;
+function moduleId(module: object | undefined): number {
+  if (!module) return 0;
+  let id = moduleIds.get(module);
+  if (id === undefined) { id = ++nextModuleId; moduleIds.set(module, id); }
+  return id;
+}
+
+/**
+ * X17d: the snapshot cache key: what a cold scan's rows depend on besides the data (the table versions are checked
+ * separately). Undefined when the session has no member (nothing is cached).
+ */
+function snapshotKey(request: OpenRequest, context: OpenContext): string | undefined {
+  const member = context.session.member;
+  if (!member?.id) return undefined;
+  return [moduleId(context.module), context.session.route.tenantId, request.path, stableJson((request.args ?? {}) as JsonValue), member.id, member.role,
+    stableJson((member.permissions ?? null) as JsonValue), String(member.membershipRevision ?? ""), context.scope, context.visibilityScope].join("\u0000");
 }
 
 /** `cursor_resumable`: only within the retained history of the current epoch. */
@@ -201,6 +254,10 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
 
   // The read: clock, principal, scan statement.
   const begun = await context.read((db) => {
+    // #528 re-review 3/4: a schema generation this registry has not seen yet (a migration ran while this module stayed
+    // active) re-reads the principal cache and the captured set before anything resolves through them. ACL indexes
+    // are left to `activate`: poisoning them here would turn live `inherits` subscriptions' deltas into resyncs.
+    noteSchema(context.registry, db.schemaGeneration);
     const clock = readClock(sqlOf(db));
     const resolved = resolveCollection(db, context, definition, plan, clock.revision);
     const scan = scanPlan(definition, plan, resolved, request.args, db.catalogOf(definition.table).columns);
@@ -220,7 +277,47 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
   let window: ReplicaWindow;
 
   if (!resumable) {
-    window = await coldSnapshot(request, context, scanAll, digest, cursor, meta);
+    // X17d: the same member's last cold snapshot of this collection, if nothing it reads has changed since.
+    let key = cacheableVisibility(plan) ? snapshotKey(request, context) : undefined;
+    const fingerprint = key === undefined ? "" : visibilityFingerprintOf(resolved);
+    const tables = [...new Set([...resolvedDependencyColumns(plan, resolved).tables(), definition.table, "members"])].sort();
+    let cached = key === undefined ? undefined : snapshotCache.get(context.registry, key);
+    let why = cached ? "" : "absent";
+    if (cached && cached.fingerprint !== fingerprint) { cached = undefined; why = "fingerprint"; }
+    if (cached && (cached.epoch !== clock.epoch || cached.revision < clock.retained || cached.revision > clock.revision)) { cached = undefined; why = "history"; }
+    let schema = -1;
+    if (key !== undefined) {
+      // #528 re-review: the change-log probe only sees tables the log records under their own name. A table with
+      // capture `metadata`/`derived`, `owned` storage or logical-record storage changes without a row under its name
+      // (a legacy bounded plan keeps its sets in SQL, so the fingerprint cannot see them either): such a collection is
+      // neither stored nor served, as the principal cache refuses the same inputs (principal-cache.ts `store`).
+      const since = cached?.revision;
+      const verdict = await context.read((db) => {
+        // #528 re-review 3: a release's migrations (capture changes, rebuilds) run while the previous module stays
+        // active, so the registry's cached captured set can be stale. The tenant's schema generation moves on every
+        // committed schema change (the migrator's `schemaChanged`, module DDL): a change forgets the registry's
+        // schema-derived caches (principal cache included), and an entry from another generation is a miss.
+        schema = db.schemaGeneration;
+        noteSchema(context.registry, schema);
+        const captured = context.registry.principals.capturedTables(db);
+        if (!tables.every((table) => captured.has(table))) return "uncaptured";
+        if (cached && cached.schema !== schema) return "schema";
+        if (since === undefined || since >= clock.revision) return "ok";
+        // Re-read the retention bound in the probe's own read: a prune since the first read may have removed rows.
+        if (since < readClock(sqlOf(db)).retained) return "history";
+        return tablesChanged(db, since, clock.revision, tables) ? "changed" : "ok";
+      });
+      if (verdict === "uncaptured") { key = undefined; cached = undefined; }
+      else if (verdict === "schema") { cached = undefined; why = "schema"; }
+      else if (verdict !== "ok" && cached) { cached = undefined; why = verdict; }
+    }
+    if (cached) snapshotCache.stats.hits++; else if (key !== undefined) snapshotCache.stats.misses++;
+    span("tenant.snapshotCache", { path: request.path, result: cached ? "hit" : key === undefined ? "uncacheable" : `miss:${why}` });
+    window = await coldSnapshot(request, context, scanAll, digest, cursor, meta, cached,
+      key === undefined ? undefined : (rows) => {
+        const slim = rows.map((row) => ({ key: row.key, text: row.text, hash: row.hash, value: {}, bytes: row.bytes }));
+        return (scanned) => snapshotCache.set(context.registry, key, { epoch: clock.epoch, revision: clock.revision, fingerprint, schema, rows: slim, window: scanned, bytes: retainedRowBytes(slim) });
+      });
   } else if (requested === "aggregate") {
     const after = request.cursor?.revision ?? 0;
     const dependencies = resolvedDependencyColumns(plan, resolved);
@@ -300,17 +397,27 @@ const sameCursor = (a: OpenRequest["cursor"], b: Cursor) => a !== undefined && a
 async function coldSnapshot(
   request: OpenRequest, context: OpenContext, scanAll: (visit: (row: ScannedRow) => boolean | void, light?: boolean) => Promise<ReplicaWindow>,
   digest: Aggregate, cursor: Cursor, meta: (truncated: boolean) => PageMetadata,
+  cached?: CachedSnapshot, store?: (rows: ScannedRow[]) => (window: ReplicaWindow) => void,
 ): Promise<ReplicaWindow> {
   let kept: ScannedRow[] | undefined = [];
   let keptBytes = 0;
-  const window = await scanAll((row) => {
-    digest.add(row.hash);
-    if (kept) {
-      kept.push(row);
-      keptBytes += row.text.length;
-      if (keptBytes > RETAIN_BYTES) kept = undefined;
-    }
-  });
+  let window: ReplicaWindow;
+  if (cached) {
+    // X17d: the rows a scan admits at this revision (snapshot-cache.ts), in scan order.
+    kept = cached.rows as ScannedRow[];
+    for (const row of kept) digest.add(row.hash);
+    window = { ...cached.window };
+  } else {
+    window = await scanAll((row) => {
+      digest.add(row.hash);
+      if (kept) {
+        kept.push(row);
+        keptBytes += row.text.length;
+        if (keptBytes > RETAIN_BYTES) kept = undefined;
+      }
+    });
+    if (kept && store) store(kept)({ ...window });
+  }
   if (!context.paged) {
     if (!kept) throw new ReplicaError("replica snapshot exceeds the outbound frame limit; negotiate replicaSnapshotPages");
     const inline = kept.length <= INLINE_HASH_LIMIT ? new Map(kept.map((row) => [row.key, row.hash])) : undefined;

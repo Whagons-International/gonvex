@@ -255,6 +255,12 @@ export class StorageSession {
 
   constructor(private readonly tenant: TenantStorage, readonly kind: InvocationKind) {}
 
+  /**
+   * The tenant's schema generation: bumped by every `invalidateSchema` (the migrator's `schemaChanged` after each
+   * committed schema change, module DDL, a rolled-back schema change). Caches derived from the schema compare it.
+   */
+  get schemaGeneration(): number { return this.tenant.catalog.generation; }
+
   // ---- module SQL (`db.query`) ----------------------------------------------
 
   /**
