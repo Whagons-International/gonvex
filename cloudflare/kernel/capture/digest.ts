@@ -16,7 +16,31 @@ const K = new Uint32Array([
 
 const encoder = new TextEncoder();
 
+/**
+ * X16: the platform's native SHA-256 when the runtime has it (`nodejs_compat`: Workers, workerd tests, Node), ~8x faster
+ * than the JavaScript below. The tenant hashes every snapshot row and the gateway every recovery chunk with this.
+ * Same lowercase hex output; the JavaScript version stays the fallback.
+ */
+type NativeHash = (text: string) => string;
+const native: NativeHash | undefined = (() => {
+  try {
+    const get = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule;
+    const crypto = typeof get === "function" ? get("node:crypto") as { createHash?: (a: string) => { update(t: string, e: string): { digest(e: string): string } } } | undefined : undefined;
+    if (typeof crypto?.createHash !== "function") return undefined;
+    const hash: NativeHash = (text) => crypto.createHash!("sha256").update(text, "utf8").digest("hex");
+    return hash("abc") === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" ? hash : undefined;
+  } catch { return undefined; }
+})();
+
+/** True when `sha256Hex` uses the platform hash. */
+export const nativeSha256 = native !== undefined;
+
 export function sha256Hex(text: string): string {
+  return native ? native(text) : sha256HexJs(text);
+}
+
+/** The JavaScript SHA-256 (fallback and parity reference). */
+export function sha256HexJs(text: string): string {
   const data = encoder.encode(text);
   const length = data.length;
   const blocks = Math.ceil((length + 9) / 64);

@@ -56,10 +56,13 @@ describe("X15 recovery writes per openMany reply", () => {
     const opens = Array.from({ length: 5 }, (_, i) => ({ id: `r${i}`, path: `items.list${i}` }));
     await f.session.receive(JSON.stringify({ type: "replica.openMany", opens }));
     // Five completions, all inside one scope; nothing persisted outside it before the scope ended.
-    const scope = events.indexOf("scope"), end = events.indexOf("end");
-    expect(scope).toBeGreaterThanOrEqual(0);
+    // X16: two scopes per frame: the opens' registration (5 changes, one write), then the reply's completions.
+    expect(events.filter((e) => e === "scope")).toHaveLength(2);
+    expect(events).not.toContain("persist");
+    const first = events.indexOf("scope"), firstEnd = events.indexOf("end");
+    expect(events.slice(first + 1, firstEnd).filter((e) => e === "persist-in-scope").length).toBeGreaterThanOrEqual(5);
+    const scope = events.lastIndexOf("scope"), end = events.lastIndexOf("end");
     expect(events.slice(scope + 1, end).filter((e) => e === "persist-in-scope")).toHaveLength(5);
-    expect(events.filter((e) => e === "scope")).toHaveLength(1);
     expect(f.session.record.initialRequests ?? {}).toEqual({});
     expect(Object.keys(f.session.record.replicas ?? {}).sort()).toEqual(opens.map((o) => o.id).sort());
     expect(f.sent.filter((t) => t.includes('"replica.ready"'))).toHaveLength(5);
