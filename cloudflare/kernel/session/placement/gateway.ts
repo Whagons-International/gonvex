@@ -409,8 +409,6 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
    */
   async deliverReplicaBatch(tenantId: string, payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]> {
     if (!Array.isArray(payloads)) throw new Error("invalid replica batch");
-    const sentAt = payloads[0]?.pressure?.sentAt;
-    if (typeof sentAt === "number") span("gateway.receive", { transitMs: Date.now() - sentAt, items: payloads.length });
     const results: ReplicaBatchResult[] = [];
     const failed = (error: unknown): ReplicaBatchResult => {
       const failure = error as (Error & { code?: unknown }) | undefined;
@@ -472,6 +470,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   }
   /** Applies one delivery. Synchronous unless it has to wait (recovery, a bootstrap); then a promise. */
   private applyReplicaNow(tenantId: string, payload: ReplicaDelivery): ReplicaReceipt | Promise<ReplicaReceipt> {
+    const sentAt = payload.pressure?.sentAt;
+    if (typeof sentAt === "number") span("gateway.receive", { transitMs: Date.now() - sentAt, queueAgeMs: payload.pressure?.queueAgeMs ?? 0 });
     if (payload.initialFailure) throw new Error("initial failures require the marker-only receiver");
     if (!validRecoveryInitialDelivery(payload)) throw new Error("invalid recovery initial offer");
     if (Object.values(payload.sockets).some(work=>!validInitialCompletions(work))) throw new Error("invalid initial completion metadata");
