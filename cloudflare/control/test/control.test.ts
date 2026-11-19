@@ -276,22 +276,90 @@ describe("external tokens (C.3.4)", () => {
   });
 });
 
-describe("X17f sign-in tenant list uses the last admission while the membership revision is unchanged", () => {
-  it("admits live, then serves from the cache, then admits live again after a membership change", async () => {
+describe("X17f sign-in tenant list reuses the last admission while the directory row is unchanged", () => {
+  it("admits the active tenant live every time; the rest of the list is served from the cache until the row changes", async () => {
     const { fixtureSpans } = await import("../../kernel/delivery/spans");
     (await import("../src/sessions")).clearAdmissionCache();
-    const seeded = await seed({ a: ["sid"] });
+    const seeded = await seed({ a: ["sid"], b: ["sid"] });
     const admits = async () => {
       fixtureSpans(true);
       try { await login(seeded.project, seeded.members.sid!.email); return fixtureSpans(false).find((line) => line.name === "control.auth")!.fields.admits; }
       finally { fixtureSpans(false); }
     };
+    expect(await admits()).toBe(2);
     expect(await admits()).toBe(1);
-    expect(await admits()).toBe(0);
+    // A membership revision bump invalidates.
     await runInDurableObject(control(), (instance: ControlObject) => {
       instance.sql.run("UPDATE account_tenant_index SET tenant_membership_revision=tenant_membership_revision+1");
     });
+    expect(await admits()).toBe(2);
     expect(await admits()).toBe(1);
+    // So does any new projection of the row (same revision, new updated_at), and a member id change.
+    await runInDurableObject(control(), (instance: ControlObject) => { instance.sql.run("UPDATE account_tenant_index SET updated_at=updated_at+1"); });
+    expect(await admits()).toBe(2);
+    await runInDurableObject(control(), (instance: ControlObject) => { instance.sql.run("UPDATE account_tenant_index SET member_id=member_id||'-x'"); });
+    expect(await admits()).toBe(2);
+  });
+});
+
+describe("review #530: the sign-in tenant list stays a live admission", () => {
+  /** A write in the tenant's own SQL, as an application Reducer makes it (no projection unless flushed). */
+  const tenantRun = (id: string, query: string, ...args: unknown[]) => runInDurableObject(tenantStub(id), (instance: StubTenantObject) => {
+    (instance as unknown as { sql: { run(query: string, ...args: unknown[]): void } }).sql.run(query, ...args);
+  });
+  const tenantsOf = async (project: string, email: string) => (await login(project, email)).session.tenants as Array<Record<string, unknown>>;
+
+  it("a role/permissions change written by an application Reducer (no membership_revision bump) shows on the next sign-in", async () => {
+    (await import("../src/sessions")).clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"] });
+    const tenant = seeded.tenants.a!;
+    const account = seeded.members.sid!.accountId;
+    expect((await tenantsOf(seeded.project, seeded.members.sid!.email))[0]).toMatchObject({ role: "admin", permissions: { e2e: true } });
+    // What whagons5-client gonvex/members.ts transferTenantOwnership / update do: ctx.db.update("members", id, { role }).
+    // The members trigger still projects the row to Control, with the same membership_revision.
+    await tenantRun(tenant, "UPDATE members SET role='member',permissions='{}' WHERE account_id=$1", account);
+    await tenantStub(tenant).flushMemberships();
+    expect((await tenantsOf(seeded.project, seeded.members.sid!.email))[0]).toMatchObject({ role: "member", permissions: {} });
+  });
+
+  it("the same change in a tenant that is not the active one shows once the tenant projects it", async () => {
+    (await import("../src/sessions")).clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"], b: ["sid"] });
+    const email = seeded.members.sid!.email;
+    const account = seeded.members.sid!.accountId;
+    const roleIn = async (tenant: string) => (await tenantsOf(seeded.project, email)).find((t) => t.id === tenant);
+    expect(await roleIn(seeded.tenants.b!)).toMatchObject({ role: "admin" });
+    await roleIn(seeded.tenants.b!); // b is now served from the cache
+    await tenantRun(seeded.tenants.b!, "UPDATE members SET role='member',permissions='{}' WHERE account_id=$1", account);
+    await tenantStub(seeded.tenants.b!).flushMemberships();
+    expect(await roleIn(seeded.tenants.b!)).toMatchObject({ role: "member", permissions: {} });
+  });
+
+  it("a revoked membership not yet projected to Control is neither listed nor chosen as the active tenant", async () => {
+    (await import("../src/sessions")).clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"], b: ["sid"] });
+    const email = seeded.members.sid!.email;
+    const account = seeded.members.sid!.accountId;
+    expect((await tenantsOf(seeded.project, email)).map((t) => t.id)).toEqual([seeded.tenants.a, seeded.tenants.b]);
+    // Revoked in tenant A; the outbox push to Control has not happened yet (projection lag, or a failed push awaiting its retry alarm).
+    await tenantRun(seeded.tenants.a!, "UPDATE members SET status='revoked',membership_revision=membership_revision+1 WHERE account_id=$1", account);
+    const { session } = await login(seeded.project, email);
+    expect((session.tenants as Array<Record<string, unknown>>).map((t) => t.id)).toEqual([seeded.tenants.b]);
+    expect(session.activeTenantId).toBe(seeded.tenants.b);
+  });
+
+  it("a requested tenant served from the cache is admitted live before it becomes the active tenant", async () => {
+    (await import("../src/sessions")).clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"], b: ["sid"] });
+    const email = seeded.members.sid!.email;
+    const account = seeded.members.sid!.accountId;
+    await tenantsOf(seeded.project, email); // b cached
+    await tenantRun(seeded.tenants.b!, "UPDATE members SET status='revoked',membership_revision=membership_revision+1 WHERE account_id=$1", account);
+    // Revoke a too, unprojected: a is tried first (live, fails), b (cached) must be admitted live and fail as well.
+    await tenantRun(seeded.tenants.a!, "UPDATE members SET status='revoked',membership_revision=membership_revision+1 WHERE account_id=$1", account);
+    const { session } = await login(seeded.project, email);
+    expect(session.tenants).toEqual([]);
+    expect(session.activeTenantId).toBe("");
   });
 });
 
