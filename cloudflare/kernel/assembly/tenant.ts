@@ -421,6 +421,8 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
 
     await this.scheduler.notify();
   }
+  /** X17f: distinguishes the projection pushes' outbox markers within one millisecond. */
+  private membershipPushes = 0;
   private hasMemberships(): boolean {
     try { return this.ctx.storage.sql.exec("SELECT 1 FROM _gonvex_control_plane_membership_outbox LIMIT 1").toArray().length > 0; }
     catch { return false; } // A legacy schema may not declare the projection outbox.
@@ -429,8 +431,14 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     if (!this.hasMemberships()) return 0;
     const rows = this.ctx.storage.sql.exec<{ account_id: string; member_id: string; status: string; membership_revision: number }>("SELECT account_id,member_id,status,membership_revision FROM _gonvex_control_plane_membership_outbox ORDER BY membership_revision,account_id LIMIT 1000").toArray();
     const batch = rows.map((row) => ({ accountId: row.account_id, memberId: row.member_id, status: row.status, membershipRevision: row.membership_revision }));
+    // X17f (#530 re-review): the ack deletes only rows no write touched while the push was in flight. Reducers change
+    // role/permissions/status without bumping membership_revision, so a revision-based ack dropped such a write
+    // unprojected. The rows read are stamped with this push's marker (synchronously with the read); a later write
+    // re-stamps `updated_at` with its own time (the capture trigger), so its row survives the ack and is pushed next.
+    const marker = -(Date.now() * 1024 + (this.membershipPushes++ % 1024));
+    this.ctx.storage.sql.exec(`UPDATE _gonvex_control_plane_membership_outbox SET updated_at=? WHERE account_id IN (SELECT json_extract(value,'$.accountId') FROM json_each(?))`, marker, JSON.stringify(batch));
     await rpc<{ projectMemberships(project: string, tenant: string, rows: typeof batch): Promise<number> }>(this.env.CONTROL, "control").projectMemberships(this.kernel.module!.projectId, this.ctx.id.name ?? "", batch);
-    this.ctx.storage.sql.exec(`DELETE FROM _gonvex_control_plane_membership_outbox WHERE EXISTS (SELECT 1 FROM json_each(?) j WHERE json_extract(j.value,'$.accountId')=account_id AND json_extract(j.value,'$.membershipRevision')>=membership_revision)`, JSON.stringify(batch));
+    this.ctx.storage.sql.exec(`DELETE FROM _gonvex_control_plane_membership_outbox WHERE updated_at=? AND account_id IN (SELECT json_extract(value,'$.accountId') FROM json_each(?))`, marker, JSON.stringify(batch));
     return rows.length;
   }
   private async runScheduledReducer(run: DurableRun) {

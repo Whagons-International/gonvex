@@ -99,6 +99,8 @@ const PUSH_RETRY_MS = 2000;
 
 export class StubTenantObject extends DurableObject<StubEnv> implements TenantPort {
   private readonly sql: Sql;
+  /** X17f: distinguishes the projection pushes' outbox markers within one millisecond. */
+  private pushes = 0;
 
   constructor(state: DurableObjectState, env: StubEnv) {
     super(state, env);
@@ -120,8 +122,17 @@ export class StubTenantObject extends DurableObject<StubEnv> implements TenantPo
     });
   }
 
-  /** Pushes outbox rows to the control object and deletes what it acknowledged. */
-  private async pushMemberships(): Promise<void> {
+  /**
+   * Pushes outbox rows to the control object and deletes what it acknowledged. One push at a time, as the real tenant
+   * (its alarm): two concurrent pushes would re-stamp each other's rows (X17f markers) and neither ack would hold.
+   */
+  private pushing: Promise<void> = Promise.resolve();
+  private pushMemberships(): Promise<void> {
+    const next = this.pushing.then(() => this.pushMembershipsNow());
+    this.pushing = next.catch(() => undefined);
+    return next;
+  }
+  private async pushMembershipsNow(): Promise<void> {
     const projectId = this.meta("project");
     const tenantId = this.meta("tenant");
     if (!projectId || !tenantId) return;
@@ -130,6 +141,9 @@ export class StubTenantObject extends DurableObject<StubEnv> implements TenantPo
         .all("SELECT account_id,member_id,status,membership_revision FROM _gonvex_control_plane_membership_outbox ORDER BY membership_revision,account_id LIMIT 1000")
         .map((row) => ({ accountId: str(row.account_id), memberId: str(row.member_id), status: str(row.status), membershipRevision: num(row.membership_revision) }));
       if (rows.length === 0) return;
+      // X17f: the ack deletes only rows no write touched during the push (kernel/assembly/tenant.ts projectMemberships).
+      const marker = -(Date.now() * 1024 + (this.pushes++ % 1024));
+      this.sql.run("UPDATE _gonvex_control_plane_membership_outbox SET updated_at=$1 WHERE account_id IN (SELECT json_extract(value,'$.accountId') FROM json_each($2))", marker, JSON.stringify(rows));
       try {
         await this.env.CONTROL.getByName("control").projectMemberships(projectId, tenantId, rows);
       } catch {
@@ -138,7 +152,7 @@ export class StubTenantObject extends DurableObject<StubEnv> implements TenantPo
       }
       this.sql.tx(() => {
         for (const row of rows) {
-          this.sql.run("DELETE FROM _gonvex_control_plane_membership_outbox WHERE account_id=$1 AND membership_revision<=$2", row.accountId, row.membershipRevision);
+          this.sql.run("DELETE FROM _gonvex_control_plane_membership_outbox WHERE account_id=$1 AND updated_at=$2", row.accountId, marker);
         }
       });
     }

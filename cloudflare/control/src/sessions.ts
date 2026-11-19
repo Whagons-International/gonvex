@@ -5,8 +5,9 @@
 import type { Ctx } from "./context";
 import { FANOUT, mapLimit } from "./context";
 import { admitMember } from "./directory";
+import type { Member } from "./types";
 import { invalid } from "./errors";
-import { NOW_MS, json, num, optNum, str } from "./sql";
+import { NOW_MS, json, num, optNum, str, type Row } from "./sql";
 import { randomId, secureToken, sha256Hex } from "./util";
 
 export const ACCESS_TOKEN_MS = 15 * 60 * 1000;
@@ -155,13 +156,41 @@ export function sessionResult(grant: SessionGrant, account: AuthAccount, request
  * routing projection: every candidate is re-admitted against its tenant
  * object, at most 32 RPCs in flight (0012 R15), order kept.
  */
+/**
+ * X17f: last admissions per (project, tenant, account). An entry is used only while the directory row it was admitted
+ * under is unchanged: same member id, membership revision and projection time (`updated_at`). The revision alone is
+ * not complete (#530 review): application Reducers change `role`/`permissions`/`status` without bumping it. The members
+ * trigger queues every update in the tenant's projection outbox, whose push only acks rows no write touched while it
+ * was in flight (kernel/assembly/tenant.ts `projectMemberships`, #530 re-review), and every projection rewrites
+ * `updated_at`. Entries also expire after `ADMISSION_CACHE_TTL_MS`.
+ */
+interface CachedAdmission { readonly member: Member; readonly memberId: string; readonly revision: number; readonly projectedAt: number; readonly at: number }
+const admissionCache = new Map<string, CachedAdmission>();
+const ADMISSION_CACHE_MAX = 4096;
+export const ADMISSION_CACHE_TTL_MS = 30 * 1000;
+/** Test seam. */
+export function clearAdmissionCache(): void { admissionCache.clear(); }
+
+/**
+ * `session_result_from_directory` (control.rs:4001). The directory is only a
+ * routing projection: every candidate is re-admitted against its tenant
+ * object, at most 32 RPCs in flight (0012 R15), order kept.
+ *
+ * X17f: the tenant the session will use (`activeTenantId`: the requested one, else the first candidate) is always
+ * admitted live, falling through to the next candidate when that admission fails, as before. The other entries of
+ * the list may come from `admissionCache`, so an idle tenant is not woken for the sign-in's tenant list (a cold tenant
+ * cost 0.3-1.8 s of the exchange on dev). Residual staleness of those entries: a membership change the tenant has
+ * not projected to Control yet (its outbox push from the tenant alarm, retried every second). `auth` admits the
+ * tenant it enters live, so the cache never grants entry to a tenant.
+ */
 export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, result: Record<string, unknown>): Promise<Record<string, unknown>> {
   const account = (result.account ?? {}) as Record<string, unknown>;
   const accountId = typeof account.id === "string" ? account.id : "";
   const requested = typeof result.activeTenantId === "string" ? result.activeTenantId : "";
   const rows = ctx.sql.all(
     `SELECT tenant.tenant_id,tenant.name,tenant.domain,tenant.timezone,
-            tenant.description,tenant.profile,directory.member_id
+            tenant.description,tenant.profile,directory.member_id,directory.tenant_membership_revision,
+            directory.updated_at AS projected_at
      FROM account_tenant_index directory
      JOIN gonvex_runtime_tenants tenant ON tenant.tenant_id=directory.tenant_id
      WHERE tenant.project_id=$1 AND directory.account_id=$2
@@ -171,17 +200,52 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
     projectId,
     accountId,
   );
-  const admitted = await mapLimit(rows, FANOUT, async (row) => {
+  const keyOf = (row: Row) => `${projectId}\u0000${str(row.tenant_id)}\u0000${accountId}`;
+  const admitLive = async (row: Row): Promise<Member | null> => {
+    const key = keyOf(row);
     try {
-      return (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
+      const member = (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
+      admissionCache.delete(key);
+      admissionCache.set(key, { member, memberId: str(row.member_id), revision: Number(row.tenant_membership_revision ?? -1), projectedAt: Number(row.projected_at ?? -1), at: Date.now() });
+      if (admissionCache.size > ADMISSION_CACHE_MAX) admissionCache.delete(admissionCache.keys().next().value!);
+      return member;
     } catch {
+      admissionCache.delete(key);
       return null;
     }
+  };
+  const fromCache = (row: Row): Member | undefined => {
+    const cached = admissionCache.get(keyOf(row));
+    if (!cached || Date.now() - cached.at > ADMISSION_CACHE_TTL_MS) return undefined;
+    const revision = Number(row.tenant_membership_revision ?? -1), projectedAt = Number(row.projected_at ?? -1);
+    if (revision < 0 || projectedAt < 0 || cached.revision !== revision || cached.projectedAt !== projectedAt) return undefined;
+    if (cached.memberId !== str(row.member_id) || cached.member.id !== str(row.member_id) || cached.member.status !== "active") return undefined;
+    return cached.member;
+  };
+  const matches = (row: Row) => str(row.tenant_id) === requested || str(row.domain).toLowerCase() === requested.toLowerCase();
+  // Candidates for the active tenant, in the order the session would choose them.
+  const preferred = [...rows.filter(matches), ...rows.filter((row) => !matches(row))];
+  // The first candidate is admitted live, alongside the rest of the list (cached or live).
+  const live = new Set<Row>();
+  const admitted = new Map<Row, Member | null>();
+  const results = await mapLimit(rows, FANOUT, async (row) => {
+    if (row === preferred[0]) { live.add(row); return admitLive(row); }
+    const cached = fromCache(row);
+    if (cached) return cached;
+    live.add(row);
+    return admitLive(row);
   });
+  rows.forEach((row, index) => admitted.set(row, results[index]!));
+  let active: Row | undefined;
+  for (const row of preferred) {
+    // Fall through, as before; a candidate served from the cache is admitted live before it becomes the active tenant.
+    if (!live.has(row)) { live.add(row); admitted.set(row, await admitLive(row)); }
+    if (admitted.get(row)) { active = row; break; }
+  }
   const tenants: Array<Record<string, unknown>> = [];
-  rows.forEach((row, index) => {
-    const member = admitted[index];
-    if (!member) return;
+  for (const row of rows) {
+    const member = admitted.get(row);
+    if (!member) continue;
     tenants.push({
       id: str(row.tenant_id),
       name: str(row.name),
@@ -193,9 +257,8 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
       description: str(row.description),
       profile: json(row.profile),
     });
-  });
-  const match = tenants.find((tenant) => tenant.id === requested || String(tenant.domain).toLowerCase() === requested.toLowerCase());
-  return { ...result, tenants, activeTenantId: String((match ?? tenants[0])?.id ?? "") };
+  }
+  return { ...result, tenants, activeTenantId: active ? str(active.tenant_id) : "" };
 }
 
 /** `require_external_signup` (control.rs:3898). */
