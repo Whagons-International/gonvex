@@ -26,6 +26,17 @@ const RECOVERY_BYTES = 8 * 1024 * 1024;
 const MAX_HOSTS = 32 * 64 + 8; // finite automatic fleet plus the legacy pool during deployment skew
 const MAX_PENDING = 256;
 const MAX_RPCS = 8;
+/**
+ * X14: payloads waiting for one holder go in ONE ordered RPC (`deliverReplicaBatch`), up to these bounds. Every
+ * delivery RPC is held by the gateway's output gate until its socket-recovery write is durable (~20-30 ms on dev),
+ * and the channel carries one RPC at a time, so one RPC per snapshot page made a cold load's ~60-90 opens a serial
+ * chain of ~30 ms round trips (X14 report). The batch is applied in order on the holder, item by item, exactly as the
+ * single RPCs were; it only removes the per-page round trip and output-gate wait.
+ */
+export const BATCH_MAX_ITEMS = 64;
+export const BATCH_MAX_BYTES = 8 * 1024 * 1024;
+/** X14 review: a holder that refused the batch method (deployment skew) is tried again with a batch after this. */
+export const SINGLE_ONLY_TTL_MS = 60_000;
 export class DeliveryRecoveryUnsupportedError extends Error {
   readonly code = "GONVEX_DELIVERY_RECOVERY_UNSUPPORTED";
   constructor() { super("holder did not acknowledge whole-holder recovery"); pressureCounts.unsupportedRecoveries++; }
@@ -52,6 +63,8 @@ interface Pending {
   recovery: boolean;
   /** Its credits were returned already: on completion, or (BUG-4b) when its RPC stopped progressing. */
   released?: boolean;
+  /** X14 review: the engine reset its holder for a stall (`abandon`): its work is given up, not just its credits. */
+  abandoned?: boolean;
   enqueued: number;
   resolve(value: ReplicaReceipt | undefined): void;
   reject(error: unknown): void;
@@ -59,8 +72,10 @@ interface Pending {
 interface Queue {
   pending: Pending[];
   running: boolean;
-  /** The item whose RPC is in flight. */
+  /** The first item of the RPC in flight. */
   current?: Pending | undefined;
+  /** X14: every item of the RPC in flight (one, or a batch), in order. */
+  inflight: Pending[];
   /** BUG-4b: ticks of an isolate claim that found this channel's RPC in flight and no completion since the last. */
   stuckTicks: number;
   stuckSeen: number;
@@ -72,8 +87,22 @@ interface Queue {
   drained(): void;
 }
 
+/** X14: one item's outcome in a `deliverReplicaBatch` reply, in request order. A failed item keeps its error's
+ * message, name and code (the engine and its tests tell capacity and protocol errors apart by them). */
+export type ReplicaBatchResult = { readonly receipt: ReplicaReceipt } | { readonly error: string; readonly name?: string; readonly code?: string };
+
+/** The Error a failed batch item rejects with: the holder's message, name and code. */
+export function batchItemError(result: { error: string; name?: string; code?: string }): Error {
+  const error = new Error(result.error) as Error & { code?: string };
+  if (result.name) error.name = result.name;
+  if (result.code !== undefined) error.code = result.code;
+  return error;
+}
+
 export interface ReplicaHolderRpc {
   deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt>;
+  /** X14: the payloads applied in order, each as its own delivery RPC would be; one result per payload. */
+  deliverReplicaBatch?(tenantId: string, payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]>;
   deliverInitialFailures?(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt>;
   deliverReplicaInitial?(tenantId:string,payload:ReplicaDelivery):Promise<ReplicaReceipt>;
 }
@@ -95,6 +124,17 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
 
   protected abstract deliver(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt>;
+  /** X14: whether this placement can send `host` a batch at all (decided before items are taken off its queue). */
+  protected batchable(_host: string): boolean { return false; }
+  /** X14: several payloads in one ordered call; only called when `batchable(host)`. */
+  protected deliverBatch(_host: string, _payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]> { return Promise.reject(new Error("replica batches are not supported by this placement")); }
+  /** X14: holders that answered a batch with workerd's missing-method error (deployment skew), until when they get single RPCs. */
+  private readonly singleOnly = new Map<string, number>();
+  private batching(host: string): boolean {
+    const until = this.singleOnly.get(host);
+    if (until !== undefined && until <= Date.now()) this.singleOnly.delete(host);
+    return until === undefined || until <= Date.now() ? this.batchable(host) : false;
+  }
   abstract hosts(): Promise<string[]>;
 
   private queue(host: string): Queue {
@@ -107,7 +147,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       let drained!: () => void;
       const idle = new Promise<void>(resolve => { drained = resolve; });
       this.queues.set(host, (queue = { pending: [], running: false, stuckTicks: 0, stuckSeen: -1, bytes: 0, rpcMs: 0,
-        recoveryRequired: false, recovery: undefined, idle, drained }));
+        recoveryRequired: false, recovery: undefined, idle, drained, inflight: [] }));
     }
     return queue;
   }
@@ -177,11 +217,11 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       if (!outlet) continue;
       for (const [name, queue] of outlet.queues) {
         const current = queue.current;
-        if (!current || current.recovery || current.released) { queue.stuckTicks = 0; continue; }
+        if (!current || current.recovery || queue.inflight.every(item => item.released)) { queue.stuckTicks = 0; continue; }
         const done = outlet.progress(name);
         if (done === queue.stuckSeen) queue.stuckTicks += 1;
         else { queue.stuckTicks = 1; queue.stuckSeen = done; }
-        if (queue.stuckTicks > threshold) { outlet.release(queue, current); freed = true; }
+        if (queue.stuckTicks > threshold) { for (const item of queue.inflight) outlet.release(queue, item); freed = true; }
       }
     }
     return freed;
@@ -190,7 +230,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   /** BUG-4b: the engine reset `host` for a stall: its in-flight RPC's credits are returned now, not when it settles. */
   abandon(host: string): void {
     const queue = this.queues.get(host);
-    if (queue?.current && !queue.current.recovery) this.release(queue, queue.current);
+    if (queue?.current && !queue.current.recovery) for (const item of queue.inflight) { item.abandoned = true; this.release(queue, item); }
   }
 
   /**
@@ -243,32 +283,74 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       if (queue.running) continue;
       const item = queue.pending.shift();
       if (!item) continue;
-      queue.running = true; credits.running++; queue.current = item;
-      void this.run(host, queue, item);
+      const items = [item];
+      // X14: ordinary payloads queued behind it for the same holder ride the same RPC (never a recovery barrier).
+      if (!item.recovery && queue.pending.length && !queue.pending[0]!.recovery && this.batching(host)) {
+        let bytes = item.bytes;
+        while (items.length < BATCH_MAX_ITEMS && queue.pending.length && !queue.pending[0]!.recovery
+          && bytes + queue.pending[0]!.bytes <= BATCH_MAX_BYTES) {
+          const next = queue.pending.shift()!;
+          bytes += next.bytes; items.push(next);
+        }
+      }
+      queue.running = true; credits.running++; queue.current = item; queue.inflight = items;
+      void this.run(host, queue, items);
       return;
     }
   }
 
-  private async run(host: string, queue: Queue, item: Pending): Promise<void> {
+  private async run(host: string, queue: Queue, items: Pending[]): Promise<void> {
     const started = Date.now();
+    const pressure = (item: Pending) => ({ ...item.payload, pressure: { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs } });
+    let requeue = false;
     try {
-      const receipt = await this.deliver(host, { ...item.payload,
-        pressure: { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs } });
-      if (item.payload.initialFailure && receipt.initialFailureAck !== 1) throw new Error("GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED");
-      if (item.recovery) {
-        if (receipt.recoveryAck !== 1) throw new DeliveryRecoveryUnsupportedError();
-        queue.recoveryRequired = false;
+      if (items.length === 1) {
+        try { this.settle(items[0]!, queue, await this.deliver(host, pressure(items[0]!))); }
+        catch (error) { items[0]!.reject(error); }
+      } else {
+        let results: ReplicaBatchResult[];
+        try { results = await this.deliverBatch(host, items.map(pressure)); }
+        catch (error) {
+          if (!batchUnsupported(error)) throw error;
+          // Deployment skew: the old holder has no batch method, so nothing was applied. Resend singly, in order,
+          // and try a batch again after SINGLE_ONLY_TTL_MS (the holder is likely updated by then).
+          this.singleOnly.set(host, Date.now() + SINGLE_ONLY_TTL_MS);
+          requeue = true;
+          return;
+        }
+        if (!Array.isArray(results) || results.length !== items.length) throw new Error("invalid replica batch receipt");
+        items.forEach((item, index) => {
+          const result = results[index]!;
+          if ("error" in result) { item.reject(batchItemError(result)); return; }
+          try { this.settle(item, queue, result.receipt); } catch (error) { item.reject(error); }
+        });
       }
-      item.resolve(receipt);
-    } catch (error) { item.reject(error); }
+    } catch (error) { for (const item of items) item.reject(error); }
     finally {
       queue.rpcMs = Date.now() - started;
       // X13i: tenant -> holder delivery: wait behind this holder's earlier payload, then the RPC (dev spans only).
-      span("tenant.delivery", { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs });
-      this.completed.set(host, (this.completed.get(host) ?? 0) + 1);
+      // X14: one line per RPC; a batch reports its oldest item's wait and how many payloads it carried.
+      span("tenant.delivery", { queueAgeMs: started - items[0]!.enqueued, rpcMs: queue.rpcMs, items: items.length });
       queue.current = undefined;
-      this.release(queue, item);
-      if (item.recovery) queue.recovery = undefined;
+      queue.inflight = [];
+      if (requeue) {
+        // Items the engine meanwhile gave up on (a recovery barrier was set or is queued, or `abandon` reset the
+        // holder for a stall) are settled as discarded, as `discard` settles pending work. Items whose credits a
+        // claim tick only returned early (BUG-4b, no engine reset) are still owed: they go back, in order.
+        const discarded = queue.recoveryRequired || queue.recovery !== undefined;
+        const back: Pending[] = [];
+        for (const item of items) {
+          if (discarded || item.abandoned) { this.release(queue, item); item.resolve(undefined); }
+          else back.push(item);
+        }
+        queue.pending.unshift(...back);
+      } else {
+        this.completed.set(host, (this.completed.get(host) ?? 0) + 1);
+        for (const item of items) {
+          this.release(queue, item);
+          if (item.recovery) queue.recovery = undefined;
+        }
+      }
       queue.running = false; credits.running--;
       if (!queue.pending.length) {
         this.settleEmpty(host, queue);
@@ -280,6 +362,16 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       if ([...this.queues.values()].some(q => q.pending.length && !q.running)) ready.add(this);
       OrderedOutlet.schedule();
     }
+  }
+
+  /** One item's receipt: the checks a single delivery RPC's receipt gets. Throws to reject the item. */
+  private settle(item: Pending, queue: Queue, receipt: ReplicaReceipt): void {
+    if (item.payload.initialFailure && receipt.initialFailureAck !== 1) throw new Error("GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED");
+    if (item.recovery) {
+      if (receipt.recoveryAck !== 1) throw new DeliveryRecoveryUnsupportedError();
+      queue.recoveryRequired = false;
+    }
+    item.resolve(receipt);
   }
 
   private release(queue: Queue, item: Pending): void {
@@ -300,7 +392,8 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
   queued(host: string): number {
     const queue = this.queues.get(host);
-    return queue ? queue.pending.length + Number(queue.running) : 0;
+    // Items, not RPCs: a batch in flight counts every payload it carries (#453/#473 deferral bound).
+    return queue ? queue.pending.length + (queue.running ? Math.max(1, queue.inflight.length) : 0) : 0;
   }
   backlogged(host: string): boolean {
     const queue = this.queues.get(host);
@@ -346,6 +439,14 @@ export class GatewayOutlet extends OrderedOutlet {
     return this.gateway(host).deliverReplica(this.tenantId, payload);
   }
 
+  protected override batchable(host: string): boolean {
+    return typeof this.gateway(host).deliverReplicaBatch === "function";
+  }
+
+  protected override deliverBatch(host: string, payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]> {
+    return this.gateway(host).deliverReplicaBatch!(this.tenantId, payloads);
+  }
+
   hosts(): Promise<string[]> {
     return this.registered();
   }
@@ -374,6 +475,14 @@ export class LocalOutlet extends OrderedOutlet {
   async hosts(): Promise<string[]> {
     return this.names();
   }
+}
+
+/** X14: the holder's Worker version predates `deliverReplicaBatch` (Workers RPC: the receiver does not implement it). */
+export function batchUnsupported(error: unknown): boolean {
+  const message = String((error as Error | undefined)?.message ?? error);
+  // workerd's wording for a method the receiving class does not define. workerd 1.20261023 says
+  // 'The RPC receiver does not implement "deliverReplicaBatch".'; other versions add "the method".
+  return /does not implement (the method )?"deliverReplicaBatch"/.test(message);
 }
 
 /** Conservative text/copy credits (UTF16 plus two worst-case UTF8 copies), no second JSON encoding of the delivery payload. */

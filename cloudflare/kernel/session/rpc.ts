@@ -10,6 +10,7 @@ import type { PresenceDelivery, PresenceReceipt } from "../presence/tenant";
 import type { ServiceTenantCall, ServiceTenantOutcome } from "../principals/frames";
 import type { ServiceGrant } from "../principals/grant";
 import type { ReplicaDelivery, ReplicaReceipt } from "../delivery/protocol";
+import type { ReplicaBatchResult } from "../delivery/outlet";
 import type {
   Impersonation, Member, ModuleInfo, Outcome, RevalidationItem, SessionIdentity, SocketView, TenantRoute, TenantSession,
 } from "./ports";
@@ -22,6 +23,7 @@ export interface GatewayRpc {
   presence(delivery: PresenceDelivery): Promise<PresenceReceipt>;
   presenceConnections(tenantId: string): Promise<ConnectionReport[]>;
   deliverReplica(tenantId: string, payload: ReplicaDelivery): Promise<ReplicaReceipt>;
+  deliverReplicaBatch(tenantId: string, payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]>;
   liveConnections(connectionIds: string[]): Promise<string[]>;
 }
 
