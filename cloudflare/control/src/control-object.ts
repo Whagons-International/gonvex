@@ -448,7 +448,9 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
    * every `controlChanged`/`presenceChanged` arrives at depth 1, which lets the gateway treat it as a bounded notice
    * and launch its refreshes at once (gateway call at 2, Control query at 3) instead of waiting for its own alarm.
    * Notices are coalesced per watcher and project; a failed send is retried with backoff instead of unregistering
-   * the watcher, which is dropped only after `NOTICE_ATTEMPTS` failures in a row.
+   * the watcher, which is dropped only after `NOTICE_ATTEMPTS` failures in a row. The outbox is in memory: a Control
+   * reset drops queued notices, as the old in-place sends were lost; a gateway refreshes all its sessions when its
+   * alarm sees a new Control instance (`refreshControlWatches`).
    */
   private readonly outbox = new Map<string, PendingNotice>();
   private noticeAlarmAt: number | undefined;
@@ -467,7 +469,8 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
   private armNotices(at: number): void {
     if (this.noticeAlarmAt !== undefined && this.noticeAlarmAt <= at) return;
     this.noticeAlarmAt = at;
-    void this.ctx.storage.setAlarm(at, { allowUnconfirmed: true }).catch((error) => console.error("control: notice alarm failed", error));
+    // Never later than a duty already due earlier (prune, operator socket ticks; #532 re-review): setAlarm replaces it.
+    void this.ctx.storage.setAlarm(Math.min(at, this.nextAlarmAt()), { allowUnconfirmed: true }).catch((error) => console.error("control: notice alarm failed", error));
   }
 
   /** Sends every due notice now. Call only synchronously at the start of the alarm (see `outbox`). */

@@ -559,3 +559,26 @@ describe("review #532: one slow watcher does not hold back every other watcher's
     expect(Date.now() - second).toBeLessThan(1000);
   });
 });
+
+describe("review #532 (e80f28e6): a notice retry never postpones an alarm that is already armed earlier", () => {
+  it("noticeFailed's backoff alarm does not move the prune / the operator's socket tick later", async () => {
+    type Internals = { noticeFailed(key: string, pending: unknown, projectId: string, kind: "control" | "presence", error: unknown): void };
+    const owners = env.CONTROL_SOCKETS as unknown as DurableObjectNamespace;
+    const stub = env.CONTROL.getByName(unique("r532b-control")) as DurableObjectStub<ControlObject>;
+    const id = owners.idFromName(unique("r532b-owner"));
+    const project = unique("r532b-project");
+    await stub.watch(project, "CONTROL_SOCKETS", id.toString());
+    await runInDurableObject(stub, async (instance: ControlObject, state) => {
+      // An earlier duty is armed: here the prune in 2 s; on the operator Control, a logs socket tick in 500 ms.
+      const due = Date.now() + 2_000;
+      state.storage.kv.put("k19/prune-due", due);
+      await instance.armAlarm();
+      expect(await state.storage.getAlarm()).toBe(due);
+      // A send from the last alarm fails for the 3rd time in a row: its retry is due in 250 * 4^2 = 4 s.
+      const pending = { binding: "CONTROL_SOCKETS", name: id.toString(), projects: new Map([[project, "control"]]), attempts: 2, dueAt: 0 };
+      (instance as unknown as Internals).noticeFailed(`CONTROL_SOCKETS:${id.toString()}`, pending, project, "control", new Error("transient"));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(await state.storage.getAlarm()).toBeLessThanOrEqual(due);
+    });
+  });
+});
