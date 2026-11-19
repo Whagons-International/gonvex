@@ -17,7 +17,7 @@ import { replicaModule, type ReplicaModule } from "./definition.ts";
 import { ReplicaDeliveryEngine } from "./engine.ts";
 import { openReplica, resolveCollection, sqlOf } from "./subscription.ts";
 import { readClock } from "./log.ts";
-import { scanPlan } from "./scan.ts";
+import { scanPlan, scanWindow } from "./scan.ts";
 import { GatewayOutlet, type ReplicaHolderRpc } from "./outlet.ts";
 import { keepAliveCheck, SubscriberKeepAlive } from "./keepalive.ts";
 
@@ -86,7 +86,7 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
    * "none" (the loop only), "resolve" (clock, visibility resolution, scan plan) or "open" (the whole open, frames
    * discarded, nothing installed). The caller reads each call's CPU from Workers Logs.
    */
-  async devOpenCost(phase: "none" | "resolve" | "open", rounds = 1, only?: string[]): Promise<{ paths: number; frames: number; errors: number; failed?: string }> {
+  async devOpenCost(phase: "none" | "resolve" | "open" | "light" | "scan", rounds = 1, only?: string[]): Promise<{ paths: number; frames: number; errors: number; failed?: string }> {
     if ((this.env as { GONVEX_SPAN_TIMING?: string }).GONVEX_SPAN_TIMING !== "1") throw new Error("dev profiling is disabled");
     const module = this.replicaModule();
     const active = this.kernel.module;
@@ -114,6 +114,17 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
         if (!plan) { errors++; continue; }
         const context = { session, module, sumNegotiated: true, paged: true, scope: "dev", visibilityScope: "dev", registry: this.delivery.registry, read,
           emit: (out: string[]) => { frames += out.length; if (out.some((f) => f.includes('"replica.error"'))) errors++; }, drain: async () => {} };
+        if (phase === "light" || phase === "scan") {
+          try {
+            const scan = await read((db) => {
+              const clock = readClock(sqlOf(db));
+              const resolved = resolveCollection(db, context, definition, plan, clock.revision);
+              return scanPlan(definition, plan, resolved, {}, db.catalogOf(definition.table).columns);
+            });
+            await scanWindow(read, definition, scan, () => { frames++; }, { chunkBytes: 2 << 20, light: phase === "light" });
+          } catch (error) { errors++; failed ??= `${path}: ${String((error as Error)?.message ?? error).slice(0, 200)}`; }
+          continue;
+        }
         if (phase === "resolve") {
           try {
             await read((db) => {
