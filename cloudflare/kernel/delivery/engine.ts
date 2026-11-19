@@ -35,6 +35,11 @@ import { openReplica, sqlOf, type OpenRequest, type Subscription } from "./subsc
 export const OPEN_BATCH_LIMIT = 256;
 /** Opens waiting in one tenant object (Rust: process-wide admission, `GONVEX_REPLICA_OPEN_MAX_WAITING`). */
 export const MAX_WAITING_OPENS = 4096;
+/** X17c: opens between yields while a holder has pages waiting. */
+export const OPEN_STREAM_EVERY = 4;
+/** X17c: one macrotask, so the outlet's RPC completions (and other requests) are delivered to the object. */
+const yieldToEvents = (): Promise<void> => new Promise((resolve) => { globalThis.setTimeout(resolve, 0); });
+
 /** X17: the same socket work without its watermark certificate (a reply sent ahead of its holder's backlog). */
 function withoutWatermark(work: SocketWork): SocketWork {
   if (work.watermark === undefined) return work;
@@ -644,6 +649,8 @@ export class ReplicaDeliveryEngine {
 
   /** A wake that arrived while the loop was finishing; the loop runs once more (BUG-4: a holder's room signal). */
   private again = false;
+  /** X17c: opens run since the loop last yielded to the event loop. */
+  private opensSinceYield = 0;
 
   private kick(): void {
     if (this.running) { this.again = true; return; }
@@ -668,6 +675,15 @@ export class ReplicaDeliveryEngine {
       const next = this.nextOpen();
       if (next) {
         await this.options.serial(() => this.processOpen(next.connection, next.request));
+        // X17c: an open's reads are synchronous, so a cohort of opens never returned to the event loop: the outlet
+        // learned of its RPC completions only after the last open, and the pages left in one burst at the end (-12:
+        // 67 opens, pages 5.1-5.8 s), which the client then persisted serially (~2 s). When this holder has pages
+        // waiting behind an RPC in flight, the loop yields one macrotask every OPEN_STREAM_EVERY opens so they stream.
+        // Warm loads (hash checks, little output) rarely meet the condition (an unconditional yield cost them 0.3-1 s).
+        if (this.waitingOpens > 0 && ++this.opensSinceYield >= OPEN_STREAM_EVERY && this.options.outlet.queued(next.connection.host) >= 2) {
+          this.opensSinceYield = 0;
+          await yieldToEvents();
+        }
         continue;
       }
       if (this.delivered !== undefined && this.wanted <= this.delivered.revision) return;
