@@ -1,4 +1,4 @@
-# 0092: run a socket's interactive agent Action in the tenant object's isolate (proposal, needs lead decision)
+# 0094: run a socket's interactive agent Action in the tenant object's isolate (proposal, needs lead decision)
 
 Status: **proposed** by X13f (2026-11-19). It changes 0016 G0-8 ("Actions run in the Action Worker") for one
 path only. Nothing is implemented. This note asks for a decision.
