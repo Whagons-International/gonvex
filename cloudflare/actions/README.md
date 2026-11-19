@@ -66,6 +66,12 @@ direct action.call (K05/K07) ─► ActionWorker.call ─┬─ standard / publi
   runner dies, its lease expires and the sweep hands the run to a Workflow; if the run throws,
   `releaseCall` hands it to a Workflow at once. An older tenant without `startCall` gets the Workflow
   hand-off as before. `kernel/assembly/test/x13-latency.spec.ts` measures it.
+- **Per-tenant ActionHost (X13g, 0094 B).** A socket's `profile: "agent"` Action runs in the tenant's
+  ActionHost (`src/host.ts`), a DO in this script held resident while the tenant has live subscribers. One
+  host serializes a tenant's agent-Action CPU, and an overrun or an Actions deploy resets it and fails that
+  tenant's in-flight agent Actions (each still at most once, via the X13b sweep). A host call whose run
+  never started (the tenant records `startCall` by owner token) falls back to the stateless ActionWorker,
+  e.g. after a rollback to a script without ActionHost. Deploy notes: 0094 "Operational consequences".
 - **Cold isolates (X13b).** The generated Actions catalog loads a project's manifest and its code separately,
   and the registry installs the code as a loader (`ModuleExportsSource`). So reading contracts never
   evaluates an app; an inline agent call on a cold isolate evaluates the bundle (Whagons: ~350-450 ms

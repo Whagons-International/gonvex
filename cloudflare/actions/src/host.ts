@@ -20,13 +20,16 @@ import { KEEPALIVE_CHECK_MS } from "../../kernel/delivery/keepalive";
 import { prewarm, serveCall, type ActionEnv, type DirectCall } from "./worker.js";
 import type { ActionReport } from "./runtime.js";
 
-export interface HoldRequest { v: 1; projectId: string; tenantId: string }
+export interface HoldRequest { v: 1; projectId: string; tenantId: string; /** X13g review: newer wins; absent = legacy, always applied. */ generation?: number }
+export interface ReleaseRequest { v: 1; generation?: number }
 export interface HoldReply { v: 1; held: boolean; warm: boolean }
 
 interface TenantWant { actionHostWanted(): Promise<boolean> }
 
 export class ActionHost extends DurableObject<ActionEnv> {
   private held: HoldRequest | undefined;
+  /** The newest hold/release generation applied: an older (reordered) one is ignored. */
+  private generation = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   /** Test and operator view: module evaluations requested by prewarm (not by calls). */
   private prewarms = 0;
@@ -41,6 +44,7 @@ export class ActionHost extends DurableObject<ActionEnv> {
 
   /** The tenant gained a live subscriber: stay resident, and evaluate the module now. */
   async hold(request: HoldRequest): Promise<HoldReply> {
+    if (this.stale(request.generation)) return { v: 1, held: this.held !== undefined, warm: false };
     this.held = request;
     this.arm();
     let warm = false;
@@ -50,7 +54,20 @@ export class ActionHost extends DurableObject<ActionEnv> {
   }
 
   /** The tenant's last subscriber went: let the object hibernate. */
-  async release(): Promise<{ v: 1; held: false }> {
+  async release(request?: ReleaseRequest): Promise<{ v: 1; held: boolean }> {
+    if (this.stale(request?.generation)) return { v: 1, held: this.held !== undefined };
+    return this.letGo();
+  }
+
+  /** True for a reordered hold/release older than one already applied; records a newer one. */
+  private stale(generation: number | undefined): boolean {
+    if (generation === undefined) return false;
+    if (generation <= this.generation) return true;
+    this.generation = generation;
+    return false;
+  }
+
+  private letGo(): { v: 1; held: false } {
     this.held = undefined;
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
@@ -78,7 +95,7 @@ export class ActionHost extends DurableObject<ActionEnv> {
       wanted = await tenant.actionHostWanted();
     } catch { wanted = false; }
     if (this.held !== held) return;
-    if (wanted) this.arm(); else await this.release();
+    if (wanted) this.arm(); else this.letGo();
   }
 }
 

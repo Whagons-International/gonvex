@@ -88,3 +88,40 @@ it('X13g limits: the host applies the same capability checks; standard Actions k
  expect(JSON.parse((await object.dispatch(socket, { type: 'action.call', id: 'std', path: 'probe.noop', args: {} }))[0]!)).toMatchObject({ type: 'action.result', result: null });
  expect(await host(state.id.name!).hostState()).toEqual(before);
 }));
+
+// Review of #509 (a): the fallback follows evidence (did the run start here?), not an error message.
+function withHost(object: CompositionTenant, host: Record<string, unknown>) {
+ (object as unknown as { env: Record<string, unknown> }).env = { ...(object as unknown as { env: Record<string, unknown> }).env, ACTION_HOST: { getByName: () => host } };
+}
+
+it('X13g review (a): a host that fails before starting the run (e.g. an Actions script rolled back without ActionHost) falls back to the ActionWorker', async () => fixture(async (object, state) => {
+ withHost(object, { call: async () => { throw new Error('Durable Object class "ActionHost" is not exported by script gonvex-cf-dev-k22-actions'); }, hold: async () => ({}), release: async () => ({}) });
+ const replies = await object.dispatch(view(state.id.name!), { type: 'action.call', id: 'rolled-back', path: 'probe.agentNoop', args: {} });
+ expect(replies.map((r) => JSON.parse(r))).toEqual([{ type: 'action.result', id: 'rolled-back', path: 'probe.agentNoop', result: null }]);
+ for (let i = 0; i < 100 && runs(state).some((r) => r.state !== 'done'); i++) await new Promise((r) => setTimeout(r, 10)); // completion follows the reply (X13b)
+ expect(runs(state).map((r) => [r.state, r.attempts])).toEqual([['done', 1]]); // one run, by the ActionWorker
+}));
+
+it('X13g review (a): a host that fails after its run started is not retried (the Action runs at most once)', async () => fixture(async (object, state) => {
+ withHost(object, { call: async (input: { session: unknown; path: string; args: unknown; inlineOwner: string }) => {
+  await object.startCall({ v: 1, session: input.session as never, path: input.path, args: input.args, owner: input.inlineOwner });
+  throw new Error('Durable Object reset because its code was updated');
+ }, hold: async () => ({}), release: async () => ({}) });
+ await expect(object.dispatch(view(state.id.name!), { type: 'action.call', id: 'reset', path: 'probe.agentNoop', args: {} })).rejects.toThrow('reset');
+ // Exactly one run: started by the host, left for the X13b sweep; no second run by the ActionWorker.
+ expect(runs(state).map((r) => [r.state, r.attempts, r.dispatch_count])).toEqual([['live', 1, 0]]);
+}));
+
+it('X13g review (c): a reordered older release cannot drop a newer hold', async () => fixture(async (object, state) => {
+ const stub = (bindings.ACTION_HOST as unknown as { getByName(n: string): { hold(r: unknown): Promise<unknown>; release(r?: unknown): Promise<unknown>; hostState(): Promise<HostState> } }).getByName(state.id.name!);
+ await stub.hold({ v: 1, projectId: 'p', tenantId: state.id.name!, generation: 5 });
+ await stub.release({ v: 1, generation: 4 }); // sent before the hold, delivered after it
+ expect(await stub.hostState()).toMatchObject({ held: true, holding: true });
+ await stub.hold({ v: 1, projectId: 'p', tenantId: state.id.name!, generation: 3 }); // stale hold changes nothing either
+ await stub.release({ v: 1, generation: 6 });
+ expect(await stub.hostState()).toMatchObject({ held: false, holding: false });
+ // A legacy caller without generations still works.
+ await stub.hold({ v: 1, projectId: 'p', tenantId: state.id.name! });
+ await stub.release();
+ expect(await stub.hostState()).toMatchObject({ held: false });
+}));

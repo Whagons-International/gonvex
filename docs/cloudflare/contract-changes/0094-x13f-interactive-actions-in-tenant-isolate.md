@@ -96,3 +96,14 @@ So **(b)'s CF-specific excess is about 120 ms of durable-write latency, a platfo
 - the number of storage writes in the create's commit, if the gate scales with them (unmeasured).
 
 **Not cuttable:** the platform's replicated durability.
+
+
+## Operational consequences (X13g, review of #509)
+
+- **One host per tenant.** All of a tenant's socket agent Actions share one ActionHost: one isolate, one event loop. They run concurrently while waiting on I/O (provider calls, tool calls), but their CPU is serialized. Before X13g, the platform could spread concurrent stateless invocations across isolates.
+- **A reset fails every in-flight agent Action of that tenant.** That covers an Action exceeding the CPU or memory limit, and a deploy of the Actions script, which resets every ActionHost. Before, only the offending invocation died, and a stateless invocation finished on the old version across a deploy.
+  - Each failed run still runs at most once. Its run is ended by the X13b lease sweep ("Action runner stopped before its outcome was recorded"), and the socket sees that error or a closed socket.
+  - Outbox and scheduled Actions (Workflows) are unaffected.
+- **Deploy order stays Actions, then runtime** (`deploy.mjs`). Deploy the Actions script when few agent Actions are in flight. Its deploy cuts in-flight interactive agent Actions on every tenant.
+- **Rollback.** If the Actions script is rolled back to a version without ActionHost, the tenant falls back to the stateless ActionWorker for every call whose run never started. The tenant records each host run's `startCall` (by owner token), so this does not depend on the error text.
+- **Hold ordering.** `hold` and `release` carry a generation that increases monotonically and is time-based across tenant restarts. A reordered older message is ignored, so a stale `release` cannot drop a newer `hold`.

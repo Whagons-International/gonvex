@@ -170,6 +170,11 @@ export interface DirectCall {
   allowInternal?: boolean;
   /** K18 provider/share requests await the actual result, including agent Actions. */
   inline?: boolean;
+  /**
+   * X13g review: the inline run's owner, chosen by the caller (the tenant), so the caller can tell
+   * whether a failed host call started a run (and must not be retried) or never did.
+   */
+  inlineOwner?: string;
 }
 
 export class ActionWorker extends WorkerEntrypoint<ActionEnv> {
@@ -198,7 +203,8 @@ export async function serveCall(env: ActionEnv, waitUntil: (work: Promise<unknow
     // ends it (X13b).
     let claim: Awaited<ReturnType<TenantStub["startCall"]>>;
     try {
-      claim = await startInline(tenant, { ...request, owner: `inline:${crypto.randomUUID()}` }, active?.engine);
+      const owner = typeof input.inlineOwner === "string" && input.inlineOwner.startsWith("inline:") ? input.inlineOwner : `inline:${crypto.randomUUID()}`;
+      claim = await startInline(tenant, { ...request, owner }, active?.engine);
     } catch (error) {
       // Deploy skew: an older tenant object has no `startCall`. Hand the call to a Workflow as before.
       if (!/does not implement the method/i.test(String((error as Error)?.message ?? error))) throw error;

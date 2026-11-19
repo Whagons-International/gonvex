@@ -160,6 +160,9 @@ export async function deployAssembly({ name, directory, images, secrets = {}, pu
   const rootSecrets = { GONVEX_STORAGE_SECRET: storageSecret, ...secrets, GONVEX_RELEASE_BUILDER_TOKEN: token };
   for (const [key, value] of Object.entries(rootSecrets)) await api(`/workers/scripts/${name}/secrets`, { method: 'PUT', body: { name: key, text: value, type: 'secret_text' } });
   if(!existing){const runtimeBootstrap={...configs.runtime.config,services:[],workflows:[]};const path=join(directory,'runtime-bootstrap.json');await writeFile(path,JSON.stringify(runtimeBootstrap),{mode:0o600});await deployConfig(['deploy','--config',path],credentials,directory);}
+  // X13g (0094 B): the Actions script (which defines ActionHost) deploys before the runtime that binds it.
+  // Deploying it resets every tenant's ActionHost and fails in-flight interactive agent Actions (each at most
+  // once, via the X13b sweep); see 0094 "Operational consequences".
   for (const kind of ['sandbox', 'actions', 'runtime', 'builder']) await deployConfig(['deploy', '--config', configs[kind].path, '--keep-vars'], credentials, directory);
   for (const kind of ['runtime', 'actions', 'sandbox']) await api(`/workers/scripts/${name}-${kind}/secrets`, { method: 'PUT', body: { name: 'GONVEX_STORAGE_SECRET', text: rootSecrets.GONVEX_STORAGE_SECRET, type: 'secret_text' } });
   for(const [key,value]of Object.entries(rootSecrets))if(key.startsWith('GONVEX_DEV_TRANSFER_'))await api(`/workers/scripts/${name}-runtime/secrets`,{method:'PUT',body:{name:key,text:value,type:'secret_text'}});
