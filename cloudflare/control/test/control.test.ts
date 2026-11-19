@@ -396,8 +396,10 @@ describe("idempotency receipts expire after 24 h (0012 R9)", () => {
     );
     const expired = await client.call("action.call", "control.auth.passwordLogin", { email: seeded.members.ivy!.email, password: "wrong-password-1" }, "fixed-key");
     expect(expired.error).toBe("invalid arguments: invalid email or password");
-    await runInDurableObject(control(), async (instance: ControlObject) => {
+    await runInDurableObject(control(), async (instance: ControlObject, state) => {
       instance.sql.run("INSERT INTO gonvex_control_idempotency(project_id,subject_id,idempotency_key,kind,path,created_at) VALUES('p','s','old','action','x',1)");
+      // X17e: notice alarms of earlier tests may have pruned already; the next prune is due now.
+      state.storage.kv.delete("k19/prune-due");
       await instance.alarm();
       expect(instance.sql.value("SELECT count(*) FROM gonvex_control_idempotency WHERE idempotency_key='old'")).toBe(0);
     });
@@ -433,5 +435,97 @@ describe("router", () => {
     expect(config.headers.get("access-control-allow-origin")).toBe("*");
     void dev;
     void unique;
+  });
+});
+
+describe("X17e: Control notifications leave from Control's alarm (#529 review)", () => {
+  type Internals = {
+    notify(projectId: string): void;
+    outbox: Map<string, { projects: Map<string, string>; attempts: number; dueAt: number; binding: string; name: string }>;
+    noticeFailed(key: string, pending: unknown, projectId: string, kind: "control" | "presence", error: unknown): void;
+    watchersFor(projectId: string): Map<string, { binding: string; name: string }>;
+  };
+  type Owner = { fixtureNotices(fail?: number): Promise<string[]> };
+  const owners = env.CONTROL_SOCKETS as unknown as DurableObjectNamespace;
+  async function setup() {
+    const stub = env.CONTROL.getByName(unique("x17e-control")) as DurableObjectStub<ControlObject>;
+    const id = owners.idFromName(unique("x17e-owner"));
+    const owner = owners.get(id) as unknown as Owner;
+    const project = unique("x17e-project");
+    await stub.watch(project, "CONTROL_SOCKETS", id.toString());
+    return { stub, owner, project, key: `CONTROL_SOCKETS:${id.toString()}` };
+  }
+  async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, ms = 4000): Promise<T> {
+    const end = Date.now() + ms;
+    for (;;) {
+      const value = await read();
+      if (done(value) || Date.now() > end) return value;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  it("a write's notification is queued, coalesced per watcher and project, and sent by the alarm", async () => {
+    const { stub, owner, project } = await setup();
+    await runInDurableObject(stub, async (instance: ControlObject, state) => {
+      const internals = instance as unknown as Internals;
+      internals.notify(project);
+      internals.notify(project);
+      internals.notify(project);
+      // Nothing is sent in place: one pending notice, and the alarm is armed for now.
+      expect([...internals.outbox.values()].map((pending) => [...pending.projects.entries()])).toEqual([[[project, "control"]]]);
+      expect((await state.storage.getAlarm())!).toBeLessThanOrEqual(Date.now());
+    });
+    expect(await until(() => owner.fixtureNotices(), (log) => log.length > 0)).toEqual([project]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(await owner.fixtureNotices()).toEqual([project]);
+    await runInDurableObject(stub, (instance: ControlObject) => { expect((instance as unknown as Internals).outbox.size).toBe(0); });
+  });
+
+  it("a failed notification is retried from the alarm and the watcher stays registered", async () => {
+    const { stub, owner, project, key } = await setup();
+    await owner.fixtureNotices(1);
+    await runInDurableObject(stub, (instance: ControlObject) => { (instance as unknown as Internals).notify(project); });
+    expect(await until(() => owner.fixtureNotices(), (log) => log.length >= 2)).toEqual([`fail:${project}`, project]);
+    await runInDurableObject(stub, (instance: ControlObject) => {
+      const internals = instance as unknown as Internals;
+      expect(internals.watchersFor(project).has(key)).toBe(true);
+      expect(internals.outbox.size).toBe(0);
+    });
+  });
+
+  it("backs off between retries and unregisters the watcher only after NOTICE_ATTEMPTS failures in a row", async () => {
+    const { stub, project, key } = await setup();
+    await runInDurableObject(stub, (instance: ControlObject) => {
+      const internals = instance as unknown as Internals;
+      const pending = (attempts: number) => ({ binding: "CONTROL_SOCKETS", name: key.slice("CONTROL_SOCKETS:".length), projects: new Map([[project, "control"]]), attempts, dueAt: 0 });
+      const before = Date.now();
+      internals.noticeFailed(key, pending(0), project, "control", new Error("transient"));
+      const retry = internals.outbox.get(key)!;
+      expect(retry.attempts).toBe(1);
+      expect(retry.dueAt).toBeGreaterThanOrEqual(before + 250);
+      internals.outbox.delete(key);
+      internals.noticeFailed(key, pending(2), project, "control", new Error("transient"));
+      expect(internals.outbox.get(key)!.dueAt).toBeGreaterThanOrEqual(before + 250 * 16);
+      expect(internals.watchersFor(project).has(key)).toBe(true);
+      internals.outbox.delete(key);
+      internals.noticeFailed(key, pending(5), project, "control", new Error("gone"));
+      expect(internals.outbox.has(key)).toBe(false);
+      expect(internals.watchersFor(project).has(key)).toBe(false);
+    });
+  });
+
+  it("an alarm armed only for notices does not prune early", async () => {
+    const { stub, owner, project } = await setup();
+    await runInDurableObject(stub, (instance: ControlObject, state) => {
+      state.storage.kv.put("k19/prune-due", Date.now() + 3_600_000);
+      instance.sql.run("INSERT INTO gonvex_control_idempotency(project_id,subject_id,idempotency_key,kind,path,created_at) VALUES('p','s','x17e-old','action','x',1)");
+      (instance as unknown as Internals).notify(project);
+    });
+    expect(await until(() => owner.fixtureNotices(), (log) => log.length > 0)).toEqual([project]);
+    await runInDurableObject(stub, async (instance: ControlObject, state) => {
+      expect(instance.sql.value("SELECT count(*) FROM gonvex_control_idempotency WHERE idempotency_key='x17e-old'")).toBe(1);
+      // The next alarm is the hourly prune again.
+      expect((await state.storage.getAlarm())!).toBeGreaterThan(Date.now() + 3_000_000);
+    });
   });
 });

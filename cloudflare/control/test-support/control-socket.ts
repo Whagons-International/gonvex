@@ -133,8 +133,18 @@ export class ControlSocketObject extends DurableObject<SocketEnv> {
     });
   }
 
+  /** X17e tests: the notifications this object received, and how many of the next ones fail. */
+  private readonly noticeLog: string[] = [];
+  private failNotices = 0;
+  async fixtureNotices(fail?: number): Promise<string[]> {
+    if (fail !== undefined) this.failNotices = fail;
+    return [...this.noticeLog];
+  }
+
   /** `RuntimeEvent::ControlChanged` for this socket's project. */
   async controlChanged(projectId: string): Promise<void> {
+    if (this.failNotices > 0) { this.failNotices--; this.noticeLog.push(`fail:${projectId}`); throw new Error("fixture notice failure"); }
+    this.noticeLog.push(projectId);
     this.enqueue(async () => {
       if (projectId === this.connection.projectId) for (const message of await this.refresh("control-change")) this.send(message);
     });

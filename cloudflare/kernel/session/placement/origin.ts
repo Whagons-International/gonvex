@@ -28,7 +28,13 @@
 
 import { span } from "../../delivery/spans";
 
-export type InboundKind = "fresh" | "peer";
+/**
+ * `fresh`: a platform event (depth 0); it releases waiting calls. `notice`: a request that is known to arrive at a
+ * bounded depth (X17e: Control sends `controlChanged`/`presenceChanged` only from its alarm, so they arrive at depth
+ * 1). A call launched while a notice is the front is bounded too, but a notice releases nothing that waits: only calls
+ * made while it is the front (its own refreshes) launch under it. `peer`: anything else.
+ */
+export type InboundKind = "fresh" | "notice" | "peer";
 
 interface Entry { readonly fresh: boolean; running: boolean }
 
@@ -88,13 +94,13 @@ export class CallOrigin {
     this.maxWaitMs = options.maxWaitMs ?? ORIGIN_MAX_WAIT_MS;
   }
 
-  /** A platform-delivered request starts. A fresh one releases waiting calls in this turn. */
+  /** A platform-delivered request starts. A fresh one releases waiting calls in this turn; a notice does not. */
   enter(kind: InboundKind): Entry {
     // Every finished entry now has a newer request: the platform has let it go.
     this.entries = this.entries.filter((entry) => entry.running);
-    const entry: Entry = { fresh: kind === "fresh", running: true };
+    const entry: Entry = { fresh: kind !== "peer", running: true };
     this.entries.push(entry);
-    if (entry.fresh) {
+    if (kind === "fresh") {
       this.woken = false;
       this.flush();
     }
@@ -256,6 +262,9 @@ export function gatedEnv<E extends object>(env: E, origin: CallOrigin): E {
 /** Platform events that start a new call chain. */
 export const FRESH_ENTRIES: ReadonlySet<string> = new Set(["fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError"]);
 
+/** X17e: Control's notifications, sent only from Control's alarm (depth 1). See `InboundKind`. */
+export const NOTICE_ENTRIES: ReadonlySet<string> = new Set(["controlChanged", "presenceChanged"]);
+
 const WRAPPED = Symbol("gonvex.origin.wrapped");
 type Wrapped = ((this: any, ...args: unknown[]) => unknown) & { [WRAPPED]?: (...args: unknown[]) => unknown };
 
@@ -283,7 +292,7 @@ export function trackEntries(
     const found = (proto as Record<string, Wrapped>)[name]!;
     const original = found[WRAPPED] ?? found;
     const custom = override?.(name, original);
-    const kind: InboundKind = FRESH_ENTRIES.has(name) ? "fresh" : "peer";
+    const kind: InboundKind = FRESH_ENTRIES.has(name) ? "fresh" : NOTICE_ENTRIES.has(name) ? "notice" : "peer";
     const wrapper: Wrapped = custom ?? function (this: unknown, ...args: unknown[]) {
       const origin = originOf(this as object);
       if (!origin) return original.apply(this, args);

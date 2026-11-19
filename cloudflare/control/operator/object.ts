@@ -41,8 +41,6 @@ export interface OperatorObjectEnv extends ControlEnv, OperatorEnv {
   GONVEX_RELEASE_BUILDER_TOKEN?: string;
 }
 
-const PRUNE_DUE_KEY = "k19/prune-due";
-const PRUNE_EVERY_MS = 60 * 60 * 1000;
 
 /** The operator identity the admin key acts as (`OperatorAuth`). */
 const ADMIN_KEY_OPERATOR = "admin@gonvex.local";
@@ -329,27 +327,17 @@ export class OperatorControlObject extends ControlObject {
   // -------------------------------------------------------------- alarm
 
   /**
-   * One alarm for K06's hourly prune and the operator sockets' ticks. K06's
-   * `alarm()` prunes and re-arms itself one hour out; the due time is kept
-   * here so a socket tick never prunes early and a prune is never skipped.
+   * One alarm for K06's hourly prune, its notices (X17e) and the operator sockets' ticks. K06's `alarm()` sends due
+   * notices, runs `alarmWork` (the prune when due, then these ticks) and arms the earliest of `nextAlarmAt`.
    */
-  override async alarm(): Promise<void> {
-    const now = Date.now();
-    const pruneDue = this.ctx.storage.kv.get<number>(PRUNE_DUE_KEY) ?? now;
-    if (now >= pruneDue) {
-      await super.alarm();
-      this.ctx.storage.kv.put(PRUNE_DUE_KEY, now + PRUNE_EVERY_MS);
-    }
+  protected override async alarmWork(now: number): Promise<void> {
+    await super.alarmWork(now);
     await this.sockets.tick(now);
-    await this.armAlarm();
   }
 
-  async armAlarm(): Promise<void> {
-    const pruneDue = this.ctx.storage.kv.get<number>(PRUNE_DUE_KEY) ?? Date.now() + PRUNE_EVERY_MS;
+  protected override nextAlarmAt(): number {
     const socketDue = this.sockets.nextDue();
-    const next = socketDue === undefined ? pruneDue : Math.min(pruneDue, socketDue);
-    const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > next || current < Date.now()) await this.ctx.storage.setAlarm(next);
+    return socketDue === undefined ? super.nextAlarmAt() : Math.min(super.nextAlarmAt(), socketDue);
   }
 }
 

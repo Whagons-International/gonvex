@@ -84,6 +84,40 @@ export function missingMethod(error: unknown, method: string): boolean {
   return message.includes("does not implement") && message.includes(`"${method}"`);
 }
 
+/** X17e: attempts of a failed Control refresh (retries after 250 ms, 1 s, 4 s, 16 s). */
+export const REFRESH_ATTEMPTS = 5;
+export const REFRESH_RETRY_MS = 250;
+
+interface RefreshedSession { readonly closed: boolean; controlChanged(projectId: string, reason: "control-change" | "presence-change"): Promise<void> }
+
+/**
+ * X17e (#529 review): a refresh that fails is retried with backoff instead of leaving the subscription stale until
+ * the next notification. A retry's calls go through CallOrigin like any other: if launching then is not safe, they
+ * wait for the gateway's alarm. After `REFRESH_ATTEMPTS` the session keeps its last result (as before). A module
+ * function, not a method: every gateway method counts as an inbound request (`trackEntries`).
+ */
+export async function refreshSessions(
+  sessions: readonly RefreshedSession[], projectId: string, reason: "control-change" | "presence-change",
+  options: { attempts?: number; retryMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<void> {
+  const attempts = options.attempts ?? REFRESH_ATTEMPTS, retryMs = options.retryMs ?? REFRESH_RETRY_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let pending = sessions;
+  for (let attempt = 1; ; attempt++) {
+    const results = await Promise.allSettled(pending.map((session) => session.controlChanged(projectId, reason)));
+    const failed = pending.filter((session, index) => results[index]!.status === "rejected" && !session.closed);
+    if (!failed.length) return;
+    const error = String((results.find((result) => result.status === "rejected") as PromiseRejectedResult).reason);
+    if (attempt >= attempts) {
+      console.error("gateway: Control refresh failed; giving up", { projectId, sessions: failed.length, attempts: attempt, error });
+      return;
+    }
+    console.error("gateway: Control refresh failed; retrying", { projectId, sessions: failed.length, attempt, error });
+    await sleep(retryMs * 4 ** (attempt - 1));
+    pending = failed;
+  }
+}
+
 export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
   private controlInstance: string | undefined;
   private fixtureBootstrapGate: {promise:Promise<void>;release():void;entered:number;phase:'bootstrap'|'challenge'}|undefined;
@@ -110,11 +144,12 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
     await super.alarm();
     await this.refreshControlWatches();
   }
+  /** X17e: a notice from Control's alarm (depth 1); its refreshes launch at once (CallOrigin `notice`). */
   async controlChanged(projectId: string): Promise<void> {
-    this.ctx.waitUntil(Promise.all([...this.host.sessions.values()].map((session) => session.controlChanged(projectId))));
+    this.ctx.waitUntil(refreshSessions([...this.host.sessions.values()], projectId, "control-change"));
   }
   async presenceChanged(projectId: string): Promise<void> {
-    this.ctx.waitUntil(Promise.all([...this.host.sessions.values()].map((session) => session.controlChanged(projectId, "presence-change"))));
+    this.ctx.waitUntil(refreshSessions([...this.host.sessions.values()], projectId, "presence-change"));
   }
   /** X13i fixture: switch dev spans in this isolate; returns the lines captured since the last call. */
   async fixtureSpans(on: boolean) {
