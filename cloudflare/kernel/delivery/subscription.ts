@@ -24,6 +24,7 @@ import { scanPlan, scanWindow, type ScannedRow, type ScanProgress } from "./scan
 import { collectionFiltersAdmit, errors, projectRow, ReplicaError, visible, type ReplicaWindow } from "./window.ts";
 import { canonical, stableJson } from "./canonical.ts";
 import { snapshotCache, type CachedSnapshot } from "./snapshot-cache.ts";
+import { span } from "./spans.ts";
 
 /** Legacy snapshot pages (replica.rs `SNAPSHOT_PAGE_BYTES`, `SNAPSHOT_PAGE_ROWS`). */
 export const PAGE_BYTES = 256 * 1024;
@@ -248,10 +249,11 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
     if (cached && (cached.epoch !== clock.epoch || cached.revision < clock.retained || cached.revision > clock.revision)) cached = undefined;
     if (cached && cached.revision < clock.revision) {
       const since = cached.revision;
-      const touched = await context.read((db) => { let any = false; readChangeRows(sqlOf(db), since, clock.revision, tables, () => { any = true; }); return any; });
-      if (touched) cached = undefined;
+      const changed = await context.read((db) => { const seen = new Set<string>(); readChangeRows(sqlOf(db), since, clock.revision, tables, (c) => { seen.add(c.table); }); return seen; });
+      if (changed.size) { span("tenant.snapshotCache", { path: request.path, result: "stale", tables: [...changed].join(",").slice(0, 120) }); cached = undefined; }
     }
     if (cached) snapshotCache.stats.hits++; else if (key !== undefined) snapshotCache.stats.misses++;
+    span("tenant.snapshotCache", { path: request.path, result: cached ? "hit" : key === undefined ? "nokey" : "miss" });
     window = await coldSnapshot(request, context, scanAll, digest, cursor, meta, cached,
       key === undefined ? undefined : (rows, scanned, bytes) => snapshotCache.set(context.registry, key, { epoch: clock.epoch, revision: clock.revision,
         rows: rows.map((row) => ({ key: row.key, text: row.text, hash: row.hash, value: {}, bytes: row.bytes })), window: scanned, bytes }));
