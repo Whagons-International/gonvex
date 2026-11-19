@@ -115,6 +115,15 @@ export function configFromEnv(env: ControlEnv): ControlConfig {
 }
 
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
+/** The next hourly prune (shared with the operator Control, K19). */
+const PRUNE_DUE_KEY = "k19/prune-due";
+/** X17e: a watcher is unregistered only after this many failed notifications in a row (~85 s of backoff). */
+export const NOTICE_ATTEMPTS = 6;
+/** X17e: first retry delay of a failed notification; each further retry waits 4x longer. */
+export const NOTICE_RETRY_MS = 250;
+type NoticeKind = "control" | "presence";
+/** `attempts`: consecutive failed control notices (they unregister the watcher); `presenceAttempts`: presence ones (never do). */
+interface PendingNotice { binding: string; name: string; projects: Map<string, NoticeKind>; attempts: number; presenceAttempts?: number; dueAt: number }
 
 export class ControlObject extends DurableObject<ControlEnv> implements LiveConnections {
   readonly sql: Sql;
@@ -418,35 +427,110 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
 
   /** X17: a change only `control.support.*` queries can observe (error sessions, error events). */
   private notifySupport(projectId: string): void {
-    for (const { binding, name } of this.supportWatchers(projectId)) {
-      const namespace = this.env[binding] as DurableObjectNamespace | undefined;
-      if (!namespace) continue;
-      const stub = namespace.get(namespace.idFromString(name)) as unknown as ControlWatcher;
-      this.ctx.waitUntil(stub.controlChanged(projectId).catch(() => this.watchers.get(projectId)?.delete(`${binding}:${name}`)));
-    }
+    for (const { binding, name } of this.supportWatchers(projectId)) this.enqueueNotice(binding, name, projectId, "control");
   }
 
   private notify(projectId: string): void {
-    const set = this.watchersFor(projectId);
-    for (const { binding, name } of set.values()) {
-      const namespace = this.env[binding] as DurableObjectNamespace | undefined;
-      if (!namespace) continue;
-      const stub = namespace.get(namespace.idFromString(name)) as unknown as ControlWatcher;
-      this.ctx.waitUntil(stub.controlChanged(projectId).catch(() => this.watchers.get(projectId)?.delete(`${binding}:${name}`)));
-    }
+    for (const { binding, name } of this.watchersFor(projectId).values()) this.enqueueNotice(binding, name, projectId, "control");
   }
 
   private notifyPresence(projectId: string): void {
     // X17: only `control.support.listTenants` reads the live counts this refreshes.
-    for (const { binding, name } of this.supportWatchers(projectId)) {
-      // K22's real gateway implements this additive hook; package fixture
-      // socket owners retain their existing ControlChanged contract.
-      if (binding !== "GATEWAY") continue;
-      const namespace = this.env[binding] as DurableObjectNamespace | undefined;
+    // K22's real gateway implements this additive hook; package fixture socket owners keep the ControlChanged contract.
+    for (const { binding, name } of this.supportWatchers(projectId)) if (binding === "GATEWAY") this.enqueueNotice(binding, name, projectId, "presence");
+  }
+
+  /**
+   * X17e (#529 review): notifications leave Control only from its own alarm. An outgoing call counts one hop below
+   * the object's NEWEST incoming request (kernel/session/placement/origin.ts), and the write that notifies can commit
+   * while another gateway's refresh query is Control's newest request, so a notification sent in place had no depth
+   * bound. Sent synchronously at the start of the alarm (a depth-0 platform event that is then the newest request),
+   * every `controlChanged`/`presenceChanged` arrives at depth 1, which lets the gateway treat it as a bounded notice
+   * and launch its refreshes at once (gateway call at 2, Control query at 3) instead of waiting for its own alarm.
+   * Notices are coalesced per watcher and project; a failed send is retried with backoff instead of unregistering
+   * the watcher, which is dropped only after `NOTICE_ATTEMPTS` failures in a row. The outbox is in memory: a Control
+   * reset drops queued notices, as the old in-place sends were lost; a gateway refreshes all its sessions when its
+   * alarm sees a new Control instance (`refreshControlWatches`).
+   */
+  private readonly outbox = new Map<string, PendingNotice>();
+  private noticeAlarmAt: number | undefined;
+
+  private enqueueNotice(binding: string, name: string, projectId: string, kind: NoticeKind): void {
+    if (!this.env[binding]) return;
+    const key = `${binding}:${name}`;
+    let pending = this.outbox.get(key);
+    if (!pending) this.outbox.set(key, pending = { binding, name, projects: new Map(), attempts: 0, dueAt: 0 });
+    // A control change refreshes every Control query, presence ones included.
+    if (pending.projects.get(projectId) !== "control") pending.projects.set(projectId, kind);
+    pending.dueAt = Date.now();
+    this.armNotices(pending.dueAt);
+  }
+
+  private armNotices(at: number): void {
+    if (this.noticeAlarmAt !== undefined && this.noticeAlarmAt <= at) return;
+    this.noticeAlarmAt = at;
+    // Never later than a duty already due earlier (prune, operator socket ticks; #532 re-review): setAlarm replaces it.
+    void this.ctx.storage.setAlarm(Math.min(at, this.nextAlarmAt()), { allowUnconfirmed: true }).catch((error) => console.error("control: notice alarm failed", error));
+  }
+
+  /** Sends every due notice now. Call only synchronously at the start of the alarm (see `outbox`). */
+  private sendNotices(now: number): Promise<unknown> {
+    const sends: Promise<unknown>[] = [];
+    for (const [key, pending] of [...this.outbox]) {
+      if (pending.dueAt > now) continue;
+      this.outbox.delete(key);
+      const namespace = this.env[pending.binding] as DurableObjectNamespace | undefined;
       if (!namespace) continue;
-      const stub = namespace.get(namespace.idFromString(name)) as unknown as Required<ControlWatcher>;
-      this.ctx.waitUntil(stub.presenceChanged(projectId).catch((error) => console.error("control: presence refresh failed", error)));
+      let stub: Required<ControlWatcher>;
+      try { stub = namespace.get(namespace.idFromString(pending.name)) as unknown as Required<ControlWatcher>; }
+      catch (error) { console.error("control: watcher id is invalid", { watcher: key, error: String(error) }); continue; }
+      for (const [projectId, kind] of pending.projects) {
+        const call = kind === "presence" ? stub.presenceChanged(projectId) : stub.controlChanged(projectId);
+        sends.push(Promise.resolve(call).catch((error) => this.noticeFailed(key, pending, projectId, kind, error)));
+      }
     }
+    return Promise.all(sends);
+  }
+
+  private noticeFailed(key: string, pending: PendingNotice, projectId: string, kind: NoticeKind, error: unknown): void {
+    // #532 review: presence failures (e.g. a gateway build without `presenceChanged` during a rollout) are counted apart
+    // and never unregister the watcher; only consecutive failed control notices do.
+    const presence = kind === "presence";
+    const attempts = (presence ? pending.presenceAttempts ?? 0 : pending.attempts) + 1;
+    if (attempts >= NOTICE_ATTEMPTS) {
+      if (presence) { console.error("control: presence notice failed; giving up", { watcher: key, attempts, error: String(error) }); return; }
+      console.error("control: watcher dropped after failed notifications", { watcher: key, attempts, error: String(error) });
+      this.watchers.get(projectId)?.delete(key);
+      this.ctx.storage.kv.put(`control/watchers/${projectId}`, [...this.watchersFor(projectId).values()]);
+      return;
+    }
+    console.error("control: notification failed; retrying", { watcher: key, kind, attempts, error: String(error) });
+    let retry = this.outbox.get(key);
+    if (!retry) this.outbox.set(key, retry = { binding: pending.binding, name: pending.name, projects: new Map(), attempts: 0, dueAt: 0 });
+    if (retry.projects.get(projectId) !== "control") retry.projects.set(projectId, kind);
+    if (presence) retry.presenceAttempts = Math.max(retry.presenceAttempts ?? 0, attempts);
+    else retry.attempts = Math.max(retry.attempts, attempts);
+    const at = Date.now() + NOTICE_RETRY_MS * 4 ** (attempts - 1);
+    retry.dueAt = retry.dueAt ? Math.min(retry.dueAt, at) : at;
+    this.armNotices(retry.dueAt);
+  }
+
+  /** The next prune or pending notice, whichever is first. Subclasses add their own deadlines. */
+  protected nextAlarmAt(): number {
+    let at = this.ctx.storage.kv.get<number>(PRUNE_DUE_KEY) ?? Date.now() + PRUNE_EVERY_MS;
+    for (const pending of this.outbox.values()) at = Math.min(at, pending.dueAt);
+    return at;
+  }
+
+  /**
+   * Arms the object's single alarm for `nextAlarmAt`, never later than it already is (unless that time passed). The
+   * deadline is read after the `getAlarm` wait, so a notice enqueued meanwhile is included or arms its own alarm later.
+   */
+  async armAlarm(): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    const next = this.nextAlarmAt();
+    if (this.outbox.size) this.noticeAlarmAt = Math.min(next, current ?? next);
+    if (current === null || current > next || current < Date.now()) await this.ctx.storage.setAlarm(next);
   }
 
   // --------------------------------------------------------------- HTTP
@@ -458,8 +542,27 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
 
   // -------------------------------------------------------------- alarm
 
-  /** Kernel: `gonvex_control_idempotency` rows expire after 24 h (0012 R9), pruned in pages. */
+  /**
+   * X17e: pending notices first, synchronously (see `outbox`), then `alarmWork`, then the next alarm. Subclasses
+   * extend `alarmWork` and `nextAlarmAt`, not this method.
+   */
   override async alarm(): Promise<void> {
+    this.noticeAlarmAt = undefined;
+    const now = Date.now();
+    // Started now (depth 1), not awaited (#532 review): one slow watcher must not hold back the next batch, the prune
+    // or the operator's socket ticks. A failed send arms its own retry (`noticeFailed`).
+    this.ctx.waitUntil(this.sendNotices(now));
+    try {
+      await this.alarmWork(now);
+    } finally {
+      await this.armAlarm();
+    }
+  }
+
+  /** Kernel: `gonvex_control_idempotency` rows expire after 24 h (0012 R9), pruned in pages, hourly. */
+  protected async alarmWork(now: number): Promise<void> {
+    const due = this.ctx.storage.kv.get<number>(PRUNE_DUE_KEY) ?? now;
+    if (now < due) return;
     const ctx = this.context();
     for (let page = 0; page < 20; page++) {
       if (pruneIdempotency(ctx, 500) < 500) break;
@@ -471,7 +574,7 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
     } catch (error) {
       console.error("telemetry: prune failed", error);
     }
-    await this.ctx.storage.setAlarm(Date.now() + PRUNE_EVERY_MS);
+    this.ctx.storage.kv.put(PRUNE_DUE_KEY, now + PRUNE_EVERY_MS);
   }
 
   // ------------------------------------------------- seeding (tests only)

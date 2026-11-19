@@ -9,7 +9,7 @@
  * gate the depth ratchets with every frame until the platform refuses the call.
  */
 import { describe, expect, it } from "vitest";
-import { CallOrigin, gatedEnv, gatedStub } from "../placement/origin";
+import { CallOrigin, FRESH_ENTRIES, NOTICE_ENTRIES, gatedEnv, gatedStub, type InboundKind } from "../placement/origin";
 
 const LIMIT = 16;
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -262,5 +262,150 @@ describe("X07b BUG-5 on -12: a deferred gateway call never strands its socket", 
     await tick();
     expect(String((error as Error)?.message)).toMatch(/gateway call dispatch waited 10000 ms/);
     expect(origin.stats()).toMatchObject({ waiting: 0, expired: 1 });
+  });
+});
+
+describe("X17e: Control notifications are notices sent from Control's alarm (#529 review)", () => {
+  /**
+   * The #529 review's model, extended with the X17e re-land: Control has no CallOrigin, so a call it makes counts one
+   * hop below its NEWEST alive request. Two gateways, one Control. Each round a client write commits on Control after
+   * the previous notification's refresh queries reached Control (they are then its newest requests), and every
+   * session refreshes its Control subscriptions on each notification.
+   *
+   * `sendFromAlarm: false` sends the notification in place (#529); `true` queues it for Control's alarm (depth 0),
+   * which sends every queued notice synchronously at its start (control-object.ts `outbox`).
+   */
+  async function overlap(rounds: number, options: { sendFromAlarm: boolean; gatewayKind: InboundKind }) {
+    const control = new ModelObject();
+    const gateways = [0, 1].map(() => {
+      const object = new ModelObject();
+      const s = { object } as { object: ModelObject; origin: CallOrigin };
+      const fresh = <T>(handler: () => Promise<T>) => object.deliver(0, async () => {
+        const entry = s.origin.enter("fresh");
+        try { return await handler(); } finally { s.origin.exit(entry); }
+      });
+      // The wake is the gateway's alarm (depth 0).
+      s.origin = new CallOrigin(() => { setTimeout(() => void fresh(async () => {}), 0); });
+      return { ...s, fresh };
+    });
+    const failures: string[] = [];
+    let refreshes: Array<() => Promise<void>> = [];
+    // gateway.controlChanged (kernel/assembly/gateway.ts): returns at once; each session's refresh query runs under waitUntil.
+    const controlChanged = (g: (typeof gateways)[number], depth: number) => g.object.deliver(depth, async () => {
+      const entry = g.origin.enter(options.gatewayKind);
+      try {
+        void gatedStub({ query: () => {
+          let d: number;
+          try { d = g.object.outgoing(); } catch (error) { failures.push(String(error)); return Promise.resolve(); }
+          return new Promise<void>((done) => { refreshes.push(() => control.deliver(d, async () => { await tick(); }).then(done)); });
+        } }, g.origin).query().catch((error) => failures.push(String(error)));
+      } finally { g.origin.exit(entry); }
+    });
+    // ControlObject.sendNotices: every watcher, from Control's current context.
+    const send = () => {
+      for (const g of gateways) {
+        let d: number;
+        try { d = control.outgoing(); } catch (error) { failures.push(String(error)); continue; }
+        void tick().then(() => controlChanged(g, d));
+      }
+    };
+    let queued = false;
+    const notify = () => {
+      if (!options.sendFromAlarm) return send();
+      if (queued) return;
+      queued = true;
+      // setAlarm(now): the platform delivers Control's alarm (depth 0); queued notices go out before any await.
+      setTimeout(() => void control.deliver(0, async () => { queued = false; send(); await tick(); }), 0);
+    };
+    for (let round = 0; round < rounds; round++) {
+      // A session's Control write from a client frame (one hop below a fresh event) that awaits before it commits.
+      let commit!: () => void;
+      const committed = new Promise<void>((resolve) => { commit = resolve; });
+      const write = gateways[0]!.fresh(() => gatedStub({ write: () => {
+        const d = gateways[0]!.object.outgoing();
+        return control.deliver(d, async () => { await committed; notify(); });
+      } }, gateways[0]!.origin).write());
+      await tick();
+      // Meanwhile the previous notification's refresh queries reach Control: they are now its newest requests.
+      const pending = refreshes; refreshes = [];
+      await Promise.all(pending.map((deliver) => deliver()));
+      commit();
+      await write;
+      for (let i = 0; i < 6; i++) await tick();
+    }
+    return { failures, controlMax: control.maxOutgoing, gatewayMax: Math.max(...gateways.map((g) => g.object.maxOutgoing)) };
+  }
+
+  it("the review's failing test: a notification sent in place and treated as bounded ratchets until the platform refuses", async () => {
+    const result = await overlap(30, { sendFromAlarm: false, gatewayKind: "notice" });
+    expect(result.failures.some((failure) => failure.includes("Subrequest depth limit exceeded"))).toBe(true);
+  });
+
+  it("sent from Control's alarm, notifications stay at a bounded depth however many writes overlap refreshes", async () => {
+    const result = await overlap(30, { sendFromAlarm: true, gatewayKind: "notice" });
+    expect(result.failures).toEqual([]);
+    // Notice at 1, gateway refresh at 2, Control's next notices from its alarm at 1 again.
+    expect(result.controlMax).toBeLessThanOrEqual(3);
+    expect(result.gatewayMax).toBeLessThanOrEqual(3);
+  });
+
+  it("Control -> gateway -> Control overlap: refreshes launched under a notice reach Control at depth 2 at most", async () => {
+    // The same world, but every refresh query is still running on Control when the next alarm sends notices.
+    const result = await overlap(50, { sendFromAlarm: true, gatewayKind: "notice" });
+    expect(result.failures).toEqual([]);
+    expect(result.controlMax).toBeLessThanOrEqual(3);
+  });
+
+  it("the gateway classifies Control's notifications as notices, not fresh events or peers", () => {
+    for (const name of ["controlChanged", "presenceChanged"]) {
+      expect(NOTICE_ENTRIES.has(name)).toBe(true);
+      expect(FRESH_ENTRIES.has(name)).toBe(false);
+    }
+    for (const peer of ["deliverReplica", "deliverReplicaBatch", "deliverReplicaInitial", "deliverInitialFailures", "capacity", "drain"]) {
+      expect(NOTICE_ENTRIES.has(peer)).toBe(false);
+      expect(FRESH_ENTRIES.has(peer)).toBe(false);
+    }
+  });
+
+  it("a notice releases no waiting call; only calls made while it is the front launch under it", async () => {
+    let wakes = 0;
+    const origin = new CallOrigin(() => { wakes++; });
+    const launched: string[] = [];
+    const tenant = gatedStub({ reduce: async () => { launched.push("reduce"); }, refresh: async () => { launched.push("refresh"); } }, origin);
+    // A Reducer call made while a tenant delivery was the front waits for a fresh event.
+    const delivery = origin.enter("peer");
+    const reduce = tenant.reduce();
+    origin.exit(delivery);
+    expect(origin.stats().waiting).toBe(1);
+    // A notice arrives: the waiting Reducer call stays queued (no flush), and so does a refresh behind it (FIFO).
+    const notice = origin.enter("notice");
+    expect(launched).toEqual([]);
+    const refreshBehind = tenant.refresh();
+    origin.exit(notice);
+    expect(launched).toEqual([]);
+    expect(origin.stats().waiting).toBe(2);
+    // The next fresh event (the gateway's alarm) launches both, in order.
+    const alarm = origin.enter("fresh");
+    origin.exit(alarm);
+    await Promise.all([reduce, refreshBehind]);
+    expect(launched).toEqual(["reduce", "refresh"]);
+    expect(wakes).toBe(1);
+
+    // Nothing waiting: a refresh made under a notice launches at once, without an alarm.
+    const second = origin.enter("notice");
+    await tenant.refresh();
+    origin.exit(second);
+    expect(launched).toEqual(["reduce", "refresh", "refresh"]);
+    expect(wakes).toBe(1);
+  });
+
+  it("a peer request newer than the notice still defers the refresh", () => {
+    const origin = new CallOrigin(() => {});
+    const notice = origin.enter("notice");
+    const peer = origin.enter("peer");
+    expect(origin.safe()).toBe(false);
+    origin.exit(peer);
+    origin.exit(notice);
+    expect(origin.safe()).toBe(false);
   });
 });

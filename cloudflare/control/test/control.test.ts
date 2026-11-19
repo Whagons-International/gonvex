@@ -524,8 +524,10 @@ describe("idempotency receipts expire after 24 h (0012 R9)", () => {
     );
     const expired = await client.call("action.call", "control.auth.passwordLogin", { email: seeded.members.ivy!.email, password: "wrong-password-1" }, "fixed-key");
     expect(expired.error).toBe("invalid arguments: invalid email or password");
-    await runInDurableObject(control(), async (instance: ControlObject) => {
+    await runInDurableObject(control(), async (instance: ControlObject, state) => {
       instance.sql.run("INSERT INTO gonvex_control_idempotency(project_id,subject_id,idempotency_key,kind,path,created_at) VALUES('p','s','old','action','x',1)");
+      // X17e: notice alarms of earlier tests may have pruned already; the next prune is due now.
+      state.storage.kv.delete("k19/prune-due");
       await instance.alarm();
       expect(instance.sql.value("SELECT count(*) FROM gonvex_control_idempotency WHERE idempotency_key='old'")).toBe(0);
     });
@@ -561,5 +563,150 @@ describe("router", () => {
     expect(config.headers.get("access-control-allow-origin")).toBe("*");
     void dev;
     void unique;
+  });
+});
+
+describe("X17e: Control notifications leave from Control's alarm (#529 review)", () => {
+  type Internals = {
+    notify(projectId: string): void;
+    outbox: Map<string, { projects: Map<string, string>; attempts: number; dueAt: number; binding: string; name: string }>;
+    noticeFailed(key: string, pending: unknown, projectId: string, kind: "control" | "presence", error: unknown): void;
+    watchersFor(projectId: string): Map<string, { binding: string; name: string }>;
+  };
+  type Owner = { fixtureNotices(fail?: number): Promise<string[]> };
+  const owners = env.CONTROL_SOCKETS as unknown as DurableObjectNamespace;
+  async function setup() {
+    const stub = env.CONTROL.getByName(unique("x17e-control")) as DurableObjectStub<ControlObject>;
+    const id = owners.idFromName(unique("x17e-owner"));
+    const owner = owners.get(id) as unknown as Owner;
+    const project = unique("x17e-project");
+    await stub.watch(project, "CONTROL_SOCKETS", id.toString());
+    return { stub, owner, project, key: `CONTROL_SOCKETS:${id.toString()}` };
+  }
+  async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, ms = 4000): Promise<T> {
+    const end = Date.now() + ms;
+    for (;;) {
+      const value = await read();
+      if (done(value) || Date.now() > end) return value;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  it("a write's notification is queued, coalesced per watcher and project, and sent by the alarm", async () => {
+    const { stub, owner, project } = await setup();
+    await runInDurableObject(stub, async (instance: ControlObject, state) => {
+      const internals = instance as unknown as Internals;
+      internals.notify(project);
+      internals.notify(project);
+      internals.notify(project);
+      // Nothing is sent in place: one pending notice, and the alarm is armed for now.
+      expect([...internals.outbox.values()].map((pending) => [...pending.projects.entries()])).toEqual([[[project, "control"]]]);
+      expect((await state.storage.getAlarm())!).toBeLessThanOrEqual(Date.now());
+    });
+    expect(await until(() => owner.fixtureNotices(), (log) => log.length > 0)).toEqual([project]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(await owner.fixtureNotices()).toEqual([project]);
+    await runInDurableObject(stub, (instance: ControlObject) => { expect((instance as unknown as Internals).outbox.size).toBe(0); });
+  });
+
+  it("a failed notification is retried from the alarm and the watcher stays registered", async () => {
+    const { stub, owner, project, key } = await setup();
+    await owner.fixtureNotices(1);
+    await runInDurableObject(stub, (instance: ControlObject) => { (instance as unknown as Internals).notify(project); });
+    expect(await until(() => owner.fixtureNotices(), (log) => log.length >= 2)).toEqual([`fail:${project}`, project]);
+    await runInDurableObject(stub, (instance: ControlObject) => {
+      const internals = instance as unknown as Internals;
+      expect(internals.watchersFor(project).has(key)).toBe(true);
+      expect(internals.outbox.size).toBe(0);
+    });
+  });
+
+  it("backs off between retries and unregisters the watcher only after NOTICE_ATTEMPTS failures in a row", async () => {
+    const { stub, project, key } = await setup();
+    await runInDurableObject(stub, (instance: ControlObject) => {
+      const internals = instance as unknown as Internals;
+      const pending = (attempts: number) => ({ binding: "CONTROL_SOCKETS", name: key.slice("CONTROL_SOCKETS:".length), projects: new Map([[project, "control"]]), attempts, dueAt: 0 });
+      const before = Date.now();
+      internals.noticeFailed(key, pending(0), project, "control", new Error("transient"));
+      const retry = internals.outbox.get(key)!;
+      expect(retry.attempts).toBe(1);
+      expect(retry.dueAt).toBeGreaterThanOrEqual(before + 250);
+      internals.outbox.delete(key);
+      internals.noticeFailed(key, pending(2), project, "control", new Error("transient"));
+      expect(internals.outbox.get(key)!.dueAt).toBeGreaterThanOrEqual(before + 250 * 16);
+      expect(internals.watchersFor(project).has(key)).toBe(true);
+      internals.outbox.delete(key);
+      // Presence failures are counted apart and never unregister the watcher (#532 review).
+      internals.noticeFailed(key, { ...pending(0), presenceAttempts: 5 }, project, "presence", new Error("no presenceChanged"));
+      expect(internals.watchersFor(project).has(key)).toBe(true);
+      internals.outbox.delete(key);
+      internals.noticeFailed(key, pending(5), project, "control", new Error("gone"));
+      expect(internals.outbox.has(key)).toBe(false);
+      expect(internals.watchersFor(project).has(key)).toBe(false);
+    });
+  });
+
+  it("an alarm armed only for notices does not prune early", async () => {
+    const { stub, owner, project } = await setup();
+    await runInDurableObject(stub, (instance: ControlObject, state) => {
+      state.storage.kv.put("k19/prune-due", Date.now() + 3_600_000);
+      instance.sql.run("INSERT INTO gonvex_control_idempotency(project_id,subject_id,idempotency_key,kind,path,created_at) VALUES('p','s','x17e-old','action','x',1)");
+      (instance as unknown as Internals).notify(project);
+    });
+    expect(await until(() => owner.fixtureNotices(), (log) => log.length > 0)).toEqual([project]);
+    await runInDurableObject(stub, async (instance: ControlObject, state) => {
+      expect(instance.sql.value("SELECT count(*) FROM gonvex_control_idempotency WHERE idempotency_key='x17e-old'")).toBe(1);
+      // The next alarm is the hourly prune again.
+      expect((await state.storage.getAlarm())!).toBeGreaterThan(Date.now() + 3_000_000);
+    });
+  });
+});
+
+describe("review #532: one slow watcher does not hold back every other watcher's notices", () => {
+  it("a second write's notice reaches a healthy watcher while the previous batch's send to a slow watcher is still open", async () => {
+    type Owner = { fixtureNotices(fail?: number): Promise<string[]>; fixtureHoldNotice(ms: number): Promise<void> };
+    const owners = env.CONTROL_SOCKETS as unknown as DurableObjectNamespace;
+    const stub = env.CONTROL.getByName(unique("r532-control")) as DurableObjectStub<ControlObject>;
+    const project = unique("r532-project");
+    const slowId = owners.idFromName(unique("r532-slow")), fastId = owners.idFromName(unique("r532-fast"));
+    const slow = owners.get(slowId) as unknown as Owner, fast = owners.get(fastId) as unknown as Owner;
+    await stub.watch(project, "CONTROL_SOCKETS", slowId.toString());
+    await stub.watch(project, "CONTROL_SOCKETS", fastId.toString());
+    await slow.fixtureHoldNotice(3000);
+    const notify = () => runInDurableObject(stub, (instance: ControlObject) => { (instance as unknown as { notify(p: string): void }).notify(project); });
+    const until = async (read: () => Promise<string[]>, n: number, ms: number) => {
+      const end = Date.now() + ms;
+      for (;;) { const log = await read(); if (log.length >= n || Date.now() > end) return log; await new Promise((r) => setTimeout(r, 25)); }
+    };
+    await notify();
+    expect(await until(() => fast.fixtureNotices(), 1, 2000)).toEqual([project]);
+    // The slow watcher is still answering the first notice (3 s). A new write notifies again.
+    const second = Date.now();
+    await notify();
+    expect(await until(() => fast.fixtureNotices(), 2, 1000)).toEqual([project, project]);
+    expect(Date.now() - second).toBeLessThan(1000);
+  });
+});
+
+describe("review #532 (e80f28e6): a notice retry never postpones an alarm that is already armed earlier", () => {
+  it("noticeFailed's backoff alarm does not move the prune / the operator's socket tick later", async () => {
+    type Internals = { noticeFailed(key: string, pending: unknown, projectId: string, kind: "control" | "presence", error: unknown): void };
+    const owners = env.CONTROL_SOCKETS as unknown as DurableObjectNamespace;
+    const stub = env.CONTROL.getByName(unique("r532b-control")) as DurableObjectStub<ControlObject>;
+    const id = owners.idFromName(unique("r532b-owner"));
+    const project = unique("r532b-project");
+    await stub.watch(project, "CONTROL_SOCKETS", id.toString());
+    await runInDurableObject(stub, async (instance: ControlObject, state) => {
+      // An earlier duty is armed: here the prune in 2 s; on the operator Control, a logs socket tick in 500 ms.
+      const due = Date.now() + 2_000;
+      state.storage.kv.put("k19/prune-due", due);
+      await instance.armAlarm();
+      expect(await state.storage.getAlarm()).toBe(due);
+      // A send from the last alarm fails for the 3rd time in a row: its retry is due in 250 * 4^2 = 4 s.
+      const pending = { binding: "CONTROL_SOCKETS", name: id.toString(), projects: new Map([[project, "control"]]), attempts: 2, dueAt: 0 };
+      (instance as unknown as Internals).noticeFailed(`CONTROL_SOCKETS:${id.toString()}`, pending, project, "control", new Error("transient"));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(await state.storage.getAlarm()).toBeLessThanOrEqual(due);
+    });
   });
 });
