@@ -241,4 +241,28 @@ describe("TenantPresence", () => {
     expect(presence.stats.swept).toBe(1);
     expect(types(gw("gw-b").frames("s"))).toEqual(["snapshot[]", "m1:active", "m1:offline"]);
   });
+
+  it("logs presence-diag lines with times and ids only (505 investigation)", async () => {
+    const lines: Record<string, any>[] = [];
+    const log = console.log;
+    console.log = (line?: unknown) => { if (typeof line === "string" && line.includes('"diag":"presence"')) lines.push(JSON.parse(line)); };
+    try {
+      const { presence } = setup();
+      await presence.frame(socket("v", "viewer"), { type: "presence.subscribe", id: "s1" });
+      await presence.frame(socket("c1", "m1", "gw-b"), { type: "presence.set", state: "active" });
+      await presence.leave("c1", "gw-b");
+      await sleep(400);
+      await presence.flushed();
+    } finally { console.log = log; }
+    const leave = lines.find(l => l.event === "leave")!;
+    expect(leave).toMatchObject({ tenant: TENANT, connection: "c1", gateway: "gw-b", registered: true, member: "m1", after: { connections: [], published: "active", dirty: true } });
+    expect(leave.after.graceUntil - leave.now).toBe(300);
+    expect(lines.some(l => l.event === "schedule" && l.next === leave.after.graceUntil)).toBe(true);
+    expect(lines.some(l => l.event === "timer")).toBe(true);
+    expect(lines.find(l => l.event === "publish" && l.changes.includes("m1:offline"))).toMatchObject({ gateways: ["gw-a"] });
+    expect(lines.some(l => l.event === "delivered" && l.gateway === "gw-a" && l.patch === true)).toBe(true);
+    // Only ids, times, counts and enum states: no names, tokens or row data.
+    const allowed = new Set(["diag", "event", "tenant", "now", "type", "connection", "gateway", "state", "registered", "member", "after", "next", "timerAt", "alarmAt", "due", "at", "changes", "gateways", "ms", "subscribers", "patch", "snapshots", "resync", "loaded", "trigger", "fromAlarm", "restored", "removed"]);
+    for (const line of lines) for (const key of Object.keys(line)) expect(allowed.has(key), key).toBe(true);
+  });
 });

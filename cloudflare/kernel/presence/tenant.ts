@@ -120,6 +120,20 @@ export class TenantPresence {
 
   get enabled(): boolean { return this.options.config.enabled; }
 
+  /**
+   * Diagnostics for the 505 presence investigation: one `presence-diag` line per scheduling step, with
+   * times (ms) and ids only (connection, Member, gateway). No names, tokens or row data.
+   */
+  private diag(event: string, fields: Record<string, unknown>): void {
+    try { console.log(JSON.stringify({ diag: "presence", event, tenant: this.options.tenantId, now: this.now(), ...fields })); } catch { /* never let logging fail presence */ }
+  }
+
+  private memberOf(connection: string): { key: string; member: string } | null {
+    const r = this.hub.registered(connection);
+    const key = this.hub.scopeOf(connection);
+    return r?.member && key ? { key, member: r.member } : null;
+  }
+
   // ---- entry points --------------------------------------------------------------------
 
   /** `presence.*` frames of one socket. Returns the frames to send at once (only `presence.error`). */
@@ -131,6 +145,7 @@ export class TenantPresence {
     const connection = socket.connectionId;
     await this.load(connection, false, socket.host, socket.presencePrevious ?? null);
     const now = this.now();
+    this.diag("frame", { type: frame.type, connection, gateway: socket.host, state: frame.type === "presence.set" ? parseState(frame.state) : undefined });
     switch (frame.type) {
       case "presence.set": {
         const state = parseState(frame.state);
@@ -168,12 +183,15 @@ export class TenantPresence {
   async leave(connectionId: string, host = "", previous: ConnectionReport | null = null): Promise<void> {
     if (!this.enabled) return;
     await this.load(connectionId, false, host, previous);
+    const who = this.memberOf(connectionId);
     this.hub.disconnect(connectionId, this.now());
+    this.diag("leave", { connection: connectionId, gateway: host, registered: who !== null, member: who?.member, after: who ? this.hub.memberDiag(who.key, who.member) : null });
     this.afterChange();
   }
 
   /** The object's alarm fired (grace ends; at-least-once, idempotent). */
   async alarm(): Promise<void> {
+    this.diag("alarm", { alarmAt: this.alarmAt, timerAt: this.timerAt, loaded: this.loaded !== null });
     if (this.alarmAt !== null && this.alarmAt <= this.now()) this.alarmAt = null;
     if (!this.enabled) return;
     await this.load(undefined, true);
@@ -204,12 +222,16 @@ export class TenantPresence {
   private afterChange(fromAlarm = false): void {
     const now = this.now();
     const { publications, next } = this.hub.runDue(now, this.wall());
-    for (const publication of publications) this.enqueuePublication(publication);
+    for (const publication of publications) {
+      this.diag("publish", { changes: publication.changes.map(c => `${c.memberId}:${c.state}`), gateways: publication.gateways });
+      this.enqueuePublication(publication);
+    }
     this.schedule(next, now);
     if (fromAlarm || now - this.lastSweep >= SWEEP_INTERVAL_MS) this.sweep();
   }
 
   private schedule(next: number | null, now: number): void {
+    if (next !== null || this.timerAt !== null) this.diag("schedule", { next, timerAt: this.timerAt, alarmAt: this.alarmAt });
     if (next === null) {
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
@@ -220,6 +242,7 @@ export class TenantPresence {
       if (this.timer) clearTimeout(this.timer);
       this.timerAt = next;
       this.timer = setTimeout(() => {
+        this.diag("timer", { due: next });
         this.timer = null;
         this.timerAt = null;
         this.afterChange();
@@ -228,6 +251,7 @@ export class TenantPresence {
     // A grace end also goes on the alarm, so a reset object still publishes it.
     if (next - now >= ALARM_MIN_DELAY_MS && (this.alarmAt === null || next < this.alarmAt || this.alarmAt <= now)) {
       this.alarmAt = next;
+      this.diag("armAlarm", { at: next });
       this.options.armAlarm?.(next);
     }
   }
@@ -298,10 +322,13 @@ export class TenantPresence {
       for (const delivery of deliveries) {
         try {
           this.stats.deliveries++;
-          await link.presence(delivery);
+          const started = this.now();
+          const receipt = await link.presence(delivery);
+          this.diag("delivered", { gateway, ms: this.now() - started, subscribers: receipt?.subscribers, patch: delivery.patch !== undefined, snapshots: delivery.snapshots?.length ?? 0, resync: delivery.resync !== undefined });
         } catch (error) {
           // The gateway missed this delivery: its subscribers get a snapshot on the retry.
           console.error(`presence: delivery to ${gateway} failed`, error);
+          this.diag("deliveryFailed", { gateway });
           channel.resync.add(scopeKey(delivery.projectId, delivery.tenantId));
           failed = true;
         }
@@ -357,6 +384,7 @@ export class TenantPresence {
         restored++;
       }
     });
+    this.diag("rebuild", { trigger, fromAlarm, gateways: gateways.length, restored });
     if (!restored) return;
     this.stats.rebuilds++;
     // A memory loss with a grace pending (the alarm that covers it fired, or is still set): subscribers
@@ -392,6 +420,7 @@ export class TenantPresence {
           if (!r.value.live.has(connection)) { this.hub.disconnect(connection, now); removed++; }
         }
       }
+      this.diag("sweep", { gateways: gateways.length, removed });
       if (removed) {
         this.stats.swept += removed;
         const { publications, next } = this.hub.runDue(now, this.wall());
