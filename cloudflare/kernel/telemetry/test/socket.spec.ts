@@ -15,7 +15,7 @@ import { ACK_ERRORS, LIMITS, type PerformanceRow, type PreparedErrorEvent } from
 import { TelemetryLimiter, telemetrySubject } from "../limiter";
 import type { TelemetryPort } from "../port";
 import type { ErrorSessionInput } from "../store";
-import { SocketTelemetry, type TelemetryFrame, type TelemetryHostState, type TelemetryRecordHost, telemetryHostState } from "../socket";
+import { PerformanceBuffer, SocketTelemetry, type TelemetryFrame, type TelemetryHostState, type TelemetryRecordHost, telemetryHostState } from "../socket";
 
 class RecordingPort implements TelemetryPort {
   sessions: ErrorSessionInput[] = [];
@@ -229,5 +229,54 @@ describe("through K05's Session", () => {
     ]);
     expect(JSON.parse(port.errors[0]!.events[0]!.payload)).toEqual({ message: "m", sessionId: "c-1", tenant: "", project: "p" });
     expect(session.record.telemetryDevice).toEqual({ browserName: "Firefox" });
+  });
+});
+
+describe("X17 background performance rows (PerformanceBuffer)", () => {
+  function manualTimers() {
+    const queued: Array<() => void> = [];
+    return { queued, timers: { set: (fn: () => void) => { queued.push(fn); return queued.length as unknown as ReturnType<typeof setTimeout>; }, clear: () => { queued.length = 0; } } };
+  }
+
+  it("answers telemetry.batch at once and writes the rows later, one call per project, in order", async () => {
+    const { queued, timers } = manualTimers();
+    const performance = new PerformanceBuffer(5_000, 200, timers);
+    const host = telemetryHostState({ presenceEnabled: true, performance });
+    const port = new RecordingPort();
+    const a = socket(MEMBER, { host, port, batch: true });
+    const b = socket(MEMBER, { host, port, batch: true, connectionId: "conn-2" });
+    expect(await a.send({ type: "telemetry.batch", events: [perf("a1"), perf("a2")] })).toEqual([]);
+    expect(await b.send({ type: "telemetry.batch", events: [perf("b1")] })).toEqual([]);
+    expect(port.performance).toEqual([]);
+    expect(performance.size).toBe(3);
+    expect(queued).toHaveLength(1); // one timer for the whole object
+    queued.shift()!();
+    await Promise.resolve(); await Promise.resolve();
+    expect(port.performance).toHaveLength(1);
+    expect(port.performance[0]!.projectId).toBe("p");
+    expect(port.performance[0]!.rows.map(r => (r as unknown as { eventId?: string; id?: string }).eventId ?? (r as any).id)).toHaveLength(3);
+    expect(performance.size).toBe(0);
+  });
+
+  it("flushes a full buffer at once, in chunks, and drops a failed write without throwing", async () => {
+    const { timers } = manualTimers();
+    const performance = new PerformanceBuffer(5_000, 2, timers);
+    const calls: number[] = [];
+    let fail = true;
+    const port = new RecordingPort();
+    port.recordPerformance = async (_p: string, rows: PerformanceRow[]) => { calls.push(rows.length); if (fail) { fail = false; throw new Error("control unavailable"); } };
+    const rows = (n: number) => Array.from({ length: n }, () => ({}) as PerformanceRow);
+    performance.add(port, "p", rows(1));
+    expect(calls).toEqual([]);
+    performance.add(port, "p", rows(2)); // 3 >= 2: flushed now, in chunks of 2
+    await performance.flush();
+    expect(calls).toEqual([2, 1]);
+  });
+
+  it("without a buffer (other owners and tests) the rows are written before the frame completes, as before", async () => {
+    const port = new RecordingPort();
+    const s = socket(MEMBER, { port, batch: true });
+    await s.send({ type: "telemetry.batch", events: [perf("x")] });
+    expect(port.performance).toHaveLength(1);
   });
 });

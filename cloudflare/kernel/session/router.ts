@@ -1,4 +1,5 @@
 import { ASSIGNMENT_HEADER, automaticPlacement, controllerCell, withDeadline, type GatewayAssignment } from "../gateway/placement";
+import { setSpanTiming, span, spanTimingFromEnv } from "../delivery/spans";
 /**
  * `GET /ws` in the router Worker (CONTRACT.md A.1.1). The Worker cannot know
  * the tenant (it arrives in the first `auth` frame, 0004), so it only checks
@@ -88,6 +89,7 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   const extensions = request.headers.get("sec-websocket-extensions");
   if (extensions !== null && !validExtensionsField(extensions)) return new Response(null, { status: 400 });
   const url = new URL(request.url);
+  if (spanTimingFromEnv(env)) setSpanTiming(true);
   const placement = automaticPlacement(env);
   const connectionId = placement ? warmCell.connectionId() : crypto.randomUUID();
   const publicTransport = url.searchParams.get("public") === "1";
@@ -97,9 +99,10 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   let response: Response | undefined;
   const started = Date.now();
   let stage: UpgradeStage = "placement";
+  const times: Record<string, number> = {};
   try {
     if (placement) {
-      try { assignment = await withDeadline(placement.acquire(connectionId), 5_000); }
+      try { assignment = await withDeadline(placement.acquire(connectionId), 5_000); times.acquireMs = Date.now() - started; }
       catch (error) { warmCell.refused(); return refusedUpgrade("placement", error, started, "gateway capacity unavailable"); }
     }
     stage = "admission";
@@ -107,8 +110,10 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     slots = env.PUBLIC_LIMITER ? (publicTransport ? "pending,public" : "pending") : "";
     // The deadline also travels to the limiter: Promise.race cannot cancel a slow audit/RPC.
     const admissionMs = 2_000;
+    const admitStarted = Date.now();
     const refused = await withDeadline(admitUpgrade(env, { address, connectionId, gateway: gatewayName, publicTransport,
       expiresAt: Date.now() + admissionMs }), admissionMs);
+    times.admitMs = Date.now() - admitStarted;
     if (refused) return refused;
     stage = "gateway";
     const headers = new Headers(request.headers);
@@ -120,7 +125,9 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     headers.set(UPGRADE_HEADERS.publicTransport, publicTransport ? "1" : "0");
     headers.set(UPGRADE_HEADERS.address, address);
     headers.set(UPGRADE_HEADERS.slots, slots);
+    const gatewayStarted = Date.now();
     response = await withDeadline(env.GATEWAY.getByName(gatewayName).fetch(new Request(request.url, { method: "GET", headers })));
+    span("router.upgrade", { ...times, gatewayMs: Date.now() - gatewayStarted, totalMs: Date.now() - started, status: response.status, warm: warmCell.remembered === assignment?.cell });
     if (assignment) { if (response.status === 101) warmCell.admitted(assignment.cell); else warmCell.refused(); }
     return response;
   } catch (error) {

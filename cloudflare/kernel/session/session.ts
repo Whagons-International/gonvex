@@ -160,6 +160,9 @@ export interface SessionTimers {
   later(ms: number, fn: () => void): () => void;
 }
 
+/** X17: how long a host's watcher registration and module read stand in for another one at auth. */
+export const REGISTERED_MS = 60_000;
+
 /** Per-host cache of each project's active module (one RPC per project, refreshed on reload). */
 export class ModuleCache {
   private entries = new Map<string, Promise<ModuleInfo | null>>();
@@ -174,6 +177,30 @@ export class ModuleCache {
     return entry;
   }
   set(projectId: string, info: ModuleInfo | null): void { this.entries.set(projectId, Promise.resolve(info)); }
+
+  /**
+   * X17: the replica epoch of (project, database, module). Control derives it from the deployed manifest, whose module
+   * hash covers the functions and schema the epoch hashes, so one read per module is enough; it was a serial Control
+   * round trip (~34 ms on dev) in every tenant auth. A module without a hash, or a failed read, is not kept.
+   */
+  private readonly epochs = new Map<string, Promise<string>>();
+  async epoch(projectId: string, databaseUrl: string): Promise<string> {
+    const hash = (await this.get(projectId).catch(() => null))?.artifactHash;
+    if (!hash) return this.ports.modules.epoch(projectId, databaseUrl);
+    const key = `${projectId}\u0000${databaseUrl}\u0000${hash}`;
+    let entry = this.epochs.get(key);
+    if (!entry) {
+      if (this.epochs.size >= 256) this.epochs.clear();
+      entry = this.ports.modules.epoch(projectId, databaseUrl).catch((error) => { this.epochs.delete(key); throw error; });
+      this.epochs.set(key, entry);
+    }
+    return entry;
+  }
+  /** A deploy changed the project's module: its epochs are read again. */
+  invalidate(projectId: string): void {
+    this.registered.delete(projectId);
+    for (const key of [...this.epochs.keys()]) if (key.startsWith(`${projectId}\u0000`)) this.epochs.delete(key);
+  }
   async refresh(projectId: string): Promise<ModuleInfo | null> {
     return this.refreshWith(projectId, () => this.ports.modules.module(projectId));
   }
@@ -186,6 +213,19 @@ export class ModuleCache {
     this.set(projectId, info);
     return info;
   }
+
+  /**
+   * X17: when this host registered as the project's watcher (and read its module) less than `REGISTERED_MS` ago, an
+   * auth reuses that instead of another Control round trip (each auth waited 70-145 ms for it on dev). Publications
+   * still reach the host as `moduleReloaded` (which drops this), a Control restart is caught by the host's watch
+   * refresh, and a watcher Control dropped is registered again at most `REGISTERED_MS` later.
+   */
+  private readonly registered = new Map<string, number>();
+  recentlyRegistered(projectId: string, now: number): boolean {
+    const at = this.registered.get(projectId);
+    return at !== undefined && now - at < REGISTERED_MS && this.entries.has(projectId);
+  }
+  noteRegistered(projectId: string, now: number): void { this.registered.set(projectId, now); }
 }
 
 class AuthTimeout extends Error {}
@@ -487,7 +527,9 @@ export class Session {
     if (this.closed) return;
     const tenant = this.record.tenant;
     const control = async (f: ClientFrame) => {
+      const turnWaitMs = this.turnWaitMs, called = this.now();
       const replies = await this.forward(this.ports.control.dispatch(this.view(), f));
+      span("gateway.control", { type: f.type, path: "path" in f && typeof f.path === "string" ? f.path : "", turnWaitMs, rpcMs: this.now() - called });
       if (f.type === "query.subscribe") {
         const reply = replies.map((text) => JSON.parse(text)).find((value) => value.type === "query.result");
         if (reply) { (this.record.controlQueries ??= Object.create(null))[f.id] = { request: f, last: JSON.stringify(reply.result) }; this.hooks.recoveryChanged?.(); }
@@ -1090,15 +1132,22 @@ export class Session {
   private publication: { projectId: string; refreshed: Promise<ModuleInfo | null> } | undefined;
 
   private publish(projectId: string): Promise<ModuleInfo | null> {
+    if (this.modules.recentlyRegistered(projectId, this.now())) return this.modules.get(projectId);
     // The entry `authenticate` reads (artifactHash) exists first, so this read replaces it, as a refresh after it did.
     this.modules.get(projectId).catch(() => {});
+    const started = this.now();
     const refreshed = this.modules.refreshWith(projectId, () => this.hooks.projectAuthenticatedModule!(projectId));
-    refreshed.catch(() => {}); // awaited by `auth`; an auth that fails first must not leave it unhandled
+    refreshed.then(() => this.modules.noteRegistered(projectId, started), () => {}); // awaited by `auth`; a failed auth must not leave it unhandled
     return refreshed;
   }
 
+  /** X17: wall-time parts of the current auth (spans only; time-only, no identifiers). */
+  private authTimes: { sessionMs?: number; epochMs?: number } = {};
+
   private async auth(frame: AuthFrame): Promise<void> {
     const record = this.record;
+    const authStarted = this.now(), authTurnWaitMs = this.turnWaitMs;
+    this.authTimes = {};
     const tenantRequest = controlAuthTenant(frame.controlOnly, frame.capabilities, frame.tenant);
     const deadline = record.pendingUntil ?? this.now() + LIMITS.authTimeoutMs;
     let outcome: { response: AuthResponse; connection: Connection };
@@ -1138,6 +1187,7 @@ export class Session {
     }
     record.clientContract = frame.clientContract === undefined ? null : frame.clientContract.toString();
 
+    const authenticatedAt = this.now();
     let module = await this.modules.get(connection.projectId);
     if (response.ok && this.hooks.projectAuthenticated) {
       try {
@@ -1189,6 +1239,9 @@ export class Session {
     this.hooks.persist?.();
     this.send(response.ok ? frames.authResult(response.id, response.result as Json) : frames.authError(response.id, response.error, response.code));
     this.reportConnection();
+    span("gateway.auth", { kind: frame.public ? "public" : frame.token === undefined ? (frame.controlOnly ? "control-anon" : "anon") : frame.controlOnly ? "control" : "tenant",
+      ok: response.ok, turnWaitMs: authTurnWaitMs, totalMs: this.now() - authStarted, authenticateMs: authenticatedAt - authStarted,
+      publishWaitMs: this.now() - authenticatedAt, ...this.authTimes });
   }
 
   /** `authenticate` (lib.rs:4475-4780). */
@@ -1239,7 +1292,9 @@ export class Session {
       const result = { projectId, accountId: identity.value.account.id, tenantId: "", artifactHash: await artifactHash(projectId) };
       return { response: { ok: true, id, result }, connection: { projectId, identity: identity.value, tenant: null, impersonationId: "", authToken: token } };
     }
+    const sessionStarted = this.now();
     const authenticated = await control.authenticateSession(token, project, tenant);
+    this.authTimes.sessionMs = this.now() - sessionStarted;
     if (!authenticated.ok) return failed(authenticated);
     const session = authenticated.value;
     // X15: the holder registration + module read (`auth` awaits it) overlaps the replica epoch read below.
@@ -1262,7 +1317,9 @@ export class Session {
   private async directive(session: TenantSession) {
     const module = await this.modules.get(session.identity.projectId);
     if (!module) return null;
-    const epoch = await this.ports.modules.epoch(session.identity.projectId, session.route.databaseUrl);
+    const epochStarted = this.now();
+    const epoch = await this.modules.epoch(session.identity.projectId, session.route.databaseUrl);
+    this.authTimes.epochMs = this.now() - epochStarted;
     return replicaDirective({
       projectId: session.identity.projectId, tenantId: session.route.tenantId, accountId: session.identity.account.id,
       permissions: session.member.permissions, epoch,

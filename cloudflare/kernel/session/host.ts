@@ -205,6 +205,7 @@ export class SocketHost {
 
   /** A deploy changed a project's module (A.1.5 c). */
   async moduleReloaded(projectId: string, module: ModuleInfo | null): Promise<number> {
+    this.modules.invalidate(projectId);
     this.modules.set(projectId, module);
     const affected = [...this.sessions.values()].filter(s => !s.closed && s.record.connection.projectId === projectId);
     await Promise.all(affected.map(s => s.moduleReloaded(module)));

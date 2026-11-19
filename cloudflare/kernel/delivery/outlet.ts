@@ -9,7 +9,7 @@
 
 import type { DeliveryOutlet } from "./engine.ts";
 import { initialRefBytes, validRecoveryInitialDelivery, initialDeliveryOnly, initialFailureOnly, type InitialRequestRef, type ReplicaDelivery, type ReplicaReceipt } from "./protocol.ts";
-import { span } from "./spans.ts";
+import { span, spanTimingOn } from "./spans.ts";
 
 const pressureCounts = { capacityRejections: 0, unsupportedRecoveries: 0 };
 export const DELIVERY_CAPACITY_CODE = "GONVEX_DELIVERY_CAPACITY";
@@ -26,6 +26,12 @@ const RECOVERY_BYTES = 8 * 1024 * 1024;
 const MAX_HOSTS = 32 * 64 + 8; // finite automatic fleet plus the legacy pool during deployment skew
 const MAX_PENDING = 256;
 const MAX_RPCS = 8;
+/**
+ * X17: a `sendFirst` payload this small is admitted beyond the holder's and the isolate's byte budgets (a first load's
+ * snapshot pages fill them, which is exactly when a live query reply has to overtake them). The count cap and a
+ * holder in recovery still refuse it.
+ */
+export const FIRST_BYTES = 1024 * 1024;
 /**
  * X14: payloads waiting for one holder go in ONE ordered RPC (`deliverReplicaBatch`), up to these bounds. Every
  * delivery RPC is held by the gateway's output gate until its socket-recovery write is durable (~20-30 ms on dev),
@@ -66,6 +72,8 @@ interface Pending {
   /** X14 review: the engine reset its holder for a stall (`abandon`): its work is given up, not just its credits. */
   abandoned?: boolean;
   enqueued: number;
+  /** X17: sent ahead of the ordinary payloads waiting for this holder (`sendFirst`). */
+  first?: boolean;
   resolve(value: ReplicaReceipt | undefined): void;
   reject(error: unknown): void;
 }
@@ -170,6 +178,29 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
 
   /**
+   * X17: `send`, placed ahead of every ordinary payload still waiting for `host` (never ahead of the RPC in flight, a
+   * recovery barrier, or an earlier `sendFirst` payload). The same admission and credits as `send`.
+   */
+  sendFirst(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined> {
+    if (!validRecoveryInitialDelivery(payload)) return Promise.reject(new Error("invalid recovery initial offer"));
+    if (payload.initialFailure && !initialFailureOnly(payload)) return Promise.reject(new Error("invalid initial-failure-only delivery"));
+    if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length)&&!initialDeliveryOnly(payload))return Promise.reject(new Error("invalid initial-only delivery"));
+    let queue: Queue;
+    try { queue = this.queue(host); } catch (error) { return Promise.reject(error); }
+    const bytes = retainedBytes(payload);
+    if (!OrderedOutlet.fitsFirst(queue, bytes)) {
+      queue.recoveryRequired = true;
+      this.settleEmpty(host, queue);
+      return Promise.reject(new DeliveryCapacityError());
+    }
+    let at = 0;
+    while (at < queue.pending.length && (queue.pending[at]!.first || queue.pending[at]!.recovery)) at++;
+    const sent = this.enqueue(host, queue, payload, bytes, false, at);
+    this.unclaim(host);
+    return sent;
+  }
+
+  /**
    * A legal large singleton is allowed when it is the only retained normal delivery. Never impose
    * the pending budget as a smaller wire/frame limit. Its real isolate peak remains a V04 gate.
    */
@@ -179,6 +210,19 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     // RPC must not hold back the singleton forever (BUG-4b r4609198131). Peak: the singleton plus that reserve.
     const singleton = credits.normal === 0 && !queue?.running && !queue?.pending.length;
     return singleton || ((queue?.bytes ?? 0) + bytes <= HOST_PENDING_BYTES && credits.normal + bytes <= NORMAL_BYTES);
+  }
+
+  /** X17: `fits` for a `sendFirst` payload: within `FIRST_BYTES` it needs no byte room. */
+  private static fitsFirst(queue: Queue | undefined, bytes: number): boolean {
+    if (bytes <= FIRST_BYTES) return !queue?.recoveryRequired && credits.count < MAX_PENDING;
+    return OrderedOutlet.fits(queue, bytes);
+  }
+
+  /** X17: whether `sendFirst` would accept `payload` now (no side effects). */
+  admitsFirst(host: string, payload: ReplicaDelivery): boolean {
+    // A holder that claimed the quiet isolate for a large payload (BUG-4b) still goes before anyone else.
+    if (claim && claim.owner.deref() && !(claim.owner.deref() === this && claim.host === host)) return false;
+    return OrderedOutlet.fitsFirst(this.queues.get(host), retainedBytes(payload));
   }
 
   /** BUG-4: whether `send` would accept `payload` now (no side effects); the engine waits for room instead of tripping recovery. */
@@ -253,12 +297,13 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     return recovery;
   }
 
-  private enqueue(host: string, queue: Queue, payload: ReplicaDelivery, bytes: number, recovery: boolean): Promise<ReplicaReceipt | undefined> {
+  private enqueue(host: string, queue: Queue, payload: ReplicaDelivery, bytes: number, recovery: boolean, at?: number): Promise<ReplicaReceipt | undefined> {
     if (!queue.running && !queue.pending.length) {
       queue.idle = new Promise<void>(resolve => { queue.drained = resolve; });
     }
     const next = new Promise<ReplicaReceipt | undefined>((resolve, reject) => {
-      queue.pending.push({ payload, bytes, recovery, enqueued: Date.now(), resolve, reject });
+      const item: Pending = { payload, bytes, recovery, enqueued: Date.now(), resolve, reject, ...(at === undefined ? {} : { first: true }) };
+      if (at === undefined) queue.pending.push(item); else queue.pending.splice(at, 0, item);
     });
     if (recovery) credits.recovery += bytes;
     else { queue.bytes += bytes; credits.normal += bytes; credits.count++; }
@@ -301,7 +346,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
 
   private async run(host: string, queue: Queue, items: Pending[]): Promise<void> {
     const started = Date.now();
-    const pressure = (item: Pending) => ({ ...item.payload, pressure: { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs } });
+    const pressure = (item: Pending) => ({ ...item.payload, pressure: { queueAgeMs: started - item.enqueued, rpcMs: queue.rpcMs, ...(spanTimingOn() ? { sentAt: started } : {}) } });
     let requeue = false;
     try {
       if (items.length === 1) {

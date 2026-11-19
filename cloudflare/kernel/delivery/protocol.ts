@@ -197,7 +197,7 @@ export interface ReplicaDelivery {
   /** X01 bounded transport telemetry; never part of the SDK/wire protocol. */
   /** Whole-holder ordered lag recovery (K22); old holders must not fake acknowledgment. */
   readonly recovery?: { readonly reason: "change-feed-lagged" };
-  readonly pressure?: { readonly queueAgeMs: number; readonly rpcMs: number };
+  readonly pressure?: { readonly queueAgeMs: number; readonly rpcMs: number; /** X17 dev spans: the sender's clock when the RPC left. */ readonly sentAt?: number };
   /** The tenant object's instance: a new one means its in-memory subscriptions are gone. */
   readonly instance: string;
   /** 0061: sender understands the server-only empty-work restart fence. */
