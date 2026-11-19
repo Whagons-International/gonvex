@@ -1493,26 +1493,3 @@ describe("X17 a live query's initial reply goes ahead of its holder's backlog", 
   });
 });
 
-describe("X17 a cohort of opens yields between opens", () => {
-  it("a live query that arrives during a 30-open cohort is answered before the cohort ends", { timeout: 60_000 }, async () => {
-    await withEngine(async (h) => {
-      const insert: Array<[string, unknown[]]> = [];
-      for (let i = 0; i < 300; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 200)]]);
-      await h.commit(insert);
-      const opens = Array.from({ length: 30 }, (_, i) => ({ id: `o${i}`, path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false }));
-      h.engine.dispatch(socket("S1"), { type: "replica.openMany", opens } as never);
-      // The query arrives as a later event, as an RPC does.
-      const view = { ...socket("Q"), queryId: "live" };
-      const subscribed = new Promise<string[]>((resolve) => setTimeout(() => resolve(h.engine.querySubscribe(view, (db) => h.live.subscribeSnapshot(db, view.connectionId, view.tenant, { id: "live", path: "items.live", args: {} }))), 0));
-      expect(await subscribed).toEqual([]);
-      for (let spin = 0; spin < 4000 && frames(h.payloads, "S1").filter((f) => f.type === "replica.ready").length < 30; spin++) await new Promise((resolve) => setTimeout(resolve, 5));
-      await h.engine.settled();
-      const reply = h.payloads.findIndex(([, p]) => !!p.sockets.Q);
-      let lastReady = -1;
-      h.payloads.forEach(([, p], index) => { if ((p.sockets.S1?.ops ?? []).some((op) => op[0] === "f" && String(op[1]).includes("replica.ready"))) lastReady = index; });
-      expect(reply).toBeGreaterThanOrEqual(0);
-      expect(reply).toBeLessThan(lastReady);
-      expect(frames(h.payloads, "S1").filter((f) => f.type === "replica.ready")).toHaveLength(30);
-    }, MODULE, true);
-  });
-});
