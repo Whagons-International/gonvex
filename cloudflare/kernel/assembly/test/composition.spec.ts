@@ -386,3 +386,44 @@ it('X13c an Action tool Reducer answers after its commit, not behind serial work
   expect(order).toContain('queued:start');
  }finally{release();stop();}
 }));
+it('X14 a woken tenant whose stored module came from this baked release neither rewrites nor re-activates it',async()=>{
+ // Dev cold sign-in: every cold tenant wake wrote the whole manifest twice (restore, then activate) and parsed it
+ // twice before Control's `admit` could run. A woken object holding this exact release now writes nothing.
+ const {releases}=await import('../releases');
+ const {MODULE_KEY}=await import('../../reducer/tenant');
+ const {exports}=await import('./catalog');
+ const project=`wake-${crypto.randomUUID()}`;
+ releases[project]={project,hash:(manifest as {module:{hash:string}}).module.hash,generation:1,manifest,exports};
+ const stub=bindings.TENANT.getByName(`assembly-wake-${crypto.randomUUID()}`);
+ const logs:string[]=[];const log=console.log;
+ try {
+  await runInDurableObject(stub,async(object,state)=>{
+   const release=await buildReleasePlan(await migrationsFromFiles(files)); plans.add(release);
+   await (object as CompositionTenant).activate(project,manifest,release.id);
+   state.storage.kv.put('assembly/project',project);
+   const puts:string[]=[];const kv=state.storage.kv as unknown as {put(k:string,v:unknown):void};const put=kv.put.bind(kv);
+   kv.put=(k,v)=>{puts.push(k);put(k,v);};
+   console.log=(...args:unknown[])=>{logs.push(args.map(String).join(' '));};
+   const Ctor=object.constructor as new(ctx:DurableObjectState,env:unknown)=>CompositionTenant;
+   const wake=async()=>{const woken=new Ctor(state,(object as unknown as {env:unknown}).env);await new Promise(r=>setTimeout(r,50));return woken;};
+   // First wake after activation by another writer: restore stores the marked form once, activation is skipped.
+   const first=await wake();
+   expect(puts.filter(k=>k===MODULE_KEY)).toHaveLength(1);
+   expect((state.storage.kv.get(MODULE_KEY) as {source?:string}).source).toBeTruthy();
+   expect((first as unknown as {kernel:{module?:{projectId:string}}}).kernel.module?.projectId).toBe(project);
+   // Every later wake writes nothing and does not activate again.
+   puts.length=0;
+   const second=await wake();
+   expect(puts.filter(k=>k===MODULE_KEY)).toHaveLength(0);
+   expect((second as unknown as {kernel:{module?:{projectId:string}}}).kernel.module?.projectId).toBe(project);
+   const diags=logs.filter(l=>l.includes('"x14-wake"')).map(l=>JSON.parse(l) as {activated:boolean});
+   expect(diags.map(d=>d.activated)).toEqual([false,false]);
+   // A different baked release (new generation) is stored and served again.
+   releases[project]={...releases[project]!,generation:2};
+   puts.length=0;
+   await wake();
+   expect(puts.filter(k=>k===MODULE_KEY)).toHaveLength(1);
+   kv.put=put;
+  });
+ } finally { console.log=log; delete releases[project]; }
+});

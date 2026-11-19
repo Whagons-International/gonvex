@@ -46,7 +46,7 @@ import {
   tenantAdminRequired,
   unknownFunction,
 } from "./errors";
-import { type ExternalAuthConfiguration, verifyExternalToken } from "./external-auth";
+import { type ExchangeTimings, type ExternalAuthConfiguration, verifyExternalToken } from "./external-auth";
 import { hashPassword, verifyPassword } from "./password";
 import { decryptControlSecret, encryptControlSecret } from "./secrets";
 import {
@@ -1304,6 +1304,8 @@ function loadExternalConfiguration(ctx: Ctx, project: string, provider: string):
 /** `execute_auth_action` (control.rs:373). */
 async function executeAuthAction(ctx: Ctx, connection: ControlConnection, path: string, args: unknown, key: string): Promise<unknown> {
   const project = connection.projectId;
+  const started = Date.now();
+  const timings: ExchangeTimings = {};
   let externalIdentity: VerifiedExternalIdentity | null = null;
   if (path === "control.auth.exchangeExternalToken") {
     const object = exactObject(args, ["provider", "token", "tenantId", "previousRefreshToken"]);
@@ -1311,8 +1313,9 @@ async function executeAuthAction(ctx: Ctx, connection: ControlConnection, path: 
     if (provider !== "firebase" && provider !== "external-oidc") throw invalid("provider must be firebase or external-oidc");
     const configuration = loadExternalConfiguration(ctx, project, provider);
     // Token verification (network) happens before the writer transaction.
-    externalIdentity = await verifyExternalToken(ctx.config, ctx.fetch, configuration, requiredString(object, "token"));
+    externalIdentity = await verifyExternalToken(ctx.config, ctx.fetch, configuration, requiredString(object, "token"), timings);
   }
+  const verified = Date.now();
   const subject = authSubject(path, args);
   const outcome = ctx.sql.tx((): { replay: unknown } | { result: Record<string, unknown> } | { reuse: string } => {
     dropExpiredClaim(ctx, project, subject, key);
@@ -1378,7 +1381,13 @@ async function executeAuthAction(ctx: Ctx, connection: ControlConnection, path: 
   });
   if ("reuse" in outcome) throw invalid(outcome.reuse);
   const result = "replay" in outcome ? (outcome.replay as Record<string, unknown>) : outcome.result;
-  return sessionResultFromDirectory(ctx, project, result ?? {});
+  const committed = Date.now();
+  const calls = ctx.tenantCalls;
+  const answer = await sessionResultFromDirectory(ctx, project, result ?? {});
+  // X14 diagnostics: wall time per part of one login (no identifiers, tokens or tenant names).
+  console.log(JSON.stringify({ diag: "x14-auth", path, totalMs: Date.now() - started, externalMs: verified - started, ...timings,
+    txMs: committed - verified, admitMs: Date.now() - committed, admits: ctx.tenantCalls - calls }));
+  return answer;
 }
 
 // --------------------------------------------------------------------- sagas

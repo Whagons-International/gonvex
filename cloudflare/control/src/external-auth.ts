@@ -15,6 +15,7 @@
  */
 import type { ControlConfig } from "./context";
 import { external } from "./errors";
+import { sha256Hex } from "./util";
 import type { VerifiedExternalIdentity } from "./sessions";
 
 export interface ExternalAuthConfiguration {
@@ -38,6 +39,18 @@ interface Jwk {
 }
 
 const cache = new Map<string, { expiresAt: number; keys: Jwk[] }>();
+/**
+ * X14: Google OAuth access tokens of the Firebase admin service account, per isolate. Google issues them for ~1 h
+ * and they only authorize `accounts:lookup`; fetching one per exchange cost a Google round trip (75-216 ms from the
+ * edge, X14 report). Keyed by a digest of the token URL and the whole credentials JSON, so a rotated key never
+ * reuses a token. The lookup itself (disabled / revoked check) still runs on every exchange.
+ */
+const accessTokens = new Map<string, { token: string; expiresAt: number }>();
+const ACCESS_TOKEN_MARGIN_MS = 5 * 60_000;
+const ACCESS_TOKEN_MAX_MS = 60 * 60_000;
+
+/** X14: wall time of each part of one exchange's verification, for the dev diagnostics (no identifiers). */
+export interface ExchangeTimings { jwksMs?: number; verifyMs?: number; accessTokenMs?: number; accessTokenCached?: boolean; lookupMs?: number }
 const MIN_AGE = 30_000;
 const MAX_AGE = 60 * 60_000;
 const DEFAULT_AGE = 5 * 60_000;
@@ -109,21 +122,23 @@ async function jwks(config: ControlConfig, fetcher: typeof fetch, url: string, f
   return keys as Jwk[];
 }
 
-/** Clears the JWKS cache (tests). */
-export const clearJwksCache = (): void => cache.clear();
+/** Clears the JWKS and access-token caches (tests). */
+export const clearJwksCache = (): void => { cache.clear(); accessTokens.clear(); };
 
 const numeric = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : null);
 
 /** jsonwebtoken `decode` with `Validation::new(RS256)` as configured in external_auth.rs:113-131. */
-async function verifiedClaims(config: ControlConfig, fetcher: typeof fetch, configuration: ExternalAuthConfiguration, token: string): Promise<Record<string, unknown>> {
+async function verifiedClaims(config: ControlConfig, fetcher: typeof fetch, configuration: ExternalAuthConfiguration, token: string, timings?: ExchangeTimings): Promise<Record<string, unknown>> {
   const parts = token.split(".");
   if (parts.length !== 3) throw external.invalidToken();
   const header = decodeSegment(parts[0]!) as Record<string, unknown> | null;
   if (!header || typeof header !== "object" || header.alg !== "RS256") throw external.invalidToken();
   const kid = header.kid;
   if (typeof kid !== "string") throw external.invalidToken();
+  const keysAt = Date.now();
   let keys = await jwks(config, fetcher, configuration.jwksUrl, false);
   if (!keys.some((key) => key.kid === kid)) keys = await jwks(config, fetcher, configuration.jwksUrl, true);
+  if (timings) timings.jwksMs = Date.now() - keysAt;
   const jwk = keys.find((key) => key.kid === kid);
   if (!jwk || jwk.kty !== "RSA" || typeof jwk.n !== "string" || typeof jwk.e !== "string") throw external.invalidToken();
   let key: CryptoKey;
@@ -185,6 +200,7 @@ async function identityFromClaims(
   fetcher: typeof fetch,
   configuration: ExternalAuthConfiguration,
   claims: Record<string, unknown>,
+  timings?: ExchangeTimings,
 ): Promise<VerifiedExternalIdentity> {
   const subject = typeof claims.sub === "string" ? claims.sub.trim() : "";
   if (!subject) throw external.missingSubject();
@@ -216,7 +232,7 @@ async function identityFromClaims(
     authTime,
   };
   if (configuration.firebaseAdminCredentials !== null) {
-    await verifyFirebaseAccount(config, fetcher, configuration, configuration.firebaseAdminCredentials, identity);
+    await verifyFirebaseAccount(config, fetcher, configuration, configuration.firebaseAdminCredentials, identity, timings);
   }
   return identity;
 }
@@ -226,30 +242,18 @@ function pemToDer(pem: string): Uint8Array {
   return new Uint8Array(Buffer.from(body, "base64"));
 }
 
-/** `verify_firebase_account` (external_auth.rs:331-446): service-account JWT, then `accounts:lookup`. */
-async function verifyFirebaseAccount(
-  config: ControlConfig,
-  fetcher: typeof fetch,
-  configuration: ExternalAuthConfiguration,
-  credentialsJson: string,
-  identity: VerifiedExternalIdentity,
-): Promise<void> {
-  let credentials: { project_id?: unknown; client_email?: unknown; private_key?: unknown };
-  try {
-    credentials = JSON.parse(credentialsJson);
-  } catch {
-    throw external.firebaseAccountUnavailable();
-  }
-  if (
-    typeof credentials.project_id !== "string" ||
-    typeof credentials.client_email !== "string" ||
-    typeof credentials.private_key !== "string" ||
-    credentials.project_id !== configuration.firebaseProjectId ||
-    !credentials.client_email.trim() ||
-    !credentials.private_key.trim()
-  ) {
-    throw external.firebaseAccountUnavailable();
-  }
+function lookup(fetcher: typeof fetch, url: string, accessToken: string, subject: string): Promise<Response> {
+  return fetcher(url, {
+    method: "POST",
+    headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ localId: [subject] }),
+    redirect: "manual",
+    signal: AbortSignal.timeout(8000),
+  });
+}
+
+/** The service-account JWT exchanged for an access token (external_auth.rs:331-446), cached per isolate (X14). */
+async function serviceAccountToken(fetcher: typeof fetch, tokenUrl: string, cacheKey: string, credentials: { client_email: string; private_key: string }): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   let assertion: string;
   try {
@@ -269,9 +273,7 @@ async function verifyFirebaseAccount(
   } catch {
     throw external.firebaseAccountUnavailable();
   }
-  const tokenUrl = config.googleTokenUrl ?? "https://oauth2.googleapis.com/token";
   const form = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion });
-  let accessToken: string;
   try {
     const response = await fetcher(tokenUrl, {
       method: "POST",
@@ -281,28 +283,68 @@ async function verifyFirebaseAccount(
       signal: AbortSignal.timeout(8000),
     });
     if (response.status < 200 || response.status >= 300) throw external.firebaseAccountUnavailable();
-    const body = (await response.json()) as { access_token?: unknown };
+    const body = (await response.json()) as { access_token?: unknown; expires_in?: unknown };
     if (typeof body.access_token !== "string" || !body.access_token) throw external.firebaseAccountUnavailable();
-    accessToken = body.access_token;
+    const lifetime = typeof body.expires_in === "number" && Number.isFinite(body.expires_in) ? Math.min(body.expires_in * 1000, ACCESS_TOKEN_MAX_MS) : 0;
+    if (lifetime > ACCESS_TOKEN_MARGIN_MS) accessTokens.set(cacheKey, { token: body.access_token, expiresAt: Date.now() + lifetime - ACCESS_TOKEN_MARGIN_MS });
+    return body.access_token;
   } catch {
     throw external.firebaseAccountUnavailable();
   }
+}
+
+/** `verify_firebase_account` (external_auth.rs:331-446): service-account JWT, then `accounts:lookup`. */
+async function verifyFirebaseAccount(
+  config: ControlConfig,
+  fetcher: typeof fetch,
+  configuration: ExternalAuthConfiguration,
+  credentialsJson: string,
+  identity: VerifiedExternalIdentity,
+  timings?: ExchangeTimings,
+): Promise<void> {
+  let credentials: { project_id?: unknown; client_email?: unknown; private_key?: unknown };
+  try {
+    credentials = JSON.parse(credentialsJson);
+  } catch {
+    throw external.firebaseAccountUnavailable();
+  }
+  if (
+    typeof credentials.project_id !== "string" ||
+    typeof credentials.client_email !== "string" ||
+    typeof credentials.private_key !== "string" ||
+    credentials.project_id !== configuration.firebaseProjectId ||
+    !credentials.client_email.trim() ||
+    !credentials.private_key.trim()
+  ) {
+    throw external.firebaseAccountUnavailable();
+  }
+  const tokenUrl = config.googleTokenUrl ?? "https://oauth2.googleapis.com/token";
+  const cacheKey = sha256Hex(`${tokenUrl}\0${credentialsJson}`);
+  const tokenAt = Date.now();
+  const cachedToken = accessTokens.get(cacheKey);
+  let accessToken = cachedToken && cachedToken.expiresAt > Date.now() ? cachedToken.token : undefined;
+  const fromCache = accessToken !== undefined;
+  if (timings) timings.accessTokenCached = fromCache;
+  if (accessToken === undefined) accessToken = await serviceAccountToken(fetcher, tokenUrl, cacheKey, credentials as { client_email: string; private_key: string });
+  if (timings) timings.accessTokenMs = Date.now() - tokenAt;
   const base = config.identityToolkitUrl ?? "https://identitytoolkit.googleapis.com";
   const lookupUrl = `${base}/v1/projects/${encodeURIComponent(configuration.firebaseProjectId).replace(/%20/g, "+")}/accounts:lookup`;
+  const lookupAt = Date.now();
   let body: { users?: Array<Record<string, unknown>> };
   try {
-    const response = await fetcher(lookupUrl, {
-      method: "POST",
-      headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ localId: [identity.subject] }),
-      redirect: "manual",
-      signal: AbortSignal.timeout(8000),
-    });
+    let response = await lookup(fetcher, lookupUrl, accessToken, identity.subject);
+    if ((response.status === 401 || response.status === 403) && fromCache) {
+      // A cached token Google no longer accepts: drop it and retry once with a fresh one.
+      accessTokens.delete(cacheKey);
+      accessToken = await serviceAccountToken(fetcher, tokenUrl, cacheKey, credentials as { client_email: string; private_key: string });
+      response = await lookup(fetcher, lookupUrl, accessToken, identity.subject);
+    }
     if (response.status < 200 || response.status >= 300) throw external.firebaseAccountUnavailable();
     body = (await response.json()) as typeof body;
   } catch {
     throw external.firebaseAccountUnavailable();
   }
+  if (timings) timings.lookupMs = Date.now() - lookupAt;
   const user = Array.isArray(body.users) ? body.users.find((entry) => entry?.localId === identity.subject) : undefined;
   if (!user) throw external.firebaseAccountRevoked();
   if (user.disabled === true) throw external.firebaseAccountRevoked();
@@ -316,14 +358,17 @@ export async function verifyExternalToken(
   fetcher: typeof fetch,
   configuration: ExternalAuthConfiguration,
   token: string,
+  timings?: ExchangeTimings,
 ): Promise<VerifiedExternalIdentity> {
   if (!token.trim()) throw external.invalidToken();
+  const verifyAt = Date.now();
   const claims = config.authEmulator
     ? emulatorAllowed(configuration, config.authEmulator.host)
       ? emulatorClaims(configuration, token)
       : (() => {
           throw external.invalidToken();
         })()
-    : await verifiedClaims(config, fetcher, configuration, token);
-  return identityFromClaims(config, fetcher, configuration, claims);
+    : await verifiedClaims(config, fetcher, configuration, token, timings);
+  if (timings) timings.verifyMs = Date.now() - verifyAt;
+  return identityFromClaims(config, fetcher, configuration, claims, timings);
 }
