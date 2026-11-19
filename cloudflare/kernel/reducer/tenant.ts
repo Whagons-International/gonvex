@@ -11,7 +11,7 @@
 import { applyInstallUnit, CaptureState, ChangeWake, directSql, finalize, planChangeFeedInstall, type CommitNotice } from "../capture/index.ts";
 import type { CaptureHooks } from "../migrate/capture-port.ts";
 import { TenantMigrator, type MigrationStatus, type PlanStore } from "../migrate/index.ts";
-import { ModuleRegistry, TenantModuleHost, type ModuleExports } from "../host/src/index.js";
+import { ModuleRegistry, TenantModuleHost, type ModuleExportsSource } from "../host/src/index.js";
 import type { FileMetadataSource } from "../host/src/database-host";
 import type { TenantCall } from "../host/src/invoke";
 import type { ClientFrame } from "../session/decode";
@@ -30,8 +30,11 @@ export const NOT_IMPLEMENTED = "not implemented by the kernel tenant object yet"
 
 export interface KernelTenantOptions {
   readonly ctx: DurableObjectState;
-  /** The Worker version's bundle for an artifact hash (0016 G0-2), or undefined. */
-  readonly bundle: (artifactHash: string) => ModuleExports | undefined;
+  /**
+   * The Worker version's bundle for an artifact hash (0016 G0-2), or undefined. A function is evaluated on the
+   * first call that runs module code (X15: a woken tenant that only answers `admit` never evaluates it).
+   */
+  readonly bundle: (artifactHash: string) => ModuleExportsSource | undefined;
   /** Release plans (K02): built once per release outside the object. */
   readonly plans: PlanStore;
   readonly files?: (() => FileMetadataSource | undefined) | undefined;

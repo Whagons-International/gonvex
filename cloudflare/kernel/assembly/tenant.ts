@@ -1,6 +1,6 @@
 /// <reference path="../host/src/shims.d.ts" />
 import type { TenantCall } from "../host/src/invoke";
-import type { ModuleExports } from "../host/src/index";
+import type { ModuleExportsSource } from "../host/src/index";
 import { validateValue } from "../host/src/index";
 import { ReplicaTenantObject } from "../delivery/object";
 import { R2PlanStore, type PlanStore } from "../migrate/plan";
@@ -117,7 +117,15 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   private queryModule: { hash: string; module: QueryModule } | undefined;
   private fixtureRecoveryFailure=false;
 
-  protected bundle(hash: string): ModuleExports | undefined { return Object.values(releases).find((release) => release.hash === hash)?.exports; }
+  /**
+   * X15: lazy. Reading `exports` evaluates the release's app bundle (several MB) in this isolate; a cold wake
+   * that only answers Control's `admit` (each sign-in re-admits the account on all its tenants) skips it.
+   * The engine evaluates it on the first call that runs module code.
+   */
+  protected bundle(hash: string): ModuleExportsSource | undefined {
+    const release = Object.values(releases).find((candidate) => candidate.hash === hash);
+    return release ? () => release.exports : undefined;
+  }
   protected plans(): PlanStore { return new R2PlanStore(this.env.RELEASES); }
   protected override liveQueries(): LiveQueries | undefined { return this.queries?.live; }
   protected override operatorSink(): OperatorDataSink { return rpc(this.env.CONTROL, "control"); }
