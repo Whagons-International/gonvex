@@ -1969,8 +1969,10 @@ describe("#528 re-review 4: a cold open after module DDL does not change live su
     await h.commit(rows);
     h.engine.dispatch(socket("S"), { type: "replica.open", id: "notes", path: "notes.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
     await h.engine.settled();
-    // Module DDL in a reducer (K01 bumps the schema generation; nothing visibility reads changed).
+    // Module DDL in a reducer: nothing visibility reads changed, but the schema generation moves. The harness `commit`
+    // runs through StorageSession.run, which does not bump it, so bump it as K01's module-SQL path does.
     await h.commit([["CREATE TABLE IF NOT EXISTS scratch (x TEXT)", []]]);
+    h.schemaChanged();
     if (coldOpen) {
       h.engine.dispatch(socket("C"), { type: "replica.open", id: "items", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
       await h.engine.settled();
