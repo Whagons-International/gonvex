@@ -63,13 +63,55 @@ export interface TelemetryHostState {
   /** Rust's `support_is_current` answers only while presence v2 is enabled. */
   presenceEnabled: boolean;
   now?: () => number;
+  /** X17: performance rows wait here and reach the control object in one call per project (see PerformanceBuffer). */
+  performance?: PerformanceBuffer | undefined;
+}
+
+/**
+ * X17: performance rows (`telemetry.*`, answered with nothing) leave the socket's frame queue at once and reach the
+ * control object a few seconds later, one call per project for every socket of this object. Before, each
+ * `telemetry.batch` held its socket's queue for a control round trip, and the client sends one right before its sign-in
+ * `auth` frames; its insert also held every other reply of the (single) control object behind the write's replication,
+ * because a Durable Object's output gate covers the whole object. The rows, their order within a project, the rate
+ * limits and the store budget are unchanged; only when they are written moves (Rust writes them in the background too).
+ */
+export const PERFORMANCE_FLUSH_MS = 5_000;
+export const PERFORMANCE_FLUSH_ROWS = 200;
+export class PerformanceBuffer {
+  private readonly pending = new Map<string, { port: TelemetryPort; rows: PerformanceRow[] }>();
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private rows = 0;
+  constructor(private readonly delayMs = PERFORMANCE_FLUSH_MS, private readonly maxRows = PERFORMANCE_FLUSH_ROWS,
+    private readonly timers: { set(fn: () => void, ms: number): ReturnType<typeof setTimeout>; clear(t: ReturnType<typeof setTimeout>): void } = { set: (fn, ms) => setTimeout(fn, ms), clear: (t) => clearTimeout(t) }) {}
+  add(port: TelemetryPort, projectId: string, rows: readonly PerformanceRow[]): void {
+    const entry = this.pending.get(projectId) ?? { port, rows: [] };
+    entry.port = port;
+    entry.rows.push(...rows);
+    this.pending.set(projectId, entry);
+    this.rows += rows.length;
+    if (this.rows >= this.maxRows) void this.flush();
+    else this.timer ??= this.timers.set(() => { this.timer = undefined; void this.flush(); }, this.delayMs);
+  }
+  /** Writes everything buffered now (also the timer's and a full buffer's path). */
+  async flush(): Promise<void> {
+    if (this.timer !== undefined) { this.timers.clear(this.timer); this.timer = undefined; }
+    const batches = [...this.pending]; this.pending.clear(); this.rows = 0;
+    await Promise.all(batches.map(async ([projectId, { port, rows }]) => {
+      for (let i = 0; i < rows.length; i += this.maxRows) {
+        try { await port.recordPerformance(projectId, rows.slice(i, i + this.maxRows)); }
+        catch (error) { console.error("telemetry: performance rows not stored", error); }
+      }
+    }));
+  }
+  get size(): number { return this.rows; }
 }
 
 /** Default forwarding budget: 600 rows a minute per gateway and project (8 gateways: at most 80 rows/s). */
 export const STORE_PER_MINUTE = 600;
 
-export function telemetryHostState(options: { presenceEnabled: boolean; sink?: PerformanceSink | undefined; storePerMinute?: number; now?: () => number }): TelemetryHostState {
+export function telemetryHostState(options: { presenceEnabled: boolean; sink?: PerformanceSink | undefined; storePerMinute?: number; now?: () => number; performance?: PerformanceBuffer }): TelemetryHostState {
   return {
+    ...(options.performance ? { performance: options.performance } : {}),
     limiter: new TelemetryLimiter(),
     storeBudget: new TelemetryLimiter(),
     storePerMinute: options.storePerMinute ?? STORE_PER_MINUTE,
@@ -195,6 +237,8 @@ export class SocketTelemetry {
     this.host.sink?.write(attribution.projectId, rows);
     const budget = `store:${attribution.projectId}`;
     const stored = rows.filter(() => this.host.storeBudget.allow(budget, this.host.storePerMinute, this.now));
-    if (stored.length > 0) await this.port.recordPerformance(attribution.projectId, stored);
+    if (stored.length === 0) return;
+    if (this.host.performance) this.host.performance.add(this.port, attribution.projectId, stored);
+    else await this.port.recordPerformance(attribution.projectId, stored);
   }
 }

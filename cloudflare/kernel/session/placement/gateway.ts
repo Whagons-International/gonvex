@@ -36,7 +36,7 @@ import { limiterFor } from "../../public/limiter";
 import type { SlotKind } from "../../public/limiter";
 import { GatewayRoutingIdentity } from "./routing-identity";
 import { CallOrigin, gatedEnv, trackEntries, type OriginStats } from "./origin";
-import { setSpanTiming, spanTimingFromEnv } from "../../delivery/spans";
+import { setSpanTiming, span, spanTimingFromEnv } from "../../delivery/spans";
 
 /**
  * Helpers only the gateway itself calls. Every other method is an inbound request
@@ -256,10 +256,15 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       // Serialize claim + accept, so parallel upgrades cannot race the socket ceiling.
       if (this.admissionWaiting >= 16) return refusedAdmission("admission-busy", "gateway admission busy");
       this.admissionWaiting++;
+      const queued = Date.now();
       const accepted = this.admissionTail.then(async () => {
+        const started = Date.now();
         await this.loadPlacement();
         if (assignment.epoch < this.placementEpoch || this.host.sessions.size >= MAX_SOCKETS) return refusedAdmission("capacity", "gateway full");
+        const claiming = Date.now();
         if (!await withDeadline(controller(this.env, assignment.cell).claim(assignment))) return refusedAdmission("claim-refused", "gateway assignment expired");
+        const claimMs = Date.now() - claiming;
+        queueMicrotask(() => span("gateway.admit", { waitMs: started - queued, placementMs: claiming - started, claimMs, totalMs: Date.now() - queued, sockets: this.host.sessions.size }));
         if (assignment.epoch !== this.placementEpoch) {
           if (this.host.sessions.size) return refusedAdmission("epoch-busy", "gateway epoch busy");
           this.draining = undefined;

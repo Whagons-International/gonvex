@@ -10,7 +10,7 @@
  *   (default 600).
  */
 import { analyticsEngineSink } from "./sink";
-import { STORE_PER_MINUTE, type TelemetryHostState, telemetryHostState } from "./socket";
+import { PerformanceBuffer, STORE_PER_MINUTE, type TelemetryHostState, telemetryHostState } from "./socket";
 
 export interface TelemetryEnv {
   TELEMETRY_EVENTS?: AnalyticsEngineDataset;
@@ -23,5 +23,7 @@ export function telemetryHostFromEnv(env: TelemetryEnv, presenceEnabled: boolean
     presenceEnabled,
     sink: analyticsEngineSink(env.TELEMETRY_EVENTS),
     storePerMinute: Number.isInteger(configured) && configured >= 0 ? configured : STORE_PER_MINUTE,
+    // X17: the gateway writes performance rows in the background (PerformanceBuffer).
+    performance: new PerformanceBuffer(),
   });
 }
