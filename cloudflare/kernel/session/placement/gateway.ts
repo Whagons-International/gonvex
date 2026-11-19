@@ -132,6 +132,8 @@ type AdmissionReason = "parse-invalid" | "holder-identity" | "connection-mismatc
   | "direct-invalid" | "direct-identity" | "direct-unavailable" | "direct-busy" | "direct-refused";
 /** X17g: the router retries a refusal with this prefix through the controller (it is not the client's answer). */
 export const DIRECT_REFUSAL_PREFIX = "direct-";
+/** X17g: a direct admission's whole budget at the holder, under the router's 2 s hop deadline (#533 review). */
+export const DIRECT_BUDGET_MS = 1_500;
 function refusedAdmission(reason: AdmissionReason, body = "gateway assignment required"): Response {
   return new Response(body, { status: 503, headers: { [ADMISSION_REASON_HEADER]: reason } });
 }
@@ -295,10 +297,9 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   /**
    * X17g: an upgrade the router sent straight here (`DIRECT_HEADER`): this holder already serves this cell at this
    * epoch, so one controller call (`admitDirect`: acquire and claim at once) admits it, while the address limiter
-   * reserves its slots in parallel (the router did neither). Anything this holder does not take is refused with a
+   * reserves its slots first (the router did neither). Anything this holder does not take is refused with a
    * `direct-*` reason and the router falls back to `acquire`. A limiter refusal is the client's answer (429/503, as
-   * the router sends it); a lease the controller granted for it stays claimed until it expires (LEASE_MS), counted
-   * as pending, like any lost upgrade.
+   * the router sends it) and no lease is taken for it.
    */
   private admitDirect(direct: DirectAdmission, headers: Headers): Promise<Response> | Response {
     const identity = this.routingIdentity!;
@@ -316,17 +317,21 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       const address = headers.get(UPGRADE_HEADERS.address) ?? UNKNOWN_ADDRESS;
       const publicTransport = headers.get(UPGRADE_HEADERS.publicTransport) === "1";
       const kinds: SlotKind[] = this.env.PUBLIC_LIMITER ? (publicTransport ? ["pending", "public"] : ["pending"]) : [];
-      const admissionMs = 2_000;
-      const [granted, limited] = await Promise.all([
-        withDeadline(controller(this.env, direct.cell).admitDirect(direct, this.host.sessions.size)).catch((error: unknown) => {
-          console.error("gateway: direct admission failed", { cause: String((error as Error)?.message ?? error).slice(0, 120) });
-          return null;
-        }),
-        withDeadline(admitUpgrade(this.env, { address, connectionId, gateway: direct.gateway, publicTransport, expiresAt: Date.now() + admissionMs }), admissionMs)
-          .catch(() => new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [ADMISSION_REASON_HEADER]: "limiter-unavailable" } })),
-      ]);
-      const release = () => kinds.length ? publicGuard(this.env).release(address, connectionId, kinds) : Promise.resolve();
+      // The limiter first, then the lease only for an admitted upgrade (#533 review): a refused upgrade must hold no
+      // claimed lease (`release` keeps claimed leases until they expire). Both within the router's deadline: a budget
+      // spent waiting here refuses (`direct-busy`) instead of admitting after the router gave up.
+      const budget = DIRECT_BUDGET_MS - (Date.now() - queued);
+      if (budget < 200) return refusedAdmission("direct-busy", "gateway admission busy");
+      const deadline = Date.now() + budget;
+      const limited = await withDeadline(admitUpgrade(this.env, { address, connectionId, gateway: direct.gateway, publicTransport, expiresAt: deadline }), budget)
+        .catch(() => new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [ADMISSION_REASON_HEADER]: "limiter-unavailable" } }));
       if (limited) return limited;
+      const release = () => kinds.length ? publicGuard(this.env).release(address, connectionId, kinds) : Promise.resolve();
+      const left = deadline - Date.now();
+      const granted = left < 100 ? null : await withDeadline(controller(this.env, direct.cell).admitDirect(direct, this.host.sessions.size), left).catch((error: unknown) => {
+        console.error("gateway: direct admission failed", { cause: String((error as Error)?.message ?? error).slice(0, 120) });
+        return null;
+      });
       if (!granted) { await release(); return refusedAdmission("direct-refused", "gateway assignment expired"); }
       queueMicrotask(() => span("gateway.admitDirect", { waitMs: started - queued, admitMs: Date.now() - started, totalMs: Date.now() - queued, sockets: this.host.sessions.size }));
       identity.claimed(direct.gateway);

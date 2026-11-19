@@ -137,14 +137,17 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
       const response = await withDeadline(env.GATEWAY.getByName(direct.gateway).fetch(new Request(request.url, { method: "GET", headers })));
       const reason = response.headers.get(ADMISSION_REASON_HEADER) ?? "";
       span("router.upgrade", { direct: true, gatewayMs: Date.now() - started, totalMs: Date.now() - started, status: response.status, ...(reason ? { reason } : {}) });
-      if (!(response.status === 503 && reason.startsWith(DIRECT_REFUSAL_PREFIX))) {
-        if (response.status === 101) warmCell.admitted(direct.cell, { gateway: direct.gateway, epoch: direct.epoch });
-        return response;
-      }
+      // Any answer but a 101 forgets the holder (#533 review): a refused address must not keep this isolate's upgrades
+      // going direct. Only a `direct-*` refusal falls back; a limiter 429/503 is the client's answer.
+      if (response.status === 101) { warmCell.admitted(direct.cell, { gateway: direct.gateway, epoch: direct.epoch }); return response; }
+      warmCell.refused();
+      if (!(response.status === 503 && reason.startsWith(DIRECT_REFUSAL_PREFIX))) return response;
     } catch (error) {
+      warmCell.refused();
+      // A deadline: the holder may still admit this attempt, so it is not retried (no second admission, #533 review).
+      if (refusalCause(error) === "deadline") return refusedUpgrade("gateway", error, started, "gateway admission unavailable");
       console.error("router: direct upgrade failed; using the controller", { cause: refusalCause(error), elapsedMs: Date.now() - started });
     }
-    warmCell.refused();
   }
   const connectionId = placement ? warmCell.connectionId() : crypto.randomUUID();
   let assignment: GatewayAssignment | undefined;

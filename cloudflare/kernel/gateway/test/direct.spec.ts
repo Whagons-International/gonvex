@@ -136,6 +136,23 @@ describe("X17g router: one hop after the first admission", () => {
     expect(calls.fetches.slice(1).map((f) => [f.direct !== null, f.assignment !== null])).toEqual([[true, false], [false, true]]);
   });
 
+  it("a limiter refusal on the direct path is the client's answer and forgets the holder", async () => {
+    const { calls, wrapped } = counting();
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+    const first = JSON.parse(calls.fetches[0]!.assignment!) as GatewayAssignment;
+    const { limiterFor } = await import("../../public/limiter");
+    const limiter = limiterFor(bindings.PUBLIC_LIMITER!, "192.0.2.95");
+    for (let i = 0; i < 20; i++) expect((await limiter.admit({ v: 1, connectionId: `x17g-cap-${i}`, gateway: first.gateway, publicTransport: true, pendingLimit: 100, publicLimit: 20 })).ok).toBe(true);
+    const refused = await handleWebSocketUpgrade(new Request("https://x/ws?public=1", { headers: { upgrade: "websocket", "cf-connecting-ip": "192.0.2.95" } }), wrapped);
+    expect(refused.status).toBe(429);
+    expect(calls.acquire).toBe(1);
+    expect(calls.fetches[1]!.direct).not.toBeNull();
+    // The next upgrade goes through the controller again.
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+    expect(calls.acquire).toBe(2);
+    expect(calls.fetches[2]!.direct).toBeNull();
+  });
+
   it("removes a client's direct header on the controller path", async () => {
     const { calls, wrapped } = counting();
     const forged: DirectAdmission = { v: 1, cell: 0, gateway: "auto-gw-0-0", epoch: 1, connectionId: connection(0) };
@@ -143,5 +160,23 @@ describe("X17g router: one hop after the first admission", () => {
     expect(calls.fetches).toHaveLength(1);
     expect(calls.fetches[0]!.direct).toBeNull();
     expect(calls.fetches[0]!.assignment).not.toBeNull();
+  });
+});
+
+describe("review #533: a limiter refusal on the direct path holds no lease", () => {
+  it("direct upgrades the limiter refuses (429) leave no claimed lease, as the controller path releases its lease", async () => {
+    const a = await serving(9);
+    const { limiterFor } = await import("../../public/limiter");
+    const limiter = limiterFor(bindings.PUBLIC_LIMITER!, "192.0.2.94");
+    for (let i = 0; i < 20; i++) expect((await limiter.admit({ v: 1, connectionId: `r533-fill-${i}`, gateway: a.gateway, publicTransport: true, pendingLimit: 100, publicLimit: 20 })).ok).toBe(true);
+    const before = (await control(9).status()).pending;
+    // An address over its connection cap keeps retrying; the router's isolate still remembers this holder.
+    for (let i = 0; i < 10; i++) {
+      const d: DirectAdmission = { v: 1, cell: 9, gateway: a.gateway, epoch: a.epoch, connectionId: connection(9) };
+      expect((await holder(a.gateway).fetch(direct(d, { [UPGRADE_HEADERS.address]: "192.0.2.94", [UPGRADE_HEADERS.publicTransport]: "1" }))).status).toBe(429);
+    }
+    // Each refused attempt left a claimed lease for LEASE_MS (30 s): MAX_SOCKETS (125) of them fill the holder for
+    // `acquire` and `admitDirect`; they also block its scale-in. The controller path releases its unclaimed lease.
+    expect((await control(9).status()).pending).toBe(before);
   });
 });
