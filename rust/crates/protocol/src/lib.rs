@@ -121,6 +121,44 @@ pub enum ReducerErrorClass {
     Unauthenticated,
 }
 
+/// The text a client may see for a failed call.
+///
+/// An application handler's `throw new Error("…")` reaches the runtime as
+/// `TypeScript module host returned execution_failed: module <id> function
+/// <path>: Error: <message>` followed by JavaScript stack frames. Clients get
+/// the application message alone: module ids, bundle paths and stack frames
+/// stay in server logs. Other errors pass through unchanged.
+pub fn client_error_text(error: &str) -> String {
+    const EXECUTION: &str = "TypeScript module host returned execution_failed: ";
+    let Some(start) = error.find(EXECUTION) else {
+        return error.to_owned();
+    };
+    let mut rest = &error[start + EXECUTION.len()..];
+    if let Some(after_module) = rest.strip_prefix("module ") {
+        let located = after_module
+            .find(" function ")
+            .map(|at| &after_module[at + " function ".len()..])
+            .unwrap_or(after_module);
+        if let Some(colon) = located.find(": ") {
+            rest = &located[colon + 2..];
+        }
+    }
+    let mut lines = Vec::new();
+    for line in rest.lines() {
+        let trimmed = line.trim_start();
+        if line.len() != trimmed.len() && trimmed.starts_with("at ") {
+            break;
+        }
+        lines.push(line);
+    }
+    let message = lines.join("\n");
+    let message = message.trim_end();
+    message
+        .strip_prefix("Error: ")
+        .unwrap_or(message)
+        .to_owned()
+}
+
 impl ReducerErrorClass {
     /// Build the classified wire error for one failed Reducer call.
     pub fn reducer_error(
@@ -133,7 +171,7 @@ impl ReducerErrorClass {
         ServerMessage::ReducerError {
             id,
             path,
-            error,
+            error: client_error_text(&error),
             class: Some(self),
             retryable: Some(self.retryable()),
             trace,
@@ -942,6 +980,40 @@ pub enum ServerMessage {
         )]
         artifact_hash: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod client_error_text_tests {
+    use super::client_error_text;
+
+    #[test]
+    fn application_errors_keep_only_their_message() {
+        let raw = "TypeScript module host returned execution_failed: module 6d89ca2f-144b function roles.reseedRoles: Error: Only the tenant owner may change the built-in admin role\n    at Object.assertCanManageRole (file:///gonvex/6d89/module.js:1625:316704)\n    at async gonvex:bootstrap.js:788:15";
+        assert_eq!(
+            client_error_text(raw),
+            "Only the tenant owner may change the built-in admin role"
+        );
+    }
+
+    #[test]
+    fn multi_line_messages_and_named_errors_survive() {
+        let raw = "TypeScript module host returned execution_failed: module m function a.b: TypeError: x is undefined\nsecond line\n    at f (file:///gonvex/m/module.js:1:1)";
+        assert_eq!(
+            client_error_text(raw),
+            "TypeError: x is undefined\nsecond line"
+        );
+    }
+
+    #[test]
+    fn runtime_messages_pass_through() {
+        for raw in [
+            "function \"tags.create\" is not registered",
+            "function \"tags.create\" arguments do not match its schema: $.entity: expected object, received number",
+            "authenticate with an active tenant before calling an Action",
+        ] {
+            assert_eq!(client_error_text(raw), raw);
+        }
+    }
 }
 
 #[cfg(test)]
