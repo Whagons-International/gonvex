@@ -79,12 +79,20 @@ export class MemorySlotStore implements SlotStore {
 
 const SLOT_PREFIX = "slot:";
 
-/** The object's synchronous KV storage (SQLite-backed): one entry per held connection. */
-export function kvSlotStore(kv: SyncKvStorage): SlotStore {
+/**
+ * The object's KV storage (SQLite-backed): one entry per held connection, read back synchronously when it wakes.
+ * X17: with `storage`, writes are `allowUnconfirmed` (outside any transaction), so the admit reply that every
+ * WebSocket upgrade waits for is not held until the slot write is replicated (13-152 ms per connect on dev; the output
+ * gate covers the whole object). An eviction still persists them; only a failed write (the object is then reset)
+ * loses the last slots, and an address may then hold one or two connections over its cap until they close or an
+ * audit runs. Without `storage` (tests), writes are the synchronous confirmed ones.
+ */
+export function kvSlotStore(kv: SyncKvStorage, storage?: Pick<DurableObjectStorage, "put" | "delete">): SlotStore {
+  const UNCONFIRMED = { allowUnconfirmed: true } as const;
   return {
     *load() { for (const [key, value] of kv.list<StoredSlot>({ prefix: SLOT_PREFIX })) yield [key.slice(SLOT_PREFIX.length), value]; },
-    put: (id, slot) => { kv.put(SLOT_PREFIX + id, slot); },
-    delete: (id) => { kv.delete(SLOT_PREFIX + id); },
+    put: (id, slot) => { if (storage) void storage.put(SLOT_PREFIX + id, slot, UNCONFIRMED).catch(() => {}); else kv.put(SLOT_PREFIX + id, slot); },
+    delete: (id) => { if (storage) void storage.delete(SLOT_PREFIX + id, UNCONFIRMED).catch(() => {}); else kv.delete(SLOT_PREFIX + id); },
   };
 }
 
@@ -218,7 +226,7 @@ export class PublicLimiterObject extends DurableObject<PublicLimiterEnv> {
   constructor(ctx: DurableObjectState, env: PublicLimiterEnv) {
     super(ctx, env);
     const gateways = env.GATEWAY as unknown as { getByName(name: string): LiveConnections };
-    this.budget = new AddressBudget((name) => gateways.getByName(name), Date.now, kvSlotStore(ctx.storage.kv));
+    this.budget = new AddressBudget((name) => gateways.getByName(name), Date.now, kvSlotStore(ctx.storage.kv, ctx.storage));
   }
 
   async admit(request: AdmitRequest): Promise<AdmitResult> {
@@ -238,7 +246,8 @@ export class PublicLimiterObject extends DurableObject<PublicLimiterEnv> {
 
   /** One alarm while any slot is held; never moved once set. */
   private async armSweep(): Promise<void> {
-    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+    // X17: the sweep alarm is a leak backstop; its write need not hold the admit reply either.
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS, { allowUnconfirmed: true });
   }
 }
 

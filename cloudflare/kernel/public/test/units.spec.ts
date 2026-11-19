@@ -4,6 +4,7 @@
  * Vectors follow Rust's own unit tests in public_functions.rs (286-470).
  */
 import { describe, expect, it } from "vitest";
+import { kvSlotStore } from "../limiter";
 import { addressBucket, clientAddress, FIXTURE_ADDRESS_HEADERS, UNKNOWN_ADDRESS } from "../address";
 import { DEFAULT_PUBLIC_LIMITS, PublicConfigError, publicLimits } from "../config";
 import { frameCost, publicAdmissionErrors, publicLimitErrors, runsTenantCode } from "../frames";
@@ -272,5 +273,22 @@ describe("limiter failure modes (0045)", () => {
     const guard = publicGuard(env);
     expect(await guard.allowAddress("198.51.100.9", 1)).toBe(true);
     await expect(guard.release("198.51.100.9", "c", ["pending"])).resolves.toBeUndefined();
+  });
+});
+
+describe("X17 limiter slot writes", () => {
+  it("go through storage.put/delete with allowUnconfirmed when the object's storage is given, and read back from kv", () => {
+    const entries = new Map<string, unknown>(); const options: unknown[] = [];
+    const kv = { list: ({ prefix }: { prefix: string }) => [...entries].filter(([k]) => k.startsWith(prefix)), put: () => { throw new Error("confirmed kv.put used"); }, delete: () => { throw new Error("confirmed kv.delete used"); } } as unknown as SyncKvStorage;
+    const storage = {
+      put: (key: string, value: unknown, o: unknown) => { options.push(o); entries.set(key, value); return Promise.resolve(); },
+      delete: (key: string, o: unknown) => { options.push(o); entries.delete(key); return Promise.resolve(true); },
+    } as unknown as Pick<DurableObjectStorage, "put" | "delete">;
+    const store = kvSlotStore(kv, storage);
+    store.put("c1", { gateway: "g", at: 1, kinds: ["pending"] });
+    expect([...store.load()]).toEqual([["c1", { gateway: "g", at: 1, kinds: ["pending"] }]]);
+    store.delete("c1");
+    expect([...store.load()]).toEqual([]);
+    expect(options).toEqual([{ allowUnconfirmed: true }, { allowUnconfirmed: true }]);
   });
 });
