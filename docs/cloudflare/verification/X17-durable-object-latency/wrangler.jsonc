@@ -1,0 +1,9 @@
+{
+  "name": "gonvex-cf-dev-x17-repro",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": { "bindings": [{ "name": "PROBE", "class_name": "Probe" }, { "name": "CTRL", "class_name": "GatewayControllerObject", "script_name": "gonvex-cf-dev-integration-20261117" }, { "name": "CONTROL", "class_name": "SessionControlObject", "script_name": "gonvex-cf-dev-integration-20261117" }, { "name": "TENANT", "class_name": "AssemblyTenant", "script_name": "gonvex-cf-dev-integration-20261117-runtime" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Probe"] }]
+}

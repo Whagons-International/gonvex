@@ -35,6 +35,9 @@ import { openReplica, sqlOf, type OpenRequest, type Subscription } from "./subsc
 export const OPEN_BATCH_LIMIT = 256;
 /** Opens waiting in one tenant object (Rust: process-wide admission, `GONVEX_REPLICA_OPEN_MAX_WAITING`). */
 export const MAX_WAITING_OPENS = 4096;
+/** X17: one macrotask, so requests that arrived meanwhile are delivered to the object. */
+const yieldToEvents = (): Promise<void> => new Promise((resolve) => { globalThis.setTimeout(resolve, 0); });
+
 /** X17: the same socket work without its watermark certificate (a reply sent ahead of its holder's backlog). */
 function withoutWatermark(work: SocketWork): SocketWork {
   if (work.watermark === undefined) return work;
@@ -664,6 +667,11 @@ export class ReplicaDeliveryEngine {
       const next = this.nextOpen();
       if (next) {
         await this.options.serial(() => this.processOpen(next.connection, next.request));
+        // X17: an open's reads are synchronous, so a cohort of opens (40-55 on a first load) ran in one invocation
+        // without returning to the event loop (one -04 invocation: 440 ms wall, 367 ms CPU). Nothing else reached the
+        // object meanwhile: the grid's live query, other sockets' frames, the outlet's RPC completions. Between opens
+        // the loop now yields one macrotask, so those run (a waiting query takes the next serial turn).
+        if (this.waitingOpens > 0) await yieldToEvents();
         continue;
       }
       if (this.delivered !== undefined && this.wanted <= this.delivered.revision) return;
