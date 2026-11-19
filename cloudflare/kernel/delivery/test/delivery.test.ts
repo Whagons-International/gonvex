@@ -1493,3 +1493,37 @@ describe("X17 a live query's initial reply goes ahead of its holder's backlog", 
   });
 });
 
+
+
+describe("X17d snapshot cache", () => {
+  it("serves the same pages, rows and digest as a fresh scan, and misses after a write to the table", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      const insert: Array<[string, unknown[]]> = [];
+      for (let i = 0; i < 600; i++) insert.push(["INSERT INTO items VALUES ($1, $2, $3)", [`i${String(i).padStart(6, "0")}`, i, label(i, 300)]]);
+      await h.commit(insert);
+      const { snapshotCache } = await import("../snapshot-cache.ts");
+      const open = async (id: string) => {
+        h.engine.dispatch(socket(id), { type: "replica.open", id: "all", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+        for (let spin = 0; spin < 4000 && !frames(h.payloads, id).some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+        await h.engine.settled();
+        const fs = frames(h.payloads, id);
+        const pages = fs.filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot");
+        return { rows: pages.flatMap((p) => p.result ?? p.rows ?? []), digests: pages.map((p) => p.digest ?? null), count: pages.length };
+      };
+      const hits = snapshotCache.stats.hits, misses = snapshotCache.stats.misses;
+      const fresh = await open("S1");
+      expect(snapshotCache.stats.misses).toBe(misses + 1);
+      const served = await open("S2");
+      expect(snapshotCache.stats.hits).toBe(hits + 1);
+      expect(served.rows).toEqual(fresh.rows);
+      expect(served.digests).toEqual(fresh.digests);
+      expect(served.count).toBe(fresh.count);
+      expect(fresh.rows.length).toBe(600);
+      await h.commit([["UPDATE items SET label = 'changed' WHERE id = 'i000001'", []]]);
+      const after = await open("S3");
+      expect(snapshotCache.stats.misses).toBe(misses + 2);
+      expect(JSON.stringify(after.rows)).toContain("changed");
+      expect(after.digests).not.toEqual(fresh.digests);
+    }, MODULE, true);
+  });
+});
