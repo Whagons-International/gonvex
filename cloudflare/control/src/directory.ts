@@ -10,6 +10,7 @@ import { NOW_MS, bool, json, num, str, type Row } from "./sql";
 import type { Admission } from "./tenant-port";
 import type { Account, Member, ProjectModule, SessionDelegation, SessionIdentity, TenantRoute, TenantSession } from "./types";
 import { randomId, reconnectToken, sha256Hex } from "./util";
+import { deployedManifest, derivedOf } from "./manifest-cache";
 
 export const SERVICE_PRINCIPAL_ACTOR_PREFIX = "service:";
 
@@ -414,9 +415,13 @@ export { tenantCall };
 
 /** The deployed module facts, from `gonvex_runtime_manifests` (written by `/dev/sync`, K19). */
 export function projectModule(ctx: Ctx, projectId: string): ProjectModule | null {
-  const row = ctx.sql.get("SELECT manifest,module_hash FROM gonvex_runtime_manifests WHERE project_id=$1 AND module_hash<>''", projectId);
-  if (!row) return null;
-  const manifest = (json(row.manifest) ?? {}) as Record<string, unknown>;
+  const deployed = deployedManifest(ctx.sql, projectId);
+  if (!deployed || deployed.hash === "") return null;
+  // X15: parsed once per manifest row version (`manifest-cache.ts`), not per sign-in.
+  return derivedOf(deployed, "projectModule", () => projectModuleOf(deployed.hash, deployed.manifest));
+}
+
+function projectModuleOf(hash: string, manifest: Record<string, unknown>): ProjectModule {
   const module = (manifest.module ?? {}) as Record<string, unknown>;
   const functions: ProjectModule["functions"] = {};
   const list = manifest.functions;
@@ -430,7 +435,7 @@ export function projectModule(ctx: Ctx, projectId: string): ProjectModule | null
     }
   }
   return {
-    artifactHash: str(row.module_hash),
+    artifactHash: hash,
     invitationAcceptanceReducer: typeof module.invitationAcceptanceReducer === "string" ? module.invitationAcceptanceReducer.trim() : "",
     functions,
   };

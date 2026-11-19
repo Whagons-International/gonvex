@@ -165,6 +165,20 @@ describe("X14 gateway outlet batching", () => {
     expect(results[2]).toMatchObject({ receipt: { v: REPLICA_DELIVERY_VERSION, sockets: 0 } });
   });
 
+  it("X15 the real gateway applies ordinary items in one run and a waiting item (recovery) alone, in order", async () => {
+    const gateway = (env as unknown as { GATEWAY: DurableObjectNamespace }).GATEWAY.getByName(`x15-batch-${crypto.randomUUID()}`) as unknown as ReplicaHolderRpc;
+    const empty = (): ReplicaDelivery => ({ v: REPLICA_DELIVERY_VERSION, instance: "i", scopeFence: 1, shared: [], sockets: {} });
+    const bad = { ...empty(), sockets: { c1: { ops: [], subscriptionEpoch: 0 } }, initialFailure: { v: 1, reason: "delivery-recovery-failed", requests: {} } } as unknown as ReplicaDelivery;
+    const results = await gateway.deliverReplicaBatch!("x15-tenant", [empty(), empty(), barrier(), bad, empty()]);
+    expect(results).toHaveLength(5);
+    expect(results[0]).toMatchObject({ receipt: { sockets: 0 } });
+    expect(results[1]).toMatchObject({ receipt: { sockets: 0 } });
+    expect(results[2]).toMatchObject({ receipt: { sockets: 0, recoveryAck: 1 } });
+    expect(results[3]).toEqual({ error: "invalid initial-failure-only delivery", name: "Error" });
+    expect(results[4]).toMatchObject({ receipt: { sockets: 0 } });
+    expect((results[4] as { receipt: { recoveryAck?: number } }).receipt.recoveryAck).toBeUndefined();
+  });
+
   it("falls back to single RPCs on workerd's real missing-method error (a real stub without the method)", async () => {
     // HELLO's class has no deliverReplicaBatch: the error below is the platform's own, not a hand-written message.
     const old = (env as unknown as { HELLO: DurableObjectNamespace }).HELLO.getByName(`x14-old-gateway-${crypto.randomUUID()}`) as unknown as ReplicaHolderRpc;

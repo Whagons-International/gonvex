@@ -38,6 +38,8 @@ export interface HostOptions {
   /** The placement's reaction to a socket entering or leaving a tenant. */
   tenantChanged?(socket: WebSocket, previous: TenantSession | null, next: TenantSession | null): void;
   projectAuthenticated?(projectId: string): Promise<void>;
+  /** X15: `projectAuthenticated` plus the module read after it, in one call (see `GatewayBindings`). */
+  projectAuthenticatedModule?(projectId: string): Promise<ModuleInfo | null>;
   /** Presence v2 settings (K14); default: on when `ready.presence`. */
   presence?: PresenceConfig;
   /** K16: public-function limits and the address budgets. */
@@ -65,6 +67,9 @@ export class SocketHost {
   private readonly recoveryDirty = new WeakSet<WebSocket>();
   private readonly recoveryRefs = new WeakMap<WebSocket, RecoveryReference>();
   private readonly publishing = new WeakSet<WebSocket>();
+  /** X15: open `batchPersists` scopes and the sockets whose write waits for the outermost one to end. */
+  private persistDepth = 0;
+  private readonly persistPending = new Set<WebSocket>();
   private readonly socketOwners = new WeakMap<WebSocket, string>();
   private recoveryCleanupAt: number | null = null;
 
@@ -243,8 +248,10 @@ export class SocketHost {
   private sessionOptions(ws: WebSocket) {
     const hooks: SessionHooks = {
       projectAuthenticated: (project) => this.options.projectAuthenticated?.(project) ?? Promise.resolve(),
+      ...(this.options.projectAuthenticatedModule ? { projectAuthenticatedModule: (project: string) => this.options.projectAuthenticatedModule!(project) } : {}),
       recoveryChanged: () => this.recoveryDirty.add(ws),
       persist: () => this.persist(ws, this.sessions.get(ws)),
+      batchPersists: (fn) => this.batchPersists(fn),
       tenantChanged: (previous, next) => this.options.tenantChanged?.(ws, previous, next),
       waitUntil: (promise) => this.options.ctx.waitUntil(promise),
       pendingCleared: () => {
@@ -325,7 +332,33 @@ export class SocketHost {
     this.recoveryDirty.delete(ws);
   }
 
+  /**
+   * X15: `persist()` calls made while `fn` runs are coalesced: each socket's record is written once, when the
+   * outermost `fn` returns. `fn` must be synchronous, so that write is still issued in the same turn as every
+   * frame `fn` sent and the output gate holds those frames until it is durable, exactly as the separate writes
+   * did. Each write rewrites the whole recovery record (O(subscriptions)), so a reply that completes n opens
+   * cost O(n^2) before.
+   */
+  batchPersists<T>(fn: () => T): T {
+    this.persistDepth++;
+    let result: T;
+    try {
+      result = fn();
+    } finally {
+      if (--this.persistDepth === 0) this.flushPersists();
+    }
+    if (result && typeof (result as { then?: unknown }).then === "function") throw new Error("batchPersists needs a synchronous function");
+    return result;
+  }
+
+  private flushPersists(): void {
+    const pending = [...this.persistPending];
+    this.persistPending.clear();
+    for (const ws of pending) this.persist(ws, this.sessions.get(ws));
+  }
+
   private persist(ws: WebSocket, session: Session | undefined): void {
+    if (this.persistDepth > 0) { if (session && !session.closed) this.persistPending.add(ws); return; }
     if (!session || session.closed || this.publishing.has(ws)) return;
     this.publishing.add(ws);
     const previous = this.recoveryRefs.get(ws);
