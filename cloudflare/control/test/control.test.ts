@@ -276,6 +276,26 @@ describe("external tokens (C.3.4)", () => {
   });
 });
 
+describe("X14 sign-in spans", () => {
+  it("emit control.auth per sign-in only when span timing is on", async () => {
+    const { fixtureSpans } = await import("../../kernel/delivery/spans");
+    const seeded = await seed({ a: ["sid"] });
+    fixtureSpans(false);
+    const logged: unknown[][] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { logged.push(args); };
+    try { await login(seeded.project, seeded.members.sid!.email); } finally { console.log = log; }
+    expect(logged.filter((args) => String(args[0]).includes("control.auth"))).toEqual([]);
+    fixtureSpans(true);
+    try {
+      await login(seeded.project, seeded.members.sid!.email);
+      const lines = fixtureSpans(false).filter((line) => line.name === "control.auth");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.fields).toMatchObject({ path: "control.auth.passwordLogin", totalMs: expect.any(Number), admitMs: expect.any(Number), admits: 1 });
+    } finally { fixtureSpans(false); }
+  });
+});
+
 describe("membership projection (C.4 item 6)", () => {
   it("tenant objects push outbox rows; the upsert is revision-guarded", async () => {
     const seeded = await seed({ a: ["ann"] });

@@ -207,7 +207,8 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
           const current = !!active && active.projectId === project && stored?.projectId === project && stored.source === releaseSource(release);
           if (current) await this.armReceiptExpiry();
           else await super.activate(project, release.manifest, null);
-          console.log(JSON.stringify({ diag: "x14-wake", restoreMs, activated: !current, activateMs: Date.now() - wakeAt }));
+          // X14: cold-wake cost before the first RPC runs (opt-in dev spans only).
+          span("tenant.wake", { restoreMs, activated: !current, activateMs: Date.now() - wakeAt });
         }
         await this.setupScheduled();
       }

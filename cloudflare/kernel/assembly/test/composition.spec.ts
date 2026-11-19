@@ -392,10 +392,10 @@ it('X14 a woken tenant whose stored module came from this baked release neither 
  const {releases}=await import('../releases');
  const {MODULE_KEY}=await import('../../reducer/tenant');
  const {exports}=await import('./catalog');
+ const {fixtureSpans}=await import('../../delivery/spans');
  const project=`wake-${crypto.randomUUID()}`;
  releases[project]={project,hash:(manifest as {module:{hash:string}}).module.hash,generation:1,manifest,exports};
  const stub=bindings.TENANT.getByName(`assembly-wake-${crypto.randomUUID()}`);
- const logs:string[]=[];const log=console.log;
  try {
   await runInDurableObject(stub,async(object,state)=>{
    const release=await buildReleasePlan(await migrationsFromFiles(files)); plans.add(release);
@@ -403,7 +403,7 @@ it('X14 a woken tenant whose stored module came from this baked release neither 
    state.storage.kv.put('assembly/project',project);
    const puts:string[]=[];const kv=state.storage.kv as unknown as {put(k:string,v:unknown):void};const put=kv.put.bind(kv);
    kv.put=(k,v)=>{puts.push(k);put(k,v);};
-   console.log=(...args:unknown[])=>{logs.push(args.map(String).join(' '));};
+   fixtureSpans(true);
    const Ctor=object.constructor as new(ctx:DurableObjectState,env:unknown)=>CompositionTenant;
    const wake=async()=>{const woken=new Ctor(state,(object as unknown as {env:unknown}).env);await new Promise(r=>setTimeout(r,50));return woken;};
    // First wake after activation by another writer: restore stores the marked form once, activation is skipped.
@@ -416,14 +416,20 @@ it('X14 a woken tenant whose stored module came from this baked release neither 
    const second=await wake();
    expect(puts.filter(k=>k===MODULE_KEY)).toHaveLength(0);
    expect((second as unknown as {kernel:{module?:{projectId:string}}}).kernel.module?.projectId).toBe(project);
-   const diags=logs.filter(l=>l.includes('"x14-wake"')).map(l=>JSON.parse(l) as {activated:boolean});
-   expect(diags.map(d=>d.activated)).toEqual([false,false]);
+   const wakes=fixtureSpans(true).filter(l=>l.name==='tenant.wake');
+   expect(wakes.map(l=>l.fields.activated)).toEqual([false,false]);
+   expect(wakes.every(l=>typeof l.fields.restoreMs==='number'&&typeof l.fields.activateMs==='number')).toBe(true);
    // A different baked release (new generation) is stored and served again.
    releases[project]={...releases[project]!,generation:2};
    puts.length=0;
    await wake();
    expect(puts.filter(k=>k===MODULE_KEY)).toHaveLength(1);
+   // Spans off (the default): a wake logs nothing.
+   fixtureSpans(false);
+   const logged:unknown[]=[];const log=console.log;console.log=(...a:unknown[])=>{logged.push(a);};
+   try { await wake(); } finally { console.log=log; }
+   expect(logged.filter(a=>String((a as unknown[])[0]).includes('tenant.wake'))).toEqual([]);
    kv.put=put;
   });
- } finally { console.log=log; delete releases[project]; }
+ } finally { fixtureSpans(false); delete releases[project]; }
 });

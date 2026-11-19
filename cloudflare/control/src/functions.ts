@@ -6,6 +6,7 @@
  * tenant transaction is one tenant-object RPC (`TenantPort`). Sagas keep the
  * reference's order: Control reservation, tenant write, Control finish.
  */
+import { span } from "../../kernel/delivery/spans";
 import type { Ctx } from "./context";
 import { FANOUT, mapLimit } from "./context";
 import {
@@ -1384,9 +1385,9 @@ async function executeAuthAction(ctx: Ctx, connection: ControlConnection, path: 
   const committed = Date.now();
   const calls = ctx.tenantCalls;
   const answer = await sessionResultFromDirectory(ctx, project, result ?? {});
-  // X14 diagnostics: wall time per part of one login (no identifiers, tokens or tenant names).
-  console.log(JSON.stringify({ diag: "x14-auth", path, totalMs: Date.now() - started, externalMs: verified - started, ...timings,
-    txMs: committed - verified, admitMs: Date.now() - committed, admits: ctx.tenantCalls - calls }));
+  // X14: wall time per part of one sign-in (opt-in dev spans only; no identifiers, tokens or tenant names).
+  span("control.auth", { path, totalMs: Date.now() - started, externalMs: verified - started, ...timings,
+    txMs: committed - verified, admitMs: Date.now() - committed, admits: ctx.tenantCalls - calls });
   return answer;
 }
 
