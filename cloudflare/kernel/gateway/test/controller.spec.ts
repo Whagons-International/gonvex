@@ -1,9 +1,11 @@
 import { env, evictDurableObject, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { GatewayControllerObject } from "../controller";
 import { ASSIGNMENT_HEADER, controllerCell, MAX_PENDING, LEASE_MS, SCALE_IN_MS, type GatewayAssignment } from "../placement";
 import { GatewayMetrics } from "../metrics";
-import { handleWebSocketUpgrade } from "../../session/router";
+import { handleWebSocketUpgrade, resetWarmCell } from "../../session/router";
+// X17g: each test starts without a warm holder, so an earlier test's admission does not route this one directly.
+beforeEach(() => resetWarmCell());
 
 type Bindings = Env & { GATEWAY_CONTROLLER: DurableObjectNamespace<GatewayControllerObject> };
 const bindings = env as Bindings;
@@ -84,6 +86,8 @@ describe("X01 durable placement in workerd (package harness)", () => {
     const r = await handleWebSocketUpgrade(new Request("https://x/ws", { headers: { upgrade: "websocket", [ASSIGNMENT_HEADER]: "forged" } }), bindings);
     expect(r.status).toBe(101); r.webSocket!.accept(); r.webSocket!.close();
     const broken = { ...bindings, GATEWAY_CONTROLLER: { getByName() { throw new Error("down"); } } } as unknown as Bindings;
+    // X17g: this outage is the router's binding only; without a warm holder the upgrade needs `acquire`.
+    resetWarmCell();
     const fail = await handleWebSocketUpgrade(new Request("https://x/ws", { headers: { upgrade: "websocket" } }), broken);
     expect(fail.status).toBe(503);
   });

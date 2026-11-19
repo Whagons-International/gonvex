@@ -2,6 +2,12 @@
 export const PLACEMENT_VERSION = 1;
 export const CONTROLLER_CELLS = 32;
 export const ASSIGNMENT_HEADER = "x-gonvex-gateway-assignment";
+/**
+ * X17g: set by the router only (a client's copy is removed). The upgrade goes straight to the gateway the router's
+ * isolate admitted its last upgrade to; that gateway admits it with one controller RPC (`admitDirect`) and the address
+ * limiter in parallel, instead of the router's controller `acquire`, limiter `admit` and the gateway's `claim` in turn.
+ */
+export const DIRECT_HEADER = "x-gonvex-gateway-direct";
 export const LEASE_MS = 30_000;
 export const MAX_PENDING = 256;
 export const MAX_GATEWAYS_PER_CELL = 64;
@@ -28,6 +34,8 @@ export interface GatewayAssignment {
   connectionId: string;
   expiresAt: number;
 }
+/** X17g: what the router asks a gateway to admit directly (no token: the gateway's `admitDirect` creates the lease). */
+export interface DirectAdmission { v: 1; cell: number; gateway: string; epoch: number; connectionId: string }
 export interface GatewayPlacement {
   acquire(connectionId: string): Promise<GatewayAssignment>;
   release(assignment: GatewayAssignment): Promise<void>;
@@ -72,6 +80,8 @@ export interface ControllerRpc {
   acquire(connectionId: string): Promise<GatewayAssignment>;
   release(assignment: GatewayAssignment): Promise<void>;
   claim(assignment: GatewayAssignment): Promise<boolean>;
+  /** X17g: a claimed lease on `gateway` at `epoch` for `connectionId`, or null when that holder must not take it. */
+  admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | null>;
   drainReady(gateway: string, epoch: number, replacement: string): Promise<boolean>;
   observe(gateway: string, sample: CapacitySample): Promise<void>;
 }
@@ -104,6 +114,19 @@ export function parseAssignment(text: string | null): GatewayAssignment | undefi
       || typeof a.connectionId !== "string" || a.connectionId.length > 100
       || typeof a.token !== "string" || a.token.length > 100) return undefined;
     return a;
+  } catch { return undefined; }
+}
+
+export function parseDirect(text: string | null): DirectAdmission | undefined {
+  if (!text || text.length > 512) return undefined;
+  try {
+    const d = JSON.parse(text) as DirectAdmission;
+    if (d.v !== 1 || !Number.isInteger(d.cell) || d.cell < 0 || d.cell >= CONTROLLER_CELLS
+      || !Number.isSafeInteger(d.epoch) || d.epoch < 1
+      || typeof d.gateway !== "string" || d.gateway.length > 100
+      || typeof d.connectionId !== "string" || d.connectionId.length > 100
+      || controllerCell(d.connectionId) !== d.cell) return undefined;
+    return { v: 1, cell: d.cell, gateway: d.gateway, epoch: d.epoch, connectionId: d.connectionId };
   } catch { return undefined; }
 }
 

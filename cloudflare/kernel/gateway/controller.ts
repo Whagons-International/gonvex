@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   COOLDOWN_MS, LEASE_MS, MAX_GATEWAYS_PER_CELL, MAX_PENDING, MAX_SOCKETS, SCALE_IN_MS, SCALE_IN_GRACE_MS, SCALE_IN_CHECK_MS, PRESSURE_DRAIN_START_MS,
   controllerCell, pressured, quiet, withDeadline, checkedCapacitySample, completedWindow, windowPressured, freshWindow, WINDOW_FIELDS,
-  type CapacitySample, type GatewayAssignment, type GatewayCapacityRpc,
+  type CapacitySample, type DirectAdmission, type GatewayAssignment, type GatewayCapacityRpc,
 } from "./placement";
 import { setSpanTiming, span, spanTimingFromEnv } from "../delivery/spans";
 
@@ -201,6 +201,36 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
       await this.save(false);
       span("controller.claim", { saveMs: Date.now() - saved, totalMs: Date.now() - queued });
       return true;
+    });
+  }
+  /**
+   * X17g: the router sent an upgrade straight to `request.gateway` (the holder its isolate admitted the previous upgrade
+   * to), and that holder asks for a lease in one call: acquire and claim at once. Granted only to an active slot at the
+   * same epoch that is not pressured and has room counting the holder's live sockets (`sockets`, reported by the caller)
+   * and every unexpired lease, as `acquire` counts them. Otherwise null: the router falls back to `acquire`, which
+   * balances, probes and allocates. Saved unconfirmed like any lease (see `save`). Idempotent per connection.
+   */
+  admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | null> {
+    const queued = Date.now();
+    return this.serial(async () => {
+      const now = Date.now(), cell = this.cell();
+      if (!request || request.v !== 1 || request.cell !== cell || typeof request.connectionId !== "string" || request.connectionId.length > 100
+        || controllerCell(request.connectionId) !== cell || !Number.isSafeInteger(sockets) || sockets < 0) return null;
+      this.prune(now);
+      const prior = this.state.leases.find(l => l.assignment.connectionId === request.connectionId);
+      if (prior) return prior.claimed || prior.assignment.gateway !== request.gateway || prior.assignment.epoch !== request.epoch ? null : (prior.claimed = true, prior.assignment);
+      if (this.state.leases.length >= MAX_PENDING) return null;
+      const slot = this.state.slots.find(s => s.name === request.gateway && s.epoch === request.epoch && s.mode === "active");
+      if (!slot) return null;
+      const sample = slot.sample;
+      if (sample && sample.epoch === slot.epoch && now - sample.at <= FRESH_SAMPLE_MS && pressured(sample)) return null;
+      if (Math.max(sockets, sample?.epoch === slot.epoch ? sample.sockets : 0) + this.pending(slot) >= MAX_SOCKETS) return null;
+      const assignment: GatewayAssignment = { v: 1, cell, gateway: slot.name, epoch: slot.epoch, token: crypto.randomUUID(), connectionId: request.connectionId, expiresAt: now + LEASE_MS };
+      this.state.leases.push({ assignment, claimed: true });
+      const saved = Date.now();
+      await this.save(false);
+      span("controller.admitDirect", { waitMs: now - queued, saveMs: Date.now() - saved, totalMs: Date.now() - queued });
+      return assignment;
     });
   }
   release(a: GatewayAssignment): Promise<void> {

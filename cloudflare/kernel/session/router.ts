@@ -1,4 +1,4 @@
-import { ASSIGNMENT_HEADER, automaticPlacement, controllerCell, withDeadline, type GatewayAssignment } from "../gateway/placement";
+import { ASSIGNMENT_HEADER, DIRECT_HEADER, automaticPlacement, controllerCell, withDeadline, type DirectAdmission, type GatewayAssignment } from "../gateway/placement";
 import { setSpanTiming, span, spanTimingFromEnv } from "../delivery/spans";
 /**
  * `GET /ws` in the router Worker (CONTRACT.md A.1.1). The Worker cannot know
@@ -13,7 +13,7 @@ import { setSpanTiming, span, spanTimingFromEnv } from "../delivery/spans";
  *   public connection slots are reserved in the address limiter before the
  *   upgrade, and an exhausted budget is HTTP 429 with Rust's text.
  */
-import { ADMISSION_REASON_HEADER, gatewayFor, type GatewayEnv, UPGRADE_HEADERS } from "./placement/gateway";
+import { ADMISSION_REASON_HEADER, DIRECT_REFUSAL_PREFIX, gatewayFor, type GatewayEnv, UPGRADE_HEADERS } from "./placement/gateway";
 import { clientAddress, FIXTURE_ADDRESS_HEADERS } from "../public/address";
 import { admitUpgrade, type PublicGuardEnv, publicGuard } from "../public/guard";
 
@@ -61,27 +61,48 @@ export const STICKY_PER_SECOND = 16;
 const STICKY_DRAWS = 1_024;
 export class WarmCell {
   private cell: number | undefined;
+  /** X17g: the holder (and its epoch) the remembered cell's last upgrade was admitted to. */
+  private holder: { gateway: string; epoch: number } | undefined;
   private until = 0;
   private second = 0;
   private used = 0;
   constructor(private readonly now: () => number = Date.now, private readonly uuid: () => string = () => crypto.randomUUID()) {}
   /** A connection id: in the remembered cell while it is fresh and under the rate, else uniformly random. */
   connectionId(): string {
+    return this.drawInCell() ?? this.uuid();
+  }
+  /**
+   * X17g: a direct admission to the remembered holder while it is fresh and under the rate (the same budget as
+   * `connectionId`), else undefined (the upgrade goes through the controller).
+   */
+  direct(): DirectAdmission | undefined {
+    if (!this.holder || this.cell === undefined) return undefined;
+    const { gateway, epoch } = this.holder, cell = this.cell;
+    const connectionId = this.drawInCell();
+    return connectionId === undefined || controllerCell(connectionId) !== cell ? undefined : { v: 1, cell, gateway, epoch, connectionId };
+  }
+  private drawInCell(): string | undefined {
     const now = this.now();
-    if (this.cell === undefined || now >= this.until) return this.uuid();
+    if (this.cell === undefined || now >= this.until) return undefined;
     const second = Math.floor(now / 1_000);
     if (second !== this.second) { this.second = second; this.used = 0; }
-    if (this.used >= STICKY_PER_SECOND) return this.uuid();
+    if (this.used >= STICKY_PER_SECOND) return undefined;
     this.used++;
     for (let i = 0; i < STICKY_DRAWS; i++) { const id = this.uuid(); if (controllerCell(id) === this.cell) return id; }
-    return this.uuid();
+    return undefined;
   }
-  admitted(cell: number): void { this.cell = cell; this.until = this.now() + STICKY_MS; }
-  refused(): void { this.cell = undefined; }
+  admitted(cell: number, holder?: { gateway: string; epoch: number }): void {
+    this.cell = cell;
+    this.holder = holder;
+    this.until = this.now() + STICKY_MS;
+  }
+  refused(): void { this.cell = undefined; this.holder = undefined; }
   /** Test seam. */
   get remembered(): number | undefined { return this.now() < this.until ? this.cell : undefined; }
 }
-const warmCell = new WarmCell();
+let warmCell = new WarmCell();
+/** Test seam: forget this isolate's warm cell and holder (the next upgrade goes through the controller). */
+export function resetWarmCell(cell: WarmCell = new WarmCell()): void { warmCell = cell; }
 
 export async function handleWebSocketUpgrade(request: Request, env: WebSocketRouteEnv): Promise<Response> {
   if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
@@ -91,9 +112,44 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   const url = new URL(request.url);
   if (spanTimingFromEnv(env)) setSpanTiming(true);
   const placement = automaticPlacement(env);
-  const connectionId = placement ? warmCell.connectionId() : crypto.randomUUID();
   const publicTransport = url.searchParams.get("public") === "1";
   const address = clientAddress(request.headers, env.GONVEX_ASSEMBLY_FIXTURE_KEY);
+  const forwarded = (connectionId: string, slots: string) => {
+    const headers = new Headers(request.headers);
+    headers.delete(ASSIGNMENT_HEADER);
+    headers.delete(DIRECT_HEADER);
+    headers.delete(FIXTURE_ADDRESS_HEADERS.key);
+    headers.delete(FIXTURE_ADDRESS_HEADERS.address);
+    headers.set(UPGRADE_HEADERS.connectionId, connectionId);
+    headers.set(UPGRADE_HEADERS.publicTransport, publicTransport ? "1" : "0");
+    headers.set(UPGRADE_HEADERS.address, address);
+    headers.set(UPGRADE_HEADERS.slots, slots);
+    return headers;
+  };
+  // X17g: connect in one hop. The isolate's last admitted holder takes the upgrade itself (one controller call and the
+  // limiter, in parallel); a `direct-*` refusal or a failed hop falls back to the controller path below.
+  const direct = placement ? warmCell.direct() : undefined;
+  if (direct) {
+    const started = Date.now();
+    try {
+      const headers = forwarded(direct.connectionId, "");
+      headers.set(DIRECT_HEADER, JSON.stringify(direct));
+      const response = await withDeadline(env.GATEWAY.getByName(direct.gateway).fetch(new Request(request.url, { method: "GET", headers })));
+      const reason = response.headers.get(ADMISSION_REASON_HEADER) ?? "";
+      span("router.upgrade", { direct: true, gatewayMs: Date.now() - started, totalMs: Date.now() - started, status: response.status, ...(reason ? { reason } : {}) });
+      // Any answer but a 101 forgets the holder (#533 review): a refused address must not keep this isolate's upgrades
+      // going direct. Only a `direct-*` refusal falls back; a limiter 429/503 is the client's answer.
+      if (response.status === 101) { warmCell.admitted(direct.cell, { gateway: direct.gateway, epoch: direct.epoch }); return response; }
+      warmCell.refused();
+      if (!(response.status === 503 && reason.startsWith(DIRECT_REFUSAL_PREFIX))) return response;
+    } catch (error) {
+      warmCell.refused();
+      // A deadline: the holder may still admit this attempt, so it is not retried (no second admission, #533 review).
+      if (refusalCause(error) === "deadline") return refusedUpgrade("gateway", error, started, "gateway admission unavailable");
+      console.error("router: direct upgrade failed; using the controller", { cause: refusalCause(error), elapsedMs: Date.now() - started });
+    }
+  }
+  const connectionId = placement ? warmCell.connectionId() : crypto.randomUUID();
   let assignment: GatewayAssignment | undefined;
   let slots = "";
   let response: Response | undefined;
@@ -116,19 +172,12 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     times.admitMs = Date.now() - admitStarted;
     if (refused) return refused;
     stage = "gateway";
-    const headers = new Headers(request.headers);
-    headers.delete(ASSIGNMENT_HEADER);
-    headers.delete(FIXTURE_ADDRESS_HEADERS.key);
-    headers.delete(FIXTURE_ADDRESS_HEADERS.address);
+    const headers = forwarded(connectionId, slots);
     if (assignment) headers.set(ASSIGNMENT_HEADER, JSON.stringify(assignment));
-    headers.set(UPGRADE_HEADERS.connectionId, connectionId);
-    headers.set(UPGRADE_HEADERS.publicTransport, publicTransport ? "1" : "0");
-    headers.set(UPGRADE_HEADERS.address, address);
-    headers.set(UPGRADE_HEADERS.slots, slots);
     const gatewayStarted = Date.now();
     response = await withDeadline(env.GATEWAY.getByName(gatewayName).fetch(new Request(request.url, { method: "GET", headers })));
     span("router.upgrade", { ...times, gatewayMs: Date.now() - gatewayStarted, totalMs: Date.now() - started, status: response.status, warm: warmCell.remembered === assignment?.cell });
-    if (assignment) { if (response.status === 101) warmCell.admitted(assignment.cell); else warmCell.refused(); }
+    if (assignment) { if (response.status === 101) warmCell.admitted(assignment.cell, { gateway: assignment.gateway, epoch: assignment.epoch }); else warmCell.refused(); }
     return response;
   } catch (error) {
     warmCell.refused();

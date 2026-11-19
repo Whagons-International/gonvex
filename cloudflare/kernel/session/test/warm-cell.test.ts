@@ -40,3 +40,26 @@ describe("X16 WarmCell", () => {
     expect(warm.remembered).toBeUndefined();
   });
 });
+
+describe("X17g WarmCell.direct", () => {
+  it("offers the remembered holder, in its cell, under the same rate; never without a holder; forgets on refusal", () => {
+    let now = 2_000_000;
+    const warm = new WarmCell(() => now);
+    expect(warm.direct()).toBeUndefined();
+    warm.admitted(9);
+    expect(warm.direct()).toBeUndefined();
+    warm.admitted(9, { gateway: "auto-gw-9-0", epoch: 4 });
+    const d = warm.direct()!;
+    expect(d).toMatchObject({ v: 1, cell: 9, gateway: "auto-gw-9-0", epoch: 4 });
+    expect(controllerCell(d.connectionId)).toBe(9);
+    for (let i = 1; i < STICKY_PER_SECOND; i++) expect(warm.direct()).toBeDefined();
+    expect(warm.direct()).toBeUndefined();
+    now += 1_000;
+    expect(warm.direct()).toBeDefined();
+    warm.refused();
+    expect(warm.direct()).toBeUndefined();
+    warm.admitted(9, { gateway: "auto-gw-9-0", epoch: 4 });
+    now += STICKY_MS;
+    expect(warm.direct()).toBeUndefined();
+  });
+});

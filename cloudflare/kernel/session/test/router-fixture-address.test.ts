@@ -3,8 +3,10 @@
  * conformance run against a deployed Worker names its per-step client address with the fixture headers.
  * The router honours them only with the deployment's exact fixture key and never forwards them.
  */
-import { describe, expect, it } from "vitest";
-import { handleWebSocketUpgrade, type WebSocketRouteEnv } from "../router";
+import { beforeEach, describe, expect, it } from "vitest";
+import { handleWebSocketUpgrade, resetWarmCell, type WebSocketRouteEnv } from "../router";
+// X17g: each test starts without a warm holder, so an earlier test's admission does not route this one directly.
+beforeEach(() => resetWarmCell());
 import { UPGRADE_HEADERS } from "../placement/gateway";
 import { FIXTURE_ADDRESS_HEADERS } from "../../public/address";
 
