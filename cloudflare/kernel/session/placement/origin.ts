@@ -254,14 +254,7 @@ export function gatedEnv<E extends object>(env: E, origin: CallOrigin): E {
 // ---- entry tracking on the object's own prototype -------------------------------------
 
 /** Platform events that start a new call chain. */
-export const FRESH_ENTRIES: ReadonlySet<string> = new Set(["fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError",
-  // X17e: Control's notifications. Their chains are bounded, unlike the tenant <-> gateway delivery ping-pong this
-  // rule exists for: a gateway call (one hop below a fresh event) -> Control, whose write notifies (two hops) -> this
-  // gateway's refresh queries (three hops) -> Control, which answers a query without notifying. A tenant-originated
-  // Control call adds two or three hops at most. A call launched while one of these is the newest request is
-  // therefore well under the platform's depth limit, and no longer waits for an alarm (each refresh of every
-  // session's Control subscriptions did: 650-840 ms of deferral per cold load on dev).
-  "controlChanged", "presenceChanged"]);
+export const FRESH_ENTRIES: ReadonlySet<string> = new Set(["fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError"]);
 
 const WRAPPED = Symbol("gonvex.origin.wrapped");
 type Wrapped = ((this: any, ...args: unknown[]) => unknown) & { [WRAPPED]?: (...args: unknown[]) => unknown };
