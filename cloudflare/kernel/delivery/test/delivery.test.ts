@@ -1956,3 +1956,33 @@ describe("X17d re-review 3 (#528): a schema change with the same capture classes
     });
   });
 });
+
+describe("#528 re-review 4: a cold open after module DDL does not change live subscriptions' frames", () => {
+  const BOTH: ReplicaModule = {
+    projectId: "p", artifactHash: "h-r4",
+    functions: new Map([...MASKED.functions, ...MODULE.functions]),
+    visibility: new Map([...MASKED.visibility, ...MODULE.visibility]),
+  };
+  const run = (coldOpen: boolean) => withEngine(async (h) => {
+    const rows: Array<[string, unknown[]]> = [["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO items VALUES ('a', 1, 'x')", []]];
+    for (let i = 0; i < 3; i++) rows.push(["INSERT INTO tnotes VALUES ($1, 't1', $2)", [`n${i}`, `note ${i}`]]);
+    await h.commit(rows);
+    h.engine.dispatch(socket("S"), { type: "replica.open", id: "notes", path: "notes.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    await h.engine.settled();
+    // Module DDL in a reducer (K01 bumps the schema generation; nothing visibility reads changed).
+    await h.commit([["CREATE TABLE IF NOT EXISTS scratch (x TEXT)", []]]);
+    if (coldOpen) {
+      h.engine.dispatch(socket("C"), { type: "replica.open", id: "items", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await h.engine.settled();
+    }
+    h.payloads.length = 0;
+    await h.commit([["UPDATE tasks SET state = 'closed' WHERE id = 't1'", []]]);
+    return frames(h.payloads, "S").map((f) => f.type as string);
+  }, BOTH);
+
+  it("the parent flip is the same frames with or without an unrelated cold open in between", { timeout: 60_000 }, async () => {
+    const without = await run(false);
+    expect(without).toContain("replica.delta");
+    expect(await run(true)).toEqual(without);
+  });
+});

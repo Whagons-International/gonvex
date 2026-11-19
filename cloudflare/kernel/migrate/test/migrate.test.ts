@@ -498,3 +498,28 @@ describe("plan", () => {
     expect(p.migrations[0]!.statements).toBe(2);
   });
 });
+
+describe("#528 re-review 4: a failed migration whose statements stayed committed bumps the schema generation", () => {
+  // X17d's snapshot cache and the visibility registry's captured set are keyed to K01's schema generation, which only
+  // the migrator's `schemaChanged` moves for migration DDL. A `-- gonvex:no-transaction` migration that fails part way
+  // keeps its earlier statements (Rust semantics, the test above), the plan goes to `failed` with no restore pending,
+  // the gate reopens, and nothing calls `schemaChanged`: the committed DDL (a dropped/rebuilt captured table, say) is
+  // invisible to every generation-keyed cache.
+  it("no-transaction failure after committed DDL calls schemaChanged", async () => {
+    const files = {
+      "migrations/0001_a.sql": "-- gonvex:scope tenant\n-- gonvex:no-transaction\nCREATE TABLE IF NOT EXISTS kept (id INTEGER PRIMARY KEY);\nINSERT INTO missing VALUES (1);\n",
+    };
+    const release = await plan(files);
+    await withObject(async (state) => {
+      let changed = 0;
+      // Count only the calls that could tell a cache about `kept` (made after it was committed).
+      const { m } = migrator(state, new MemoryPlanStore(release), { schemaChanged: () => { if (state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_schema WHERE name='kept'").one().n) changed++; } });
+      await m.applyRelease(release.id);
+      const s = await drain(m);
+      expect(s.error).toMatch(/^migration 0001_a\.sql: no such table: missing/);
+      expect(state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_schema WHERE name='kept'").one().n).toBe(1);
+      expect(m.gateClosed()).toBe(false); // writers resume on the partly migrated schema
+      expect(changed).toBeGreaterThan(0); // fails at 440be993: 0
+    });
+  });
+});

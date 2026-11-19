@@ -115,6 +115,11 @@ function tablesChanged(db: StorageSession, since: number, through: number, table
 
 /** #528 re-review 3: the schema generation each registry's schema-derived caches were last checked against. */
 const schemaSeen = new WeakMap<object, number>();
+function noteSchema(registry: VisibilityRegistry, generation: number): void {
+  if (schemaSeen.get(registry) === generation) return;
+  registry.principals.invalidateSchema();
+  schemaSeen.set(registry, generation);
+}
 
 const moduleIds = new WeakMap<object, number>();
 let nextModuleId = 0;
@@ -249,6 +254,10 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
 
   // The read: clock, principal, scan statement.
   const begun = await context.read((db) => {
+    // #528 re-review 3/4: a schema generation this registry has not seen yet (a migration ran while this module stayed
+    // active) re-reads the principal cache and the captured set before anything resolves through them. ACL indexes
+    // are left to `activate`: poisoning them here would turn live `inherits` subscriptions' deltas into resyncs.
+    noteSchema(context.registry, db.schemaGeneration);
     const clock = readClock(sqlOf(db));
     const resolved = resolveCollection(db, context, definition, plan, clock.revision);
     const scan = scanPlan(definition, plan, resolved, request.args, db.catalogOf(definition.table).columns);
@@ -289,7 +298,7 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
         // committed schema change (the migrator's `schemaChanged`, module DDL): a change forgets the registry's
         // schema-derived caches (principal cache included), and an entry from another generation is a miss.
         schema = db.schemaGeneration;
-        if (schemaSeen.get(context.registry) !== schema) { context.registry.invalidateSchema(); schemaSeen.set(context.registry, schema); }
+        noteSchema(context.registry, schema);
         const captured = context.registry.principals.capturedTables(db);
         if (!tables.every((table) => captured.has(table))) return "uncaptured";
         if (cached && cached.schema !== schema) return "schema";

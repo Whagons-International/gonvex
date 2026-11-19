@@ -740,6 +740,9 @@ export class TenantMigrator {
   }
 
   private async failed(error: StepFailure, manifest: PlanManifest): Promise<void> {
+    // #528 re-review 4: a failed `no-transaction` migration keeps the statements that ran before the failure (DDL
+    // included). An extra bump on a fully rolled-back failure only costs schema-derived caches a miss.
+    this.options.schemaChanged?.();
     const p = this.load()!;
     const restore = error.restore;
     const text = message(error);
