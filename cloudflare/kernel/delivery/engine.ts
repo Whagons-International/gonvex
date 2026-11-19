@@ -12,6 +12,7 @@
 // task does. Nothing here is written to SQLite (brief: nothing ephemeral).
 
 import { span, spanTimingOn } from "./spans";
+import { sqlTotals } from "../storage/session.ts";
 import { captureRecoveryInitials, recoveryInitialCleanup, type RecoveryInitialCapture } from "./recovery-initials";
 import { AuthorityAdmission } from "./authority";
 import { type RecoveryDelivery, type RecoveryReceipt, type ScopedSocketWork } from "./recovery";
@@ -867,9 +868,12 @@ export class ReplicaDeliveryEngine {
     if (this.connections.get(connection.id) !== connection) return;
     if (!spanTimingOn()) return this.processOpenTimed(connection, request, () => {});
     const openStarted = Date.now();
+    const before = { statements: this.stats.statements, rowsRead: this.stats.rowsRead, sql: sqlTotals.statements, sqlRows: sqlTotals.rowsRead };
     let drainMs = 0, drains = 0;
     try { await this.processOpenTimed(connection, request, (ms) => { drainMs += ms; drains++; }); }
-    finally { span("tenant.open", { path: request.path, runMs: Date.now() - openStarted, drainMs, drains, pending: connection.pending.length, queuedAfter: this.options.outlet.queued(connection.host) }); }
+    finally { span("tenant.open", { path: request.path, runMs: Date.now() - openStarted, drainMs, drains, pending: connection.pending.length, queuedAfter: this.options.outlet.queued(connection.host),
+      statements: this.stats.statements - before.statements, rowsRead: this.stats.rowsRead - before.rowsRead,
+      sql: sqlTotals.statements - before.sql, sqlRows: sqlTotals.rowsRead - before.sqlRows }); }
   }
 
   private async processOpenTimed(connection: Connection, request: OpenRequest, drained: (ms: number) => void): Promise<void> {

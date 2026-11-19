@@ -67,6 +67,9 @@ import {
   type Parameter,
 } from "./values";
 
+/** X17 (dev spans): every statement any storage session of this isolate ran, and the rows they read. */
+export const sqlTotals = { statements: 0, rowsRead: 0 };
+
 export const CLOSED = "the invocation transaction is closed";
 
 /** What the session needs from `ctx.storage`. */
@@ -417,6 +420,7 @@ export class StorageSession {
 
   /** Runs SQL on the connection, counting rows; a failure marks the transaction aborted. */
   private execute(sql: string, binds: readonly SqlBind[], counters?: RowCounters): RawResult {
+    sqlTotals.statements++;
     let cursor: SqlStorageCursor<Record<string, SqlStorageValue>>;
     let rows: SqlStorageValue[][];
     try {
@@ -427,6 +431,7 @@ export class StorageSession {
       throw this.failed(failure.message, failure.code, failure.sqliteMessage);
     }
     const result = { columnNames: cursor.columnNames, rows, rowsRead: cursor.rowsRead, rowsWritten: cursor.rowsWritten };
+    sqlTotals.rowsRead += cursor.rowsRead;
     for (const target of counters ? [this.stats, counters] : [this.stats]) {
       target.statements++;
       target.rowsRead += result.rowsRead;

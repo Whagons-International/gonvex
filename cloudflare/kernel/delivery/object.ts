@@ -15,6 +15,9 @@ import { MODULE_KEY, type StoredModule } from "../reducer/tenant.ts";
 import { ReducerTenantObject, type ReducerTenantEnv } from "../reducer/object.ts";
 import { replicaModule, type ReplicaModule } from "./definition.ts";
 import { ReplicaDeliveryEngine } from "./engine.ts";
+import { openReplica, resolveCollection, sqlOf } from "./subscription.ts";
+import { readClock } from "./log.ts";
+import { pageStatement, scanPlan, scanWindow, STATEMENT_ROWS } from "./scan.ts";
 import { GatewayOutlet, type ReplicaHolderRpc } from "./outlet.ts";
 import { keepAliveCheck, SubscriberKeepAlive } from "./keepalive.ts";
 
@@ -75,6 +78,80 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
       this.dataChangedScheduled = false;
       await sink.operatorDataChanged(projectId, tenantId).catch((error) => console.error("delivery: operatorDataChanged failed", error));
     })());
+  }
+
+  /**
+   * X17 dev profiling (only while `GONVEX_SPAN_TIMING=1`): runs every replica function of the active module for one
+   * active member, `rounds` times, read-only, in the invocation queue, with the engine's own registry. `phase`:
+   * "none" (the loop only), "resolve" (clock, visibility resolution, scan plan) or "open" (the whole open, frames
+   * discarded, nothing installed). The caller reads each call's CPU from Workers Logs.
+   */
+  async devOpenCost(phase: "none" | "resolve" | "open" | "light" | "scan" | "explain", rounds = 1, only?: string[]): Promise<{ paths: number; frames: number; errors: number; failed?: string; explain?: unknown[] }> {
+    if ((this.env as { GONVEX_SPAN_TIMING?: string }).GONVEX_SPAN_TIMING !== "1") throw new Error("dev profiling is disabled");
+    const module = this.replicaModule();
+    const active = this.kernel.module;
+    if (!module || !active) throw new Error("no active module");
+    const row = this.ctx.storage.sql.exec<{ account_id: string }>("SELECT account_id FROM members WHERE status='active' ORDER BY (role='owner') DESC, (role='admin') DESC LIMIT 1").toArray()[0];
+    if (!row) throw new Error("no active member");
+    const admitted = await this.admit(String(row.account_id));
+    if (!admitted) throw new Error("member not admitted");
+    const { admissionRevision, ...member } = admitted;
+    const session = {
+      identity: { projectId: active.projectId, account: { id: String(row.account_id), email: "", emailVerified: true, name: "", avatarUrl: "", provider: "" } },
+      route: { projectId: active.projectId, tenantId: this.ctx.id.name ?? "", databaseUrl: "" },
+      member, admissionRevision, delegation: null, developerSession: null, anonymous: false,
+    } as unknown as Parameters<typeof resolveCollection>[1]["session"];
+    const paths = [...module.functions].filter(([path, fn]) => fn.kind === "query" && fn.delivery === "replica" && fn.replica && (!only || only.includes(path))).map(([path]) => path);
+    let failed: string | undefined;
+    const explain: unknown[] = [];
+    const read = snapshotRunner(this.kernel.storage);
+    let frames = 0, errors = 0;
+    await this.kernel.reducers.serial(async () => {
+      for (let round = 0; round < rounds; round++) for (const path of paths) {
+        if (phase === "none") continue;
+        const fn = module.functions.get(path)!;
+        const definition = fn.replica!;
+        const plan = module.visibility.get(definition.table);
+        if (!plan) { errors++; continue; }
+        const context = { session, module, sumNegotiated: true, paged: true, scope: "dev", visibilityScope: "dev", registry: this.delivery.registry, read,
+          emit: (out: string[]) => { frames += out.length; if (out.some((f) => f.includes('"replica.error"'))) errors++; }, drain: async () => {} };
+        if (phase === "explain") {
+          await read((db) => {
+            const clock = readClock(sqlOf(db));
+            const resolved = resolveCollection(db, context, definition, plan, clock.revision);
+            const scan = scanPlan(definition, plan, resolved, {}, db.catalogOf(definition.table).columns);
+            const statement = pageStatement(scan, undefined, STATEMENT_ROWS);
+            const qp = db.run(`EXPLAIN QUERY PLAN ${statement.sql}`, statement.parameters as never).rows.map((r) => r[r.length - 1]);
+            explain.push({ path, sql: statement.sql.slice(0, 1500), plan: qp });
+          });
+          continue;
+        }
+        if (phase === "light" || phase === "scan") {
+          try {
+            const scan = await read((db) => {
+              const clock = readClock(sqlOf(db));
+              const resolved = resolveCollection(db, context, definition, plan, clock.revision);
+              return scanPlan(definition, plan, resolved, {}, db.catalogOf(definition.table).columns);
+            });
+            await scanWindow(read, definition, scan, () => { frames++; }, { chunkBytes: 2 << 20, light: phase === "light" });
+          } catch (error) { errors++; failed ??= `${path}: ${String((error as Error)?.message ?? error).slice(0, 200)}`; }
+          continue;
+        }
+        if (phase === "resolve") {
+          try {
+            await read((db) => {
+              const clock = readClock(sqlOf(db));
+              const resolved = resolveCollection(db, context, definition, plan, clock.revision);
+              return scanPlan(definition, plan, resolved, {}, db.catalogOf(definition.table).columns);
+            });
+          } catch (error) { errors++; failed ??= `${path}: ${String((error as Error)?.message ?? error).slice(0, 200)}`; }
+        } else {
+          try { await openReplica({ id: `dev-${path}`, path, args: {}, keys: [], hashes: {}, fullIntegrity: false } as never, context as never); }
+          catch (error) { errors++; failed ??= `${path}: ${String((error as Error)?.message ?? error).slice(0, 200)}`; }
+        }
+      }
+    });
+    return { paths: paths.length, frames, errors, ...(failed ? { failed } : {}), ...(explain.length ? { explain } : {}) };
   }
 
   /** The replica view of the active generation, rebuilt when the generation changes. */
