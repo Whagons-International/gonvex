@@ -161,6 +161,37 @@ describe("handshake", () => {
   });
 });
 
+describe("X13e delivery sends are never held by a storage write", () => {
+  // The platform's output gate holds a Durable Object's outgoing messages, WebSocket sends included, until its
+  // pending storage writes are durable (local workerd: a setAlarm before a send held it ~40 ms; one in a later
+  // turn of the same event too). A steady-state delivery therefore must not write: no alarm re-arm, no put,
+  // no attachment. Only the first delivery of a new replica instance publishes its recovery state.
+  it("a steady-state targeted delivery with a watermark writes nothing; a new instance publishes once", async () => {
+    const w = await world({ a: ["ana"] });
+    const c = await signedIn(w, "ana", "a");
+    try {
+      const [name] = await stub("GET", `gateways?tenant=${w.tenants.a}`) as string[];
+      const socket = await inGateway(name!, (instance) => { const s = [...instance.host.sessions.values()].find((s: any) => s.record.tenant?.route.tenantId === w.tenants.a) as any; return { id: s.record.connectionId, epoch: s.record.subscriptionEpoch }; }) as { id: string; epoch: number };
+      await inGatewayState(gateway(name!), (instance: any, state: DurableObjectState) => {
+        const log: string[] = instance.__writes = [];
+        const st: any = state.storage;
+        for (const m of ["setAlarm", "deleteAlarm", "put", "delete"]) { const o = st[m].bind(st); st[m] = (...a: any[]) => { log.push(m); return o(...a); }; }
+        for (const m of ["put", "delete"]) { const o = st.kv[m].bind(st.kv); st.kv[m] = (...a: any[]) => { log.push("kv." + m); return o(...a); }; }
+        for (const ws of state.getWebSockets()) { const o = (ws as any).serializeAttachment.bind(ws); (ws as any).serializeAttachment = (v: any) => { log.push("attachment"); return o(v); }; }
+      });
+      const writes = () => inGateway(name!, (instance: any) => instance.__writes.splice(0)) as Promise<string[]>;
+      for (let n = 0; n < 4; n++) {
+        await gateway(name!).deliverReplica(w.tenants.a, { v: 1, scopeFence: 1, instance: "x13e", shared: [], watermark: 10 + n,
+          sockets: { [socket.id]: { subscriptionEpoch: socket.epoch, watermark: 10 + n, ops: [["f", `{"type":"x13e","n":${n}}`]] } } });
+        await c.next((f) => f.type === "x13e" && f.n === n);
+        const done = await writes();
+        if (n === 0) expect(done).toContain("attachment"); // the new instance's recovery state, once
+        else expect(done, `delivery ${n}`).toEqual([]);
+      }
+    } finally { c.ws.close(1000); }
+  });
+});
+
 describe("gateway placement", () => {
   it("0063 targets only A on a shared A/B/C holder, including an auth arrival during empty bootstrap", async () => {
     const w = await world({ a: ["ana", "ben"] });
