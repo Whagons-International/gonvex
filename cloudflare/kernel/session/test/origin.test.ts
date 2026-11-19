@@ -9,7 +9,7 @@
  * gate the depth ratchets with every frame until the platform refuses the call.
  */
 import { describe, expect, it } from "vitest";
-import { CallOrigin, gatedEnv, gatedStub } from "../placement/origin";
+import { CallOrigin, FRESH_ENTRIES, gatedEnv, gatedStub } from "../placement/origin";
 
 const LIMIT = 16;
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -262,5 +262,13 @@ describe("X07b BUG-5 on -12: a deferred gateway call never strands its socket", 
     await tick();
     expect(String((error as Error)?.message)).toMatch(/gateway call dispatch waited 10000 ms/);
     expect(origin.stats()).toMatchObject({ waiting: 0, expired: 1 });
+  });
+});
+
+describe("X17e Control notifications start a bounded chain", () => {
+  it("controlChanged and presenceChanged are fresh entries; tenant deliveries stay peers", () => {
+    expect(FRESH_ENTRIES.has("controlChanged")).toBe(true);
+    expect(FRESH_ENTRIES.has("presenceChanged")).toBe(true);
+    for (const peer of ["deliverReplica", "deliverReplicaBatch", "deliverReplicaInitial", "deliverInitialFailures", "capacity", "drain"]) expect(FRESH_ENTRIES.has(peer)).toBe(false);
   });
 });
