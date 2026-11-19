@@ -76,8 +76,8 @@ export interface AssemblyTenantEnv extends AssemblyGatewayEnv, TransferEnv {
 
 interface ActionHostStub {
   call(input: DirectCall): Promise<ActionReport | { pending: true; id: string }>;
-  hold(request: { v: 1; projectId: string; tenantId: string }): Promise<unknown>;
-  release(): Promise<unknown>;
+  hold(request: { v: 1; projectId: string; tenantId: string; generation: number }): Promise<unknown>;
+  release(request: { v: 1; generation: number }): Promise<unknown>;
 }
 
 /** X13c: one log line per Reducer that waited or ran long (path only; never arguments), to split its wall time. */
@@ -270,11 +270,25 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   private async socketAction(input: DirectCall): Promise<ActionReport | { pending: true; id: string }> {
     const host = this.actionHost();
     if (host && this.kernel.module?.functions.get(input.path)?.raw.actionProfile === "agent") {
-      try { return await host.call(input); }
-      catch (error) { if (!/does not implement the method/i.test(String((error as Error)?.message ?? error))) throw error; }
+      // Review of #509: the fallback is decided by evidence, not by error text. The host must start the
+      // run here (`startCall`) with this owner before the Action can execute; if that start never reached
+      // this tenant, nothing ran and the ActionWorker answers instead (an Actions script rolled back to a
+      // version without ActionHost, a host that failed before its start, deploy skew). If it did, the error
+      // stands: the run is ended by the X13b sweep and the Action runs at most once.
+      const owner = `inline:${crypto.randomUUID()}`;
+      this.hostStarts.set(owner, false);
+      try { return await host.call({ ...input, inlineOwner: owner }); }
+      catch (error) {
+        if (this.hostStarts.get(owner)) throw error;
+        console.error("action host: call failed before its run started; the ActionWorker answers", { path: input.path, error: String((error as Error)?.message ?? error).slice(0, 200) });
+      } finally { this.hostStarts.delete(owner); }
     }
     return this.env.ACTIONS.call(input);
   }
+  /** Owners of host calls in flight, and whether their run reached `startCall` (review of #509). */
+  private readonly hostStarts = new Map<string, boolean>();
+  /** X13g review: monotonic across this object's restarts (time-based), so a reordered release never drops a newer hold. */
+  private hostGeneration = 0;
   private actionHost(): ActionHostStub | undefined {
     const namespace = this.env.ACTION_HOST;
     return namespace ? (namespace as unknown as { getByName(name: string): ActionHostStub }).getByName(this.ctx.id.name ?? "") : undefined;
@@ -283,7 +297,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   protected override subscribersChanged(holding: boolean): void {
     const host = this.actionHost(), projectId = this.kernel.module?.projectId;
     if (!host || !projectId) return;
-    const work = holding ? host.hold({ v: 1, projectId, tenantId: this.ctx.id.name ?? "" }) : host.release();
+    this.hostGeneration = Math.max(Date.now(), this.hostGeneration + 1);
+    const generation = this.hostGeneration;
+    const work = holding ? host.hold({ v: 1, projectId, tenantId: this.ctx.id.name ?? "", generation }) : host.release({ v: 1, generation });
     this.ctx.waitUntil(Promise.resolve(work).then(() => undefined, (error) => console.error("action host: hold/release failed", { holding, error: String((error as Error)?.message ?? error).slice(0, 200) })));
   }
   /** X13g: the ActionHost's periodic check: still wanted while this tenant holds subscribers. */
@@ -411,7 +427,10 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async completeCall(request: CompleteRequest) { await this.setupScheduled(); return this.calls!.complete(request); }
   async beginCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown }) { await this.setupScheduled(); return this.calls!.begin(request); }
   /** X13: a direct agent call the Action Worker runs inline (`ActionCalls.start`). */
-  async startCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown; owner: string }) { await this.setupScheduled(); return this.calls!.start(request, request.owner); }
+  async startCall(request: { v: 1; session: ActionSession; path: string; args: unknown; provenance?: unknown; owner: string }) {
+    if (this.hostStarts.has(request.owner)) this.hostStarts.set(request.owner, true);
+    await this.setupScheduled(); return this.calls!.start(request, request.owner);
+  }
   async releaseCall(request: { v: 1; id: string; attempt: number }) { await this.setupScheduled(); return this.calls!.release(request); }
   async renewRun(request: { v: 1; claim: Parameters<Scheduler["renew"]>[0] }) { await this.setupScheduled(); return this.scheduler!.renew(request.claim); }
   async completeRun(request: { v: 1; claim: Parameters<Scheduler["complete"]>[0]; outcome: Parameters<Scheduler["complete"]>[1] }) { await this.setupScheduled(); return this.scheduler!.complete(request.claim, request.outcome); }
