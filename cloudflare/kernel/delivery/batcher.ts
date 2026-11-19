@@ -141,6 +141,7 @@ export class ReplicaBatcher {
     const tail = batch.watermark !== undefined ? `],"watermark":${batch.watermark}}` : "]}";
     if (this.socket.sendRaw(batch.prefix + batch.parts.join("") + tail) === false) return false;
     this.acceptedBatches++;
+    if (batch.data > 0) flushTiming(this.socket.now() - batch.openedAt, batch.data);
     if (batch.watermark !== undefined) {
       this.lastWatermark = Math.max(this.lastWatermark, batch.watermark);
       for (const revision of this.waiting) if (revision <= batch.watermark) this.waiting.delete(revision);
@@ -170,4 +171,17 @@ export class ReplicaBatcher {
       this.flush();
     });
   }
+}
+
+/**
+ * X13e: one time-only line per sent data batch (no ids, paths or contents): how long the batch was held
+ * after its first item reached the holder, and how many items it carried. With `GONVEX_DELIVERY_TIMING=1`
+ * every data batch is logged (dev, to split commit -> second client); otherwise only a batch held at least
+ * `SLOW_FLUSH_MS` (the tick is 50 ms, as Rust's).
+ */
+let everyFlush = false;
+const SLOW_FLUSH_MS = 200;
+export function setDeliveryTiming(enabled: boolean): void { everyFlush = enabled; }
+function flushTiming(heldMs: number, items: number): void {
+  if (everyFlush || heldMs >= SLOW_FLUSH_MS) console.log("delivery: replica batch sent", { heldMs, items });
 }

@@ -10,7 +10,7 @@ import type { Negotiated } from "../../session/capabilities.ts";
 import type { SocketView, TenantSession } from "../../session/ports.ts";
 import { TenantStorage } from "../../storage";
 import { parsePlan } from "../../visibility/plan.ts";
-import { ReplicaBatcher } from "../batcher.ts";
+import { ReplicaBatcher, setDeliveryTiming } from "../batcher.ts";
 import { Aggregate, stableJson } from "../canonical.ts";
 import { parseDefinition, type ReplicaModule } from "../definition.ts";
 import { ReplicaDeliveryEngine, STALL_TICKS, type DeliveryClock } from "../engine.ts";
@@ -384,6 +384,25 @@ describe("socket side", () => {
       '{"type":"replica.watermark","revision":9}',
     ]);
     expect(tracked).toEqual({});
+  });
+
+  it("X13e logs each sent data batch's hold time and item count only (every batch with timing on; slow ones always)", () => {
+    const sent: string[] = [], logs: unknown[][] = [];
+    let now = 1_000;
+    const batcher = new ReplicaBatcher({ sendRaw: (t) => sent.push(t), envelope: () => ({ tenant: "t", class: "c" }), now: () => now, later: () => () => {} });
+    const original = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args); };
+    try {
+      setDeliveryTiming(false);
+      batcher.item('{"type":"replica.transaction","secret":"row value"}'); now += 50; batcher.flush();
+      expect(logs).toEqual([]);
+      batcher.item('{"type":"replica.transaction"}'); now += 250; batcher.flush();
+      setDeliveryTiming(true);
+      batcher.item('{"type":"replica.transaction"}'); batcher.item('{"type":"replica.transaction"}'); now += 50; batcher.flush();
+    } finally { console.log = original; setDeliveryTiming(false); }
+    expect(sent.length).toBe(3);
+    expect(logs).toEqual([["delivery: replica batch sent", { heldMs: 250, items: 1 }], ["delivery: replica batch sent", { heldMs: 50, items: 2 }]]);
+    expect(JSON.stringify(logs)).not.toContain("row value");
   });
 
   it("presence rides in a batch that holds rows, and goes at once otherwise", () => {

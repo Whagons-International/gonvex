@@ -17,6 +17,7 @@
  * deploy's skew (10-40 s, S3 §7) never breaks a call: unknown fields are
  * ignored and every method tolerates older callers.
  */
+import { setDeliveryTiming } from "../../delivery/batcher";
 import { ASSIGNMENT_HEADER, MAX_SOCKETS, controller, withDeadline, parseAssignment, type AutoscaleEnv, type CapacitySample, type DrainCommand, type DrainResult, pressured, hashConnection } from "../../gateway/placement";
 import { GatewayMetrics } from "../../gateway/metrics";
 import { DurableObject } from "cloudflare:workers";
@@ -159,6 +160,8 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     super(ctx, gatedEnv(rawEnv, origin));
     this.origin = origin;
     const env = this.env;
+    // X13e: time-only per-batch send log on dev (GONVEX_DELIVERY_TIMING=1); slow batches are always logged.
+    setDeliveryTiming((rawEnv as { GONVEX_DELIVERY_TIMING?: string }).GONVEX_DELIVERY_TIMING === "1");
     const proto = new.target.prototype as object;
     if (!tracked.has(proto)) {
       tracked.add(proto);
