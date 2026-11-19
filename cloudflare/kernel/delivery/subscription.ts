@@ -23,7 +23,8 @@ import { CollapsedChanges, readChangeRows, readClock, type LogChange, type LogSq
 import { scanPlan, scanWindow, type ScannedRow, type ScanProgress } from "./scan.ts";
 import { collectionFiltersAdmit, errors, projectRow, ReplicaError, visible, type ReplicaWindow } from "./window.ts";
 import { canonical, stableJson } from "./canonical.ts";
-import { snapshotCache, type CachedSnapshot } from "./snapshot-cache.ts";
+import { retainedRowBytes, snapshotCache, type CachedSnapshot } from "./snapshot-cache.ts";
+import { inheritedTables } from "../visibility/plan.ts";
 import { span } from "./spans.ts";
 
 /** Legacy snapshot pages (replica.rs `SNAPSHOT_PAGE_BYTES`, `SNAPSHOT_PAGE_ROWS`). */
@@ -94,6 +95,28 @@ export interface OpenContext {
  * X17d: the snapshot cache key: what a cold scan's rows depend on besides the data (the table versions are checked
  * separately). Undefined when the session has no member (nothing is cached).
  */
+/**
+ * X17d: only plans whose visibility does not inherit from parent rows are cached. A child's visibility also depends on
+ * parent rows, `via` rows and the parents' own principal tables, which the validity check does not cover (#528 review).
+ */
+function cacheableVisibility(plan: VisibilityPlan): boolean {
+  return plan.version !== 2 || inheritedTables(plan).length === 0;
+}
+
+/** X17d: the resolution the rows were admitted under, parents included (defence in depth: a missed table is a miss). */
+function visibilityFingerprintOf(resolved: ResolvedVisibility): string {
+  const parts = [resolved.fingerprint];
+  for (const [table, parent] of [...resolved.inherited].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) parts.push(`${table}=${visibilityFingerprintOf(parent.resolved)}`);
+  return parts.join("|");
+}
+
+/** X17d: whether any transaction in (since, through] wrote one of `tables` (one indexed probe, no change rows read). */
+function tablesChanged(db: StorageSession, since: number, through: number, tables: readonly string[]): boolean {
+  if (!tables.length) return false;
+  const marks = tables.map((_, index) => `$${index + 3}`).join(",");
+  return db.run(`SELECT 1 FROM _gonvex_sync_changes WHERE revision > $1 AND revision <= $2 AND table_name IN (${marks}) LIMIT 1`, [since, through, ...tables] as never).rows.length > 0;
+}
+
 const moduleIds = new WeakMap<object, number>();
 let nextModuleId = 0;
 function moduleId(module: object | undefined): number {
@@ -242,21 +265,25 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
   let window: ReplicaWindow;
 
   if (!resumable) {
-    // X17d: the same member's last cold snapshot of this collection, if no transaction since touched what it reads.
-    const key = snapshotKey(request, context);
+    // X17d: the same member's last cold snapshot of this collection, if nothing it reads has changed since.
+    const key = cacheableVisibility(plan) ? snapshotKey(request, context) : undefined;
+    const fingerprint = key === undefined ? "" : visibilityFingerprintOf(resolved);
     const tables = [...new Set([...resolvedDependencyColumns(plan, resolved).tables(), definition.table, "members"])].sort();
     let cached = key === undefined ? undefined : snapshotCache.get(context.registry, key);
-    if (cached && (cached.epoch !== clock.epoch || cached.revision < clock.retained || cached.revision > clock.revision)) cached = undefined;
+    let why = cached ? "" : "absent";
+    if (cached && cached.fingerprint !== fingerprint) { cached = undefined; why = "fingerprint"; }
+    if (cached && (cached.epoch !== clock.epoch || cached.revision < clock.retained || cached.revision > clock.revision)) { cached = undefined; why = "history"; }
     if (cached && cached.revision < clock.revision) {
       const since = cached.revision;
-      const changed = await context.read((db) => { const seen = new Set<string>(); readChangeRows(sqlOf(db), since, clock.revision, tables, (c) => { seen.add(c.table); }); return seen; });
-      if (changed.size) { span("tenant.snapshotCache", { path: request.path, result: "stale", tables: [...changed].join(",").slice(0, 120) }); cached = undefined; }
+      if (await context.read((db) => tablesChanged(db, since, clock.revision, tables))) { cached = undefined; why = "changed"; }
     }
     if (cached) snapshotCache.stats.hits++; else if (key !== undefined) snapshotCache.stats.misses++;
-    span("tenant.snapshotCache", { path: request.path, result: cached ? "hit" : key === undefined ? "nokey" : "miss" });
+    span("tenant.snapshotCache", { path: request.path, result: cached ? "hit" : key === undefined ? "uncacheable" : `miss:${why}` });
     window = await coldSnapshot(request, context, scanAll, digest, cursor, meta, cached,
-      key === undefined ? undefined : (rows, scanned, bytes) => snapshotCache.set(context.registry, key, { epoch: clock.epoch, revision: clock.revision,
-        rows: rows.map((row) => ({ key: row.key, text: row.text, hash: row.hash, value: {}, bytes: row.bytes })), window: scanned, bytes }));
+      key === undefined ? undefined : (rows) => {
+        const slim = rows.map((row) => ({ key: row.key, text: row.text, hash: row.hash, value: {}, bytes: row.bytes }));
+        return (scanned) => snapshotCache.set(context.registry, key, { epoch: clock.epoch, revision: clock.revision, fingerprint, rows: slim, window: scanned, bytes: retainedRowBytes(slim) });
+      });
   } else if (requested === "aggregate") {
     const after = request.cursor?.revision ?? 0;
     const dependencies = resolvedDependencyColumns(plan, resolved);
@@ -336,7 +363,7 @@ const sameCursor = (a: OpenRequest["cursor"], b: Cursor) => a !== undefined && a
 async function coldSnapshot(
   request: OpenRequest, context: OpenContext, scanAll: (visit: (row: ScannedRow) => boolean | void, light?: boolean) => Promise<ReplicaWindow>,
   digest: Aggregate, cursor: Cursor, meta: (truncated: boolean) => PageMetadata,
-  cached?: CachedSnapshot, store?: (rows: ScannedRow[], window: ReplicaWindow, bytes: number) => void,
+  cached?: CachedSnapshot, store?: (rows: ScannedRow[]) => (window: ReplicaWindow) => void,
 ): Promise<ReplicaWindow> {
   let kept: ScannedRow[] | undefined = [];
   let keptBytes = 0;
@@ -355,7 +382,7 @@ async function coldSnapshot(
         if (keptBytes > RETAIN_BYTES) kept = undefined;
       }
     });
-    if (kept && store) store(kept, { ...window }, keptBytes);
+    if (kept && store) store(kept)({ ...window });
   }
   if (!context.paged) {
     if (!kept) throw new ReplicaError("replica snapshot exceeds the outbound frame limit; negotiate replicaSnapshotPages");

@@ -68,6 +68,8 @@ interface Harness {
   conflicts: string[];
   /** `settle: false` returns once the commit is published, while delivery may still be running (a concurrent writer). */
   commit(statements: Array<[string, unknown[]]>, settle?: boolean): Promise<number>;
+  /** X17d: direct SQL in the invocation queue (clock edits: epoch reset, pruned history). */
+  sql(fn: (sql: ReturnType<typeof directSql>) => void): Promise<void>;
 }
 
 async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: ReplicaModule = MODULE, composeLive = false, activity?: () => void, stallMs?: number, hosts: string[] = ["h1"], clock?: DeliveryClock): Promise<T> {
@@ -130,6 +132,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     });
     let commands = 0;
     return body({
+      sql: (fn) => serial(async () => { fn(sql); }),
       engine, live, payloads, receiver, delivered, conflicts,
       async commit(statements, settle = true) {
         const commandId = `c${++commands}`;
@@ -1583,5 +1586,117 @@ describe("X17d snapshot cache: ACL, membership and a write during a populating o
       const served = await openRows(h, socket("C2"));
       expect(served.text).toContain("raced");
     }, MODULE, true);
+  });
+});
+
+describe("X17d snapshot cache review (#528): every way the rows can change is a miss", () => {
+  const GRANTED: ReplicaModule = {
+    projectId: "p",
+    artifactHash: "h3",
+    functions: new Map([
+      ["tasks.mine", { path: "tasks.mine", kind: "query", delivery: "replica", replica: parseDefinition({ table: "tasks", key: "id", columns: ["id", "state"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 10000 }) }],
+      ["notes.all", MASKED.functions.get("notes.all")!],
+    ]),
+    visibility: new Map([
+      // A grant set read from a table other than members: tasks the member holds a tnotes row for.
+      ["tasks", parsePlan({ version: 2, table: "tasks", key: "id", sets: { mine: { kind: "grant", table: "tnotes", select: "task_id", joins: [], where: [{ table: "tnotes", column: "body", context: "member.id" }] } }, where: { operator: "inSet", column: "id", set: "mine" } })],
+      ["tnotes", MASKED.visibility.get("tnotes")!],
+    ]),
+  };
+  const opener = (h: Harness) => async (id: string, path: string, view?: SocketView) => {
+    const s = view ?? socket(id);
+    h.engine.dispatch(s, { type: "replica.open", id: "c", path, args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    for (let spin = 0; spin < 4000 && !frames(h.payloads, s.connectionId).some((f) => f.type === "replica.ready"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+    await h.engine.settled();
+    const fs = frames(h.payloads, s.connectionId);
+    const pages = fs.filter((f) => f.type === "replica.snapshotPage" || f.type === "replica.snapshot");
+    return { rows: pages.flatMap((p) => p.result ?? p.rows ?? []), digests: pages.map((p) => p.digest ?? null), ready: fs.find((f) => f.type === "replica.ready") };
+  };
+  const stats = async () => ({ ...(await import("../snapshot-cache.ts")).snapshotCache.stats });
+
+  it("the reviewer's case: a parent row that hides the children (inherits) is never served from the cache", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      const rows: Array<[string, unknown[]]> = [["INSERT INTO tasks VALUES ('t1', 'open')", []]];
+      for (let i = 0; i < 5; i++) rows.push(["INSERT INTO tnotes VALUES ($1, 't1', $2)", [`n${i}`, `note ${i}`]]);
+      await h.commit(rows);
+      const open = opener(h);
+      const before = await stats();
+      expect((await open("A1", "notes.all")).rows.length).toBe(5);
+      await h.commit([["UPDATE tasks SET state = 'closed' WHERE id = 't1'", []]]);
+      expect((await open("A2", "notes.all")).rows).toEqual([]);
+      const after = await stats();
+      expect(after.stores).toBe(before.stores); // inherits/inheritsAny plans are not cached at all
+      expect(after.hits).toBe(before.hits);
+    }, MASKED);
+  });
+
+  it("a grant revoked on a non-members table is a miss; the next open matches a fresh scan", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tasks VALUES ('t2', 'open')", []],
+        ["INSERT INTO tnotes VALUES ('g1', 't1', 'm-alice')", []], ["INSERT INTO tnotes VALUES ('g2', 't2', 'm-alice')", []]]);
+      const open = opener(h);
+      const first = await open("G1", "tasks.mine");
+      expect(first.rows.map((r: { id: string }) => r.id)).toEqual(["t1", "t2"]);
+      const hit = await open("G2", "tasks.mine");
+      expect(hit.rows).toEqual(first.rows);
+      expect(hit.digests).toEqual(first.digests);
+      const before = await stats();
+      await h.commit([["DELETE FROM tnotes WHERE id = 'g2'", []]]);
+      const after = await open("G3", "tasks.mine");
+      expect((await stats()).hits).toBe(before.hits);
+      expect(after.rows.map((r: { id: string }) => r.id)).toEqual(["t1"]);
+    }, GRANTED);
+  });
+
+  it("a role or permissions change on members is a miss", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tnotes VALUES ('g1', 't1', 'm-alice')", []]]);
+      const open = opener(h);
+      await open("R1", "tasks.mine");
+      const before = await stats();
+      await h.commit([["UPDATE members SET permissions = '{\"x\":true}' WHERE id = 'm-alice'", []]]);
+      await open("R2", "tasks.mine");
+      expect((await stats()).hits).toBe(before.hits);
+    }, GRANTED);
+  });
+
+  it("an epoch reset and pruned history are misses", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tnotes VALUES ('g1', 't1', 'm-alice')", []]]);
+      const open = opener(h);
+      await open("E1", "tasks.mine");
+      let before = await stats();
+      await h.commit([["INSERT INTO items VALUES ('x', 1, 'unrelated')", []]]); // advances the clock, touches nothing read
+      await open("E2", "tasks.mine");
+      expect((await stats()).hits).toBe(before.hits + 1); // control: an unrelated write still hits
+      await h.sql((sql) => sql.run("UPDATE _gonvex_sync_clock SET retained_revision = revision WHERE singleton = 1"));
+      before = await stats();
+      await h.commit([["INSERT INTO items VALUES ('y', 2, 'unrelated')", []]]);
+      await open("E3", "tasks.mine");
+      expect((await stats()).hits).toBe(before.hits); // the entry's revision is no longer retained
+      await open("E4", "tasks.mine"); // stores again
+      await h.sql((sql) => sql.run("UPDATE _gonvex_sync_clock SET epoch = 'reset-epoch' WHERE singleton = 1"));
+      before = await stats();
+      await open("E5", "tasks.mine");
+      expect((await stats()).hits).toBe(before.hits);
+    }, GRANTED);
+  });
+
+  it("another member or other args never share an entry", { timeout: 60_000 }, async () => {
+    await withEngine(async (h) => {
+      await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tnotes VALUES ('g1', 't1', 'm-alice')", []],
+        ["INSERT INTO members VALUES ('m-bob', 'acct-bob', 'active', 'admin', '{}')", []]]);
+      const open = opener(h);
+      expect((await open("M1", "tasks.mine")).rows.length).toBe(1);
+      const before = await stats();
+      const bobSession = session("bob");
+      const bob = { ...socket("M2"), tenant: bobSession, connection: { ...socket("M2").connection, identity: bobSession.identity, tenant: bobSession } } as SocketView;
+      expect((await open("M2", "tasks.mine", bob)).rows).toEqual([]); // bob holds no grant: a fresh scan, not alice's rows
+      expect((await stats()).hits).toBe(before.hits);
+      h.engine.dispatch(socket("M3"), { type: "replica.open", id: "c", path: "tasks.mine", args: { other: 1 }, keys: [], hashes: {}, fullIntegrity: false });
+      for (let spin = 0; spin < 2000 && !frames(h.payloads, "M3").some((f) => f.type === "replica.ready" || f.type === "replica.error"); spin++) await new Promise((resolve) => setTimeout(resolve, 5));
+      await h.engine.settled();
+      expect((await stats()).hits).toBe(before.hits);
+    }, GRANTED);
   });
 });
