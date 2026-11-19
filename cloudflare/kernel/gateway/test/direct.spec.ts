@@ -180,3 +180,39 @@ describe("review #533: a limiter refusal on the direct path holds no lease", () 
     expect((await control(9).status()).pending).toBe(before);
   });
 });
+
+describe("re-review #533: a controller grant that lands after the holder's budget", () => {
+  it("leaves no claimed lease once the holder refused the upgrade (direct-refused; the holder cancels the late grant)", async () => {
+    const { runInDurableObject } = await import("cloudflare:test");
+    const a = await serving(11);
+    const before = (await control(11).status()).pending;
+    // The controller's serial queue is slow (e.g. an acquire probing a faulted holder, up to 2 s per probe): its
+    // admitDirect grant is written after the holder's DIRECT_BUDGET_MS deadline fired.
+    await runInDurableObject(control(11), async (instance: GatewayControllerObject) => {
+      const object = instance as unknown as { save(confirmed?: boolean): Promise<void> };
+      const save = object.save.bind(object);
+      object.save = async (confirmed?: boolean) => { object.save = save; await new Promise((r) => setTimeout(r, 1_800)); return save(confirmed); };
+    });
+    const d: DirectAdmission = { v: 1, cell: 11, gateway: a.gateway, epoch: a.epoch, connectionId: connection(11) };
+    await refusal(await holder(a.gateway).fetch(direct(d)), "direct-refused");
+    await new Promise((r) => setTimeout(r, 600));
+    // The holder refused (and the router falls back to acquire, a second lease), but the late grant stays a claimed
+    // lease for LEASE_MS: `release` skips claimed leases, so it counts as pending and blocks scale-in for 30 s.
+    expect((await control(11).status()).pending).toBe(before);
+  });
+});
+
+describe("X17g follow-up: cancelDirect", () => {
+  it("removes only the matching lease, claimed or not", async () => {
+    const a = await serving(12), c = control(12);
+    const d: DirectAdmission = { v: 1, cell: 12, gateway: a.gateway, epoch: a.epoch, connectionId: connection(12) };
+    const other: DirectAdmission = { ...d, connectionId: connection(12) };
+    expect(await c.admitDirect(d, 1)).not.toBeNull();
+    expect(await c.admitDirect(other, 1)).not.toBeNull();
+    const before = (await c.status()).pending;
+    expect(await c.cancelDirect({ ...d, epoch: d.epoch + 1 })).toBe(false);
+    expect(await c.cancelDirect(d)).toBe(true);
+    expect(await c.cancelDirect(d)).toBe(false);
+    expect((await c.status()).pending).toBe(before - 1);
+  });
+});

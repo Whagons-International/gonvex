@@ -323,23 +323,37 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       const budget = DIRECT_BUDGET_MS - (Date.now() - queued);
       if (budget < 200) return refusedAdmission("direct-busy", "gateway admission busy");
       const deadline = Date.now() + budget;
+      // X17g follow-up (#533 re-review): releases never wait on this holder's admission queue; idempotent, bounded.
+      const release = () => { if (kinds.length) this.ctx.waitUntil(withDeadline(publicGuard(this.env).release(address, connectionId, kinds)).catch(() => undefined)); };
       const limited = await withDeadline(admitUpgrade(this.env, { address, connectionId, gateway: direct.gateway, publicTransport, expiresAt: deadline }), budget)
-        .catch(() => new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [ADMISSION_REASON_HEADER]: "limiter-unavailable" } }));
+        .catch(() => {
+          // The limiter may still admit after this deadline: free what it may have reserved.
+          release();
+          return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [ADMISSION_REASON_HEADER]: "limiter-unavailable" } });
+        });
       if (limited) return limited;
-      const release = () => kinds.length ? publicGuard(this.env).release(address, connectionId, kinds) : Promise.resolve();
       const left = deadline - Date.now();
+      let timedOut = false;
       const granted = left < 100 ? null : await withDeadline(controller(this.env, direct.cell).admitDirect(direct, this.host.sessions.size), left).catch((error: unknown) => {
+        timedOut = String((error as Error)?.message ?? error) === "gateway RPC deadline";
         console.error("gateway: direct admission failed", { cause: String((error as Error)?.message ?? error).slice(0, 120) });
         return null;
       });
-      if (!granted) { await release(); return refusedAdmission("direct-refused", "gateway assignment expired"); }
+      if (!granted) {
+        release();
+        // A grant the controller writes after this deadline would stay a claimed lease for LEASE_MS while the router
+        // falls back to `acquire` (#533 re-review): cancel it. The controller serializes calls, so the cancel runs
+        // after a late grant.
+        if (timedOut) this.ctx.waitUntil(withDeadline(controller(this.env, direct.cell).cancelDirect(direct)).catch(() => undefined));
+        return refusedAdmission("direct-refused", "gateway assignment expired");
+      }
       queueMicrotask(() => span("gateway.admitDirect", { waitMs: started - queued, admitMs: Date.now() - started, totalMs: Date.now() - queued, sockets: this.host.sessions.size }));
       identity.claimed(direct.gateway);
       try {
         const response = this.host.accept(publicTransport, connectionId, address, kinds);
         this.reportCapacity();
         return response;
-      } catch (error) { await release(); throw error; }
+      } catch (error) { release(); throw error; }
     }).finally(() => { this.admissionWaiting--; });
     this.admissionTail = accepted.catch(() => undefined);
     return accepted;
