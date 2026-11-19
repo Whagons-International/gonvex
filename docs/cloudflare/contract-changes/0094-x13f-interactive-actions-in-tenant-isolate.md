@@ -31,11 +31,50 @@ Run a **socket's direct agent Action** (`action.call` from a session, X13's inli
 - **Capability separation.** The tenant gets `fetch` to the Action's declared origins, plus project secrets for that call. The Action host code (`actions/src`) is reused unchanged.
 - **Expected effect on create (a):** about −0.25 s on every rewrite whose Action isolate would have been cold. Most "warm" creates in #505 were like that, so the measured warm (a) gap of +360 ms would shrink to roughly provider variance.
 
-## Alternatives already in flight
+## Already live and not enough
 
-- **#502, opt-in Action-only bundle:** cold Action CPU about −60% (import 320–346 → 120–147 ms locally), so a cold rewrite costs about 0.1 s instead of about 0.27 s.
-- **Pruning the 109 stale dev conformance projects (approved):** about −0.2 s compile per cold isolate on dev only.
-- These two shrink the per-call penalty but do not make reuse happen.
+The lead's correction: #502 (the Action-only bundle) and the dev catalog prune are already in 34562a4a, the release the verifier measured. The cold-per-call cost above (238–297 ms CPU per rewrite) is therefore measured *with* both in place. They shrank the penalty but did not make reuse happen.
+
+## Alternative B (lead): a per-tenant ActionHost Durable Object, kept alive only while the tenant has live subscribers
+
+**Shape.**
+- An `ActionHost` DO class in the Actions Worker script, one per tenant: `getByName(tenantId)`.
+- It runs a socket's interactive agent Actions with X13's inline runner. The durable start and completion records stay in the tenant.
+- It is held resident by the same no-expiry rule as the tenant (BUG-9, `SubscriberKeepAlive`): one pending timer, re-armed every 60 s, only while the tenant has a live subscription.
+  - The tenant tells the host when its subscription state changes (`hold` / `release`, with no reply needed).
+  - It is session-tied, not a synthetic ping, and is released when the last subscriber goes.
+
+**Feasibility, measured locally (miniflare/workerd, 2026-11-19).** A DO in a Worker that lazily evaluates the real 678bdc80 bundles on first use, with the module cached at module level in the isolate (`/home/gabriel/work/gonvex-x13f/run.mjs`):
+
+| | Action-only bundle (3.0 MB, #502) | Complete bundle (6.3 MB) |
+|---|---|---|
+| Cold: first call RTT (isolate start incl. ~11 MB script load + evaluation) | 715 ms | 729 ms |
+| Cold: evaluation inside the DO | **88 ms** | 246 ms |
+| Warm: next calls on the same object, RTT | **3–5 ms** | 2.5–3.6 ms |
+| A second object in the same isolate | 1 ms in DO (module cache shared) | 1 ms |
+
+- **The evaluated module stays warm across calls for as long as the object (and its isolate) lives.** That is the property the stateless Actions Worker lacks on the platform.
+- **Holding works on dev.** Durable Objects are kept from hibernating by a pending timer, which BUG-9 proved on dev: 30-minute sessions with no tenant resets. So an ActionHost would keep its isolate for the session.
+- **Not proven on the platform:** whether the platform still evicts a held DO's isolate under machine pressure. The tenant's own CPU in the same rounds (0–5 ms outside commits) suggests it does not.
+
+**Expected costs on dev:**
+- **Cold:** paid once per held lifetime, at the first Action of a session. That is about 0.1 s CPU with the Action-only bundle, plus isolate start.
+  - It can be paid before the first rewrite, by warming when the tenant gains its first subscriber. That is still session-tied, an evaluation at session start, which is what Rust's module host does at activation.
+- **Warm:** about the tenant→ActionHost RPC hop (~15–30 ms on dev, comparable to today's tenant→Actions Worker hop) plus the Action's own CPU (7–14 ms per rewrite). That removes the ~0.25 s per-call cold penalty the verifier saw.
+
+**Compared with proposal A (in-tenant execution):**
+
+| | A: in the tenant isolate | B: per-tenant ActionHost DO |
+|---|---|---|
+| Determinism boundary | Actions share the Reducers' event loop | Separate object; Reducers untouched |
+| CPU limit | the runtime Worker's 5 s per event (X10) | the Actions Worker's 300 s (`cpu_ms` 300000) |
+| Capabilities | the tenant gets fetch and secrets for the call | unchanged: Actions Worker bindings (FILES, SANDBOX, network) |
+| Warm cost per rewrite | Action CPU only | Action CPU + one DO RPC hop (~15–30 ms) |
+| Cold cost | once per tenant isolate | once per session (or prewarmed at first subscriber) |
+| Extra billing | none | DO duration while subscribers exist (same rule as the tenant's, already accepted) |
+| Contract change | 0016 G0-8 for one path | 0016 G0-8 kept in spirit: Actions still run in the Actions Worker script, in a DO class |
+
+**Recommendation: B.** It keeps Actions out of the deterministic tenant and under the Actions Worker's limits and bindings. It costs one warm RPC hop that A avoids, and it reuses an already-accepted keep-alive rule. Scope it to socket-initiated `profile: "agent"` calls (X13's inline path). Outbox and scheduled Actions stay on Workflows.
 
 ## Also measured: (b) pre-commit, warm 348 ms vs Rust 163 ms
 
