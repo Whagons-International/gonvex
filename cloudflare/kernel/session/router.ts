@@ -1,4 +1,4 @@
-import { ASSIGNMENT_HEADER, automaticPlacement, withDeadline, type GatewayAssignment } from "../gateway/placement";
+import { ASSIGNMENT_HEADER, automaticPlacement, controllerCell, withDeadline, type GatewayAssignment } from "../gateway/placement";
 /**
  * `GET /ws` in the router Worker (CONTRACT.md A.1.1). The Worker cannot know
  * the tenant (it arrives in the first `auth` frame, 0004), so it only checks
@@ -45,16 +45,53 @@ function refusedUpgrade(stage: UpgradeStage, error: unknown, started: number, bo
   return new Response(body, { status: 503, headers: { "retry-after": "1", [ADMISSION_REASON_HEADER]: `router-${stage}-${cause}` } });
 }
 
+/**
+ * X16: warm placement. The cell comes from a hash of the connection id, so a random id put nearly every sign-in on
+ * another of the 32 cells: a cold controller, a cold gateway, and that gateway's first-time registrations (Control
+ * `watch`, the tenant's `attachGateway`, its routing identity and placement epoch), each a durable write the
+ * reply waits for. This isolate remembers the cell of its last admitted upgrade for `STICKY_MS` and draws the next
+ * id from that cell (a uniformly random UUID that hashes into it), so back-to-back sign-ins reach the same warm,
+ * registered gateway. The cell's controller still picks the gateway and enforces capacity. At most
+ * `STICKY_PER_SECOND` upgrades a second use the remembered cell; the rest spread over all cells as before, and any
+ * refusal forgets it.
+ */
+export const STICKY_MS = 120_000;
+export const STICKY_PER_SECOND = 16;
+const STICKY_DRAWS = 1_024;
+export class WarmCell {
+  private cell: number | undefined;
+  private until = 0;
+  private second = 0;
+  private used = 0;
+  constructor(private readonly now: () => number = Date.now, private readonly uuid: () => string = () => crypto.randomUUID()) {}
+  /** A connection id: in the remembered cell while it is fresh and under the rate, else uniformly random. */
+  connectionId(): string {
+    const now = this.now();
+    if (this.cell === undefined || now >= this.until) return this.uuid();
+    const second = Math.floor(now / 1_000);
+    if (second !== this.second) { this.second = second; this.used = 0; }
+    if (this.used >= STICKY_PER_SECOND) return this.uuid();
+    this.used++;
+    for (let i = 0; i < STICKY_DRAWS; i++) { const id = this.uuid(); if (controllerCell(id) === this.cell) return id; }
+    return this.uuid();
+  }
+  admitted(cell: number): void { this.cell = cell; this.until = this.now() + STICKY_MS; }
+  refused(): void { this.cell = undefined; }
+  /** Test seam. */
+  get remembered(): number | undefined { return this.now() < this.until ? this.cell : undefined; }
+}
+const warmCell = new WarmCell();
+
 export async function handleWebSocketUpgrade(request: Request, env: WebSocketRouteEnv): Promise<Response> {
   if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("Connection header did not include 'upgrade'", { status: 400 });
   const extensions = request.headers.get("sec-websocket-extensions");
   if (extensions !== null && !validExtensionsField(extensions)) return new Response(null, { status: 400 });
   const url = new URL(request.url);
-  const connectionId = crypto.randomUUID();
+  const placement = automaticPlacement(env);
+  const connectionId = placement ? warmCell.connectionId() : crypto.randomUUID();
   const publicTransport = url.searchParams.get("public") === "1";
   const address = clientAddress(request.headers, env.GONVEX_ASSEMBLY_FIXTURE_KEY);
-  const placement = automaticPlacement(env);
   let assignment: GatewayAssignment | undefined;
   let slots = "";
   let response: Response | undefined;
@@ -63,7 +100,7 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   try {
     if (placement) {
       try { assignment = await withDeadline(placement.acquire(connectionId), 5_000); }
-      catch (error) { return refusedUpgrade("placement", error, started, "gateway capacity unavailable"); }
+      catch (error) { warmCell.refused(); return refusedUpgrade("placement", error, started, "gateway capacity unavailable"); }
     }
     stage = "admission";
     const gatewayName = assignment?.gateway ?? gatewayFor(env, connectionId);
@@ -84,8 +121,10 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     headers.set(UPGRADE_HEADERS.address, address);
     headers.set(UPGRADE_HEADERS.slots, slots);
     response = await withDeadline(env.GATEWAY.getByName(gatewayName).fetch(new Request(request.url, { method: "GET", headers })));
+    if (assignment) { if (response.status === 101) warmCell.admitted(assignment.cell); else warmCell.refused(); }
     return response;
   } catch (error) {
+    warmCell.refused();
     return refusedUpgrade(stage, error, started, "gateway admission unavailable");
   } finally {
     if (response?.status !== 101) {
