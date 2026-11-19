@@ -867,9 +867,11 @@ export class ReplicaDeliveryEngine {
     if (this.connections.get(connection.id) !== connection) return;
     if (!spanTimingOn()) return this.processOpenTimed(connection, request, () => {});
     const openStarted = Date.now();
+    const before = { statements: this.stats.statements, rowsRead: this.stats.rowsRead };
     let drainMs = 0, drains = 0;
     try { await this.processOpenTimed(connection, request, (ms) => { drainMs += ms; drains++; }); }
-    finally { span("tenant.open", { path: request.path, runMs: Date.now() - openStarted, drainMs, drains, pending: connection.pending.length, queuedAfter: this.options.outlet.queued(connection.host) }); }
+    finally { span("tenant.open", { path: request.path, runMs: Date.now() - openStarted, drainMs, drains, pending: connection.pending.length, queuedAfter: this.options.outlet.queued(connection.host),
+      statements: this.stats.statements - before.statements, rowsRead: this.stats.rowsRead - before.rowsRead }); }
   }
 
   private async processOpenTimed(connection: Connection, request: OpenRequest, drained: (ms: number) => void): Promise<void> {
