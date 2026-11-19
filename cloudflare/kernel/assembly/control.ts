@@ -158,6 +158,7 @@ export class SessionControlObject extends OperatorControlObject {
 
   private async dispatchFrame(socket: SocketView, frame: ClientFrame): Promise<string[]> {
     const connection = connectionOf(socket);
+    if ((frame.type === "query.subscribe" || frame.type === "query.call") && frame.path.startsWith("control.support.")) this.noteSupportInterest(connection.projectId, socket.host);
     const j = JSON.stringify;
     switch (frame.type) {
       case "query.call":

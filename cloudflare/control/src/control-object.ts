@@ -326,7 +326,7 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
       const state = this.connections.get(input.connectionId);
       this.connections.set(input.connectionId, { ...(state ?? { projectId: input.projectId, tenantId: input.tenantId, authenticated: true }), errorSessionId: input.connectionId });
     }
-    this.notify(input.projectId);
+    this.notifySupport(input.projectId);
     return true;
   }
 
@@ -339,7 +339,7 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
       console.error("telemetry: error events not stored", error);
       return null;
     }
-    if (inserted.some(Boolean)) this.notify(projectId);
+    if (inserted.some(Boolean)) this.notifySupport(projectId);
     return inserted;
   }
 
@@ -381,6 +381,51 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
     this.ctx.storage.kv.put(`control/watchers/${projectId}`, [...set.values()]);
   }
 
+  /**
+   * X17: gateways (watcher keys) whose sessions read `control.support.*` for a project. Only those queries read what
+   * the error-session/telemetry writes and the live-connection counts change, so those notifications go to these
+   * gateways only (and to every non-gateway watcher, as before). A gateway that receives a notification it has no use
+   * for still pays for it: the notification is a peer request, so its next outgoing call waits for a fresh event (X02
+   * CallOrigin, 30-70 ms on dev), and every sign-in `auth` changed the connection state, so it notified every gateway.
+   * Kept in memory and in an unconfirmed KV copy; a gateway re-registers when its sessions run the query again.
+   */
+  private readonly supportInterest = new Map<string, Set<string>>();
+  private supportInterestFor(projectId: string): Set<string> {
+    let set = this.supportInterest.get(projectId);
+    if (!set) {
+      set = new Set(this.ctx.storage.kv.get<string[]>(`control/support-interest/${projectId}`) ?? []);
+      this.supportInterest.set(projectId, set);
+    }
+    return set;
+  }
+  /** A session of gateway `host` (its object name) ran a `control.support.*` query of `projectId`. */
+  protected noteSupportInterest(projectId: string, host: string): void {
+    const namespace = this.env.GATEWAY as DurableObjectNamespace | undefined;
+    if (!namespace || !projectId || !host) return;
+    let key: string;
+    try { key = `GATEWAY:${namespace.idFromName(host).toString()}`; } catch { return; }
+    const set = this.supportInterestFor(projectId);
+    if (set.has(key)) return;
+    set.add(key);
+    while (set.size > 256) set.delete(set.values().next().value!);
+    void this.ctx.storage.put(`control/support-interest/${projectId}`, [...set], { allowUnconfirmed: true }).catch(() => {});
+  }
+  /** Watchers of `projectId` that need a support-scoped change: every non-gateway watcher, and gateways that read support queries. */
+  private supportWatchers(projectId: string) {
+    const interest = this.supportInterestFor(projectId);
+    return [...this.watchersFor(projectId).values()].filter(({ binding, name }) => binding !== "GATEWAY" || interest.has(`${binding}:${name}`));
+  }
+
+  /** X17: a change only `control.support.*` queries can observe (error sessions, error events). */
+  private notifySupport(projectId: string): void {
+    for (const { binding, name } of this.supportWatchers(projectId)) {
+      const namespace = this.env[binding] as DurableObjectNamespace | undefined;
+      if (!namespace) continue;
+      const stub = namespace.get(namespace.idFromString(name)) as unknown as ControlWatcher;
+      this.ctx.waitUntil(stub.controlChanged(projectId).catch(() => this.watchers.get(projectId)?.delete(`${binding}:${name}`)));
+    }
+  }
+
   private notify(projectId: string): void {
     const set = this.watchersFor(projectId);
     for (const { binding, name } of set.values()) {
@@ -392,7 +437,8 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
   }
 
   private notifyPresence(projectId: string): void {
-    for (const { binding, name } of this.watchersFor(projectId).values()) {
+    // X17: only `control.support.listTenants` reads the live counts this refreshes.
+    for (const { binding, name } of this.supportWatchers(projectId)) {
       // K22's real gateway implements this additive hook; package fixture
       // socket owners retain their existing ControlChanged contract.
       if (binding !== "GATEWAY") continue;
