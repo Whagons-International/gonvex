@@ -175,7 +175,7 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
   /** Rows read and written and tenant RPCs of the last `query` / `write` (tests and the PR's numbers). */
   lastCost: Cost = { rowsRead: 0, rowsWritten: 0, tenantCalls: 0 };
 
-  private async run<T>(fn: (ctx: Ctx) => Promise<T> | T): Promise<Outcome<T>> {
+  private async run<T>(fn: (ctx: Ctx) => Promise<T> | T, rowsWritten?: (rows: number) => void): Promise<Outcome<T>> {
     const ctx = this.context();
     const before = this.sql.mark();
     try {
@@ -186,6 +186,8 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
     } finally {
       const after = this.sql.mark();
       this.lastCost = { rowsRead: after.read - before.read, rowsWritten: after.written - before.written, tenantCalls: ctx.tenantCalls };
+      // X17j review: this call's own count (lastCost is shared by concurrent calls).
+      rowsWritten?.(after.written - before.written);
     }
   }
 
@@ -202,11 +204,12 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
   }
 
   async write(connection: ControlConnection, path: string, args: unknown, idempotencyKey: string, kind: "reducer" | "action"): Promise<Outcome> {
-    const outcome = await this.run((ctx) => executeControlWrite(ctx, this, connection, path, args, idempotencyKey, kind));
+    let written = 0;
+    const outcome = await this.run((ctx) => executeControlWrite(ctx, this, connection, path, args, idempotencyKey, kind), (rows) => { written = rows; });
     // `notify_control_changed` after any successful Control write (lib.rs:4036). X17j: also after a failed refresh that
     // committed rows (refresh-token reuse revokes its whole family, then answers an error), so the gateways' identity
     // leases (kernel/session/identity-lease.ts) drop that project's tokens; an unchanged refresh sends no frame.
-    if (outcome.ok || (path === "control.auth.refreshSession" && this.lastCost.rowsWritten > 0)) this.notify(connection.projectId);
+    if (outcome.ok || (path === "control.auth.refreshSession" && written > 0)) this.notify(connection.projectId);
     return outcome;
   }
 

@@ -9,7 +9,7 @@ import type { SessionControlObject } from "./control";
 import type { ReplicaDelivery } from "../delivery/protocol";
 import { telemetrySubject } from "../telemetry/limiter";
 import { fixtureSpans } from "../delivery/spans";
-import { admittedMember, identityLeases } from "../session/identity-lease";
+import { admittedMember, leasesFor } from "../session/identity-lease";
 
 type Control = Pick<SessionControlObject,
   "sessionProject" | "sessionIdentity" | "sessionAuthenticate" | "sessionImpersonation" |
@@ -26,28 +26,32 @@ export interface AssemblyGatewayEnv extends GatewayEnv, PublicGuardEnv {
 export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
   const control = () => rpc<Control>(env.CONTROL, "control");
   const tenant = (id: string) => rpc<Required<TenantRpc>>(env.TENANT, id);
+  const leases = leasesFor(env);
   return {
     control: {
       project: (id) => control().sessionProject(id),
-      // X17j: identity leases (kernel/session/identity-lease.ts).
+      // X17j: identity leases (kernel/session/identity-lease.ts), one store per gateway object.
       loadSessionIdentity: async (token, project) => {
-        const leased = identityLeases.identity(token, project);
+        const leased = leases.identity(token, project);
         if (leased) return { ok: true, value: leased };
         const outcome = await control().sessionIdentity(token, project);
-        if (outcome.ok) identityLeases.putIdentity(token, project, outcome.value);
+        if (outcome.ok) leases.putIdentity(token, project, outcome.value, (outcome as { expiresAt?: number }).expiresAt);
         return outcome;
       },
       authenticateSession: async (token, project, id) => {
-        const leased = id ? identityLeases.session(token, project, id) : undefined;
+        const leased = id ? leases.session(token, project, id) : undefined;
         if (leased) {
           try {
             const admitted = admittedMember(await tenant(leased.route.tenantId).admit(leased.identity.account.id));
             if (admitted) return { ok: true, value: { ...leased, member: admitted.member, admissionRevision: admitted.admissionRevision } };
           } catch { /* Control answers below */ }
-          identityLeases.drop(token, project, id!);
+          leases.drop(token, project, id!);
         }
-        const outcome = await control().sessionAuthenticate(token, project, id);
-        if (outcome.ok && id) identityLeases.putSession(token, project, id, outcome.value);
+        // #540 review: after the tenant refused a leased member, Control must admit live too (never a recent admission).
+        const outcome = leased
+          ? await (control() as unknown as { sessionAuthenticate(t: string, p: string | undefined, i: string | undefined, o: { liveOnly: true }): ReturnType<Control["sessionAuthenticate"]> }).sessionAuthenticate(token, project, id, { liveOnly: true })
+          : await control().sessionAuthenticate(token, project, id);
+        if (outcome.ok && id) leases.putSession(token, project, id, outcome.value, (outcome as { expiresAt?: number }).expiresAt);
         return outcome;
       },
       authenticateImpersonation: (token, project, id, connection) => control().sessionImpersonation(token, project, id, connection),
@@ -55,7 +59,12 @@ export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
       revalidate: (items) => control().sessionRevalidate(items),
       dispatch: async (socket, frame) => {
         if (frame.type === "query.subscribe") await control().watch(socket.connection.projectId, "GATEWAY", env.GATEWAY.idFromName(socket.host).toString());
-        return control().sessionDispatch(socket, frame);
+        const write = frame.type === "action.call" || frame.type === "reducer.call";
+        const replies = await control().sessionDispatch(socket, frame);
+        // X17j: a Control write this gateway forwarded (logout, refresh, ...) drops the project's leases here at once;
+        // other gateways drop theirs on Control's notice (one Control alarm later).
+        if (write) leases.invalidate(socket.connection.projectId);
+        return replies;
       },
       authenticateService: (token, project, id) => control().serviceAuthenticate(token, project, id),
       serviceCall: (grant, path, args) => control().serviceControl(grant, path, args),
@@ -167,7 +176,7 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
   /** X17e: a notice from Control's alarm (depth 1); its refreshes launch at once (CallOrigin `notice`). */
   async controlChanged(projectId: string): Promise<void> {
     // X17j: a revocation (session, account, membership) reaches the gateway as this notice: no lease outlives it.
-    identityLeases.invalidate(projectId);
+    leasesFor(this.env).invalidate(projectId);
     this.ctx.waitUntil(refreshSessions([...this.host.sessions.values()], projectId, "control-change"));
   }
   async presenceChanged(projectId: string): Promise<void> {

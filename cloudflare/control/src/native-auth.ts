@@ -464,7 +464,8 @@ async function token(ctx: Ctx, request: Request): Promise<Response> {
     if (cause instanceof Rejection) return cause.response;
     return error(503, "auth session service is unavailable");
   }
-  if (outcome.kind === "reuse") return error(401, "invalid or expired authentication grant");
+  // X17j: reuse revoked the whole family (committed): the gateways drop the project's identity leases.
+  if (outcome.kind === "reuse") { ctx.controlChanged(project); return error(401, "invalid or expired authentication grant"); }
   if (outcome.kind === "fail") return error(401, "invalid or expired authentication grant");
   try {
     return jsonResponse(200, await sessionResultFromDirectory(ctx, project, outcome.result));
@@ -482,6 +483,7 @@ async function logout(ctx: Ctx, request: Request): Promise<Response> {
   const all = body.all === true;
   const header = request.headers.get("authorization") ?? "";
   const access = (header.startsWith("Bearer ") ? header.slice(7) : "").trim();
+  let revokedProject: string | undefined;
   try {
     ctx.sql.tx(() => {
       const family = ctx.sql.value<string>(
@@ -491,6 +493,7 @@ async function logout(ctx: Ctx, request: Request): Promise<Response> {
         sha256Hex(refresh),
       );
       if (family === undefined) return;
+      revokedProject = ctx.sql.value<string>("SELECT project_id FROM gonvex_auth_sessions WHERE family_id=$1 LIMIT 1", family) ?? undefined;
       if (all) {
         const owner = ctx.sql.get("SELECT project_id,account_id FROM gonvex_auth_sessions WHERE family_id=$1 LIMIT 1", family);
         if (owner) {
@@ -503,7 +506,10 @@ async function logout(ctx: Ctx, request: Request): Promise<Response> {
     });
   } catch {
     /* the reference answers ok whatever happens */
+    revokedProject = undefined;
   }
+  // X17j: the gateways drop this project's identity leases (kernel/session/identity-lease.ts).
+  if (revokedProject) ctx.controlChanged(revokedProject);
   return jsonResponse(200, { ok: true });
 }
 
