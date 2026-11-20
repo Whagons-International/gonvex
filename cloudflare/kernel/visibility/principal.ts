@@ -36,7 +36,7 @@ import {
   type VisibilitySet,
 } from "./plan.ts";
 import { InheritedParent, type DirectContext, type ResolvedVisibility, type TokenSets } from "./resolved.ts";
-import { compileLiteralComparison, compileSet } from "./sql.ts";
+import { compileLiteralComparison, compileSet, compileSetInsertedRows } from "./sql.ts";
 import type { PrincipalCache, PrincipalClock } from "./principal-cache.ts";
 
 /** Grant-set join tokens live beside ordinary sets under this suffix (the member's team ids for a grant joined to memberTeams). */
@@ -101,6 +101,40 @@ export function visibilityFingerprint(plan: VisibilityPlan, direct: DirectContex
 }
 
 /**
+ * One active (non-derived) set of a resolution, and for a version 2 grant set with joins its join tokens
+ * (`GRANT_JOIN_SUFFIX`): the SQL `resolveMember` runs for it. X17p: the principal cache re-runs it for a set whose
+ * inputs changed when it rolls an entry forward.
+ */
+export function resolveSetInto(sql: VisibilitySql, plan: VisibilityPlan, name: string, set: VisibilitySet, direct: DirectContext, sets: Map<string, ReadonlySet<string>>, metrics?: ResolutionMetrics): void {
+  const compiled = compileSet(set, direct);
+  sets.set(name, sortedSet(textColumn(sql.run(compiled.sql, compiled.parameters).rows)));
+  if (metrics) metrics.visibilitySqlStatements += 1;
+  sets.delete(`${name}${GRANT_JOIN_SUFFIX}`);
+  if (plan.version === 2 && set.kind === "grant" && set.joins.length) {
+    const joinSet = grantJoinSet(set);
+    if (joinSet) {
+      const join = compileSet(joinSet, direct);
+      sets.set(`${name}${GRANT_JOIN_SUFFIX}`, sortedSet(textColumn(sql.run(join.sql, join.parameters).rows)));
+      if (metrics) metrics.visibilitySqlStatements += 1;
+    }
+  }
+}
+
+/**
+ * X17p: adds to `name` the tokens of the base rows `table` inserted in `(low, high]` (`compileSetInsertedRows`).
+ * Exact only when the base table's changes in that range are inserts and no table the set joins changed; the
+ * principal cache checks both before calling it. The set's join tokens do not read the base table and stay.
+ */
+export function addInsertedRowsInto(sql: VisibilitySql, name: string, set: VisibilitySet, direct: DirectContext, sets: Map<string, ReadonlySet<string>>, key: string, low: number, high: number): void {
+  const compiled = compileSetInsertedRows(set, direct, set.table, key, low, high);
+  const added = textColumn(sql.run(compiled.sql, compiled.parameters).rows);
+  if (!added.size) return;
+  const before = sets.get(name);
+  if (before && [...added].every((token) => before.has(token))) return;
+  sets.set(name, sortedSet([...(before ?? []), ...added]));
+}
+
+/**
  * `resolve_member`: the member row and the active principal and grant sets.
  * `materialize` false is `resolve_for_query` (legacy plans keep set
  * membership in SQL).
@@ -137,17 +171,7 @@ export function resolveMember(sql: VisibilitySql, session: VisibilitySession, pl
   const active = materialize || plan.version === 2 ? activeSets(plan, role) : new Set<string>();
   for (const [name, set] of setEntries(plan)) {
     if (!active.has(name) || set.kind === "derived") continue;
-    const compiled = compileSet(set, direct);
-    sets.set(name, sortedSet(textColumn(sql.run(compiled.sql, compiled.parameters).rows)));
-    if (metrics) metrics.visibilitySqlStatements += 1;
-    if (plan.version === 2 && set.kind === "grant" && set.joins.length) {
-      const joinSet = grantJoinSet(set);
-      if (joinSet) {
-        const join = compileSet(joinSet, direct);
-        sets.set(`${name}${GRANT_JOIN_SUFFIX}`, sortedSet(textColumn(sql.run(join.sql, join.parameters).rows)));
-        if (metrics) metrics.visibilitySqlStatements += 1;
-      }
-    }
+    resolveSetInto(sql, plan, name, set, direct, sets, metrics);
   }
   return {
     ephemeralMember,

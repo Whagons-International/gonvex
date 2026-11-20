@@ -277,7 +277,15 @@ describe("feed maintenance", () => {
         const resolutions = checkAll(session, harness, data, "alice", "feed");
         expect(asArray(resolutions.get("tasks")!.sets.get("workspaces"))).toEqual(["w1", "w3"]);
       });
-      expect(harness.registry.principals.stats().invalidated).toBeGreaterThan(afterData.invalidated);
+      // X17p: rolled forward through the commit (the workspaces set gained the inserted workspaceTeams row), not dropped.
+      const afterJoin = harness.registry.principals.stats();
+      expect(afterJoin.rolledForward).toBeGreaterThan(afterData.rolledForward);
+      expect(afterJoin.setsPatched).toBeGreaterThan(afterData.setsPatched);
+      expect(afterJoin.invalidated).toBe(afterData.invalidated);
+      // A member row change still drops the entry.
+      await harness.commit([[`UPDATE members SET permissions = '{"x":1}' WHERE id = 'alice'`, []]]);
+      await harness.read((session) => checkAll(session, harness, data, "alice", "feed"));
+      expect(harness.registry.principals.stats().invalidated).toBeGreaterThan(afterJoin.invalidated);
       // An anchored write naming bob is not alice's principal.
       const bobs = await harness.commit([[`INSERT INTO "memberSpots" VALUES ('bob-spot', 'bob', 's2')`, []]]);
       await harness.read((session) => {
