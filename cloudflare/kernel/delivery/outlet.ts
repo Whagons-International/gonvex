@@ -25,7 +25,7 @@ const NORMAL_BYTES = 16 * 1024 * 1024;
 const RECOVERY_BYTES = 8 * 1024 * 1024;
 const MAX_HOSTS = 32 * 64 + 8; // finite automatic fleet plus the legacy pool during deployment skew
 const MAX_PENDING = 256;
-const MAX_RPCS = 8;
+export const MAX_RPCS = 8;
 /**
  * X17: a `sendFirst` payload this small is admitted beyond the holder's and the isolate's byte budgets (a first load's
  * snapshot pages fill them, which is exactly when a live query reply has to overtake them). The count cap and a
@@ -60,8 +60,33 @@ const credits = { normal: 0, recovery: 0, count: 0, running: 0, hosts: 0 };
 let claim: { owner: WeakRef<object>; host: string } | undefined;
 const ready = new Set<OrderedOutlet>();
 const owners = new Set<WeakRef<OrderedOutlet>>();
+/**
+ * 04-hang (dev, 2026-11-20): the RPC slots and byte credits above outlive the object that took them. When the platform
+ * resets a tenant object (CPU limit, `ctx.abort`, an internal reset) and keeps the isolate, the reset object's
+ * delivery RPCs never settle in it: their continuations belong to its dead I/O context, so `run`'s `finally` never
+ * returns the slot. With `MAX_RPCS` slots taken that way, no outlet in the isolate starts another RPC: opens keep
+ * running and queueing, nothing is delivered, and only a new isolate (a redeploy) clears it.
+ *
+ * Two reclaims, both isolate-local bookkeeping (neither changes what a live holder receives or in which order):
+ * - The same object again (deterministic): one Durable Object id has at most one live instance, so a new outlet for
+ *   that id means the previous instance is gone. Its slots, credits and queues are returned at once (`retire`).
+ * - Any other (bounded): an RPC that has held a slot for `RPC_SLOT_STALE_MS` stops counting against `MAX_RPCS` and its
+ *   in-flight credits are returned. Its holder's channel stays ordered: that holder still waits for the RPC.
+ * Each reclaim logs one warn line (`delivery: outlet of a reset object retired`, `delivery: stale RPC slots returned`,
+ * counts only) and counts it in `deliveryPressure()`. The stale sweep also runs about once a second while anything is
+ * scheduled, so a delivery RPC stuck past the bound (a holder that never answers) is visible even below the cap.
+ */
+export const RPC_SLOT_STALE_MS = 60_000;
+let slotStaleMs = RPC_SLOT_STALE_MS;
+/** Test seam: the stale-slot bound for this isolate; returns the previous value. */
+export function setRpcSlotStaleMs(ms: number): number { const previous = slotStaleMs; slotStaleMs = ms; return previous; }
+const byObject = new Map<string, WeakRef<OrderedOutlet>>();
+const reclaimCounts = { retiredOutlets: 0, retiredSlots: 0, staleSlots: 0 };
+/** The stale-slot sweep runs whenever the slots are full, and otherwise at most this often (a watchdog log line). */
+const STALE_SWEEP_EVERY_MS = 1_000;
+let lastStaleSweep = 0;
 /** Bounded isolate totals, never a per-tenant/member series. Byte values are credits, not heap measurements. */
-export function deliveryPressure() { return { ...credits, ...pressureCounts }; }
+export function deliveryPressure() { return { ...credits, ...pressureCounts, ...reclaimCounts }; }
 
 interface Pending {
   payload: ReplicaDelivery;
@@ -89,6 +114,9 @@ interface Queue {
   stuckSeen: number;
   bytes: number;
   rpcMs: number;
+  /** 04-hang: when the RPC in flight took its isolate slot, and whether that slot was already given back. */
+  startedAt: number;
+  slotReturned: boolean;
   recoveryRequired: boolean;
   recovery: Promise<ReplicaReceipt | undefined> | undefined;
   idle: Promise<void>;
@@ -120,6 +148,59 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   /** BUG-4b: RPCs completed per holder, kept across the lifetimes of its queue (a drained queue is dropped). */
   private readonly completed = new Map<string, number>();
   private readonly owner = new WeakRef(this);
+  /** 04-hang: a newer instance of this outlet's object exists; this one's bookkeeping was returned (`retire`). */
+  private retired = false;
+
+  /** `object`: the owning Durable Object's id (one live instance per id); a newer outlet for it retires this one. */
+  constructor(object?: string) {
+    if (object === undefined) return;
+    const previous = byObject.get(object)?.deref();
+    if (previous && previous !== this) previous.retire();
+    byObject.set(object, this.owner);
+  }
+
+  /**
+   * 04-hang: the instance that built this outlet was reset. Nothing it queued or sent can reach a socket through it
+   * any more (the new instance serves the holders under a new `instance`), so its RPC slots, byte credits and host
+   * entries are returned and it leaves the scheduler. A late settlement of one of its RPCs returns nothing twice.
+   */
+  private retire(): void {
+    if (this.retired) return;
+    this.retired = true;
+    let slots = 0;
+    for (const queue of this.queues.values()) {
+      for (const item of [...queue.inflight, ...queue.pending]) this.release(queue, item);
+      queue.pending = [];
+      queue.recoveryRequired = false;
+      if (queue.running && !queue.slotReturned) { queue.slotReturned = true; credits.running--; slots++; }
+    }
+    credits.hosts = Math.max(0, credits.hosts - this.queues.size);
+    this.queues.clear();
+    ready.delete(this);
+    owners.delete(this.owner);
+    if (claim?.owner.deref() === this) claim = undefined;
+    reclaimCounts.retiredOutlets++;
+    reclaimCounts.retiredSlots += slots;
+    console.warn("delivery: outlet of a reset object retired", { slots, running: credits.running, count: credits.count });
+    void Promise.resolve().then(() => OrderedOutlet.schedule());
+  }
+
+  /** 04-hang: in-flight RPCs that held an isolate slot past the stale bound stop counting against `MAX_RPCS`. */
+  private static expireStaleSlots(now: number): void {
+    let stale = 0;
+    for (const ref of owners) {
+      const outlet = ref.deref();
+      if (!outlet) continue;
+      for (const queue of outlet.queues.values()) {
+        if (!queue.running || queue.slotReturned || now - queue.startedAt < slotStaleMs) continue;
+        queue.slotReturned = true; credits.running--; stale++;
+        for (const item of queue.inflight) outlet.release(queue, item);
+      }
+    }
+    if (!stale) return;
+    reclaimCounts.staleSlots += stale;
+    console.warn("delivery: stale RPC slots returned", { slots: stale, running: credits.running });
+  }
 
   private sweepOwners(): void {
     let hosts = 0;
@@ -155,7 +236,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       let drained!: () => void;
       const idle = new Promise<void>(resolve => { drained = resolve; });
       this.queues.set(host, (queue = { pending: [], running: false, stuckTicks: 0, stuckSeen: -1, bytes: 0, rpcMs: 0,
-        recoveryRequired: false, recovery: undefined, idle, drained, inflight: [] }));
+        startedAt: 0, slotReturned: false, recoveryRequired: false, recovery: undefined, idle, drained, inflight: [] }));
     }
     return queue;
   }
@@ -314,6 +395,11 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
 
   private static schedule(): void {
+    const now = Date.now();
+    if ((credits.running >= MAX_RPCS && ready.size) || now - lastStaleSweep >= STALE_SWEEP_EVERY_MS) {
+      lastStaleSweep = now;
+      OrderedOutlet.expireStaleSlots(now);
+    }
     while (credits.running < MAX_RPCS && ready.size) {
       const outlet = ready.values().next().value!;
       ready.delete(outlet);
@@ -339,6 +425,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
         }
       }
       queue.running = true; credits.running++; queue.current = item; queue.inflight = items;
+      queue.startedAt = Date.now(); queue.slotReturned = false;
       void this.run(host, queue, items);
       return;
     }
@@ -396,7 +483,9 @@ abstract class OrderedOutlet implements DeliveryOutlet {
           if (item.recovery) queue.recovery = undefined;
         }
       }
-      queue.running = false; credits.running--;
+      queue.running = false;
+      if (!queue.slotReturned) credits.running--;
+      queue.slotReturned = false;
       if (!queue.pending.length) {
         this.settleEmpty(host, queue);
       } else {
@@ -464,8 +553,10 @@ export class GatewayOutlet extends OrderedOutlet {
     private readonly tenantId: string,
     private readonly gateway: (name: string) => ReplicaHolderRpc,
     private readonly registered: () => Promise<string[]>,
+    /** 04-hang: the owning Durable Object's id; a later outlet for the same id retires this one (`OrderedOutlet`). */
+    object?: string,
   ) {
-    super();
+    super(object);
   }
 
   protected deliver(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt> {
