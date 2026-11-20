@@ -31,8 +31,25 @@ function holder(batch: boolean) {
     } : {}),
   };
   const release = async () => { while (gates.length) { gates.shift()!(); await tick(); } };
-  return { rpc, calls, release };
+  /**
+   * Releases every call as it arrives until `work` settles, bounded by `ms`. For work that waits on real I/O (a
+   * real stub's reply), where a fixed number of ticks can end before the reply lands and leave later calls held.
+   */
+  const drain = async <T>(work: Promise<T>, ms = DRAIN_MS): Promise<T> => {
+    let settled = false;
+    const done = work.then(() => { settled = true; }, () => { settled = true; });
+    const deadline = Date.now() + ms;
+    while (!settled) {
+      if (Date.now() > deadline) throw new Error(`holder calls did not settle within ${ms} ms: ${JSON.stringify(calls)}`);
+      await release();
+      await Promise.race([done, new Promise<void>((resolve) => setTimeout(resolve, 1))]);
+    }
+    return work;
+  };
+  return { rpc, calls, release, drain };
 }
+/** Bound for work that waits on a real RPC; the tests that use it allow DRAIN_MS plus margin. */
+const DRAIN_MS = 10_000;
 
 describe("X14 gateway outlet batching", () => {
   it("coalesces the payloads queued behind the in-flight RPC into one ordered batch", async () => {
@@ -179,21 +196,32 @@ describe("X14 gateway outlet batching", () => {
     expect((results[4] as { receipt: { recoveryAck?: number } }).receipt.recoveryAck).toBeUndefined();
   });
 
-  it("falls back to single RPCs on workerd's real missing-method error (a real stub without the method)", async () => {
-    // HELLO's class has no deliverReplicaBatch: the error below is the platform's own, not a hand-written message.
-    const old = (env as unknown as { HELLO: DurableObjectNamespace }).HELLO.getByName(`x14-old-gateway-${crypto.randomUUID()}`) as unknown as ReplicaHolderRpc;
-    let real: unknown;
-    try { await old.deliverReplicaBatch!("t", []); } catch (error) { real = error; }
-    expect(String((real as Error).message)).toMatch(/does not implement/);
-    expect(batchUnsupported(real)).toBe(true);
-    const h = holder(false);
-    const rpc: ReplicaHolderRpc = { ...h.rpc, deliverReplicaBatch: (t, ps) => old.deliverReplicaBatch!(t, ps) };
-    const outlet = new GatewayOutlet("t", () => rpc, async () => ["g"]);
-    const sent = [1, 2, 3].map((n) => outlet.send("g", payload(n)));
-    for (let i = 0; i < 8; i++) { await tick(); await h.release(); }
-    expect((await Promise.all(sent)).map((r) => r?.sockets)).toEqual([1, 2, 3]);
-    expect(h.calls.map((c) => [c.kind, c.items[0]])).toEqual([["single", 1], ["single", 2], ["single", 3]]);
-  });
+  // The refused batch goes to a real stub, so its rejection is real I/O and lands after an unknown number of
+  // ticks (later under load): the singles are released as they arrive until all three settle, not for a fixed
+  // number of ticks (a fixed count could end first and leave the singles held until the test timed out). The
+  // `late` case delays the platform's rejection to pin that.
+  for (const late of [0, 50]) {
+    it(`falls back to single RPCs on workerd's real missing-method error (a real stub without the method${late ? `, rejecting ${late} ms late` : ""})`, async () => {
+      // HELLO's class has no deliverReplicaBatch: the error below is the platform's own, not a hand-written message.
+      const old = (env as unknown as { HELLO: DurableObjectNamespace }).HELLO.getByName(`x14-old-gateway-${crypto.randomUUID()}`) as unknown as ReplicaHolderRpc;
+      let real: unknown;
+      try { await old.deliverReplicaBatch!("t", []); } catch (error) { real = error; }
+      expect(String((real as Error).message)).toMatch(/does not implement/);
+      expect(batchUnsupported(real)).toBe(true);
+      const h = holder(false);
+      let batches = 0;
+      const rpc: ReplicaHolderRpc = { ...h.rpc, async deliverReplicaBatch(t, ps) {
+        batches++;
+        if (late) await new Promise((resolve) => setTimeout(resolve, late));
+        return old.deliverReplicaBatch!(t, ps);
+      } };
+      const outlet = new GatewayOutlet("t", () => rpc, async () => ["g"]);
+      const sent = [1, 2, 3].map((n) => outlet.send("g", payload(n)));
+      expect((await h.drain(Promise.all(sent))).map((r) => r?.sockets)).toEqual([1, 2, 3]);
+      expect(h.calls.map((c) => [c.kind, c.items[0]])).toEqual([["single", 1], ["single", 2], ["single", 3]]);
+      expect(batches).toBe(1); // the real refusal marked the holder single-only
+    }, DRAIN_MS + 5_000);
+  }
 
   it("requeues batch items whose credits a claim tick returned early; discards only abandoned ones", async () => {
     for (const mode of ["claimTick", "abandon"] as const) {
