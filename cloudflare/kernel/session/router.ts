@@ -1,4 +1,4 @@
-import { ASSIGNMENT_HEADER, DIRECT_HEADER, automaticPlacement, controllerCell, withDeadline, type DirectAdmission, type GatewayAssignment } from "../gateway/placement";
+import { ASSIGNMENT_HEADER, CONTROLLER_CELLS, DIRECT_HEADER, automaticPlacement, controllerCell, withDeadline, type DirectAdmission, type GatewayAssignment } from "../gateway/placement";
 import { setSpanTiming, span, spanTimingFromEnv } from "../delivery/spans";
 /**
  * `GET /ws` in the router Worker (CONTRACT.md A.1.1). The Worker cannot know
@@ -97,14 +97,69 @@ export class WarmCell {
     this.until = this.now() + STICKY_MS;
   }
   refused(): void { this.cell = undefined; this.holder = undefined; }
+  /** X17i: whether a fresh holder is remembered (else the colo's shared one is read). */
+  get hasHolder(): boolean { return this.holder !== undefined && this.cell !== undefined && this.now() < this.until; }
   /** Test seam. */
   get remembered(): number | undefined { return this.now() < this.until ? this.cell : undefined; }
 }
 let warmCell = new WarmCell();
 /** Test seam: forget this isolate's warm cell and holder (the next upgrade goes through the controller). */
-export function resetWarmCell(cell: WarmCell = new WarmCell()): void { warmCell = cell; }
+export function resetWarmCell(cell: WarmCell = new WarmCell(), options: { keepShared?: boolean } = {}): void {
+  warmCell = cell;
+  lastShared = "";
+  // Each test starts without a shared holder too, unless it simulates another isolate of the same colo.
+  if (!options.keepShared) sharedIgnoredBefore = Date.now();
+}
 
-export async function handleWebSocketUpgrade(request: Request, env: WebSocketRouteEnv): Promise<Response> {
+/**
+ * X17i: the warm holder shared by every router isolate of a colo, through the colo's Cache API (5-7 ms on dev SJC).
+ * `WarmCell` is per isolate, and a client's second socket usually reaches another isolate: it went through the
+ * controller again (acquire 106-168 ms, b28) and to another holder. An isolate with no warm holder reads this one and
+ * goes direct. It is only a hint: the holder and the controller's `admitDirect` check everything (identity, epoch,
+ * cell, capacity, draining), and a `direct-*` refusal deletes it. Rust has no router; nothing client-visible changes.
+ */
+export interface SharedHolder { v: 1; cell: number; gateway: string; epoch: number; at: number }
+let sharedIgnoredBefore = 0;
+let lastShared = "";
+const SHARED_READ_MS = 50;
+function sharedKey(url: URL): Request { return new Request(`https://gonvex-warm-holder.invalid/${encodeURIComponent(url.host)}`); }
+function colocache(): Cache | undefined {
+  try { return (globalThis as { caches?: { default?: Cache } }).caches?.default; } catch { return undefined; }
+}
+async function readShared(url: URL): Promise<SharedHolder | undefined> {
+  const cache = colocache();
+  if (!cache) return undefined;
+  try {
+    const hit = await withDeadline(cache.match(sharedKey(url)), SHARED_READ_MS);
+    if (!hit) return undefined;
+    const value = await hit.json() as SharedHolder;
+    if (value?.v !== 1 || !Number.isInteger(value.cell) || value.cell < 0 || value.cell >= CONTROLLER_CELLS || typeof value.gateway !== "string"
+      || value.gateway.length > 100 || !Number.isSafeInteger(value.epoch) || value.epoch < 1 || !Number.isFinite(value.at)) return undefined;
+    if (value.at < sharedIgnoredBefore || Date.now() - value.at >= STICKY_MS) return undefined;
+    return value;
+  } catch { return undefined; }
+}
+function writeShared(url: URL, holder: { cell: number; gateway: string; epoch: number }, waitUntil?: (work: Promise<unknown>) => void): void {
+  const cache = colocache();
+  if (!cache) return;
+  const id = `${holder.cell}\u0000${holder.gateway}\u0000${holder.epoch}`;
+  const now = Date.now();
+  // One write per holder change (and a refresh at half the TTL), not one per upgrade.
+  if (lastShared.startsWith(id + "\u0000") && now - Number(lastShared.slice(id.length + 1)) < STICKY_MS / 2) return;
+  lastShared = `${id}\u0000${now}`;
+  const value: SharedHolder = { v: 1, ...holder, at: now };
+  const work = cache.put(sharedKey(url), new Response(JSON.stringify(value), { headers: { "content-type": "application/json", "cache-control": `max-age=${Math.floor(STICKY_MS / 1000)}` } })).catch(() => {});
+  if (waitUntil) waitUntil(work); else void work;
+}
+function dropShared(url: URL, waitUntil?: (work: Promise<unknown>) => void): void {
+  const cache = colocache();
+  if (!cache) return;
+  lastShared = "";
+  const work = cache.delete(sharedKey(url)).catch(() => false);
+  if (waitUntil) waitUntil(work); else void work;
+}
+
+export async function handleWebSocketUpgrade(request: Request, env: WebSocketRouteEnv, ctx?: { waitUntil(work: Promise<unknown>): void }): Promise<Response> {
   if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("Connection header did not include 'upgrade'", { status: 400 });
   const extensions = request.headers.get("sec-websocket-extensions");
@@ -128,6 +183,12 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   };
   // X17g: connect in one hop. The isolate's last admitted holder takes the upgrade itself (one controller call and the
   // limiter, in parallel); a `direct-*` refusal or a failed hop falls back to the controller path below.
+  const waitUntil = ctx ? (work: Promise<unknown>) => ctx.waitUntil(work) : undefined;
+  if (placement && !warmCell.hasHolder) {
+    // X17i: no warm holder in this isolate: the colo's, if another isolate admitted one recently.
+    const shared = await readShared(url);
+    if (shared) warmCell.admitted(shared.cell, { gateway: shared.gateway, epoch: shared.epoch });
+  }
   const direct = placement ? warmCell.direct() : undefined;
   if (direct) {
     const started = Date.now();
@@ -139,11 +200,20 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
       span("router.upgrade", { direct: true, gatewayMs: Date.now() - started, totalMs: Date.now() - started, status: response.status, ...(reason ? { reason } : {}) });
       // Any answer but a 101 forgets the holder (#533 review): a refused address must not keep this isolate's upgrades
       // going direct. Only a `direct-*` refusal falls back; a limiter 429/503 is the client's answer.
-      if (response.status === 101) { warmCell.admitted(direct.cell, { gateway: direct.gateway, epoch: direct.epoch }); return response; }
+      if (response.status === 101) {
+        warmCell.admitted(direct.cell, { gateway: direct.gateway, epoch: direct.epoch });
+        writeShared(url, direct, waitUntil);
+        return response;
+      }
       warmCell.refused();
+      // This isolate also stops using the holder another isolate shared before now (#533: a refused address must not
+      // keep going direct); a newer shared holder, written after a later admission, is used again.
+      sharedIgnoredBefore = Date.now();
       if (!(response.status === 503 && reason.startsWith(DIRECT_REFUSAL_PREFIX))) return response;
+      dropShared(url, waitUntil);
     } catch (error) {
       warmCell.refused();
+      sharedIgnoredBefore = Date.now();
       // A deadline: the holder may still admit this attempt, so it is not retried (no second admission, #533 review).
       if (refusalCause(error) === "deadline") return refusedUpgrade("gateway", error, started, "gateway admission unavailable");
       console.error("router: direct upgrade failed; using the controller", { cause: refusalCause(error), elapsedMs: Date.now() - started });
@@ -177,7 +247,12 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
     const gatewayStarted = Date.now();
     response = await withDeadline(env.GATEWAY.getByName(gatewayName).fetch(new Request(request.url, { method: "GET", headers })));
     span("router.upgrade", { ...times, gatewayMs: Date.now() - gatewayStarted, totalMs: Date.now() - started, status: response.status, warm: warmCell.remembered === assignment?.cell });
-    if (assignment) { if (response.status === 101) warmCell.admitted(assignment.cell, { gateway: assignment.gateway, epoch: assignment.epoch }); else warmCell.refused(); }
+    if (assignment) {
+      if (response.status === 101) {
+        warmCell.admitted(assignment.cell, { gateway: assignment.gateway, epoch: assignment.epoch });
+        writeShared(url, assignment, waitUntil);
+      } else warmCell.refused();
+    }
     return response;
   } catch (error) {
     warmCell.refused();

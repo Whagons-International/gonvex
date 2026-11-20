@@ -216,3 +216,52 @@ describe("X17g follow-up: cancelDirect", () => {
     expect((await c.status()).pending).toBe(before - 1);
   });
 });
+
+describe("X17i the colo-shared warm holder (another router isolate)", () => {
+  function counting() {
+    const calls = { acquire: 0, fetches: [] as Array<{ name: string; direct: string | null }> };
+    const wrapped = { ...bindings,
+      GATEWAY_CONTROLLER: { getByName(name: string) {
+        const actual = bindings.GATEWAY_CONTROLLER.getByName(name);
+        return { acquire: (id: string) => { calls.acquire++; return actual.acquire(id); }, release: (a: GatewayAssignment) => actual.release(a) };
+      } },
+      GATEWAY: { getByName(name: string) { return { fetch: (r: Request) => { calls.fetches.push({ name, direct: r.headers.get(DIRECT_HEADER) }); return holder(name).fetch(r); } }; } },
+    } as unknown as typeof bindings;
+    return { calls, wrapped };
+  }
+  const upgrade = () => new Request("https://x17i.test/ws", { headers: { upgrade: "websocket", "cf-connecting-ip": "192.0.2.96" } });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+  it("a fresh isolate goes direct to the holder another isolate admitted, with no acquire", async () => {
+    const { calls, wrapped } = counting();
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+    expect(calls.acquire).toBe(1);
+    await settle();
+    resetWarmCell(new WarmCell(), { keepShared: true }); // the client's second socket reaches another isolate
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+    expect(calls.acquire).toBe(1);
+    expect(calls.fetches[1]).toMatchObject({ name: calls.fetches[0]!.name });
+    expect(calls.fetches[1]!.direct).not.toBeNull();
+  });
+
+  it("a shared holder the holder refuses is dropped and replaced by the controller's next one", async () => {
+    const { calls, wrapped } = counting();
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+    await settle();
+    // Another isolate shared a stale epoch for this holder.
+    const first = calls.fetches[0]!.name;
+    const cache = (globalThis as unknown as { caches: { default: Cache } }).caches.default;
+    const key = new Request(`https://gonvex-warm-holder.invalid/${encodeURIComponent("x17i.test")}`);
+    const stale = JSON.parse(await (await cache.match(key))!.text());
+    await cache.put(key, new Response(JSON.stringify({ ...stale, epoch: stale.epoch + 1, at: Date.now() }), { headers: { "cache-control": "max-age=120" } }));
+    resetWarmCell(new WarmCell(), { keepShared: true });
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+    expect(calls.acquire).toBe(2); // direct-unavailable, then the controller path
+    expect(calls.fetches.slice(1).map((f) => f.direct !== null)).toEqual([true, false]);
+    await settle();
+    const now = JSON.parse(await (await cache.match(key))!.text());
+    expect(now.epoch).toBe(stale.epoch);
+    expect(now.gateway).toBeTypeOf("string");
+    void first;
+  });
+});
