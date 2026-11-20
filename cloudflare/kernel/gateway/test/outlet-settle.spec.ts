@@ -1,7 +1,7 @@
 // #550 review: accounting of the 04-hang reclaims when the RPC involved does settle later. Plain outlets in the test
 // isolate (a real reset object's RPCs never settle, so these paths need a holder that answers late).
 import { expect, it } from "vitest";
-import { GatewayOutlet, deliveryPressure, setRpcSlotStaleMs, type ReplicaHolderRpc } from "../../delivery/outlet";
+import { GatewayOutlet, MAX_RPCS, deliveryPressure, setRpcSlotStaleMs, type ReplicaHolderRpc } from "../../delivery/outlet";
 import type { ReplicaDelivery } from "../../delivery/protocol";
 
 const payload = (instance: string): ReplicaDelivery => ({ v: 1, instance, shared: ["x".repeat(64)], sockets: {} });
@@ -79,4 +79,63 @@ it("a retired outlet's late settlement returns its slot once and never re-enters
   expect(h.received).toEqual(["a", "c"]);
   expect(await next.send("g", payload("n"))).toEqual({ v: 1, sockets: 0 });
   expect(totals()).toEqual(before);
+});
+
+const never: ReplicaHolderRpc = { deliverReplica: () => new Promise(() => {}) }; // a reset object's RPC: never settles
+const within = <T>(promise: Promise<T>, ms: number) => Promise.race([promise.then(() => "delivered"), sleep(ms).then(() => "timeout")]);
+
+it("a payload queued before the stale deadline is delivered at the deadline with no later activity (#550 re-review 2)", async () => {
+  const previous = setRpcSlotStaleMs(300);
+  try {
+    const before = totals();
+    const dead = new GatewayOutlet("dead", () => never, async () => []);
+    for (let i = 0; i < MAX_RPCS; i++) void dead.send(`h${i}`, payload(`d${i}`));
+    await sleep(20);
+    // A quiet tenant: one send while every slot is held, then nothing else happens in the isolate.
+    const sent = new GatewayOutlet("quiet", () => quick, async () => []).send("q", payload("q"));
+    expect(await within(sent, 2_000)).toBe("delivered");
+    expect(totals()).toEqual(before);
+  } finally { setRpcSlotStaleMs(previous); }
+});
+
+it("a slot the stale rule returned is not returned again when its object retires (#550 re-review 4a)", async () => {
+  const previous = setRpcSlotStaleMs(100);
+  try {
+    const before = totals(), p0 = deliveryPressure();
+    void new GatewayOutlet("t", () => never, async () => [], "object-stale-retire").send("g", payload("s"));
+    await sleep(150);
+    await new GatewayOutlet("kick", () => quick, async () => []).send("k", payload("k")); // the sweep runs
+    expect(deliveryPressure().staleSlots - p0.staleSlots).toBe(1);
+    new GatewayOutlet("t", () => quick, async () => [], "object-stale-retire");
+    expect(deliveryPressure().retiredOutlets - p0.retiredOutlets).toBe(1);
+    expect(deliveryPressure().retiredSlots - p0.retiredSlots).toBe(0);
+    expect(totals()).toEqual(before);
+  } finally { setRpcSlotStaleMs(previous); }
+});
+
+it("a younger slot is still reclaimed after a sweep found only an older one stale (#550 re-review 4b)", async () => {
+  const previous = setRpcSlotStaleMs(300);
+  try {
+    const before = totals(), p0 = deliveryPressure();
+    const dead = new GatewayOutlet("staggered", () => never, async () => []);
+    void dead.send("old", payload("old"));
+    await sleep(200);
+    void dead.send("young", payload("young"));
+    await sleep(150); // old is stale, young is not
+    await new GatewayOutlet("kick1", () => quick, async () => []).send("k", payload("k"));
+    expect(deliveryPressure().staleSlots - p0.staleSlots).toBe(1);
+    await sleep(250); // young is stale now
+    await new GatewayOutlet("kick2", () => quick, async () => []).send("k", payload("k"));
+    expect(deliveryPressure().staleSlots - p0.staleSlots).toBe(2);
+    expect(totals()).toEqual(before);
+  } finally { setRpcSlotStaleMs(previous); }
+});
+
+it("pruning keeps a live outlet's entry, so its object's next outlet still retires it (#550 re-review 4c)", async () => {
+  const p0 = deliveryPressure();
+  const live = new GatewayOutlet("t", () => quick, async () => [], "object-prune-live");
+  for (let i = 0; i < 1_100; i++) new GatewayOutlet("t", () => quick, async () => [], `object-prune-${i}`); // past the prune threshold
+  new GatewayOutlet("t", () => quick, async () => [], "object-prune-live");
+  expect(deliveryPressure().retiredOutlets - p0.retiredOutlets).toBe(1);
+  expect(live).toBeDefined();
 });

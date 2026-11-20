@@ -89,6 +89,25 @@ below fails at least one test:
 Removing the recount survives these tests: releasing the queued credits at stale time already restores the totals,
 and the recount is defense in depth against drift and for outlets the GC has collected.
 
+The #550 re-review found two liveness gaps in the first reclaim, both reproduced and now covered:
+
+- **GC.** A reset object's outlet was reachable only through `WeakRef`s. Once V8 collected it, neither the stale
+  sweep nor retirement could return its slots: `running` stayed at 8. Covered by `kernel/delivery/outlet-gc.test.mjs`
+  (Node with a real `gc()`, which workerd lacks). Both tests fail without the strong hold and pass with it.
+- **No sweep at the deadline.** A quiet tenant's payload queued before the stale bound waited until some later
+  enqueue or settlement in the isolate. Covered by `outlet-settle.spec.ts` ("delivered at the deadline with no later
+  activity").
+
+More mutations, each failing at least one test:
+
+| Mutation | Fails |
+| --- | --- |
+| Retirement returns a slot the stale rule already returned | stale then retire (`running` -1), and 3 others |
+| The sweep drops not-yet-stale deadlines | younger slot reclaimed after an older one |
+| `pruneObjects` clears live entries | a live outlet survives pruning and is still retired |
+| No deadline timer | delivered at the deadline with no later activity |
+| No strong hold (sweep via `WeakRef` owners) | both GC tests |
+
 No separate dev Worker was needed. The shared dev Worker was not touched (no deploys, read-only log queries).
 
 ## Fix
@@ -100,17 +119,25 @@ The fix is in `outlet.ts` and is bookkeeping only. Nothing changes what a live h
    new outlet for an id that already has one in this isolate means the earlier instance is gone. Its slots, byte
    credits, host entries and claim are returned at once, and it leaves the scheduler. If one of its RPCs did settle
    late, the slot is not returned twice (`slotReturned`, idempotent `release`). This covers the incident, where the
-   same tenant came back 11 s later in the same isolate.
+   same tenant came back 11 s later in the same isolate. It does not depend on GC: an outlet with an unreturned slot is
+   held strongly (`holding`) until the slot is returned, so its `byObject` entry cannot be pruned before it retires.
 2. **Stale slots (bounded, other tenants).** An RPC that has held a slot for `RPC_SLOT_STALE_MS` (60 s) stops counting
    against `MAX_RPCS`. The credits of its batch, and of every payload queued behind it on that holder, are returned:
    none of them can move until that RPC settles. The isolate's `normal`/`count`/`recovery`/`hosts` totals are then
    recounted from the unreleased payloads of live outlets (`WeakRef`s, as `sweepOwners` does for `hosts`). This covers
    a reset object that never comes back to this isolate: its RPC slots and its queued byte and item credits come back
-   within 60 s. Its stuck queues still count in `hosts` until GC collects the outlet, and they are bounded by
+   at the 60 s deadline. A payload of another tenant that waits for a slot arms one timer (from that tenant's own
+   invocation, never the dead one's) for the next stale deadline, so the sweep runs then even if nothing else happens.
+   The sweep walks the strongly held `holding` set, so GC cannot hide a slot holder. Its stuck queues still count in `hosts` until GC collects the outlet, and they are bounded by
    `MAX_HOSTS` with the existing sweep. Its holder's ordered channel is unchanged: that holder still waits for the RPC.
    **Bound when the RPC was only slow** and settles later: the payloads that were queued behind it at that moment go
-   out uncounted. That is at most one holder backlog (`HOST_PENDING_BYTES` = 8 MiB, or one legal singleton) per stale
-   RPC. The isolate may run more than `MAX_RPCS` RPCs, at most one per holder, growing by at most 8 per 60 s.
+   out uncounted. That is at most one holder backlog per stale RPC: `HOST_PENDING_BYTES` = 8 MiB, with `sendFirst`
+   items up to `FIRST_BYTES` each, capped by `MAX_PENDING`. After that, the engine's holder-stall recovery
+   (`HOLDER_STALL_MS` = 30 s, below the stale bound) discards and fences what that holder had counted. Cumulatively,
+   the uncounted bytes are about `HOST_PENDING_BYTES` × (stale RPCs not yet settled). That number grows by at most
+   `MAX_RPCS` per 60 s and is capped only by `MAX_HOSTS`. The isolate may run more than `MAX_RPCS` RPCs, at most one
+   per holder. No cap is added: once reached, a cap on released bytes would again leave a dead object's queue credits
+   pinned, which is the failure this rule exists for.
    A late settlement of a **retired** outlet returns its slot at most once and returns early: it never requeues,
    rotates or re-enters the scheduler.
 3. **Watchdog.** Each reclaim logs one warn line with counts only (no ids):
@@ -118,12 +145,13 @@ The fix is in `outlet.ts` and is bookkeeping only. Nothing changes what a live h
    - `delivery: stale RPC slots returned { slots, running, count }`
 
    Each reclaim is also counted in `deliveryPressure()` (`retiredOutlets`, `retiredSlots`, `staleSlots`). `schedule()`
-   sweeps only once the oldest held slot's deadline has passed (one comparison per call otherwise), so a delivery RPC
-   stuck for more than 60 s shows up even below the cap. `byObject` drops dead entries in `sweepOwners` and whenever
+   sweeps only once the oldest held slot's deadline has passed (one comparison per call otherwise). When work is
+   blocked on slots, the deadline timer runs the sweep. Below the cap, a delivery RPC stuck for more than 60 s is
+   logged at the next enqueue or settlement in the isolate. `byObject` drops dead entries in `sweepOwners` and whenever
    it reaches 1,024 ids.
 
-Runtime bundle (`wrangler deploy --dry-run -c kernel/assembly/runtime.wrangler.jsonc`): 1109.30 -> 1114.39 KiB
-(gzip 276.58 -> 277.92 KiB). No SQL, no rows read or written, no new runtime imports.
+Runtime bundle (`wrangler deploy --dry-run -c kernel/assembly/runtime.wrangler.jsonc`): 1109.30 -> 1115.96 KiB
+(gzip 276.58 -> 278.47 KiB). No SQL, no rows read or written, no new runtime imports.
 
 ## Ruled out
 

@@ -74,12 +74,20 @@ const owners = new Set<WeakRef<OrderedOutlet>>();
  *   the credits of its batch and of everything queued behind it on that holder are returned (none of it can move until
  *   that RPC settles; a reset object that never comes back would otherwise hold them forever). The isolate's
  *   `normal`/`count`/`recovery` totals are then recounted from live outlets (`WeakRef`s, as `hosts` is). Its holder's
- *   channel stays ordered: that holder still waits for the RPC. Cost when the RPC was only slow and settles later:
- *   what was queued behind it at that moment goes out uncounted, at most one holder backlog (`HOST_PENDING_BYTES`,
- *   `MAX_PENDING` items) per stale RPC; the isolate may also run more than `MAX_RPCS` RPCs, at most one per holder.
+ *   channel stays ordered: that holder still waits for the RPC.
+ * Both are deterministic: an outlet holding a slot is strongly reachable (`holding`) until the slot is returned, so GC
+ * cannot hide a reset instance's slots from either reclaim; and an outlet whose work waits for a slot arms one timer
+ * (from its own invocation) for the next stale deadline, so the sweep runs then even if nothing else happens.
+ * Cost when a stale RPC was only slow and settles later: what was queued behind it at that moment goes out uncounted,
+ * at most one holder backlog (`HOST_PENDING_BYTES`; `sendFirst` items up to `FIRST_BYTES` each, capped by
+ * `MAX_PENDING`) per stale RPC; the engine's holder-stall recovery (`HOLDER_STALL_MS` < the stale bound) discards and
+ * fences what that holder had counted after it. Cumulatively the uncounted bytes are about `HOST_PENDING_BYTES` x (stale
+ * RPCs not yet settled), a number that grows by at most `MAX_RPCS` per `RPC_SLOT_STALE_MS` and is capped only by
+ * `MAX_HOSTS`. The isolate may also run more than `MAX_RPCS` RPCs, at most one per holder.
  * Each reclaim logs one warn line (`delivery: outlet of a reset object retired`, `delivery: stale RPC slots returned`,
- * counts only) and counts it in `deliveryPressure()`. A slot is checked when it can first be stale (the oldest slot's
- * deadline), so a delivery RPC stuck past the bound (a holder that never answers) is logged even below the cap.
+ * counts only) and counts it in `deliveryPressure()`. The sweep runs in `schedule()` once the oldest held slot's
+ * deadline has passed, and at that deadline when work is blocked on slots; a delivery RPC stuck past the bound below
+ * the cap is logged at the next enqueue or settlement in the isolate.
  */
 export const RPC_SLOT_STALE_MS = 60_000;
 let slotStaleMs = RPC_SLOT_STALE_MS;
@@ -89,10 +97,16 @@ const byObject = new Map<string, WeakRef<OrderedOutlet>>();
 const reclaimCounts = { retiredOutlets: 0, retiredSlots: 0, staleSlots: 0 };
 /** When the oldest held slot can first be stale: `schedule()` sweeps only from then (not on every call of a burst). */
 let nextStaleCheck = Number.POSITIVE_INFINITY;
+/**
+ * #550 re-review: every outlet with an RPC slot not yet returned, held STRONGLY. A reset instance's outlet is otherwise
+ * referenced only by RPC promises of its dead I/O context; were V8 to collect it, no reclaim could find its slots
+ * (`owners` and `byObject` are WeakRefs). Both reclaims and the stale sweep find slot holders here.
+ */
+const holding = new Set<OrderedOutlet>();
 /** `byObject` entries kept before dead ones are pruned (one short string per Durable Object id the isolate saw). */
 const BY_OBJECT_PRUNE_AT = 1_024;
 /** Bounded isolate totals, never a per-tenant/member series. Byte values are credits, not heap measurements. */
-export function deliveryPressure() { return { ...credits, ...pressureCounts, ...reclaimCounts }; }
+export function deliveryPressure() { return { ...credits, ...pressureCounts, ...reclaimCounts, holding: holding.size }; }
 
 interface Pending {
   payload: ReplicaDelivery;
@@ -156,6 +170,10 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   private readonly owner = new WeakRef(this);
   /** 04-hang: a newer instance of this outlet's object exists; this one's bookkeeping was returned (`retire`). */
   private retired = false;
+  /** RPC slots this outlet holds (taken, not yet returned); while any, `holding` keeps it reachable. */
+  private heldSlots = 0;
+  /** #550 re-review: this outlet's one timer for the next stale deadline while its work waits for a slot. */
+  private staleTimer: unknown;
 
   /** `object`: the owning Durable Object's id (one live instance per id); a newer outlet for it retires this one. */
   constructor(object?: string) {
@@ -179,11 +197,12 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       for (const item of [...queue.inflight, ...queue.pending]) this.release(queue, item);
       queue.pending = [];
       queue.recoveryRequired = false;
-      if (queue.running && !queue.slotReturned) { queue.slotReturned = true; credits.running--; slots++; }
+      if (queue.running && this.returnSlot(queue)) slots++;
     }
     credits.hosts = Math.max(0, credits.hosts - this.queues.size);
     this.queues.clear();
     ready.delete(this);
+    holding.delete(this); this.heldSlots = 0;
     owners.delete(this.owner);
     if (claim?.owner.deref() === this) claim = undefined;
     reclaimCounts.retiredOutlets++;
@@ -199,13 +218,11 @@ abstract class OrderedOutlet implements DeliveryOutlet {
    */
   private static expireStaleSlots(now: number): void {
     let stale = 0, next = Number.POSITIVE_INFINITY;
-    for (const ref of owners) {
-      const outlet = ref.deref();
-      if (!outlet) { owners.delete(ref); continue; }
+    for (const outlet of [...holding]) {
       for (const queue of outlet.queues.values()) {
         if (!queue.running || queue.slotReturned) continue;
         if (now - queue.startedAt < slotStaleMs) { next = Math.min(next, queue.startedAt + slotStaleMs); continue; }
-        queue.slotReturned = true; credits.running--; stale++;
+        outlet.returnSlot(queue); stale++;
         for (const item of [...queue.inflight, ...queue.pending]) outlet.release(queue, item);
       }
     }
@@ -214,6 +231,37 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     OrderedOutlet.recount();
     reclaimCounts.staleSlots += stale;
     console.warn("delivery: stale RPC slots returned", { slots: stale, running: credits.running, count: credits.count });
+  }
+
+  /** Takes one isolate RPC slot for `queue`'s RPC; the outlet stays strongly reachable until every slot it took is returned. */
+  private takeSlot(queue: Queue): void {
+    credits.running++; queue.slotReturned = false;
+    this.heldSlots++; holding.add(this);
+  }
+
+  /** Returns `queue`'s slot, once: false when the stale rule or retirement already returned it. */
+  private returnSlot(queue: Queue): boolean {
+    if (queue.slotReturned) return false;
+    queue.slotReturned = true; credits.running--;
+    if (--this.heldSlots <= 0) { this.heldSlots = 0; holding.delete(this); }
+    return true;
+  }
+
+  /**
+   * #550 re-review: this outlet's work waits for an isolate slot (all `MAX_RPCS` taken). The stale sweep runs only in
+   * `schedule()`, and nothing else calls it at the deadline (a reset object's RPCs never settle, and a quiet tenant sends
+   * nothing more), so this outlet wakes the scheduler at the next stale deadline itself. The timer belongs to this
+   * outlet's own invocation (its enqueue or settlement), never to the context of the instance holding the slots; one
+   * per outlet, re-armed while it stays blocked.
+   */
+  private armStaleTimer(): void {
+    if (this.staleTimer !== undefined || this.retired) return;
+    if (credits.running < MAX_RPCS || !ready.has(this) || !Number.isFinite(nextStaleCheck)) return;
+    this.staleTimer = setTimeout(() => {
+      this.staleTimer = undefined;
+      OrderedOutlet.schedule();
+      this.armStaleTimer();
+    }, Math.max(1, nextStaleCheck - Date.now()));
   }
 
   /** The isolate's byte and item totals from the unreleased payloads of live outlets (an outlet gone to GC drops out). */
@@ -429,7 +477,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     else { queue.bytes += bytes; credits.normal += bytes; credits.count++; }
     // Begin in a microtask so reset publishes its coalescing promise before a local RPC can finish.
     ready.add(this);
-    void Promise.resolve().then(() => OrderedOutlet.schedule());
+    void Promise.resolve().then(() => { OrderedOutlet.schedule(); this.armStaleTimer(); });
     return next;
   }
 
@@ -460,8 +508,8 @@ abstract class OrderedOutlet implements DeliveryOutlet {
           bytes += next.bytes; items.push(next);
         }
       }
-      queue.running = true; credits.running++; queue.current = item; queue.inflight = items;
-      queue.startedAt = Date.now(); queue.slotReturned = false;
+      queue.running = true; this.takeSlot(queue); queue.current = item; queue.inflight = items;
+      queue.startedAt = Date.now();
       nextStaleCheck = Math.min(nextStaleCheck, queue.startedAt + slotStaleMs);
       void this.run(host, queue, items);
       return;
@@ -506,8 +554,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
         // 04-hang: a late settlement of a retired outlet (its instance was reset) returns its slot at most once and
         // nothing else: it never requeues, rotates or re-enters the scheduler with items whose credits were returned.
         queue.running = false;
-        if (!queue.slotReturned) credits.running--;
-        queue.slotReturned = true;
+        this.returnSlot(queue);
         for (const item of items) this.release(queue, item);
       } else {
         if (requeue) {
@@ -529,7 +576,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
           }
         }
         queue.running = false;
-        if (!queue.slotReturned) credits.running--;
+        this.returnSlot(queue);
         queue.slotReturned = false;
         if (!queue.pending.length) {
           this.settleEmpty(host, queue);
@@ -541,6 +588,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
         if ([...this.queues.values()].some(q => q.pending.length && !q.running)) ready.add(this);
       }
       OrderedOutlet.schedule();
+      this.armStaleTimer();
     }
   }
 
