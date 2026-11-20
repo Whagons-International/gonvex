@@ -3,7 +3,7 @@
 // holder does not take falls back to the controller path (`acquire` -> limiter -> holder `claim`).
 import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ASSIGNMENT_HEADER, DIRECT_HEADER, MAX_SOCKETS, controllerCell, type DirectAdmission, type GatewayAssignment } from "../placement";
+import { ASSIGNMENT_HEADER, DIRECT_HEADER, MAX_SOCKETS, controllerCell, hashConnection, type DirectAdmission, type GatewayAssignment } from "../placement";
 import { ADMISSION_REASON_HEADER, UPGRADE_HEADERS } from "../../session/placement/gateway";
 import { handleWebSocketUpgrade, resetWarmCell, WarmCell } from "../../session/router";
 import type { GatewayControllerObject } from "../controller";
@@ -217,7 +217,10 @@ describe("X17g follow-up: cancelDirect", () => {
   });
 });
 
-describe("X17i the colo-shared warm holder (another router isolate)", () => {
+/** Closes this test's sockets and lets the holders' close work (capacity reports) finish before teardown. */
+async function closeAll() { for (const ws of sockets.splice(0)) ws.close(1000); await new Promise((resolve) => setTimeout(resolve, 300)); }
+
+describe("X17i the per-client shared warm holder (another router isolate)", () => {
   function counting() {
     const calls = { acquire: 0, fetches: [] as Array<{ name: string; direct: string | null }> };
     const wrapped = { ...bindings,
@@ -229,39 +232,68 @@ describe("X17i the colo-shared warm holder (another router isolate)", () => {
     } as unknown as typeof bindings;
     return { calls, wrapped };
   }
-  const upgrade = () => new Request("https://x17i.test/ws", { headers: { upgrade: "websocket", "cf-connecting-ip": "192.0.2.96" } });
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  /** The Worker entry's ctx: every cache write the router starts is awaited before the test goes on. */
+  function context() { const work: Promise<unknown>[] = []; return { ctx: { waitUntil: (p: Promise<unknown>) => { work.push(p); } }, settle: async () => { while (work.length) await Promise.allSettled(work.splice(0)); } }; }
+  const upgrade = (ip = "192.0.2.96") => new Request("https://x17i.test/ws", { headers: { upgrade: "websocket", "cf-connecting-ip": ip } });
+  const key = (ip: string) => new Request(`https://gonvex-warm-holder.invalid/${encodeURIComponent("x17i.test")}/${hashConnection(ip).toString(36)}`);
+  const cache = () => (globalThis as unknown as { caches: { default: Cache } }).caches.default;
 
-  it("a fresh isolate goes direct to the holder another isolate admitted, with no acquire", async () => {
-    const { calls, wrapped } = counting();
-    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+  it("the same client's next socket on a fresh isolate goes direct to its holder, with no acquire", async () => {
+    const { calls, wrapped } = counting(); const { ctx, settle } = context();
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped, ctx)); await settle();
     expect(calls.acquire).toBe(1);
-    await settle();
     resetWarmCell(new WarmCell(), { keepShared: true }); // the client's second socket reaches another isolate
-    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped, ctx)); await settle();
     expect(calls.acquire).toBe(1);
     expect(calls.fetches[1]).toMatchObject({ name: calls.fetches[0]!.name });
     expect(calls.fetches[1]!.direct).not.toBeNull();
+    await closeAll();
   });
 
   it("a shared holder the holder refuses is dropped and replaced by the controller's next one", async () => {
-    const { calls, wrapped } = counting();
-    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
-    await settle();
-    // Another isolate shared a stale epoch for this holder.
-    const first = calls.fetches[0]!.name;
-    const cache = (globalThis as unknown as { caches: { default: Cache } }).caches.default;
-    const key = new Request(`https://gonvex-warm-holder.invalid/${encodeURIComponent("x17i.test")}`);
-    const stale = JSON.parse(await (await cache.match(key))!.text());
-    await cache.put(key, new Response(JSON.stringify({ ...stale, epoch: stale.epoch + 1, at: Date.now() }), { headers: { "cache-control": "max-age=120" } }));
+    const { calls, wrapped } = counting(); const { ctx, settle } = context();
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped, ctx)); await settle();
+    const stale = JSON.parse(await (await cache().match(key("192.0.2.96")))!.text());
+    await cache().put(key("192.0.2.96"), new Response(JSON.stringify({ ...stale, epoch: stale.epoch + 1, at: Date.now() }), { headers: { "cache-control": "max-age=120" } }));
     resetWarmCell(new WarmCell(), { keepShared: true });
-    accepted(await handleWebSocketUpgrade(upgrade(), wrapped));
+    accepted(await handleWebSocketUpgrade(upgrade(), wrapped, ctx)); await settle();
     expect(calls.acquire).toBe(2); // direct-unavailable, then the controller path
     expect(calls.fetches.slice(1).map((f) => f.direct !== null)).toEqual([true, false]);
-    await settle();
-    const now = JSON.parse(await (await cache.match(key))!.text());
+    const now = JSON.parse(await (await cache().match(key("192.0.2.96")))!.text());
     expect(now.epoch).toBe(stale.epoch);
-    expect(now.gateway).toBeTypeOf("string");
-    void first;
+    await closeAll();
+  });
+
+  it("without the request's waitUntil nothing is shared (no write outlives its request)", async () => {
+    const { calls, wrapped } = counting();
+    accepted(await handleWebSocketUpgrade(upgrade("192.0.2.97"), wrapped));
+    expect(await cache().match(key("192.0.2.97"))).toBeUndefined();
+    expect(calls.acquire).toBe(1);
+    await closeAll();
+  });
+});
+
+describe("review #538: the shared holder is per client, not one holder for every client of the colo", () => {
+  it("other clients' first sockets on fresh isolates are not all funnelled to one holder past acquire's balancing", async () => {
+    const calls = { acquire: 0, names: [] as string[] };
+    const wrapped = { ...bindings,
+      GATEWAY_CONTROLLER: { getByName(name: string) {
+        const actual = bindings.GATEWAY_CONTROLLER.getByName(name);
+        return { acquire: (id: string) => { calls.acquire++; return actual.acquire(id); }, release: (a: GatewayAssignment) => actual.release(a) };
+      } },
+      GATEWAY: { getByName(name: string) { return { fetch: (r: Request) => { calls.names.push(name); return holder(name).fetch(r); } }; } },
+    } as unknown as typeof bindings;
+    const work: Promise<unknown>[] = []; const ctx = { waitUntil: (p: Promise<unknown>) => { work.push(p); } };
+    const settle = async () => { while (work.length) await Promise.allSettled(work.splice(0)); };
+    const upgrade = (ip: string) => new Request("https://r538.test/ws", { headers: { upgrade: "websocket", "cf-connecting-ip": ip } });
+    accepted(await handleWebSocketUpgrade(upgrade("192.0.2.110"), wrapped, ctx)); await settle();
+    // Eight unrelated clients (other users, other tenants), each reaching another isolate of the same colo.
+    for (let i = 0; i < 8; i++) {
+      resetWarmCell(new WarmCell(), { keepShared: true });
+      accepted(await handleWebSocketUpgrade(upgrade(`192.0.2.${111 + i}`), wrapped, ctx)); await settle();
+    }
+    expect(new Set(calls.names).size).toBeGreaterThan(1);
+    expect(calls.acquire).toBeGreaterThan(1);
+    await closeAll();
   });
 });
