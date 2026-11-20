@@ -238,6 +238,16 @@ export function recentAdmission(ctx: Ctx, projectId: string, tenantId: string, a
   return { member: cached.member, admissionRevision: cached.admissionRevision };
 }
 
+/** #540 re-review: drop the cached admission for (project, tenant, account), e.g. after a live admission refused it. */
+export function forgetAdmission(projectId: string, tenantId: string, accountId: string): void {
+  admissionCache.delete(`${projectId}\u0000${tenantId}\u0000${accountId}`);
+}
+/** Whether the cached admission for (project, tenant, account), if any, has exactly `member` (id, role, permissions...). */
+export function sameAdmittedMember(projectId: string, tenantId: string, accountId: string, member: Member): boolean {
+  const cached = admissionCache.get(`${projectId}\u0000${tenantId}\u0000${accountId}`);
+  return !cached || JSON.stringify(cached.member) === JSON.stringify(member);
+}
+
 /** Candidates for the active tenant, in the order the session chooses them: the requested one (id or domain) first. */
 function preferredOrder(rows: Row[], requested: string): Row[] {
   const matches = (row: Row) => str(row.tenant_id) === requested || str(row.domain).toLowerCase() === requested.toLowerCase();

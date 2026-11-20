@@ -905,3 +905,29 @@ describe("#540 x #539 review: a tenant that just refused the member is not overr
   });
 });
 
+
+describe("#540 re-review: a live refusal Control itself saw ends the reuse", () => {
+  type Internals = { context(): Parameters<typeof import("../src/sessions").sessionResultFromDirectory>[0] };
+  it("after a liveOnly auth.error, the next auth without the flag (another gateway, or the lease already dropped) is refused too", async () => {
+    const sessions = await import("../src/sessions");
+    const { authenticate } = await import("../src/auth");
+    sessions.clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"] });
+    const tenant = seeded.tenants.a!, account = seeded.members.sid!.accountId;
+    const { session } = await login(seeded.project, seeded.members.sid!.email); // admits tenant a live
+    const token = session.accessToken as string;
+    await runInDurableObject(tenantStub(tenant), (instance: StubTenantObject) => {
+      (instance as unknown as { sql: { run(q: string, ...a: unknown[]): void } }).sql.run("UPDATE members SET status='removed' WHERE account_id=$1", account);
+    });
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const ctx = (instance as unknown as Internals).context();
+      // #539's fallback: the gateway's leased admit was refused, so Control admits live and refuses too.
+      const live = await authenticate(ctx, { id: "g1", token, project: seeded.project, tenant, connectionId: "g1", liveOnly: true } as never);
+      expect(live.message.type).toBe("auth.error");
+      // The gateway dropped its lease, so its next socket (or any other gateway's) calls without liveOnly.
+      // Control has just seen the tenant refuse this member; the sign-in's older admission must not grant entry now.
+      const next = await authenticate(ctx, { id: "g2", token, project: seeded.project, tenant, connectionId: "g2" } as never);
+      expect(next.message.type).toBe("auth.error");
+    });
+  });
+});

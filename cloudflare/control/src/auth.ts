@@ -19,7 +19,7 @@ import {
   resolveTenant,
 } from "./directory";
 import { asControlError } from "./errors";
-import { recentAdmission } from "./sessions";
+import { forgetAdmission, recentAdmission, sameAdmittedMember } from "./sessions";
 import type { ControlConnection, ServiceGrant, ServicePrincipalConfig, TenantSession } from "./types";
 import { emptyConnection } from "./types";
 import { constantTimeEqual, sha256Hex } from "./util";
@@ -209,7 +209,17 @@ export async function authenticate(ctx: Ctx, request: AuthRequest): Promise<Auth
     const session = await authenticateSession(ctx, token, requestedProject, tenant, async (c, projectId, tenantId, accountId) => {
       const route = resolveTenant(c, projectId, tenantId);
       const recent = request.liveOnly ? undefined : recentAdmission(c, projectId, route.tenantId, accountId);
-      return recent ? { route, member: recent.member, revision: recent.admissionRevision } : admitMember(c, projectId, tenantId, accountId);
+      if (recent) return { route, member: recent.member, revision: recent.admissionRevision };
+      // #540 re-review: a live admission that refuses the member, or admits a different one, ends the reuse for every
+      // later auth (not only this `liveOnly` call).
+      try {
+        const admitted = await admitMember(c, projectId, tenantId, accountId);
+        if (!sameAdmittedMember(projectId, route.tenantId, accountId, admitted.member)) forgetAdmission(projectId, route.tenantId, accountId);
+        return admitted;
+      } catch (error) {
+        forgetAdmission(projectId, route.tenantId, accountId);
+        throw error;
+      }
     });
     const deployed = module(session.identity.projectId);
     return {
