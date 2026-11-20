@@ -44,7 +44,7 @@ import { setSpanTiming, span, spanTimingFromEnv } from "../../delivery/spans";
  */
 const INTERNAL_METHODS: ReadonlySet<string> = new Set([
   "accept", "applyReplica", "applyReplicaNow", "applyRecovery", "receiveReplica", "replicaGate", "loadPlacement", "drainTick", "reportCapacity", "index", "tenantChanged", "link",
-  "bindings", "alarmEntry", "refreshControlWatches",
+  "bindings", "alarmEntry", "refreshControlWatches", "deliverReplicaBatchInner",
 ]);
 const tracked = new WeakSet<object>();
 
@@ -484,6 +484,16 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
    */
   async deliverReplicaBatch(tenantId: string, payloads: ReplicaDelivery[]): Promise<ReplicaBatchResult[]> {
     if (!Array.isArray(payloads)) throw new Error("invalid replica batch");
+    // DEV DIAG (not for merge): the handler's own duration vs the event's wall time in Workers Logs.
+    const diagStarted = Date.now(), diagPerf = performance.now();
+    let diagWaits = 0;
+    try { return await this.deliverReplicaBatchInner(tenantId, payloads, () => { diagWaits++; }); }
+    finally {
+      let bytes = 0; try { bytes = JSON.stringify(payloads).length; } catch { /* diag */ }
+      span("gateway.deliverBatch", { items: payloads.length, bytes, waits: diagWaits, handlerMs: Date.now() - diagStarted, perfMs: Math.round(performance.now() - diagPerf), sockets: this.host.sessions.size });
+    }
+  }
+  private async deliverReplicaBatchInner(tenantId: string, payloads: ReplicaDelivery[], diagWait: () => void): Promise<ReplicaBatchResult[]> {
     const results: ReplicaBatchResult[] = [];
     const failed = (error: unknown): ReplicaBatchResult => {
       const failure = error as (Error & { code?: unknown }) | undefined;
@@ -510,6 +520,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
         }
       });
       if (waiting) {
+        diagWait();
         try { results.push({ receipt: await waiting }); } catch (error) { results.push(failed(error)); }
       }
     }
