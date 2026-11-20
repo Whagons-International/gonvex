@@ -1004,7 +1004,7 @@ impl Runtime {
                     "target account is not an active tenant member".to_owned(),
                 )
             })?;
-        let subject = control_subject(connection, Authorization::ProjectAdmin);
+        let subject = control_subject(connection, Authorization::Developer);
         let mut transaction = control.begin_control_transaction(false).await?;
         if let Some(result) = claim_control_idempotency(
             &mut transaction,
@@ -4495,11 +4495,17 @@ fn definition(path: &str) -> Option<Definition> {
                 live: false,
             }
         }
-        "control.support.pruneSessions"
-        | "control.support.sendCommand"
-        | "control.support.createImpersonation" => Definition {
+        "control.support.pruneSessions" | "control.support.sendCommand" => Definition {
             kind: Reducer,
             authorization: ProjectAdmin,
+            live: false,
+        },
+        // Developers already enter any tenant in developer mode; signing in as
+        // one of its members is part of that support work, so it does not
+        // need project administration. The grant stays short-lived and audited.
+        "control.support.createImpersonation" => Definition {
+            kind: Reducer,
+            authorization: Developer,
             live: false,
         },
         "control.support.heartbeat" | "control.support.ackCommand" => Definition {
@@ -4875,6 +4881,17 @@ fn sha256_hex(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn developers_may_sign_in_as_a_tenant_member() {
+        let impersonation = definition("control.support.createImpersonation").unwrap();
+        assert_eq!(impersonation.kind, ControlKind::Reducer);
+        assert_eq!(impersonation.authorization, Authorization::Developer);
+        assert_eq!(
+            definition("control.support.sendCommand").unwrap().authorization,
+            Authorization::ProjectAdmin
+        );
+    }
 
     #[test]
     fn registry_has_only_three_function_kinds_and_preserves_live_contracts() {
