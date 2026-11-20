@@ -61,3 +61,23 @@ it("a reset object that never comes back holds the isolate's RPC slots only up t
     await probe.staleMs(previous);
   }
 });
+
+it("a reset object that never comes back also gives back the credits of what it had queued (review #550-1)", async () => {
+  const probe = sender("probe-d");
+  const previous = await probe.staleMs(2_000);
+  try {
+    const before = await probe.pressure();
+    await sender("tenant-gone2").fill(MAX_RPCS);
+    const queued = await sender("tenant-gone2").enqueueMore("h0", 3);
+    expect(queued.count - before.count).toBe(MAX_RPCS + 3);
+    await reset("tenant-gone2");
+    expect(await holder().release()).toBe(MAX_RPCS);
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    const late = await sender("tenant-15").sendOne("h5", 3_000);
+    expect(late.outcome).toBe("delivered");
+    // Before: { running: 0, count: 3, normal: >0 } for good: `fits()` and `backlogged()` would see a dead object's queue.
+    expect(late.pressure).toMatchObject({ running: before.running, count: before.count, normal: before.normal, recovery: before.recovery });
+  } finally {
+    await probe.staleMs(previous);
+  }
+});

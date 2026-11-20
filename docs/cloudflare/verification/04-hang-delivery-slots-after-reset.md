@@ -73,8 +73,21 @@ After the fix: both pass.
 before:  × a tenant reset with every isolate RPC slot in flight does not wedge its next instance or other tenants
          AssertionError: expected 'timeout' to be 'delivered'
          × a reset object that never comes back holds the isolate's RPC slots only up to the stale bound
-after:   ✓ both (kernel/gateway 89/89, kernel/delivery 102/102, root 589/589, kernel/assembly 141/141)
+after:   ✓ both (kernel/gateway 93/93, root 589/589 incl. kernel/delivery, kernel/assembly 141/141)
 ```
+
+The #550 review added accounting coverage (`outlet-reset.spec.ts` test 3, `outlet-settle.spec.ts`). Each mutation
+below fails at least one test:
+
+| Mutation | Fails |
+| --- | --- |
+| Stale rule releases only in-flight credits (the first head's behavior) | dead object's queued credits; live stale-then-settle |
+| `credits.running--` unconditional in `run`'s `finally` | live stale-then-settle (`running` goes to -1) |
+| `release` not idempotent | live stale-then-settle; retired late settlement |
+| No retired guard in `finally` | retired late batch refusal (resends `b`, `c`) |
+
+Removing the recount survives these tests: releasing the queued credits at stale time already restores the totals,
+and the recount is defense in depth against drift and for outlets the GC has collected.
 
 No separate dev Worker was needed. The shared dev Worker was not touched (no deploys, read-only log queries).
 
@@ -89,19 +102,28 @@ The fix is in `outlet.ts` and is bookkeeping only. Nothing changes what a live h
    late, the slot is not returned twice (`slotReturned`, idempotent `release`). This covers the incident, where the
    same tenant came back 11 s later in the same isolate.
 2. **Stale slots (bounded, other tenants).** An RPC that has held a slot for `RPC_SLOT_STALE_MS` (60 s) stops counting
-   against `MAX_RPCS`, and its in-flight credits are returned. This covers a reset object that never comes back to
-   this isolate. Its holder's ordered channel is unchanged: that holder still waits for the RPC. A slow live RPC
-   only loosens the isolate cap.
+   against `MAX_RPCS`. The credits of its batch, and of every payload queued behind it on that holder, are returned:
+   none of them can move until that RPC settles. The isolate's `normal`/`count`/`recovery`/`hosts` totals are then
+   recounted from the unreleased payloads of live outlets (`WeakRef`s, as `sweepOwners` does for `hosts`). This covers
+   a reset object that never comes back to this isolate: its RPC slots and its queued byte and item credits come back
+   within 60 s. Its stuck queues still count in `hosts` until GC collects the outlet, and they are bounded by
+   `MAX_HOSTS` with the existing sweep. Its holder's ordered channel is unchanged: that holder still waits for the RPC.
+   **Bound when the RPC was only slow** and settles later: the payloads that were queued behind it at that moment go
+   out uncounted. That is at most one holder backlog (`HOST_PENDING_BYTES` = 8 MiB, or one legal singleton) per stale
+   RPC. The isolate may run more than `MAX_RPCS` RPCs, at most one per holder, growing by at most 8 per 60 s.
+   A late settlement of a **retired** outlet returns its slot at most once and returns early: it never requeues,
+   rotates or re-enters the scheduler.
 3. **Watchdog.** Each reclaim logs one warn line with counts only (no ids):
    - `delivery: outlet of a reset object retired { slots, running, count }`
-   - `delivery: stale RPC slots returned { slots, running }`
+   - `delivery: stale RPC slots returned { slots, running, count }`
 
-   Each reclaim is also counted in `deliveryPressure()` (`retiredOutlets`, `retiredSlots`, `staleSlots`). The stale
-   sweep also runs about once a second while anything is scheduled, so a delivery RPC stuck for more than 60 s shows
-   up even below the cap.
+   Each reclaim is also counted in `deliveryPressure()` (`retiredOutlets`, `retiredSlots`, `staleSlots`). `schedule()`
+   sweeps only once the oldest held slot's deadline has passed (one comparison per call otherwise), so a delivery RPC
+   stuck for more than 60 s shows up even below the cap. `byObject` drops dead entries in `sweepOwners` and whenever
+   it reaches 1,024 ids.
 
-Runtime bundle (`wrangler deploy --dry-run -c kernel/assembly/runtime.wrangler.jsonc`): 1109.30 -> 1112.41 KiB
-(gzip 276.58 -> 277.45 KiB). No SQL, no rows read or written, no new runtime imports.
+Runtime bundle (`wrangler deploy --dry-run -c kernel/assembly/runtime.wrangler.jsonc`): 1109.30 -> 1114.39 KiB
+(gzip 276.58 -> 277.92 KiB). No SQL, no rows read or written, no new runtime imports.
 
 ## Ruled out
 
@@ -146,9 +168,8 @@ With the fix, a returning tenant recovers at once, and other tenants of the isol
 - **A delivery RPC that never settles in a live instance** (a holder that never answers) still blocks that one
   holder's ordered channel. The engine's stall reset cannot help: its recovery barrier queues behind the same RPC.
   This is not observed. The stale-slot warn line now makes it visible.
-- **`credits.hosts`** of a never-returning object's stuck queues is returned only by the existing `MAX_HOSTS` sweep
-  (`sweepOwners`, live `WeakRef`s). `AuthorityAdmission` uses the same pattern and recovers its totals from live
-  owners the same way.
+- **`hosts` entries** of a never-returning object's stuck queues stay counted until GC collects its outlet (recount
+  and `sweepOwners` use live `WeakRef`s). `AuthorityAdmission` uses the same pattern.
 
 ## Monitoring that would catch a recurrence
 

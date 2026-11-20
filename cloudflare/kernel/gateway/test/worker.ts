@@ -62,6 +62,12 @@ export class OutletSender extends DurableObject<OutletEnv> {
     await new Promise((resolve) => setTimeout(resolve, 50));
     return deliveryPressure();
   }
+  /** `k` more payloads for `host`, queued behind whatever it has in flight (not awaited). */
+  async enqueueMore(host: string, k: number): Promise<ReturnType<typeof deliveryPressure>> {
+    for (let i = 0; i < k; i++) void this.outlet.send(host, outletPayload(`queued-${host}-${i}`)).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return deliveryPressure();
+  }
   /** One payload; whether its RPC completed within `ms`. */
   async sendOne(host: string, ms: number): Promise<{ outcome: string; pressure: ReturnType<typeof deliveryPressure> }> {
     const outcome = await Promise.race([
