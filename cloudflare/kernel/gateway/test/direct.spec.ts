@@ -45,16 +45,16 @@ describe("X17g controller admitDirect", () => {
   it("grants a claimed lease on the serving slot and nothing else", async () => {
     const a = await serving(3), c = control(3);
     const d: DirectAdmission = { v: 1, cell: 3, gateway: a.gateway, epoch: a.epoch, connectionId: connection(3) };
-    const granted = (await c.admitDirect(d, 1))!;
+    const granted = (await c.admitDirect(d, 1)) as GatewayAssignment;
     expect(granted).toMatchObject({ v: 1, cell: 3, gateway: a.gateway, epoch: a.epoch, connectionId: d.connectionId });
     // Already claimed: the token cannot be claimed again, and the same connection is not admitted twice.
     expect(await c.claim(granted)).toBe(false);
-    expect(await c.admitDirect(d, 1)).toBeNull();
+    expect(await c.admitDirect(d, 1)).toEqual({ refused: "prior" });
     // Wrong epoch, holder, cell or a full holder: refused (the router falls back to acquire).
-    expect(await c.admitDirect({ ...d, connectionId: connection(3), epoch: a.epoch + 1 }, 1)).toBeNull();
-    expect(await c.admitDirect({ ...d, connectionId: connection(3), gateway: "auto-gw-3-99" }, 1)).toBeNull();
-    expect(await c.admitDirect({ ...d, connectionId: connection(4) }, 1)).toBeNull();
-    expect(await c.admitDirect({ ...d, connectionId: connection(3) }, MAX_SOCKETS)).toBeNull();
+    expect(await c.admitDirect({ ...d, connectionId: connection(3), epoch: a.epoch + 1 }, 1)).toEqual({ refused: "slot" });
+    expect(await c.admitDirect({ ...d, connectionId: connection(3), gateway: "auto-gw-3-99" }, 1)).toEqual({ refused: "slot" });
+    expect(await c.admitDirect({ ...d, connectionId: connection(4) }, 1)).toEqual({ refused: "invalid" });
+    expect(await c.admitDirect({ ...d, connectionId: connection(3) }, MAX_SOCKETS)).toEqual({ refused: "full" });
   });
 });
 
@@ -207,8 +207,8 @@ describe("X17g follow-up: cancelDirect", () => {
     const a = await serving(12), c = control(12);
     const d: DirectAdmission = { v: 1, cell: 12, gateway: a.gateway, epoch: a.epoch, connectionId: connection(12) };
     const other: DirectAdmission = { ...d, connectionId: connection(12) };
-    expect(await c.admitDirect(d, 1)).not.toBeNull();
-    expect(await c.admitDirect(other, 1)).not.toBeNull();
+    expect(await c.admitDirect(d, 1)).toHaveProperty("token");
+    expect(await c.admitDirect(other, 1)).toHaveProperty("token");
     const before = (await c.status()).pending;
     expect(await c.cancelDirect({ ...d, epoch: d.epoch + 1 })).toBe(false);
     expect(await c.cancelDirect(d)).toBe(true);

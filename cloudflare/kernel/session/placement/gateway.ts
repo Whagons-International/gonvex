@@ -18,7 +18,7 @@
  * ignored and every method tolerates older callers.
  */
 import { setDeliveryTiming } from "../../delivery/batcher";
-import { ASSIGNMENT_HEADER, DIRECT_HEADER, MAX_SOCKETS, controller, withDeadline, parseAssignment, parseDirect, type DirectAdmission, type AutoscaleEnv, type CapacitySample, type DrainCommand, type DrainResult, pressured, hashConnection } from "../../gateway/placement";
+import { ASSIGNMENT_HEADER, DIRECT_HEADER, MAX_SOCKETS, controller, isDirectRefusal, withDeadline, parseAssignment, parseDirect, type DirectAdmission, type AutoscaleEnv, type CapacitySample, type DrainCommand, type DrainResult, pressured, hashConnection } from "../../gateway/placement";
 import { GatewayMetrics } from "../../gateway/metrics";
 import { DurableObject } from "cloudflare:workers";
 import type { ModuleInfo, Ports, TenantRoute, TenantSession } from "../ports";
@@ -334,12 +334,15 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       if (limited) return limited;
       const left = deadline - Date.now();
       let timedOut = false;
-      const granted = left < 100 ? null : await withDeadline(controller(this.env, direct.cell).admitDirect(direct, this.host.sessions.size), left).catch((error: unknown) => {
+      const answer = left < 100 ? null : await withDeadline(controller(this.env, direct.cell).admitDirect(direct, this.host.sessions.size), left).catch((error: unknown) => {
         timedOut = String((error as Error)?.message ?? error) === "gateway RPC deadline";
         console.error("gateway: direct admission failed", { cause: String((error as Error)?.message ?? error).slice(0, 120) });
         return null;
       });
+      // #538 re-review: the controller names why it refused (an older controller answers null).
+      const granted = answer && !isDirectRefusal(answer) ? answer : null;
       if (!granted) {
+        span("gateway.admitDirect", { refused: isDirectRefusal(answer) ? answer.refused : left < 100 ? "budget" : timedOut ? "deadline" : "unknown", totalMs: Date.now() - queued });
         release();
         // A grant the controller writes after this deadline would stay a claimed lease for LEASE_MS while the router
         // falls back to `acquire` (#533 re-review): cancel it. The controller serializes calls, so the cancel runs
