@@ -677,15 +677,17 @@ export class Session {
    * #554: replica opens go to the tenant advertising `acceptsBusy`. A tenant whose backlog is full (its flag on) answers
    * the opens it did not queue with one busy reply; they wait here, in this socket's ordered queue (so its later frames
    * keep their order behind them), and go again after the tenant's `retryAfterMs` (jittered) with the same initial
-   * refs. After `BUSY_MAX_ATTEMPTS` or `BUSY_MAX_WAIT_MS` they go without `acceptsBusy`, and the tenant queues them:
+   * refs. After `BUSY_MAX_ATTEMPTS`, or at `BUSY_MAX_WAIT_MS` (2,000 ms) after the first refusal, whichever comes first,
+   * they go without `acceptsBusy` and the tenant queues them (no retry sleeps past that deadline):
    * nothing waits for good, and the client sees no error, only a later snapshot. A tenant with the flag off never
    * answers busy, so this is one dispatch as before.
    */
   private async forwardOpens(first: Extract<ClientFrame, { type: "replica.open" | "replica.openMany" }>, initials: readonly InitialRequestRef[]): Promise<void> {
     let frame: Extract<ClientFrame, { type: "replica.open" | "replica.openMany" }> = first, refs = initials;
-    const started = this.now(), epoch = this.record.subscriptionEpoch ?? 0;
+    const epoch = this.record.subscriptionEpoch ?? 0;
+    let deadline: number | undefined; // the first refusal + BUSY_MAX_WAIT_MS
     for (let attempt = 0; ; attempt++) {
-      const acceptsBusy = attempt < BUSY_MAX_ATTEMPTS && this.now() - started < BUSY_MAX_WAIT_MS;
+      const acceptsBusy = attempt < BUSY_MAX_ATTEMPTS && (deadline === undefined || this.now() < deadline);
       let busy: BusyReply | undefined;
       const view = { ...this.view(), initialRequests: refs, ...(acceptsBusy ? { acceptsBusy: true } : {}) } as SocketView;
       await this.forward(this.ports.tenants.dispatch(view, frame), refs, acceptsBusy ? (reply) => { busy = reply; } : undefined);
@@ -696,7 +698,10 @@ export class Session {
       list.forEach((open, index) => { if (held.has(open.id)) { opens.push(open); if (refs[index]) kept.push(refs[index]!); } });
       if (!opens.length) return;
       span("gateway.busy", { held: opens.length, attempt, retryAfterMs: (busy as BusyReply).retryAfterMs });
-      await new Promise<void>((resolve) => { this.timers.later(Math.max(10, Math.round((busy as BusyReply).retryAfterMs * (0.75 + Math.random() / 2))), resolve); });
+      deadline ??= this.now() + BUSY_MAX_WAIT_MS;
+      // The wait never runs past the deadline: the attempt at the deadline goes without `acceptsBusy`.
+      const wait = Math.min(Math.max(10, Math.round((busy as BusyReply).retryAfterMs * (0.75 + Math.random() / 2))), Math.max(0, deadline - this.now()));
+      await new Promise<void>((resolve) => { this.timers.later(wait, resolve); });
       // A subscription reset meanwhile (re-auth, discard) cleared these opens with every other; the client reopens.
       if (this.closed || (this.record.subscriptionEpoch ?? 0) !== epoch || !this.record.tenant) return;
       frame = { type: "replica.openMany", opens };

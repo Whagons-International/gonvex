@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { Session } from "../session";
 import type { Ports, SocketView, TenantSession } from "../ports";
-import { BUSY_FRAME_TYPE, BUSY_MAX_ATTEMPTS } from "../../delivery/protocol";
+import { BUSY_FRAME_TYPE, BUSY_MAX_ATTEMPTS, BUSY_MAX_WAIT_MS } from "../../delivery/protocol";
 
 function tenant(name: string, id = "t"): TenantSession {
   return {
@@ -16,9 +16,9 @@ function tenant(name: string, id = "t"): TenantSession {
 }
 
 type Call = { type: string; ids: string[]; acceptsBusy: boolean; initials: string[] };
-function fixture(busyRounds: number) {
+function fixture(busyRounds: number, retryAfterMs = 100) {
   let clock = 1_000_000, round = 0;
-  const sent: string[] = [], calls: Call[] = [];
+  const sent: string[] = [], calls: Call[] = [], at: number[] = [];
   const timers: Array<{ at: number; fn: () => void; cancelled: boolean }> = [];
   const ports: Ports = {
     control: {
@@ -36,11 +36,12 @@ function fixture(busyRounds: number) {
       dispatch: async (socket: SocketView, frame) => {
         const opens = frame.type === "replica.openMany" ? frame.opens : frame.type === "replica.open" ? [frame] : [];
         const acceptsBusy = (socket as SocketView & { acceptsBusy?: boolean }).acceptsBusy === true;
+        if (opens.length) at.push(clock);
         if (opens.length) calls.push({ type: frame.type, ids: opens.map((o) => o.id), acceptsBusy, initials: (socket.initialRequests ?? []).map((r) => r.id) });
         if (!opens.length) return frame.type === "reducer.call" ? [JSON.stringify({ type: "reducer.result", id: frame.id, result: null })] : [];
         if (!acceptsBusy || round++ >= busyRounds) return [];
         const refused = opens.length > 1 ? opens.slice(1) : opens;
-        return [JSON.stringify({ type: BUSY_FRAME_TYPE, ids: refused.map((o) => o.id), retryAfterMs: 100 })];
+        return [JSON.stringify({ type: BUSY_FRAME_TYPE, ids: refused.map((o) => o.id), retryAfterMs })];
       },
       connectionReset: async () => {},
     },
@@ -59,7 +60,7 @@ function fixture(busyRounds: number) {
       for (let i = 0; i < 20; i++) await Promise.resolve();
     }
   };
-  return { session, sent, calls, advance };
+  return { session, sent, calls, at, advance };
 }
 
 describe("#554 the gateway absorbs a tenant's busy reply", () => {
@@ -90,5 +91,18 @@ describe("#554 the gateway absorbs a tenant's busy reply", () => {
     expect(f.calls.map((c) => c.acceptsBusy)).toEqual([...Array(BUSY_MAX_ATTEMPTS).fill(true), false]);
     expect(f.calls.at(-1)!.ids).toEqual(["z"]); // each busy round queued its first open; the last goes unconditionally
     expect(f.sent.some((t) => t.includes(BUSY_FRAME_TYPE))).toBe(false);
+  });
+
+  it(`falls through at ${BUSY_MAX_WAIT_MS} ms after the first refusal even before ${BUSY_MAX_ATTEMPTS} attempts (lead cap)`, async () => {
+    const f = fixture(1_000, 1_500); // a tenant asking for long retries: the deadline, not the attempt limit, ends it
+    await f.session.receive(JSON.stringify({ type: "auth", id: "a1", project: "p", tenant: "t", token: "alice" }));
+    const opened = f.session.receive(JSON.stringify({ type: "replica.openMany", opens: ["x", "y", "z"].map((id) => ({ id, path: "items.all", args: {} })) }));
+    await f.advance(3_000);
+    await opened;
+    expect(f.calls.length).toBeLessThan(BUSY_MAX_ATTEMPTS + 1);
+    expect(f.calls.at(-1)!.acceptsBusy).toBe(false);
+    expect(f.calls.slice(0, -1).every((c) => c.acceptsBusy)).toBe(true);
+    // The unconditional attempt goes no later than the first refusal + BUSY_MAX_WAIT_MS (the clock steps by 10 ms).
+    expect(f.at.at(-1)! - f.at[0]!).toBeLessThanOrEqual(BUSY_MAX_WAIT_MS + 10);
   });
 });

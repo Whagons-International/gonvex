@@ -142,8 +142,9 @@ deployment after the calibration run (rollout step 1).
     busy reply is stripped in `forward` and never reaches the client.
   - The refused subset is resent after `retryAfterMs` (jittered ±25%, through the session's timers) as an `openMany`
     with its original initial-request refs, aligned by index as the engine matches them.
-  - After `BUSY_MAX_ATTEMPTS` (3) or `BUSY_MAX_WAIT_MS` (10 s), the gateway sends without `acceptsBusy`, and the
-    tenant queues them. This is the aging lane and the max-wait fallthrough in one rule: nothing waits for good.
+  - After `BUSY_MAX_ATTEMPTS` (3), or at `BUSY_MAX_WAIT_MS` (**2,000 ms after the first refusal**, the lead's cap),
+    whichever comes first, the gateway sends without `acceptsBusy`, and the tenant queues them. No retry wait runs
+    past that deadline. This is the aging lane and the max-wait fallthrough in one rule: nothing waits for good.
   - It stops resending if the socket closes, its subscription epoch changes (a reset cleared the opens), or it loses
     its tenant.
 - **Shared** (`kernel/delivery/protocol.ts`): `BUSY_FRAME_TYPE`, `BusyReply`, `busyReply()` and the two limits. This
@@ -153,7 +154,7 @@ deployment after the calibration run (rollout step 1).
 1. **Opens only.** Live-query subscribes (`query.subscribe`, the heaviest single units) are not gated yet.
 2. **The hold blocks the socket's frame queue.** Refused opens wait inside the socket's ordered turn, so that
    socket's later frames wait behind them, Reducer calls included. That keeps order trivially. The worst case is
-   bounded: 3 attempts, at most about 10 s, well under the 60 s stall close. The design's non-blocking hold, where
+   bounded: at most 2,000 ms after the first refusal (plus the final dispatch), well under the 60 s stall close. The design's non-blocking hold, where
    Reducer calls overtake held opens, needs the order check against `lib.rs` first.
 3. **Aging is attempt-based at the gateway,** not a tenant-side lane.
 
@@ -165,7 +166,8 @@ deployment after the calibration run (rollout step 1).
 - `kernel/session/test/backlog-busy.test.ts`:
   - the refused subset is resent with its initial refs, and the busy reply is never sent to the client;
   - a later Reducer call keeps its order behind the held opens;
-  - after 3 attempts the gateway stops advertising `acceptsBusy`.
+  - after 3 attempts the gateway stops advertising `acceptsBusy`;
+  - with long retries, it falls through no later than 2,000 ms after the first refusal.
 
 **Not done yet:**
 - the calibration run on dev (needs a dev window coordinated with X17);
