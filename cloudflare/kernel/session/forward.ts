@@ -12,9 +12,3 @@ export function forwardRefused(replies: readonly string[]): boolean {
   return replies.length === 1 && replies[0] === FORWARD_REFUSED;
 }
 
-/** X17o review: whether an outbound frame carries the commit of the call `callId` (plain, or inside a batch envelope). */
-export function carriesCommand(text: string, callId: string): boolean {
-  if (!text.includes("originCommandId")) return false;
-  const id = JSON.stringify(callId);
-  return text.includes(`"originCommandId":${id}`) || text.includes(`\\"originCommandId\\":${JSON.stringify(id).slice(1, -1)}`);
-}

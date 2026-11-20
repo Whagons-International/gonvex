@@ -261,11 +261,6 @@ export class SocketPresence {
   // ---- reducer calls (`call_reducer_with_presence`) --------------------------------------------
 
   /** Answers in memory when Rust does; null: call the Reducer. */
-  /** X17o: whether `shortCircuit` may answer this call in the gateway (it is then never forwarded). */
-  mayShortCircuit(call: ReducerCallRequest): boolean {
-    return this.config.enabled && (call.scope === "control" || this.config.legacyBeatPaths.includes(call.path));
-  }
-
   shortCircuit(call: ReducerCallRequest): ShortCircuit | null {
     if (!this.config.enabled) return null;
     const control = call.scope === "control";
@@ -288,6 +283,11 @@ export class SocketPresence {
       return present ? { frames } : { frames, after: () => this.set("active") };
     }
     return null;
+  }
+
+  /** X17o: whether `shortCircuit` may answer this call in the gateway (it is then never forwarded). */
+  mayShortCircuit(call: ReducerCallRequest): boolean {
+    return this.config.enabled && (call.scope === "control" || this.config.legacyBeatPaths.includes(call.path));
   }
 
   /** After a call the session sent on: register a support session, or apply a legacy transition. */

@@ -16,10 +16,6 @@ import type { ClientFrame } from "../session/decode";
 import type { SocketView, TenantSession } from "../session/ports";
 import { rpc, type GatewayRpc } from "../session/rpc";
 import { FORWARD_REFUSED } from "../session/forward";
-/** X17o: how long a socket Action dispatch is remembered for a call forwarded behind it. */
-const FORWARD_ACTION_MEMORY_MS = 60_000;
-/** X17o review: an Action dispatch's identity: connection, client id and the gateway's per-socket generation (ids may be reused). */
-const actionKey = (connectionId: string, actionId: string, generation: number) => `${connectionId}\u0000${actionId}\u0000${generation}`;
 import { TenantPresence } from "../presence/tenant";
 import { presenceConfig, type ConnectionReport } from "../presence/hub";
 import { type FilesRemapResult, TenantFiles } from "../files/tenant-files";
@@ -62,6 +58,10 @@ import { retryable } from "../reducer/errors";
 
 import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } from "./tenant-transfer";
 import { fixtureSpans, setSpanTiming, span, spanTimingFromEnv, spanTimingOn } from "../delivery/spans";
+/** X17o: how long a socket Action dispatch is remembered for a call forwarded behind it. */
+const FORWARD_ACTION_MEMORY_MS = 60_000;
+/** X17o review: an Action dispatch's identity: connection, client id and the gateway's per-socket generation (ids may be reused). */
+const actionKey = (connectionId: string, actionId: string, generation: number) => `${connectionId}\u0000${actionId}\u0000${generation}`;
 
 // Match projectModuleFromManifest: an omitted/null artifact format becomes 0.
 const artifactFormat = (generation: unknown): number => typeof generation === "number" ? generation : 0;
@@ -284,6 +284,10 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     // closed (connectionReset) or was refused meanwhile rejects the call, as today's in-order dispatch would.
     if (socket.afterAction !== undefined) {
       if (frame.type !== "reducer.call" || !await this.followsAction(socket.connectionId, socket.afterAction, socket.actionGeneration)) return [FORWARD_REFUSED];
+      // Review (B): a publication while the call was held. The gateway's turn would answer client.updateRequired
+      // without dispatching it; refusing here commits nothing, and that turn does exactly that.
+      const active = this.kernel.module?.clientContract;
+      if (socket.forwardContract === undefined || (active == null ? null : String(active)) !== socket.forwardContract) return [FORWARD_REFUSED];
     }
     // Every real caller supplies its current server-owned scope, including a
     // writer with no subscriptions. Its no-op commit watermark is scoped too.

@@ -70,6 +70,7 @@ describe("X17o a Reducer call behind an in-flight Action is forwarded at once", 
     const c = f.create("c1"); await f.tick();
     expect(f.of("c1")).toHaveLength(1); // sent while the Action is out
     expect(f.of("c1")[0]!.socket.afterAction).toBe("a1");
+    expect(f.of("c1")[0]!.socket.forwardContract).toBeNull(); // the contract its frame was checked against (none)
     f.of("c1")[0]!.release(); await f.tick(); // the tenant answered the forwarded call first
     expect(f.types()).toEqual([]); // nothing is sent before the Action's own result
     f.of("a1")[0]!.release(); await a; await c;
@@ -210,7 +211,7 @@ describe("X17o a Reducer call behind an in-flight Action is forwarded at once", 
     const tx = JSON.stringify({ type: "replica.transaction", cursor: { epoch: "e", revision: 9 }, originCommandId: "c1", changes: [] });
     const watermark = JSON.stringify({ type: "replica.watermark", revision: 9 });
     const epoch = (f.record.subscriptionEpoch as number | undefined) ?? 0;
-    f.session.replicaDelivery({ v: REPLICA_DELIVERY_VERSION, instance: (f.record.replicaInstance as string | undefined) ?? "i", scopeFence: 1, shared: [], sockets: {} } as never, { ops: [["f", tx], ["f", watermark]], subscriptionEpoch: epoch } as never);
+    f.session.replicaDelivery({ v: REPLICA_DELIVERY_VERSION, instance: (f.record.replicaInstance as string | undefined) ?? "i", scopeFence: 1, shared: [], sockets: {} } as never, { ops: [["f", tx], ["f", watermark]], subscriptionEpoch: epoch, originCommandId: "c1" } as never);
     // An unrelated earlier frame (the Action's own tool commit) is not held.
     expect(f.sent.some((text) => text.includes('"originCommandId":"c1"'))).toBe(false);
     f.of("a1")[0]!.release(); await a;
@@ -225,7 +226,7 @@ describe("X17o a Reducer call behind an in-flight Action is forwarded at once", 
     const c = f.create("c1"); await f.tick();
     const tool = JSON.stringify({ type: "replica.transaction", cursor: { epoch: "e", revision: 8 }, originCommandId: "tool-1", changes: [] });
     const epoch = (f.record.subscriptionEpoch as number | undefined) ?? 0;
-    f.session.replicaDelivery({ v: REPLICA_DELIVERY_VERSION, instance: (f.record.replicaInstance as string | undefined) ?? "i", scopeFence: 1, shared: [], sockets: {} } as never, { ops: [["f", tool]], subscriptionEpoch: epoch } as never);
+    f.session.replicaDelivery({ v: REPLICA_DELIVERY_VERSION, instance: (f.record.replicaInstance as string | undefined) ?? "i", scopeFence: 1, shared: [], sockets: {} } as never, { ops: [["f", tool]], subscriptionEpoch: epoch, originCommandId: "tool-1" } as never);
     expect(f.sent.some((text) => text.includes('"tool-1"'))).toBe(true); // sent at once, before the Action's result
     f.of("a1")[0]!.release(); f.of("c1")[0]!.release(); await a; await c;
   });

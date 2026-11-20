@@ -186,6 +186,12 @@ export interface SocketWork {
   readonly opened?: Readonly<Record<string, string>>;
   /** Subscriptions the tenant removed (needHashes, error, reset). */
   readonly removed?: readonly string[];
+  /**
+   * X17o: the command that made this work's commit (the commit's first non-empty `originCommandId`), so a holder can
+   * order a forwarded Reducer call's output (every op of its work: live queries, transaction, deltas, ready) after
+   * the Action's result. Absent for catch-up chunks and work that is not one commit.
+   */
+  readonly originCommandId?: string;
 }
 
 export interface ReplicaDelivery {

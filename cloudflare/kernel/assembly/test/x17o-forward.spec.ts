@@ -20,12 +20,12 @@ async function fixture(run: (object: CompositionTenant) => Promise<void>) {
     await run(tenant);
   });
 }
-function view(tenantId: string, options: { connectionId?: string; afterAction?: string; actionGeneration?: number; subscriptionEpoch?: number } = {}): SocketView {
+function view(tenantId: string, options: { connectionId?: string; afterAction?: string; actionGeneration?: number; subscriptionEpoch?: number; forwardContract?: string | null } = {}): SocketView {
   const tenant = serviceSession({ principalId: 'x17o', route: { projectId: 'p', tenantId, databaseUrl: 'sqlite://test' }, functions: [], maxDelegationSeconds: 0 });
-  const { connectionId = 'conn-1', afterAction, actionGeneration = 1, subscriptionEpoch = 1 } = options;
+  const { connectionId = 'conn-1', afterAction, actionGeneration = 1, subscriptionEpoch = 1, forwardContract = null } = options;
   return { connectionId, host: 'fixture', actionGeneration, tenant, connection: { projectId: 'p', identity: tenant.identity, tenant, impersonationId: '', authToken: '' }, subscriptionEpoch, publicTransport: false,
     negotiated: { snapshotPages: false, noOldValues: false, fieldPatches: false, batchFrames: false, nativeRows: false, setDigest: false, telemetryBatch: false, presence: false },
-    ...(afterAction === undefined ? {} : { afterAction }) };
+    ...(afterAction === undefined ? {} : { afterAction, forwardContract }) };
 }
 const call = (id: string) => ({ type: 'reducer.call' as const, id, path: 'probe.write', args: {}, idempotencyKey: `k-${id}` });
 const tenantName = (object: CompositionTenant) => (object as unknown as { ctx: DurableObjectState }).ctx.id.name!;
@@ -103,4 +103,12 @@ it("review B: a forward behind a reused Action id does not run on the earlier di
   // id a1 reused (generation 2); its dispatch has not reached the tenant yet, the forward has.
   const out = await object.dispatch(view(name, { actionGeneration: 2, afterAction: 'a1' }), call('c1'));
   expect(out).toEqual([FORWARD_REFUSED]);
+}));
+
+it('review R5 (fix a): a forward checked against another client contract than the active module is refused, nothing committed', async () => fixture(async (object) => {
+  const name = tenantName(object);
+  (object as unknown as Internals).trackAction('conn-1', 'a1', 1, Promise.resolve(true));
+  expect(await object.dispatch(view(name, { afterAction: 'a1', forwardContract: '7' }), call('c1'))).toEqual([FORWARD_REFUSED]);
+  (object as unknown as Internals).trackAction('conn-1', 'a2', 1, Promise.resolve(true));
+  expect(reachedReducer(await object.dispatch(view(name, { afterAction: 'a2' }), call('c2')))).toBe(true); // same contract (none): runs
 }));

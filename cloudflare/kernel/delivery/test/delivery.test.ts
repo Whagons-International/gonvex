@@ -529,6 +529,19 @@ describe("X17n: a commit's delivery reads the new log rows, not the retained log
   });
 });
 
+describe("X17o: each socket's commit work carries the commit's origin", () => {
+  it("sets originCommandId on the work of the commit that command made", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      engine.dispatch(socket("s1"), { type: "replica.open", id: "sub", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      payloads.length = 0;
+      await commit([["INSERT INTO items VALUES ('o1', 1, 'o')", []]]);
+      const work = payloads.map(([, p]) => p.sockets.s1).find((w) => w && w.ops.length);
+      expect(work?.originCommandId).toMatch(/^c\d+$/);
+    });
+  });
+});
+
 describe("K22 ordered query and replica commits", () => {
   // Receiver controls below test the engine/barrier wiring; actual holder
   // scope validation and rebuilding are covered separately on Gateway/Session.

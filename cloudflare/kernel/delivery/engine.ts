@@ -1096,6 +1096,8 @@ export class ReplicaDeliveryEngine {
       return at;
     };
     const membership = membershipChanges(transaction);
+    // X17o: the commit's origin travels with each socket's work (as the transaction frame's `originCommandId`).
+    const origin = transaction.changes.find((c) => c.originCommandId !== "")?.originCommandId;
     // One set of reads per transaction, shared by every subscription of every connection (no SQL per subscriber).
     const reads = new TransactionReads({
       sql: db,
@@ -1127,7 +1129,8 @@ export class ReplicaDeliveryEngine {
       let sockets = byHost.get(connection.host);
       if (!sockets) byHost.set(connection.host, (sockets = {}));
       const watermark = Math.min(transaction.revision, ...(this.options.live?.computedRevisions(connection.id) ?? []));
-      sockets[connection.id] = { ops, watermark, subscriptionEpoch: connection.epoch, ...(removed.length ? { removed: removed.map((s) => s.id) } : {}) } as ScopedSocketWork;
+      sockets[connection.id] = { ops, watermark, subscriptionEpoch: connection.epoch, ...(removed.length ? { removed: removed.map((s) => s.id) } : {}),
+        ...(origin ? { originCommandId: origin } : {}) } as ScopedSocketWork;
     }
 
     // A commit's watermark reaches every holder, including those with no work this time; each gets only its texts.

@@ -15,7 +15,9 @@
  */
 import { type Negotiated, NOTHING_NEGOTIATED, negotiate, sessionReadyFrame, type ReadyOptions } from "./capabilities";
 import { decodeClientFrame, type AuthFrame, type ClientCapabilities, type ClientFrame, type Json, type ReducerCallRequest } from "./decode";
-import { carriesCommand, forwardRefused } from "./forward";
+import { forwardRefused } from "./forward";
+/** X17o review: the most a socket holds behind its Action's result (UTF-16 bytes); over it the socket closes. */
+const FORWARD_HOLD_MAX_BYTES = 16 * 1024 * 1024;
 import { replicaDirective, type ReplicaDirective } from "./directive";
 import { AUTH_ERRORS, CLOSE, type CloseFrame, LIMITS, UNAUTHENTICATED, echoTrace, exceedsUtf8, frames } from "./protocol";
 import {
@@ -255,12 +257,14 @@ export class Session {
   /** X17o: the tenant Action this socket's active item is dispatching (its port call has not returned). */
   private inflightAction: string | null = null;
   /**
-   * X17o review: the forwarded call's id while it is out, and, once a frame carrying its own commit (`originCommandId`)
-   * reaches `sendRaw` before the Action's reply was sent, that frame and every later one: released in order right
-   * after the Action's reply (as today, where the call is not executed until the Action's result was sent).
+   * X17o review: the forwarded call's id while it is out. From the first delivery work whose commit it made
+   * (`SocketWork.originCommandId`, checked in `replicaDelivery`), every outbound frame is held (`held`), and written in
+   * order right after the Action's reply: as today, where the call is not executed until the Action's result was sent.
    */
-  private forwardGuard: { callId: string; held: string[] | null } | null = null;
+  private forwardGuard: { callId: string; held: string[] | null; heldBytes: number } | null = null;
   private sendingActionReply = false;
+  /** X17o review: the module client contract this socket's last frame was checked against (`updateRequiredBeforeFrame`). */
+  private checkedContract: string | null | undefined = undefined;
   private queueActive = false;
   /** X07 BUG-5: when the item now holding the queue started (null: idle). */
   private queueActiveSince: number | null = null;
@@ -424,9 +428,11 @@ export class Session {
     const call: ReducerCallRequest | undefined = frame.type === "reducer.call" ? frame
       : frame.type === "reducer.callMany" && frame.calls.length === 1 ? frame.calls[0] : undefined;
     if (!call || call.scope === "control" || !call.idempotencyKey?.trim() || this.presence.mayShortCircuit(call)) return undefined;
-    const reply = this.ports.tenants.dispatch({ ...this.view(), afterAction: action, actionGeneration: this.record.actionGenerations?.[action] }, { type: "reducer.call", ...call });
+    // Review (B): the tenant refuses the call if its active module's contract is no longer the one checked here.
+    if (this.checkedContract === undefined) return undefined;
+    const reply = this.ports.tenants.dispatch({ ...this.view(), afterAction: action, actionGeneration: this.record.actionGenerations?.[action], forwardContract: this.checkedContract }, { type: "reducer.call", ...call });
     void reply.catch(() => {}); // a failed forward is dispatched again below
-    this.forwardGuard = { callId: call.id, held: null };
+    this.forwardGuard = { callId: call.id, held: null, heldBytes: 0 };
     return { call, frame, reply };
   }
 
@@ -561,7 +567,11 @@ export class Session {
   private async updateRequiredBeforeFrame(): Promise<boolean> {
     if (!this.record.tenant) return false;
     const module = await this.modules.get(this.record.connection.projectId);
-    if (module?.clientContract == null || this.record.clientContract === String(module.clientContract)) return false;
+    if (module?.clientContract == null || this.record.clientContract === String(module.clientContract)) {
+      this.checkedContract = module?.clientContract == null ? null : String(module.clientContract);
+      return false;
+    }
+    this.checkedContract = undefined;
     this.send(frames.clientUpdateRequired(module.clientContract));
     this.close(CLOSE.ended);
     return true;
@@ -736,8 +746,11 @@ export class Session {
     const origins = initial ? (Array.isArray(initial) ? [...initial] : [initial as InitialRequestRef]) : [];
     // X15: an openMany reply completes many initials in this one synchronous loop; one recovery write covers them.
     const sendAll = () => {
-      // X17o review: an Action's reply passes a held forward (its frames precede the forwarded call's rows).
-      if (actionReply) this.sendingActionReply = true;
+      if (!actionReply) return sendEach();
+      // X17o review: the open batch goes first with the bypass off (rows of the forwarded commit in it are held, the
+      // Action's own earlier rows are not), then the Action's reply passes a held forward.
+      if (this.delivery?.batcher.hasOpen) this.delivery.batcher.flush();
+      this.sendingActionReply = true;
       try { sendEach(); } finally { this.sendingActionReply = false; }
     };
     const sendEach = () => {
@@ -827,6 +840,7 @@ export class Session {
       return obsolete();
     }
     if (work && epoch !== (this.record.subscriptionEpoch ?? 0)) return obsolete();
+    if (work) this.holdForwardedOutput(work);
     if (!work) {
       // An unscoped holder-wide watermark is never an auth-scope certificate.
       if (this.record.replicaInstance && this.record.replicaInstance !== payload.instance) this.close({ code: 1012, reason: "delivery scope requires reconnect" });
@@ -1708,10 +1722,12 @@ export class Session {
     }
     this.lastOutboundAt = this.now();
     const guard = this.forwardGuard;
-    if (guard && !this.sendingActionReply && (guard.held || carriesCommand(text, guard.callId))) {
-      // X17o review: accepted (in order) now, written after the Action's reply.
-      (guard.held ??= []).push(text);
+    if (guard?.held && !this.sendingActionReply) {
+      // X17o review: accepted (in order) now, written after the Action's reply. Bounded like the socket's own buffer.
+      guard.held.push(text);
+      guard.heldBytes += text.length * 2;
       this.sinkSequence++;
+      if (guard.heldBytes > FORWARD_HOLD_MAX_BYTES) this.close({ code: 1011, reason: "forwarded call output exceeds the hold limit" });
       return true;
     }
     this.sink.send(text);
@@ -1719,12 +1735,25 @@ export class Session {
     return true;
   }
 
-  /** X17o review: the Action's reply was sent (or its dispatch ended): held frames go out in their order. */
+  /**
+   * X17o review: the Action's reply was sent (or its dispatch ended): held frames go out in their order. Also called by
+   * `close()` before the close frame, even when the Action's result was never sent (stall, failed Action call): the held
+   * frames were counted as accepted (`sinkSequence`, delivery receipts), so they are written rather than dropped.
+   */
   private releaseForwardGuard(): void {
     const held = this.forwardGuard?.held;
     this.forwardGuard = null;
-    if (!held || this.closed) return;
+    if (!held?.length || this.closed) return;
+    this.lastOutboundAt = this.now();
     for (const text of held) this.sink.send(text);
+  }
+
+  /** X17o review: the forwarded call's own commit reached this socket: hold from here (after the open batch went out). */
+  private holdForwardedOutput(work: SocketWork): void {
+    const guard = this.forwardGuard;
+    if (!guard || guard.held || work.originCommandId !== guard.callId) return;
+    if (this.delivery?.batcher.hasOpen) this.delivery.batcher.flush();
+    guard.held = [];
   }
 
   close(frame: CloseFrame): void {

@@ -139,6 +139,11 @@ export interface SocketView {
    * follow. The tenant runs the call after that Action's inline result, or answers `FORWARD_REFUSED`.
    */
   afterAction?: string;
+  /**
+   * X17o review: on a forwarded call, the module client contract the socket was checked against (null: none). The
+   * tenant refuses the call if its active module's contract differs when the call would run (a publication meanwhile).
+   */
+  forwardContract?: string | null;
 }
 
 /** K17: a `gvx_svc_` credential's admission (`authenticate_service_principal`). */
