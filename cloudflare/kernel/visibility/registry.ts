@@ -13,7 +13,7 @@
 // the index and reloads it.
 
 import { ParentAclIndex } from "./acl-index.ts";
-import { markedTable, replacedMarker } from "../capture/replace-marker.ts";
+import { isReplacedMarker, REPLACED_MARKER } from "../capture/replace-marker.ts";
 import { readChanges, readClock, type FeedTransaction, type LogChange, type TenantClock } from "./feed.ts";
 import { get, isObject, scalar, type JsonValue } from "./json.ts";
 import { debugString } from "./json.ts";
@@ -185,9 +185,9 @@ export class ParentAclRegistry {
 
   private catchUp(sql: CatalogSql, entry: Entry, clock: TenantClock): void {
     const counted = { rowsRead: 0 };
-    for (const transaction of readChanges(countingSql(sql, counted), clock.epoch, [entry.shape.table, replacedMarker(entry.shape.table)], entry.index.revision, clock.revision)) {
+    for (const transaction of readChanges(countingSql(sql, counted), clock.epoch, [entry.shape.table, REPLACED_MARKER], entry.index.revision, clock.revision)) {
       // X17p (#555 R1): a REPLACE may have deleted rows unlogged; the index reloads.
-      if (transaction.changes.some((change) => markedTable(change.table) !== undefined)) {
+      if (transaction.changes.some((change) => isReplacedMarker(change.table))) {
         entry.index.poison();
         this.counters.rowsRead += counted.rowsRead;
         return;
@@ -213,8 +213,8 @@ export class ParentAclRegistry {
         index.poison();
         continue;
       }
-      // X17p (#555 R1): a REPLACE of this table may have deleted rows unlogged.
-      if (transaction.changes.some((change) => markedTable(change.table) === entry.shape.table)) {
+      // X17p (#555): a REPLACE may have deleted rows unlogged.
+      if (transaction.changes.some((change) => isReplacedMarker(change.table))) {
         index.poison();
         continue;
       }

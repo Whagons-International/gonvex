@@ -56,7 +56,7 @@ import {
 } from "./parameters";
 import { projectionKinds } from "./projection";
 import { ReplaceModel } from "./replace-model";
-import { REPLACED_MARKER_SQL, replacedMarker } from "../capture/replace-marker.ts";
+import { REPLACED_MARKER_SQL } from "../capture/replace-marker.ts";
 import { RegexpRewriteError, regexpRewrites, RegexpUnsupportedError } from "./regexp";
 import {
   decodeCell,
@@ -560,10 +560,10 @@ export class StorageSession {
     else if (mode === "mixed") this.written.noteStatement(tokens, this.foreignKeyModel(), this.tenant.rowReported ?? (() => false));
   }
 
-  /** X17p (#555 R1): the change-log marker for each captured table this write may have REPLACE-deleted rows of. */
+  /** X17p (#555): the transaction's REPLACE marker when this write may have REPLACE-deleted rows (`replace-model.ts`). */
   private markReplaces(tokens: readonly Token[]): void {
     const model = this.tenant.replaceModel((sql) => this.objects(this.execute(sql, [], this.stats.schema)));
-    for (const table of model.targets(tokens)) this.execute(REPLACED_MARKER_SQL, [replacedMarker(table)]);
+    if (model.marks(tokens)) this.execute(REPLACED_MARKER_SQL, []);
   }
 
   /** Change capture (K03) or a writer reports the exact rows it wrote, for a row-level FK check. */

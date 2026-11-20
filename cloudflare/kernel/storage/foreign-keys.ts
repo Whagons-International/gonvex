@@ -85,7 +85,7 @@ export function deferredClauses(createSql: string): boolean[] {
   return out;
 }
 
-export interface TriggerWrites {
+interface TriggerWrites {
   readonly events: ReadonlySet<WriteOperation>;
   readonly writes: readonly WrittenTable[];
 }

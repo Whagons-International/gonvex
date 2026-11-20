@@ -181,7 +181,7 @@ describe("live queries", () => {
 
 describe("#555 C3: a REPLACE marker reruns live queries that read its table", () => {
   // A REPLACE deletes rows without a log row: the replacing insert's image names another member, so no change is
-  // "mine" by images alone. The marker `_gonvex_replaced:<table>` makes the query rerun.
+  // "mine" by images alone. The global marker `_gonvex_replaced:*` makes the query rerun.
   const SPOTS: LiveQueryPlan = { table: "spots", key: "_id", columns: ["_id"] };
   const MANIFEST2 = {
     functions: { "spots.mine": { kind: "query", delivery: "live", dependencies: { liveQueryPlan: SPOTS } } },
@@ -200,7 +200,7 @@ describe("#555 C3: a REPLACE marker reruns live queries that read its table", ()
 CREATE TABLE loose ("_id" PRIMARY KEY, "memberId" TEXT, "spotId" TEXT, "deletedAt" TEXT);
 CREATE TABLE claims ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON CONFLICT REPLACE);`;
   const tx = (revision: number, changes: Array<Record<string, unknown>>) => ({ kind: "transaction" as const, revision, epoch: "epoch-1", changes: changes.map((c) => ({ changedColumns: [], oldValue: null, newValue: null, ...c })) as never });
-  const marker = (table: string) => ({ table: `_gonvex_replaced:${table}`, rowId: "", operation: "delete" });
+  const marker = (_table?: string) => ({ table: "_gonvex_replaced:*", rowId: "", operation: "delete" });
   const rows = (frames: Map<string, string[]>) => frames.get("s1")?.map((f) => JSON.parse(f).result?.map((r: { _id: string }) => r._id));
 
   it("same-key REPLACE on a principal table, and a declared conflict on a grant table: rerun only with the marker", async () => {
@@ -226,9 +226,11 @@ CREATE TABLE claims ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQ
       setRevision(state, 6);
       expect(rows(await queries.live.applyFeed(tx(6, [{ table: "claims", rowId: "c3", operation: "insert", newValue: { _id: "c3", memberId: "m-bob", spotId: "s7" } }, marker("claims")])))).toEqual([[]]);
 
-      // A marker for a table the query does not read leaves it alone.
+      // The marker is global: a REPLACE elsewhere still reruns the query; the result is unchanged, so no frame.
       setRevision(state, 7);
-      expect((await queries.live.applyFeed(tx(7, [marker("other")]))).size).toBe(0);
+      const stats: FeedStats = { reruns: 0, executions: 0, skipped: 0, statements: 0, rowsRead: 0 };
+      expect((await queries.live.applyFeed(tx(7, [marker()]), stats)).size).toBe(0);
+      expect(stats.reruns).toBe(1);
     });
   });
 });

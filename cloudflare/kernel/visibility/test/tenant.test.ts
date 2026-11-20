@@ -316,14 +316,14 @@ describe("feed maintenance", () => {
       const pushed = await harness.read((session) => harness.registry.acl.ensure(session, plans, [notes]).get("tasks", "_id"));
       const push = async (statement: string) => {
         const revision = await harness.commit([[statement, []]]);
-        return harness.read((session) => readChanges(session, readClock(session).epoch, ["tasks", "_gonvex_replaced:tasks"], revision - 1, revision)[0]!);
+        return harness.read((session) => readChanges(session, readClock(session).epoch, ["tasks", "_gonvex_replaced:*"], revision - 1, revision)[0]!);
       };
       const ordinary = await push(`INSERT INTO tasks VALUES ('t-push', 'w1', NULL, 'alice', 'web', NULL)`);
       harness.registry.acl.apply(ordinary, ordinary.revision - 1);
       expect(pushed.poisoned).toBe(false);
       expect(pushed.revision).toBe(ordinary.revision);
       const replaced = await push(`REPLACE INTO tasks VALUES ('t-push', 'w2', NULL, 'alice', 'web', NULL)`);
-      expect(replaced.changes.map((change) => change.table)).toEqual(["tasks", "_gonvex_replaced:tasks"]);
+      expect(replaced.changes.map((change) => change.table)).toEqual(["tasks", "_gonvex_replaced:*"]);
       harness.registry.acl.apply(replaced, replaced.revision - 1);
       expect(pushed.poisoned, "a pushed REPLACE marker poisons the index").toBe(true);
     });
@@ -421,7 +421,7 @@ describe("permission bits from the manifest (permissionGrants)", () => {
       // #555 M-e, the push path: a pushed transaction carrying the grants marker poisons the bits ("rebuilding").
       const push = async (statement: string) => {
         const revision = await harness.commit([[statement, []]]);
-        return harness.read((session) => readChanges(session, readClock(session).epoch, ["grants", "_gonvex_replaced:grants"], revision - 1, revision)[0]!);
+        return harness.read((session) => readChanges(session, readClock(session).epoch, ["grants", "_gonvex_replaced:*"], revision - 1, revision)[0]!);
       };
       const ordinary = await push(`INSERT INTO grants VALUES ('g9', 'm1', 'lead', 'w1', NULL)`);
       bits.apply(ordinary);

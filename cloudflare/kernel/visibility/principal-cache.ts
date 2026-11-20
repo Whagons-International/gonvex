@@ -14,14 +14,15 @@
 //
 // X17p: when an input table changed between the entry and a later open, the
 // entry is rolled forward through those commits instead of dropped. A change to
-// `members` (role, member row) still drops it. Otherwise each active set whose
-// joined tables changed, or whose base table changed other than by inserts, is
-// re-run with the same SQL; a set whose base table only gained rows adds what
-// those rows contribute (a set is inner joins and equality predicates, so it is
-// monotone in its rows); derived sets are re-run. An insert without a row
-// image, a REPLACE marker (`../capture/replace-marker.ts`: rows may have been
-// deleted unlogged), or inserted keys that do not match their rows exactly
-// (`insertedKeysExact`) count as other changes, so the set re-runs. The rolled
+// `members` (role, member row) or the REPLACE marker
+// (`../capture/replace-marker.ts`: rows of any table may have been deleted
+// unlogged) still drops it. Otherwise each active set whose joined tables
+// changed, or whose base table changed other than by inserts, is re-run with
+// the same SQL; a set whose base table only gained rows adds what those rows
+// contribute (a set is inner joins and equality predicates, so it is monotone
+// in its rows); derived sets are re-run. An insert without a row image, or
+// inserted keys that do not match their rows exactly (`insertedKeysExact`),
+// count as other changes, so the set re-runs. The rolled
 // sets are the sets a fresh resolution at the open's revision returns. Rust
 // drops the entry here; both give the same resolution, fingerprint and frames.
 //
@@ -29,7 +30,7 @@
 // time, so Rust's single-flight lock per key is not needed.
 
 import { sha256Hex } from "../capture/digest.ts";
-import { markedTable, replacedMarker } from "../capture/replace-marker.ts";
+import { REPLACED_MARKER } from "../capture/replace-marker.ts";
 import { activeSets, setOf, setsSignatureText, type VisibilityPlan } from "./plan.ts";
 import { addInsertedRowsInto, resolveDerived, resolveSetInto, visibilityFingerprint, type VisibilitySession, type VisibilitySql } from "./principal.ts";
 import type { DirectContext, ResolvedVisibility, TokenSets } from "./resolved.ts";
@@ -194,7 +195,8 @@ export class PrincipalCache {
    * when the member must be resolved again (a `members` change).
    */
   private rollForward(entry: Entry, plan: VisibilityPlan, sql: VisibilitySql, clock: PrincipalClock, changes: ReadonlyMap<string, TableChanges>): Entry | undefined {
-    if (changes.has("members")) return undefined;
+    // A member row change, or a REPLACE marker (rows of any table may be gone unlogged): resolve again.
+    if (changes.has("members") || changes.has(REPLACED_MARKER)) return undefined;
     const core = entry.core;
     const keys = this.entityKeys(sql);
     const sets = new Map<string, ReadonlySet<string>>(core.sets);
@@ -352,25 +354,19 @@ interface TableChanges {
 
 /**
  * Per input table with changes in `(low, high]`: how many, and whether all are inserts that carry a row image.
- * A REPLACE marker of a table (`replace-marker.ts`) makes it a non-insert change: rows may have gone unlogged.
- * Index seeks on `(table_name, revision)`.
+ * The REPLACE marker (`replace-marker.ts`) appears under its own name: rows of any table may have gone unlogged,
+ * and the roll-forward drops the entry. Index seeks on `(table_name, revision)`.
  */
 export function changeSummary(sql: VisibilitySql, tables: readonly string[], low: number, high: number): Map<string, TableChanges> {
   const found = new Map<string, TableChanges>();
   if (!tables.length || low >= high) return found;
-  const names = [...tables, ...tables.map(replacedMarker)];
+  const names = [...tables, REPLACED_MARKER];
   const list = names.map((_, index) => `$${index + 3}`).join(", ");
   const rows = sql.run(
     `SELECT table_name, count(*), sum(operation <> 'insert' OR new_value IS NULL) FROM _gonvex_sync_changes WHERE table_name IN (${list}) AND revision > $1 AND revision <= $2 GROUP BY table_name`,
     [low, high, ...names],
   ).rows;
-  for (const row of rows) {
-    const name = String(row[0]);
-    const marked = markedTable(name);
-    const table = marked ?? name;
-    const before = found.get(table);
-    found.set(table, { rows: Number(row[1]) + (before?.rows ?? 0), insertsOnly: marked === undefined && Number(row[2]) === 0 && (before?.insertsOnly ?? true) });
-  }
+  for (const row of rows) found.set(String(row[0]), { rows: Number(row[1]), insertsOnly: Number(row[2]) === 0 });
   return found;
 }
 

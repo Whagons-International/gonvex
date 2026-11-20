@@ -31,7 +31,7 @@
  * path and arguments share one execution per commit, and their frames share
  * one encoding of the result.
  */
-import { markedTable } from "../capture/replace-marker.ts";
+import { isReplacedMarker } from "../capture/replace-marker.ts";
 import type { StorageSession, TenantStorage } from "../storage";
 import type { TenantSession } from "../session/ports";
 import { UNAUTHENTICATED } from "../session/protocol";
@@ -278,10 +278,9 @@ export class LiveQueries {
 
   /** Whether `change` can alter what `subscription` returns. */
   private relevant(subscription: Subscription, change: LogChange): boolean {
-    // X17p (#555 C3): a REPLACE marker says rows of its table may have been deleted with no log row (no image to
-    // decide by); `tables` holds the query's own, related and every plan's dependency tables, so rerun.
-    const marked = markedTable(change.table);
-    if (marked !== undefined) return subscription.tables.has(marked);
+    // X17p (#555): the REPLACE marker says rows of any table may have been deleted with no log row (no image to
+    // decide by): rerun.
+    if (isReplacedMarker(change.table)) return true;
     if (!subscription.tables.has(change.table)) return false;
     const concerns = this.options.visibility.changeConcerns;
     if (!concerns || subscription.visibilityPlan.version !== 2 || subscription.projection.has(change.table)) return true;

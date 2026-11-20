@@ -581,12 +581,23 @@ describe("#555 R1: a REPLACE's unlogged delete reaches live subscriptions as a r
       payloads.length = 0;
       await commit([["REPLACE INTO grants VALUES ('g1', 'm-bob', 'i1')", []]]);
       expect(kinds(payloads, "mine")).toContain("replica.needHashes");
-      expect(kinds(payloads, "slots"), "a marker of another table leaves this subscription alone").not.toContain("replica.needHashes");
+      expect(kinds(payloads, "slots"), "the marker is global: every subscription reconciles").toContain("replica.needHashes");
 
+      // Both now wait for the client's hashes; open the public list again (the client would reconcile it).
+      const current = await commit([["INSERT INTO items2 VALUES ('i3', 'three')", []]]);
+      engine.dispatch(readmitted(socket("s1"), {}, current), { type: "replica.open", id: "slots2", path: "uitems.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
       // u2 takes slot A: u1 is deleted by the UNIQUE conflict, with no log row.
       payloads.length = 0;
       await commit([["INSERT OR REPLACE INTO uitems VALUES ('u2', 'A')", []]]);
-      expect(kinds(payloads, "slots")).toContain("replica.needHashes");
+      expect(kinds(payloads, "slots2")).toContain("replica.needHashes");
+      // Control: an ordinary commit after it is a plain delta, not a resync.
+      engine.dispatch(readmitted(socket("s1"), {}, current + 1), { type: "replica.open", id: "slots3", path: "uitems.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      payloads.length = 0;
+      await commit([["INSERT INTO uitems VALUES ('u3', 'B')", []]]);
+      expect(kinds(payloads, "slots3")).not.toContain("replica.needHashes");
+      expect(kinds(payloads, "slots3")).toContain("replica.delta");
     }, APP);
   });
 });

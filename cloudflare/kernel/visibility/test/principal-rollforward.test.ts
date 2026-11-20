@@ -5,10 +5,18 @@
 // base table, a derived set) and checks, after every batch of commits, that
 // the cached resolution is the fresh SQL resolution: same sets, same
 // fingerprint, same visible rows.
+//
+// #555: REPLACE conflict resolution deletes rows with no log row. A statement
+// whose own conflict resolution is REPLACE (S), or any write under a schema
+// with a REPLACE hazard (H: a declared ON CONFLICT REPLACE, or a trigger body
+// using REPLACE), logs the global marker `_gonvex_replaced:*`, and the cache
+// drops the entry. The base schema has no hazard, so its writes take the patch
+// path; each REPLACE probe adds only the tables its case needs.
 
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { CaptureState, ChangeWake, directSql, installChangeFeed, invokeCaptured } from "../../capture/index.ts";
+import { REPLACED_MARKER } from "../../capture/replace-marker.ts";
 import { TenantStorage, type StorageSession } from "../../storage";
 import { readClock } from "../feed.ts";
 import type { JsonValue } from "../json.ts";
@@ -21,6 +29,7 @@ import { VisibilityRegistry } from "../tenant.ts";
 
 let objects = 0;
 
+/** No REPLACE hazard: no declared ON CONFLICT REPLACE, no trigger using REPLACE. */
 const SCHEMA = [
   `CREATE TABLE members (id TEXT PRIMARY KEY, account_id TEXT, status TEXT, role TEXT, permissions JSON)`,
   `CREATE TABLE "memberTeams" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "teamId" TEXT, "deletedAt" TEXT)`,
@@ -33,30 +42,52 @@ const SCHEMA = [
   `CREATE TABLE "taskShares" ("_id" TEXT PRIMARY KEY, "taskId" INTEGER, "sharedToTeamId" TEXT, "revokedAt" TEXT, "deletedAt" TEXT)`,
   // #555 R2 and M13: an untyped key column (BLOB, integer, real or text keys; no affinity converts them).
   `CREATE TABLE "loose" ("_id" PRIMARY KEY, "memberId" TEXT, "spotId" TEXT, "deletedAt" TEXT)`,
-  // #555 R1: a declared ON CONFLICT REPLACE (a plain INSERT may delete another row), and a trigger that replaces.
-  `CREATE TABLE "claims" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON CONFLICT REPLACE)`,
+  // A UNIQUE spot per claim, without a declared conflict clause (no hazard by itself).
+  `CREATE TABLE "claims" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE)`,
+];
+
+/** Hazard H: a declared ON CONFLICT REPLACE (a plain INSERT may delete another key's row). */
+const DECLARED = [`CREATE TABLE "dclaims" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON CONFLICT REPLACE)`];
+/** #555 C1: comments inside the declared clause (SQLite keeps them in sqlite_schema.sql); each alone is the hazard. */
+const DECLARED_COMMENT_BLOCK = [`CREATE TABLE "dclaims" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON /* c */ CONFLICT REPLACE)`];
+const DECLARED_COMMENT_LINE = [`CREATE TABLE "dclaims" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT, UNIQUE ("spotId") ON -- c
+     CONFLICT REPLACE)`];
+/** Hazard H: a trigger body using REPLACE. */
+const TRIGGER_REPLACE = [
   `CREATE TABLE "claimRequests" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT)`,
   `CREATE TRIGGER "claimRequests_apply" AFTER INSERT ON "claimRequests" BEGIN INSERT OR REPLACE INTO "claims" VALUES (NEW."_id", NEW."memberId", NEW."spotId"); END`,
-  // #555 C1: comments inside the declared clause (SQLite keeps them in sqlite_schema.sql).
-  `CREATE TABLE "claims2" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON /* c */ CONFLICT REPLACE)`,
-  `CREATE TABLE "claims3" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT, UNIQUE ("spotId") ON -- c
-     CONFLICT REPLACE)`,
-  // #555 C2: a REPLACE in a trigger reached through a foreign key action (parent delete -> CASCADE -> child trigger).
+];
+/** #555 C2: a REPLACE in a trigger reached through a foreign key action (parent delete -> CASCADE -> child trigger). */
+const CASCADE_TRIGGER = [
   `CREATE TABLE owners ("_id" TEXT PRIMARY KEY)`,
   `CREATE TABLE "ownerLinks" ("_id" TEXT PRIMARY KEY, "ownerId" TEXT REFERENCES owners("_id") ON DELETE CASCADE, "memberId" TEXT, "spotId" TEXT)`,
   `CREATE TRIGGER "ownerLinks_gone" AFTER DELETE ON "ownerLinks" BEGIN INSERT OR REPLACE INTO claims VALUES (OLD."_id", OLD."memberId", OLD."spotId"); END`,
+];
+/** #555 D1: plain trigger writes that inherit the outer statement's OR REPLACE. No hazard H in the schema. */
+const INHERITED = [
+  `CREATE TABLE "reqs" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT)`,
+  `CREATE TRIGGER "reqs_apply" AFTER INSERT ON "reqs" BEGIN INSERT INTO "claims" VALUES (NEW."_id", NEW."memberId", NEW."spotId"); END`,
+  `CREATE TABLE "moves" ("_id" TEXT PRIMARY KEY, "claimId" TEXT, "spotId" TEXT)`,
+  `CREATE TRIGGER "moves_apply" AFTER UPDATE ON "moves" BEGIN UPDATE "claims" SET "spotId" = NEW."spotId" WHERE "_id" = NEW."claimId"; END`,
+];
+/** #555 D2: a declared conflict's delete runs a parent's ON DELETE CASCADE into a child trigger that replaces. */
+const DECLARED_CASCADE = [
+  `CREATE TABLE "dparents" ("_id" TEXT PRIMARY KEY, "code" TEXT UNIQUE ON CONFLICT REPLACE)`,
+  `CREATE TABLE "dchildren" ("_id" TEXT PRIMARY KEY, "parentId" TEXT REFERENCES dparents("_id") ON DELETE CASCADE, "memberId" TEXT, "spotId" TEXT)`,
+  `CREATE TRIGGER "dchildren_gone" AFTER DELETE ON "dchildren" BEGIN INSERT OR REPLACE INTO claims VALUES (OLD."_id", OLD."memberId", OLD."spotId"); END`,
 ];
 
 const live = (table: string) => ({ table, column: "deletedAt", value: { literal: null } });
 const me = (table: string) => ({ table, column: "memberId", context: "member.id" });
 
-/** The shapes of spots.list's sets (module.json), on a reduced schema. */
-function spotsPlan(): VisibilityPlan {
+/** The shapes of spots.list's sets (module.json), on a reduced schema; `declared` adds the `dclaims` set. */
+function spotsPlan(declared = false): VisibilityPlan {
+  const extra = declared ? { declaredSpots: { kind: "grant", table: "dclaims", select: "spotId", joins: [], where: [me("dclaims")] } } : {};
   return parsePlan({
     version: 2,
     table: "spots",
     key: "_id",
-    permissionTables: ["memberTeams", "workspaceTeams", "workspaces", "spots", "memberSpots", "members", "loose", "claims", "claims2", "claims3"],
+    permissionTables: ["memberTeams", "workspaceTeams", "workspaces", "spots", "memberSpots", "members", "loose", "claims", ...(declared ? ["dclaims"] : [])],
     sets: {
       memberSpots: { kind: "principal", table: "memberSpots", select: "spotId", joins: [], where: [me("memberSpots"), live("memberSpots")] },
       memberSpotDescendants: {
@@ -93,12 +124,12 @@ function spotsPlan(): VisibilityPlan {
       sharedTeamTaskSpots: { kind: "derived", from: "sharedTeamTaskSpotsInput", table: "tasks", key: "_id", select: "spotId", where: [{ column: "deletedAt", value: { literal: null } }] },
       looseSpots: { kind: "principal", table: "loose", select: "spotId", joins: [], where: [me("loose"), live("loose")] },
       claimedSpots: { kind: "grant", table: "claims", select: "spotId", joins: [], where: [me("claims")] },
-      claimed2Spots: { kind: "grant", table: "claims2", select: "spotId", joins: [], where: [me("claims2")] },
-      claimed3Spots: { kind: "grant", table: "claims3", select: "spotId", joins: [], where: [me("claims3")] },
+      ...extra,
     },
     where: {
       operator: "or",
-      children: ["memberSpots", "memberSpotDescendants", "createdTaskSpots", "reportedTeamTaskSpots", "personalTeamTaskSpots", "teamWorkspaceTaskSpots", "sharedTeamTaskSpots", "looseSpots", "claimedSpots", "claimed2Spots", "claimed3Spots"].map((set) => ({ operator: "inSet", column: "_id", set })),
+      children: ["memberSpots", "memberSpotDescendants", "createdTaskSpots", "reportedTeamTaskSpots", "personalTeamTaskSpots", "teamWorkspaceTaskSpots", "sharedTeamTaskSpots", "looseSpots", "claimedSpots", ...(declared ? ["declaredSpots"] : [])]
+        .map((set) => ({ operator: "inSet", column: "_id", set })),
     },
   });
 }
@@ -133,23 +164,31 @@ interface Harness {
   read<T>(body: (session: StorageSession) => T): Promise<T>;
   /** Direct SQL outside any invocation (log surgery for the R05 probe). */
   raw(text: string, ...binds: unknown[]): unknown[][];
+  /** Whether the last commit logged the REPLACE marker (and that it is the only one). */
+  marked(): boolean;
 }
 
-async function withTenant<T>(body: (harness: Harness) => Promise<T>): Promise<T> {
+async function withTenant<T>(body: (harness: Harness) => Promise<T>, extra: readonly string[] = []): Promise<T> {
   const stub = env.HELLO.getByName(`x17p-${++objects}-${Math.random()}`);
   return runInDurableObject(stub, async (_instance, state) => {
     const sql = directSql(state.storage.sql);
     state.storage.transactionSync(() => {
       installChangeFeed(sql);
-      for (const statement of SCHEMA) sql.run(statement);
+      for (const statement of [...SCHEMA, ...extra]) sql.run(statement);
       installChangeFeed(sql);
     });
     const storage = new TenantStorage(state.storage);
     const context = { state: new CaptureState(), wake: new ChangeWake() };
     let commands = 0;
+    const raw = (text: string, ...binds: unknown[]) => [...state.storage.sql.exec(text, ...(binds as never[])).raw()] as unknown[][];
     return body({
       registry: new VisibilityRegistry(),
-      raw: (text, ...binds) => [...state.storage.sql.exec(text, ...(binds as never[])).raw()] as unknown[][],
+      raw,
+      marked: () => {
+        const count = Number(raw(`SELECT count(*) FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) AND table_name = ?`, REPLACED_MARKER)[0]![0]);
+        expect(count, "at most one marker per transaction").toBeLessThanOrEqual(1);
+        return count === 1;
+      },
       async commit(statements) {
         const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (session) => {
           for (const [text, parameters] of statements) session.run(text, parameters);
@@ -207,7 +246,7 @@ function seed(): Array<[string, unknown[]]> {
 }
 
 /** One random write to an input of the plan. Mostly task inserts, as in the create workload. */
-function write(next: () => number, ids: { task: number; other: number }): [string, unknown[]] {
+function write(next: () => number, ids: { task: number; other: number }, declared: boolean): [string, unknown[]] {
   const pick = <T,>(values: readonly T[]): T => values[Math.floor(next() * values.length)]!;
   const spot = () => `s${1 + Math.floor(next() * 8)}`;
   // Spots s9..s14 come and go; parents may name one before it exists (a set joining its own base table).
@@ -235,19 +274,34 @@ function write(next: () => number, ids: { task: number; other: number }): [strin
   if (roll < 0.92) return [`DELETE FROM spots WHERE "_id" = $1`, [looseSpot()]];
   if (roll < 0.94) return [`UPDATE spots SET "parentId" = $2 WHERE "_id" = $1`, [anySpot(), anySpot()]];
   if (roll < 0.95) return [`UPDATE workspaces SET "type" = $2 WHERE "_id" = $1`, [workspace(), pick(["TEAM", "PERSONAL"])]];
-  // #555 R1: REPLACE on a task (the old row's grant goes without a delete in the log).
+  // #555 S: REPLACE on a task (the old row's grant goes without a delete in the log), and on a claim (another
+  // member's claim on the spot goes).
   if (roll < 0.96) return [pick([`REPLACE INTO tasks VALUES ($1, $2, $3, $4, $5, $6)`, `INSERT OR REPLACE INTO tasks VALUES ($1, $2, $3, $4, $5, $6)`]), [task(), spot(), workspace(), pick([...MEMBERS, "mx"]), pick([team(), null]), deleted()]];
+  if (roll < 0.965) return [`INSERT OR REPLACE INTO claims VALUES ($1, $2, $3)`, [`c-${++ids.other}`, pick(MEMBERS), spot()]];
   // #555 R2 / M13: untyped keys of every storage class.
-  if (roll < 0.97) {
+  if (roll < 0.975) {
     const n = ++ids.other;
     const key = pick([`CAST('k${n}' AS BLOB)`, `${n}`, `${n}.5`, `'k${n}'`]);
     return [`INSERT INTO loose VALUES (${key}, $1, $2, $3)`, [pick(MEMBERS), spot(), deleted()]];
   }
-  // #555 R1: a declared ON CONFLICT REPLACE, and a trigger that replaces: another member's claim on the spot goes.
-  if (roll < 0.98) return [`INSERT INTO claims VALUES ($1, $2, $3)`, [`c-${++ids.other}`, pick(MEMBERS), spot()]];
-  if (roll < 0.985) return [`INSERT INTO "claimRequests" VALUES ($1, $2, $3)`, [`c-${++ids.other}`, pick(MEMBERS), spot()]];
+  // #555 H: a plain INSERT into the declared table (a conflict deletes another member's claim).
+  if (declared && roll < 0.985) return [`INSERT INTO dclaims VALUES ($1, $2, $3)`, [`d-${++ids.other}`, pick(MEMBERS), spot()]];
   // A member row change: the entry is dropped, never rolled.
   return [`UPDATE members SET permissions = $2 WHERE id = $1`, [pick(MEMBERS), JSON.stringify({ n: ids.other++ })]];
+}
+
+/** Resolves every member (caching), runs `write`, then checks every member's cached resolution against fresh SQL. */
+async function probe(harness: Harness, plan: VisibilityPlan, label: string, write: Array<[string, unknown[]]>): Promise<void> {
+  await harness.read((session) => checkMembers(session, harness, plan, `${label} before`));
+  await harness.commit(write);
+  await harness.read((session) => checkMembers(session, harness, plan, `${label} after`));
+}
+
+function cachedSet(harness: Harness, session: StorageSession, plan: VisibilityPlan, member: string, set: string): string[] {
+  const clock = readClock(session);
+  const plans = new Map([["spots", plan]]);
+  const resolved = resolveWithParents(session, sessionOf(member), plan, clock.revision, plans, harness.registry.acl.ensure(session, plans, [plan]), undefined, { cache: harness.registry.principals, clock });
+  return [...(resolved.sets.get(set) ?? [])];
 }
 
 describe("principal cache roll-forward (X17p)", () => {
@@ -263,7 +317,7 @@ describe("principal cache roll-forward (X17p)", () => {
           // 1 to 3 commits between reads, each of 1 to 3 writes: the roll-forward spans several commits.
           const commits = 1 + Math.floor(next() * 3);
           for (let commit = 0; commit < commits; commit += 1) {
-            const statements = Array.from({ length: 1 + Math.floor(next() * 3) }, () => write(next, ids));
+            const statements = Array.from({ length: 1 + Math.floor(next() * 3) }, () => write(next, ids, false));
             await harness.commit(statements);
           }
           await harness.read((session) => checkMembers(session, harness, plan, `seed ${seedValue} round ${round}`));
@@ -272,20 +326,40 @@ describe("principal cache roll-forward (X17p)", () => {
         expect(stats.rolledForward, JSON.stringify(stats)).toBeGreaterThan(20);
         expect(stats.setsPatched, JSON.stringify(stats)).toBeGreaterThan(0);
         expect(stats.setsRerun, JSON.stringify(stats)).toBeGreaterThan(0);
-        expect(stats.invalidated, "member row changes still drop the entry").toBeGreaterThan(0);
+        expect(stats.invalidated, "member row changes and REPLACE markers still drop the entry").toBeGreaterThan(0);
       });
     }
   }, 120_000);
 
-  it("a task insert re-runs no set: the grant sets on tasks gain the new row's spot with one point query each", async () => {
+  it("the same leak test under a schema hazard: every write logs the marker and the entry is dropped", async () => {
+    const plan = spotsPlan(true);
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      const next = random(7);
+      const ids = { task: 0, other: 0 };
+      for (let round = 0; round < 25; round += 1) {
+        await harness.commit(Array.from({ length: 1 + Math.floor(next() * 3) }, () => write(next, ids, true)));
+        expect(harness.marked(), `round ${round}: H marks every write`).toBe(true);
+        await harness.read((session) => checkMembers(session, harness, plan, `hazard round ${round}`));
+      }
+      const stats = harness.registry.principals.stats();
+      expect(stats.rolledForward, "no roll under the marker").toBe(0);
+      expect(stats.setsPatched).toBe(0);
+    }, DECLARED);
+  }, 120_000);
+
+  it("no hazard, no REPLACE statement: no marker, and a task insert takes the patch path (one point query per set)", async () => {
     const plan = spotsPlan();
     await withTenant(async (harness) => {
       await harness.commit(seed());
+      expect(harness.marked()).toBe(false);
       await harness.commit([[`INSERT INTO "workspaceTeams" VALUES ('wt-m3', 'team-m3', 'w2', NULL)`, []]]);
+      expect(harness.marked()).toBe(false);
       await harness.read((session) => checkMembers(session, harness, plan, "before"));
       const before = harness.registry.principals.stats();
       // m1 creates a task in its team's workspace w1, reported by m3's team.
       await harness.commit([[`INSERT INTO tasks VALUES (100, 's7', 'w1', 'm1', 'team-m3', NULL)`, []]]);
+      expect(harness.marked()).toBe(false);
       let statements = 0;
       await harness.read((session) => {
         const counting = { run: (text: string, parameters?: unknown[]) => { statements += 1; return session.run(text, parameters as never); } } as unknown as StorageSession;
@@ -334,84 +408,75 @@ describe("principal cache roll-forward (X17p)", () => {
     });
   });
 
-  /** Resolves every member (caching), runs `write`, then checks every member's cached resolution against fresh SQL. */
-  async function probe(harness: Harness, plan: VisibilityPlan, label: string, write: Array<[string, unknown[]]>): Promise<void> {
-    await harness.read((session) => checkMembers(session, harness, plan, `${label} before`));
-    await harness.commit(write);
-    await harness.read((session) => checkMembers(session, harness, plan, `${label} after`));
-  }
-
-  function cachedSet(harness: Harness, session: StorageSession, plan: VisibilityPlan, member: string, set: string): string[] {
-    const clock = readClock(session);
-    const plans = new Map([["spots", plan]]);
-    const resolved = resolveWithParents(session, sessionOf(member), plan, clock.revision, plans, harness.registry.acl.ensure(session, plans, [plan]), undefined, { cache: harness.registry.principals, clock });
-    return [...(resolved.sets.get(set) ?? [])];
-  }
-
-  it("#555 R1 P1: a REPLACE that moves a task to another member re-runs the set (the reviewer's probe)", async () => {
+  it("#555 S (P1): REPLACE and INSERT OR REPLACE log one global marker and drop the entry (the reviewer's probe)", async () => {
     const plan = spotsPlan();
     await withTenant(async (harness) => {
       await harness.commit(seed());
       await harness.commit([[`INSERT INTO tasks VALUES (100, 's7', 'w2', 'm1', NULL, NULL)`, []]]);
+      const before = harness.registry.principals.stats().invalidated;
       await probe(harness, plan, "REPLACE INTO", [[`REPLACE INTO tasks VALUES (100, 's7', 'w2', 'mx', NULL, NULL)`, []]]);
       await harness.read((session) => expect(cachedSet(harness, session, plan, "m1", "createdTaskSpots")).toEqual([]));
-      // One marker for the table in that transaction, beside the logged insert.
       const logged = harness.raw(`SELECT table_name, operation, row_id, new_value FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) ORDER BY ordinal`);
-      expect(logged.map((row) => [row[0], row[1]])).toEqual([["tasks", "insert"], ["_gonvex_replaced:tasks", "delete"]]);
+      expect(logged.map((row) => [row[0], row[1], row[2]])).toEqual([["tasks", "insert", "100"], [REPLACED_MARKER, "delete", ""]]);
       expect(logged[1]![3]).toBeNull();
+      expect(harness.registry.principals.stats().invalidated - before, "each member's entry dropped").toBe(3);
       await harness.commit([[`INSERT INTO tasks VALUES (101, 's6', 'w2', 'm2', NULL, NULL)`, []]]);
-      await probe(harness, plan, "INSERT OR REPLACE", [[`INSERT OR REPLACE INTO tasks VALUES (101, 's6', 'w2', 'm3', NULL, NULL)`, []]]);
+      await probe(harness, plan, "INSERT OR REPLACE", [[`INSERT OR REPLACE INTO tasks VALUES (101, 's6', 'w2', 'm3', NULL, NULL)`, [], ], [`REPLACE INTO tasks VALUES (102, 's5', 'w2', 'm3', NULL, NULL)`, []]]);
+      expect(harness.marked(), "two REPLACE statements, one marker").toBe(true);
       await harness.read((session) => expect(cachedSet(harness, session, plan, "m2", "createdTaskSpots")).toEqual([]));
-      expect(harness.registry.principals.stats().setsRerun).toBeGreaterThan(0);
     });
   });
 
-  it("#555 R1: a declared ON CONFLICT REPLACE and a REPLACE inside a trigger delete another key's row; the set re-runs", async () => {
+  it("#555 H: a declared ON CONFLICT REPLACE marks every write, and the replaced claim leaves its member", async () => {
+    const plan = spotsPlan(true);
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      expect(harness.marked(), "H: even the seed").toBe(true);
+      await harness.commit([[`INSERT INTO dclaims VALUES ('c1', 'm1', 's4')`, []]]);
+      // A plain INSERT: the UNIQUE spotId conflict deletes c1 (m1's claim) without a log row.
+      await probe(harness, plan, "declared", [[`INSERT INTO dclaims VALUES ('c3', 'm3', 's4')`, []]]);
+      expect(harness.marked()).toBe(true);
+      await harness.read((session) => {
+        expect(cachedSet(harness, session, plan, "m1", "declaredSpots")).toEqual([]);
+        expect(cachedSet(harness, session, plan, "m3", "declaredSpots")).toEqual(["s4"]);
+      });
+      // A write to another table under H is marked too.
+      await probe(harness, plan, "unrelated", [[`INSERT INTO tasks VALUES (300, 's3', 'w1', 'm1', NULL, NULL)`, []]]);
+      expect(harness.marked()).toBe(true);
+    }, DECLARED);
+  });
+
+  it("#555 C1: a comment inside a declared ON CONFLICT REPLACE does not hide the hazard (the reviewer's claims2/claims3 probes)", async () => {
+    const plan = spotsPlan(true);
+    for (const [label, schema] of [["block comment", DECLARED_COMMENT_BLOCK], ["line comment", DECLARED_COMMENT_LINE]] as const) {
+      await withTenant(async (harness) => {
+        await harness.commit(seed());
+        await harness.commit([[`INSERT INTO dclaims VALUES ('c1', 'm1', 's4')`, []]]);
+        await probe(harness, plan, label, [[`INSERT INTO dclaims VALUES ('c3', 'm3', 's4')`, []]]);
+        expect(harness.marked(), label).toBe(true);
+        await harness.read((session) => {
+          expect(cachedSet(harness, session, plan, "m1", "declaredSpots"), `${label} m1`).toEqual([]);
+          expect(cachedSet(harness, session, plan, "m3", "declaredSpots"), `${label} m3`).toEqual(["s4"]);
+        });
+      }, schema);
+    }
+  });
+
+  it("#555 H: a trigger body using REPLACE marks every write, and its replace takes the other member's claim", async () => {
     const plan = spotsPlan();
     await withTenant(async (harness) => {
       await harness.commit(seed());
-      await harness.commit([[`INSERT INTO claims VALUES ('c1', 'm1', 's4')`, []], [`INSERT INTO claims VALUES ('c2', 'm2', 's5')`, []]]);
-      // A plain INSERT: the UNIQUE spotId conflict deletes c1 (m1's claim) without a log row.
-      await probe(harness, plan, "declared", [[`INSERT INTO claims VALUES ('c3', 'm3', 's4')`, []]]);
-      await harness.read((session) => {
-        expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual([]);
-        expect(cachedSet(harness, session, plan, "m3", "claimedSpots")).toEqual(["s4"]);
-      });
-      // A trigger's INSERT OR REPLACE deletes c2.
+      await harness.commit([[`INSERT INTO claims VALUES ('c2', 'm2', 's5')`, []]]);
       await probe(harness, plan, "trigger", [[`INSERT INTO "claimRequests" VALUES ('c4', 'm1', 's5')`, []]]);
+      expect(harness.marked()).toBe(true);
       await harness.read((session) => {
         expect(cachedSet(harness, session, plan, "m2", "claimedSpots")).toEqual([]);
         expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual(["s5"]);
       });
-      const markers = () => harness.raw(`SELECT count(*) FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) AND table_name LIKE '\\_gonvex\\_replaced:%' ESCAPE '\\'`)[0]![0];
-      // Any UPDATE of a table declared ON CONFLICT REPLACE may replace: one marker.
-      await probe(harness, plan, "declared update", [[`UPDATE claims SET "memberId" = 'm2' WHERE "_id" = 'c3'`, []]]);
-      expect(markers()).toBe(1);
-      // A write that cannot replace logs none.
-      await probe(harness, plan, "plain", [[`UPDATE tasks SET "spotId" = 's2' WHERE "_id" = 1`, []], [`INSERT INTO tasks VALUES (300, 's3', 'w1', 'm1', NULL, NULL)`, []]]);
-      expect(markers()).toBe(0);
-    });
+    }, TRIGGER_REPLACE);
   });
 
-  it("#555 C1: a comment inside a declared ON CONFLICT REPLACE does not hide it (the reviewer's claims2/claims3 probes)", async () => {
-    const plan = spotsPlan();
-    await withTenant(async (harness) => {
-      await harness.commit(seed());
-      for (const table of ["claims2", "claims3"]) {
-        const set = table === "claims2" ? "claimed2Spots" : "claimed3Spots";
-        await harness.commit([[`INSERT INTO ${table} VALUES ('c1', 'm1', 's4')`, []]]);
-        // The UNIQUE spotId conflict deletes m1's c1 with no log row: the marker must be logged.
-        await probe(harness, plan, table, [[`INSERT INTO ${table} VALUES ('c3', 'm3', 's4')`, []]]);
-        await harness.read((session) => {
-          expect(cachedSet(harness, session, plan, "m1", set), `${table} m1`).toEqual([]);
-          expect(cachedSet(harness, session, plan, "m3", set), `${table} m3`).toEqual(["s4"]);
-        });
-        expect(harness.raw(`SELECT count(*) FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) AND table_name = ?`, `_gonvex_replaced:${table}`)[0]![0]).toBe(1);
-      }
-    });
-  });
-
-  it("#555 C2: a REPLACE in a trigger reached through ON DELETE CASCADE logs the marker (the reviewer's owners probe)", async () => {
+  it("#555 C2: a REPLACE in a trigger reached through ON DELETE CASCADE (the reviewer's owners probe)", async () => {
     const plan = spotsPlan();
     await withTenant(async (harness) => {
       await harness.commit(seed());
@@ -423,12 +488,66 @@ describe("principal cache roll-forward (X17p)", () => {
       // The cascade deletes l1; its trigger's INSERT OR REPLACE takes spot s4 from c1 (m1).
       await probe(harness, plan, "cascade", [[`DELETE FROM owners WHERE "_id" = 'o1'`, []]]);
       expect(harness.raw(`SELECT "_id", "memberId", "spotId" FROM claims ORDER BY 1`)).toEqual([["l1", "m3", "s4"]]);
+      expect(harness.marked()).toBe(true);
       await harness.read((session) => {
         expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual([]);
         expect(cachedSet(harness, session, plan, "m3", "claimedSpots")).toEqual(["s4"]);
       });
-      expect(harness.raw(`SELECT count(*) FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) AND table_name = '_gonvex_replaced:claims'`)[0]![0]).toBe(1);
-    });
+    }, CASCADE_TRIGGER);
+  });
+
+  it("#555 D1: plain trigger writes inherit the outer OR REPLACE (A, A2 and the UPDATE form), with no schema hazard", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      // No hazard in this schema: a plain write logs no marker.
+      await harness.commit([[`INSERT INTO reqs VALUES ('r0', 'm2', 's8')`, []]]);
+      expect(harness.marked()).toBe(false);
+      // A: INSERT OR REPLACE into reqs; the trigger's plain INSERT into claims replaces m1's c1.
+      await harness.commit([[`INSERT INTO claims VALUES ('c1', 'm1', 's4')`, []]]);
+      await probe(harness, plan, "A", [[`INSERT OR REPLACE INTO reqs VALUES ('r3', 'm3', 's4')`, []]]);
+      expect(harness.marked(), "A").toBe(true);
+      expect(harness.raw(`SELECT "_id", "memberId" FROM claims WHERE "spotId" = 's4'`)).toEqual([["r3", "m3"]]);
+      await harness.read((session) => expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual([]));
+      // A2: REPLACE INTO reqs.
+      await harness.commit([[`INSERT INTO claims VALUES ('c5', 'm1', 's6')`, []]]);
+      await probe(harness, plan, "A2", [[`REPLACE INTO reqs VALUES ('r5', 'm2', 's6')`, []]]);
+      expect(harness.marked(), "A2").toBe(true);
+      await harness.read((session) => expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual([]));
+      // UPDATE form: UPDATE OR REPLACE moves; the trigger's plain UPDATE moves c2 onto s7, replacing m1's c6.
+      await harness.commit([
+        [`INSERT INTO claims VALUES ('c6', 'm1', 's7')`, []],
+        [`INSERT INTO claims VALUES ('c2', 'm2', 's2')`, []],
+        [`INSERT INTO moves VALUES ('mv2', 'c2', 's2')`, []],
+      ]);
+      await probe(harness, plan, "UPDATE", [[`UPDATE OR REPLACE moves SET "spotId" = 's7' WHERE "_id" = 'mv2'`, []]]);
+      expect(harness.marked(), "UPDATE form").toBe(true);
+      expect(harness.raw(`SELECT "_id", "memberId" FROM claims WHERE "spotId" = 's7'`)).toEqual([["c2", "m2"]]);
+      await harness.read((session) => {
+        expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual([]);
+        expect(cachedSet(harness, session, plan, "m2", "claimedSpots")).toEqual(["s6", "s7", "s8"]);
+      });
+    }, INHERITED);
+  });
+
+  it("#555 D2: a declared conflict's delete cascades into a child trigger that replaces (the reviewer's dparents probe)", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      await harness.commit([
+        [`INSERT INTO claims VALUES ('c1', 'm1', 's4')`, []],
+        [`INSERT INTO dparents VALUES ('p1', 'x')`, []],
+        [`INSERT INTO dchildren VALUES ('l1', 'p1', 'm3', 's4')`, []],
+      ]);
+      // The declared conflict deletes p1 -> the cascade deletes l1 -> the trigger replaces c1.
+      await probe(harness, plan, "dparents", [[`INSERT INTO dparents VALUES ('p2', 'x')`, []]]);
+      expect(harness.marked()).toBe(true);
+      expect(harness.raw(`SELECT "_id", "memberId", "spotId" FROM claims ORDER BY 1`)).toEqual([["l1", "m3", "s4"]]);
+      await harness.read((session) => {
+        expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual([]);
+        expect(cachedSet(harness, session, plan, "m3", "claimedSpots")).toEqual(["s4"]);
+      });
+    }, DECLARED_CASCADE);
   });
 
   it("#555 R2 P2 and M13: inserted untyped keys (BLOB, integer, real, text) patch or re-run exactly", async () => {
