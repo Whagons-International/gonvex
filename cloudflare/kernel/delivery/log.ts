@@ -100,10 +100,12 @@ export function readChangeRows(sql: LogSql, after: number, through: number, tabl
   const tableFilter = tables ? ` AND changes.table_name IN (${tables.map(() => "?").join(", ")})` : "";
   for (;;) {
     const page = sql.exec(
-      `${COLUMNS} WHERE changes.revision IS NOT NULL AND changes.revision <= ?${tableFilter}
+      // X17n: `changes.revision >= ?` repeats the cursor's lower bound in a form SQLite can seek on (the OR alone is not
+      // an index range, so every read scanned the retained log from its start: ~4000 rows per commit on -04).
+      `${COLUMNS} WHERE changes.revision IS NOT NULL AND changes.revision >= ? AND changes.revision <= ?${tableFilter}
          AND (changes.revision > ? OR (changes.revision = ? AND changes.ordinal > ?))
        ORDER BY changes.revision, changes.ordinal LIMIT ${LOG_PAGE_ROWS}`,
-      through, ...(tables ?? []), cursor[0], cursor[0], cursor[1] === Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : cursor[1],
+      cursor[0], through, ...(tables ?? []), cursor[0], cursor[0], cursor[1] === Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : cursor[1],
     ).toArray();
     for (const row of page) {
       const c = change(row);

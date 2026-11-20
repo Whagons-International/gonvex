@@ -505,6 +505,30 @@ describe("design rule: no SQL per subscriber", () => {
 });
 
 
+describe("X17n: a commit's delivery reads the new log rows, not the retained log", () => {
+  // The change-log read's lower bound was an OR that SQLite does not use as an index range, so each commit's delivery
+  // scanned every retained change row (-04: ~4000 rows per commit, growing with the log).
+  const lastCommitReads = async (history: number) => withEngine(async ({ engine, commit }) => {
+    engine.dispatch(socket("s1"), { type: "replica.open", id: "sub", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+    await engine.settled();
+    for (let batch = 0; batch < history; batch += 50) {
+      const rows: Array<[string, unknown[]]> = [];
+      for (let i = batch; i < Math.min(history, batch + 50); i++) rows.push(["INSERT INTO items VALUES ($1, $2, $3)", [`h${String(i).padStart(5, "0")}`, i, "h"]]);
+      await commit(rows);
+    }
+    const before = engine.stats.commitRowsRead;
+    await commit([["INSERT INTO items VALUES ('last', 1, 'x')", []]]);
+    return engine.stats.commitRowsRead - before;
+  });
+
+  it("reads about as many rows after 2000 retained changes as after 50", { timeout: 60_000 }, async () => {
+    const short = await lastCommitReads(50), long = await lastCommitReads(2000);
+    console.log(`X17n last-commit rows read: 50 retained ${short}, 2000 retained ${long}`);
+    expect(long).toBeLessThanOrEqual(short + 5);
+    expect(long).toBeLessThan(100);
+  });
+});
+
 describe("K22 ordered query and replica commits", () => {
   // Receiver controls below test the engine/barrier wiring; actual holder
   // scope validation and rebuilding are covered separately on Gateway/Session.
