@@ -7,6 +7,7 @@
 // A Worker version subclasses it to provide its bundles and plan store, as
 // for `ReducerTenantObject`.
 
+import { MEMBER_ACCESS_SQL, type MemberRow } from "../session/member-access";
 import type { ClientFrame } from "../session/decode";
 import type { SocketView } from "../session/ports";
 import { rpc } from "../session/rpc";
@@ -56,6 +57,12 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
       delivered: () => this.dataChanged(tenantId),
       get live() { return owner.liveQueries(); },
       activity: () => owner.keepAlive.touch(),
+      // X17m: the attach-time member check (one indexed read per attach).
+      currentMember: (memberId) => {
+        const row = ctx.storage.sql.exec<MemberRow & Record<string, SqlStorageValue>>(MEMBER_ACCESS_SQL, memberId).toArray()[0];
+        const clock = ctx.storage.sql.exec<{ revision: number }>("SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1").toArray()[0];
+        return { row, revision: Number(clock?.revision ?? 0) };
+      },
     });
     this.kernel.capture.wake.subscribe((wake) => { this.delivery.wake(wake.revision); this.dataChanged(tenantId); });
     // Commits after this point are owed to the sockets; a tenant not provisioned yet has no clock.

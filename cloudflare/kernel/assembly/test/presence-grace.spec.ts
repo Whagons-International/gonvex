@@ -59,6 +59,9 @@ async function tenant(opts: { graceMs?: number; provision?: boolean } = {}) {
    const release = await buildReleasePlan(await migrationsFromFiles(files)); plans.add(release);
    await object.activate('p', manifest, release.id);
    await (object as unknown as { setupScheduled(): Promise<void> }).setupScheduled();
+   // X17m: the tenant checks a session's Member at attach; the fixture sessions are these Members' admissions.
+   for (const id of ['A', 'B', 'C']) await object.addMember({ id, accountId: `acc-${id}`, displayName: '' });
+   s.storage.sql.exec("UPDATE members SET role='admin', permissions='null', membership_revision=1");
    internals.alarms.register({ name: 'busy', nextAt: () => busy.next, run: async (now: number) => {
     busy.inside = true;
     while (busy.holding) await sleep(20);

@@ -51,7 +51,7 @@ import { collectionQuery } from "./replica-query";
 import { flushReferences } from "../reducer/reference/integrity";
 import { overrunMarkerKey } from "./deadline";
 import { writeAdmissionError } from "../reducer/admission";
-import { DeliveryAdmissionError } from "../delivery/authority";
+import { DeliveryAdmissionError, MemberAccessChangedError } from "../delivery/authority";
 import { retryable } from "../reducer/errors";
 
 
@@ -260,7 +260,8 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     try {
       if (socket.tenant && !socket.tenant.anonymous && !this.delivery.observe(socket, false)) throw new Error("stale tenant subscription scope");
     } catch (error) {
-      if (!(error instanceof DeliveryAdmissionError) || (socket as SocketView & {queryRecovery?:boolean}).queryRecovery) throw error;
+      // X17m: a stale admission refused at attach is answered like an admission refusal (the hand-off sent auth.error).
+      if (!(error instanceof DeliveryAdmissionError || error instanceof MemberAccessChangedError) || (socket as SocketView & {queryRecovery?:boolean}).queryRecovery) throw error;
       const refused = (id:string,path:string,trace?:MessageTrace) => frame.type.startsWith("reducer.") ? frames.reducerError(id,path,error.message,"transient",trace)
         : frame.type.startsWith("query.") ? frames.queryError(id,path,error.message) : frame.type.startsWith("action.") ? frames.actionError(id,path,error.message,trace) : frames.replicaError(id,path,error.message);
       if (frame.type === "reducer.call" || frame.type === "query.call" || frame.type === "query.subscribe" || frame.type === "action.call" || frame.type === "replica.open") return [refused(frame.id,frame.path,"trace" in frame?frame.trace:undefined)];

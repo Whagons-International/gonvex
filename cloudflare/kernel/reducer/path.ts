@@ -33,6 +33,7 @@ import { AmbiguousReceiptsError, ensureReceipts, readReceipt, receiptTables, REC
 import type { ReducerStorage } from "./storage.ts";
 import { writeAdmissionError } from "./admission.ts";
 import { span } from "../delivery/spans";
+import { MEMBER_ACCESS_SQL, memberAccessChanged, memberChecked, type MemberRow } from "../session/member-access";
 
 /** Rust's Q/R execution deadline (GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS), installed into the provenance. */
 export const EXECUTION_TIMEOUT_MS = 10_000;
@@ -100,13 +101,6 @@ export type CallOutcome =
   | { readonly ok: true; readonly result: string; readonly committedRevision: number | undefined }
   | { readonly ok: false; readonly failure: ReducerFailure };
 
-interface MemberRow {
-  account_id: string;
-  status: string;
-  role: string;
-  permissions: string;
-  membership_revision: number;
-}
 
 /** Account and member identity as the module sees it (execution.rs `invocation`). */
 export function identityOf(session: TenantSession): Identity {
@@ -154,14 +148,6 @@ export function invocationInfoOf(session: TenantSession, commandId: string, arti
   };
 }
 
-/** lib.rs `member_access_changed`. */
-function memberAccessChanged(session: TenantSession, current: MemberRow | undefined): boolean {
-  if (!current) return true;
-  const admitted = session.member;
-  return admitted.accountId !== current.account_id || admitted.status !== current.status || admitted.role !== current.role
-    || JSON.stringify(admitted.permissions) !== JSON.stringify(JSON.parse(current.permissions || "null"))
-    || admitted.membershipRevision !== Number(current.membership_revision);
-}
 
 /** Rows read and written by the last executed call (budgets, PR numbers). */
 export interface CallNumbers {
@@ -245,11 +231,9 @@ export class ReducerPath {
   }
 
   private ownMembershipChanged(session: TenantSession): boolean {
-    if (session.anonymous || session.member.id.startsWith("_gonvex_service:") || !this.options.ownMembershipChanged) return false;
+    if (!memberChecked(session) || !this.options.ownMembershipChanged) return false;
     try {
-      const row = this.options.direct.sql.exec<MemberRow & Record<string, SqlStorageValue>>(
-        "SELECT account_id, status, role, permissions, membership_revision FROM members WHERE id = ?", session.member.id,
-      ).toArray()[0];
+      const row = this.options.direct.sql.exec<MemberRow & Record<string, SqlStorageValue>>(MEMBER_ACCESS_SQL, session.member.id).toArray()[0];
       return memberAccessChanged(session, row);
     } catch (error) {
       console.warn("reducer: could not re-read the session Member after a commit", error);
