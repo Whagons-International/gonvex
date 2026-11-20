@@ -200,18 +200,46 @@ function directoryRows(ctx: Ctx, projectId: string, accountId: string): Row[] {
   );
 }
 
+/** The cache entry for `row`, if it is still valid for the row's member id, revision and projection time. */
+function cachedAdmission(projectId: string, accountId: string, row: Row): Member | undefined {
+  const cached = admissionCache.get(`${projectId}\u0000${str(row.tenant_id)}\u0000${accountId}`);
+  if (!cached || Date.now() - cached.at > ADMISSION_CACHE_TTL_MS) return undefined;
+  const revision = Number(row.tenant_membership_revision ?? -1), projectedAt = Number(row.projected_at ?? -1);
+  if (revision < 0 || projectedAt < 0 || cached.revision !== revision || cached.projectedAt !== projectedAt) return undefined;
+  if (cached.memberId !== str(row.member_id) || cached.member.id !== str(row.member_id) || cached.member.status !== "active") return undefined;
+  return cached.member;
+}
+
+/** Candidates for the active tenant, in the order the session chooses them: the requested one (id or domain) first. */
+function preferredOrder(rows: Row[], requested: string): Row[] {
+  const matches = (row: Row) => str(row.tenant_id) === requested || str(row.domain).toLowerCase() === requested.toLowerCase();
+  return [...rows.filter(matches), ...rows.filter((row) => !matches(row))];
+}
+
+/** The directory row an admission was made under: its cache key parts. */
+const rowStamp = (row: Row) => `${str(row.member_id)}\u0000${Number(row.tenant_membership_revision ?? -1)}\u0000${Number(row.projected_at ?? -1)}`;
+
 /**
  * X17h: tenant admissions started before the session exists, while the external provider's account check
- * (`accounts:lookup`) is in flight. Each is the same read-only tenant admission `sessionResultFromDirectory` makes; it
- * is used only for this account, only after the account check passed and the session committed, and it is still a
- * live admission (started at most one lookup earlier). A failed one counts as a failed admission.
+ * (`accounts:lookup`) is in flight. Only the admissions the session result would make live are started: the first
+ * active-tenant candidate and the rows the admission cache cannot serve, at most `FANOUT` (#537 review). Each is the
+ * same read-only tenant admission; it is used only for this account, only after the account check passed and the
+ * session committed, and only if the tenant's directory row is unchanged since it started (member id, membership
+ * revision, projection time), so it is cached under the key it was read for. A failed one counts as failed.
+ * A disabled or revoked account whose ID token is still valid can therefore wake at most this bounded set, read-only
+ * (accepted, #537).
  */
-export interface PrefetchedAdmissions { readonly accountId: string; readonly admissions: ReadonlyMap<string, Promise<Member | null>> }
-export function prefetchAdmissions(ctx: Ctx, projectId: string, accountId: string): PrefetchedAdmissions {
-  const admissions = new Map<string, Promise<Member | null>>();
-  for (const row of directoryRows(ctx, projectId, accountId)) {
+interface EarlyAdmission { readonly stamp: string; readonly member: Promise<Member | null> }
+export interface PrefetchedAdmissions { readonly accountId: string; readonly admissions: ReadonlyMap<string, EarlyAdmission> }
+export function prefetchAdmissions(ctx: Ctx, projectId: string, accountId: string, requested = ""): PrefetchedAdmissions {
+  const rows = directoryRows(ctx, projectId, accountId);
+  const first = preferredOrder(rows, requested)[0];
+  const wanted = rows.filter((row) => row === first || !cachedAdmission(projectId, accountId, row));
+  if (first && wanted[0] !== first) { wanted.splice(wanted.indexOf(first), 1); wanted.unshift(first); }
+  const admissions = new Map<string, EarlyAdmission>();
+  for (const row of wanted.slice(0, FANOUT)) {
     const tenantId = str(row.tenant_id);
-    admissions.set(tenantId, admitMember(ctx, projectId, tenantId, accountId).then((admitted) => admitted.member, () => null));
+    admissions.set(tenantId, { stamp: rowStamp(row), member: admitMember(ctx, projectId, tenantId, accountId).then((admitted) => admitted.member, () => null) });
   }
   return { accountId, admissions };
 }
@@ -226,8 +254,9 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
   const admitLive = async (row: Row): Promise<Member | null> => {
     const key = keyOf(row);
     try {
+      // An admission started during the account check, if the directory row it was read for is still this one.
       const started = early?.get(str(row.tenant_id));
-      const member = started ? await started : (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
+      const member = started && started.stamp === rowStamp(row) ? await started.member : (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
       if (!member) throw new Error("admission failed");
       admissionCache.delete(key);
       admissionCache.set(key, { member, memberId: str(row.member_id), revision: Number(row.tenant_membership_revision ?? -1), projectedAt: Number(row.projected_at ?? -1), at: Date.now() });
@@ -238,17 +267,8 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
       return null;
     }
   };
-  const fromCache = (row: Row): Member | undefined => {
-    const cached = admissionCache.get(keyOf(row));
-    if (!cached || Date.now() - cached.at > ADMISSION_CACHE_TTL_MS) return undefined;
-    const revision = Number(row.tenant_membership_revision ?? -1), projectedAt = Number(row.projected_at ?? -1);
-    if (revision < 0 || projectedAt < 0 || cached.revision !== revision || cached.projectedAt !== projectedAt) return undefined;
-    if (cached.memberId !== str(row.member_id) || cached.member.id !== str(row.member_id) || cached.member.status !== "active") return undefined;
-    return cached.member;
-  };
-  const matches = (row: Row) => str(row.tenant_id) === requested || str(row.domain).toLowerCase() === requested.toLowerCase();
-  // Candidates for the active tenant, in the order the session would choose them.
-  const preferred = [...rows.filter(matches), ...rows.filter((row) => !matches(row))];
+  const fromCache = (row: Row): Member | undefined => cachedAdmission(projectId, accountId, row);
+  const preferred = preferredOrder(rows, requested);
   // The first candidate is admitted live, alongside the rest of the list (cached or live).
   const live = new Set<Row>();
   const admitted = new Map<Row, Member | null>();

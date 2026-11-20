@@ -464,10 +464,49 @@ describe("X17h admissions started during the provider's account check", () => {
       expect(ctx.tenantCalls).toBe(calls + 1);
       // A failed prefetched admission is a failed admission: that tenant is skipped, the next becomes active.
       sessions.clearAdmissionCache();
-      const failed = { accountId: sid, admissions: new Map([...prefetched.admissions].map(([id, p]) => [id, id === seeded.tenants.a ? Promise.resolve(null) : p])) };
+      const failed = { accountId: sid, admissions: new Map([...prefetched.admissions].map(([id, e]) => [id, id === seeded.tenants.a ? { ...e, member: Promise.resolve(null) } : e])) };
       const after = await sessions.sessionResultFromDirectory(ctx, seeded.project, { account: { id: sid } }, failed);
       expect((after.tenants as Array<{ id: string }>).map((t) => t.id)).toEqual([seeded.tenants.b]);
       expect(after.activeTenantId).toBe(seeded.tenants.b);
+    });
+  });
+});
+
+describe("#537 review: an admission started during the account check is never cached under a newer row", () => {
+  type Internals = { context(): Parameters<typeof import("../src/sessions").sessionResultFromDirectory>[0] };
+  it("a projection that lands during the lookup makes the post-commit path admit live", async () => {
+    const sessions = await import("../src/sessions");
+    sessions.clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"], b: ["sid"] });
+    const sid = seeded.members.sid!.accountId, email = seeded.members.sid!.email, b = seeded.tenants.b!;
+    const prefetched = await runInDurableObject(control(), async (instance: ControlObject) => {
+      const p = sessions.prefetchAdmissions((instance as unknown as Internals).context(), seeded.project, sid);
+      await Promise.all([...p.admissions.values()].map((e) => e.member));
+      return p;
+    });
+    // The tenant projects a role change while the lookup is in flight (a Reducer write, no revision bump).
+    await runInDurableObject(tenantStub(b), (instance: StubTenantObject) => {
+      (instance as unknown as { sql: { run(q: string, ...a: unknown[]): void } }).sql.run("UPDATE members SET role='member',permissions='{}' WHERE account_id=$1", sid);
+    });
+    await tenantStub(b).flushMemberships();
+    await runInDurableObject(control(), (instance: ControlObject) => sessions.sessionResultFromDirectory((instance as unknown as Internals).context(), seeded.project, { account: { id: sid } }, prefetched));
+    const { session } = await login(seeded.project, email); // b served from the cache
+    expect((session.tenants as Array<Record<string, unknown>>).find((t) => t.id === b)).toMatchObject({ role: "member" });
+  });
+
+  it("prefetches only the first candidate and the rows the cache cannot serve", async () => {
+    const sessions = await import("../src/sessions");
+    sessions.clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"], b: ["sid"], c: ["sid"] });
+    const sid = seeded.members.sid!.accountId;
+    await login(seeded.project, seeded.members.sid!.email); // caches a, b and c
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const ctx = (instance as unknown as Internals).context();
+      const calls = ctx.tenantCalls;
+      const p = sessions.prefetchAdmissions(ctx, seeded.project, sid, seeded.tenants.c!);
+      expect([...p.admissions.keys()]).toEqual([seeded.tenants.c]);
+      expect(ctx.tenantCalls).toBe(calls + 1);
+      await Promise.all([...p.admissions.values()].map((e) => e.member));
     });
   });
 });

@@ -1326,7 +1326,7 @@ async function executeAuthAction(ctx: Ctx, connection: ControlConnection, path: 
           "SELECT account_id FROM account_identities WHERE project_id=$1 AND provider=$2 AND issuer=$3 AND subject=$4",
           project, identity.provider, identity.issuer, identity.subject,
         );
-        if (typeof accountId === "string" && accountId) prefetched = prefetchAdmissions(ctx, project, accountId);
+        if (typeof accountId === "string" && accountId) prefetched = prefetchAdmissions(ctx, project, accountId, optionalString(object, "tenantId") ?? "");
       },
     });
   }
@@ -1400,6 +1400,8 @@ async function executeAuthAction(ctx: Ctx, connection: ControlConnection, path: 
   const calls = callsAtStart;
   const answer = await sessionResultFromDirectory(ctx, project, result ?? {}, prefetched);
   // X14: wall time per part of one sign-in (opt-in dev spans only; no identifiers, tokens or tenant names).
+  // X17h: for an exchange, `admits` counts every tenant admission of the sign-in, including those started during the
+  // account check (some may be discarded), and `admitMs` is the post-commit part only (it no longer covers them).
   span("control.auth", { path, totalMs: Date.now() - started, externalMs: verified - started, ...timings,
     txMs: committed - verified, admitMs: Date.now() - committed, admits: ctx.tenantCalls - calls });
   return answer;
