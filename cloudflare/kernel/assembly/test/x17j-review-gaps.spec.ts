@@ -18,7 +18,7 @@ function world(validUntil = Infinity) {
     // Control's load_session_identity: `gvx_session_` only, and `expires_at > now`.
     sessionIdentity: async (token: string) => {
       calls.identity++;
-      if (!token.trim().startsWith('gvx_session_') && !token.startsWith('tok-')) return { ok: false, error: 'session is invalid' };
+      if (!token.trim().startsWith('gvx_session_')) return { ok: false, error: 'session is invalid' };
       return Date.now() < validUntil ? { ok: true, value: identity, expiresAt: Number.isFinite(validUntil) ? validUntil : Date.now() + 3_600_000 } : { ok: false, error: 'session is invalid' };
     },
   };
@@ -42,9 +42,14 @@ describe('#539 review: lease keying and expiry', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const start = Date.now();
     const w = world(start + 2_000); // the session row expires 2 s after this auth
-    expect(await w.ports.control.loadSessionIdentity('tok-exp', 'p')).toMatchObject({ ok: true });
-    vi.setSystemTime(start + 3_000); // past expires_at, inside IDENTITY_LEASE_MS
-    expect(await w.ports.control.loadSessionIdentity('tok-exp', 'p')).toMatchObject({ ok: false });
+    // #539 re-review: a leasable token (`tok-exp` was never leased, so this passed with the bound removed).
+    expect(await w.ports.control.loadSessionIdentity('gvx_session_exp', 'p')).toMatchObject({ ok: true });
+    vi.setSystemTime(start + 1_000); // inside expires_at: served from the lease
+    expect(await w.ports.control.loadSessionIdentity('gvx_session_exp', 'p')).toMatchObject({ ok: true });
+    expect(w.calls.identity).toBe(1);
+    vi.setSystemTime(start + 3_000); // past expires_at, inside IDENTITY_LEASE_MS: the lease ended, Control answers
+    expect(await w.ports.control.loadSessionIdentity('gvx_session_exp', 'p')).toMatchObject({ ok: false });
+    expect(w.calls.identity).toBe(2);
   });
 });
 

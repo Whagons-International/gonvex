@@ -14,7 +14,11 @@
  * project notifies the project's watching gateways (`controlChanged`), which drops that project's leases; the gateway
  * that forwarded a Control write drops them itself, synchronously. Another gateway sees a revocation one Control alarm
  * later (the notice is sent from Control's alarm, X17e). The TTL is the backstop if a notification is lost: a revoked
- * token can authenticate on a gateway for at most `IDENTITY_LEASE_MS` (Rust: none).
+ * token can authenticate on a gateway for at most `IDENTITY_LEASE_MS` (Rust: none). Two more gaps are TTL-bounded the
+ * same way (#539 re-review): the first auth for a project on a gateway is leased before `projectAuthenticated`
+ * registers that gateway as the project's watcher, so a revocation committed in between reaches it only by the TTL;
+ * and if `sessionDispatch` throws after Control committed a write, the synchronous drop is skipped and Control's
+ * notice (one alarm later) covers it.
  * Leases never cross tokens; impersonation, delegated, developer and anonymous sessions are never leased. The store
  * belongs to one gateway object (`leasesFor`), so it goes with that object and is the one its notices reach.
  */
