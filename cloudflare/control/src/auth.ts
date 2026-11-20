@@ -9,6 +9,7 @@
  */
 import type { Ctx } from "./context";
 import {
+  admitMember,
   authenticateImpersonation,
   authenticateSession,
   loadSessionIdentity,
@@ -18,6 +19,7 @@ import {
   resolveTenant,
 } from "./directory";
 import { asControlError } from "./errors";
+import { forgetAdmission, recentAdmission, sameAdmittedMember } from "./sessions";
 import type { ControlConnection, ServiceGrant, ServicePrincipalConfig, TenantSession } from "./types";
 import { emptyConnection } from "./types";
 import { constantTimeEqual, sha256Hex } from "./util";
@@ -30,6 +32,11 @@ export interface AuthRequest {
   controlOnly: boolean;
   public: boolean;
   connectionId: string;
+  /**
+   * #540 x #539 review: admit the tenant live, never from `recentAdmission`. The gateway sets it when its own direct
+   * tenant admission (identity-lease path) refused the member, so Control's answer reflects that refusal.
+   */
+  liveOnly?: boolean;
 }
 
 export type AuthMessage =
@@ -198,7 +205,22 @@ export async function authenticate(ctx: Ctx, request: AuthRequest): Promise<Auth
         connection: { connectionId, projectId: identity.projectId, identity, tenant: null, impersonationId: "", authToken: token },
       };
     }
-    const session = await authenticateSession(ctx, token, requestedProject, tenant);
+    // X17k: a tenant auth right after the sign-in reuses the sign-in's live admission (sessions.ts `recentAdmission`).
+    const session = await authenticateSession(ctx, token, requestedProject, tenant, async (c, projectId, tenantId, accountId) => {
+      const route = resolveTenant(c, projectId, tenantId);
+      const recent = request.liveOnly ? undefined : recentAdmission(c, projectId, route.tenantId, accountId);
+      if (recent) return { route, member: recent.member, revision: recent.admissionRevision };
+      // #540 re-review: a live admission that refuses the member, or admits a different one, ends the reuse for every
+      // later auth (not only this `liveOnly` call).
+      try {
+        const admitted = await admitMember(c, projectId, tenantId, accountId);
+        if (!sameAdmittedMember(projectId, route.tenantId, accountId, admitted.member)) forgetAdmission(projectId, route.tenantId, accountId);
+        return admitted;
+      } catch (error) {
+        forgetAdmission(projectId, route.tenantId, accountId);
+        throw error;
+      }
+    });
     const deployed = module(session.identity.projectId);
     return {
       message: {

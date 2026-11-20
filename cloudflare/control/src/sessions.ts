@@ -163,8 +163,11 @@ export function sessionResult(grant: SessionGrant, account: AuthAccount, request
  * trigger queues every update in the tenant's projection outbox, whose push only acks rows no write touched while it
  * was in flight (kernel/assembly/tenant.ts `projectMemberships`, #530 re-review), and every projection rewrites
  * `updated_at`. Entries also expire after `ADMISSION_CACHE_TTL_MS`.
+ *
+ * `at` is when the admission RPC started (#540 review), not when the entry was written: the tenant's read happened
+ * at or after it, so every age bound (the TTL here, `AUTH_REUSE_MS` in `recentAdmission`) bounds the tenant read.
  */
-interface CachedAdmission { readonly member: Member; readonly memberId: string; readonly revision: number; readonly projectedAt: number; readonly at: number }
+interface CachedAdmission { readonly member: Member; readonly memberId: string; readonly revision: number; readonly projectedAt: number; readonly at: number; readonly admissionRevision?: number }
 const admissionCache = new Map<string, CachedAdmission>();
 const ADMISSION_CACHE_MAX = 4096;
 export const ADMISSION_CACHE_TTL_MS = 30 * 1000;
@@ -180,8 +183,11 @@ export function clearAdmissionCache(): void { admissionCache.clear(); }
  * admitted live, falling through to the next candidate when that admission fails, as before. The other entries of
  * the list may come from `admissionCache`, so an idle tenant is not woken for the sign-in's tenant list (a cold tenant
  * cost 0.3-1.8 s of the exchange on dev). Residual staleness of those entries: a membership change the tenant has
- * not projected to Control yet (its outbox push from the tenant alarm, retried every second). `auth` admits the
- * tenant it enters live, so the cache never grants entry to a tenant.
+ * not projected to Control yet (its outbox push from the tenant alarm, retried every second). These cached entries
+ * never grant entry to a tenant: `auth` admits the tenant it enters live, except that it may reuse an admission
+ * this sign-in (or an earlier one) made live at most `AUTH_REUSE_MS` before, measured from the admission RPC's start,
+ * under an unchanged directory row and with the tenant's admission revision (X17k, `recentAdmission`). A caller that
+ * has just seen the tenant refuse the member passes `liveOnly` and is always admitted live (#540 x #539 review).
  */
 /** The account's active directory rows, in the session result's order. */
 function directoryRows(ctx: Ctx, projectId: string, accountId: string): Row[] {
@@ -210,6 +216,38 @@ function cachedAdmission(projectId: string, accountId: string, row: Row): Member
   return cached.member;
 }
 
+/**
+ * X17k: the admission this Control made live for (tenant, account) at most `maxAgeMs` ago, if the tenant's directory
+ * row is unchanged since (member id, membership revision, projection time): a tenant auth right after the sign-in
+ * reuses the sign-in's admission instead of a second tenant round trip. Undefined otherwise (admit live). The age is
+ * measured from the admission RPC's start (#540 review), so the tenant read it reuses is at most `maxAgeMs` old.
+ */
+export const AUTH_REUSE_MS = 5_000;
+export function recentAdmission(ctx: Ctx, projectId: string, tenantId: string, accountId: string, maxAgeMs = AUTH_REUSE_MS): { member: Member; admissionRevision: number } | undefined {
+  const cached = admissionCache.get(`${projectId}\u0000${tenantId}\u0000${accountId}`);
+  if (!cached || cached.admissionRevision === undefined || Date.now() - cached.at > maxAgeMs) return undefined;
+  const row = ctx.sql.get(
+    `SELECT directory.tenant_id,directory.member_id,directory.tenant_membership_revision,directory.updated_at AS projected_at
+     FROM account_tenant_index directory
+     JOIN gonvex_runtime_tenants tenant ON tenant.tenant_id=directory.tenant_id
+     WHERE tenant.project_id=$1 AND directory.account_id=$2 AND directory.tenant_id=$3
+       AND directory.status='active' AND tenant.deleted_at IS NULL AND tenant.status NOT IN ('deleted','disabled')`,
+    projectId, accountId, tenantId,
+  );
+  if (!row || !cachedAdmission(projectId, accountId, row)) return undefined;
+  return { member: cached.member, admissionRevision: cached.admissionRevision };
+}
+
+/** #540 re-review: drop the cached admission for (project, tenant, account), e.g. after a live admission refused it. */
+export function forgetAdmission(projectId: string, tenantId: string, accountId: string): void {
+  admissionCache.delete(`${projectId}\u0000${tenantId}\u0000${accountId}`);
+}
+/** Whether the cached admission for (project, tenant, account), if any, has exactly `member` (id, role, permissions...). */
+export function sameAdmittedMember(projectId: string, tenantId: string, accountId: string, member: Member): boolean {
+  const cached = admissionCache.get(`${projectId}\u0000${tenantId}\u0000${accountId}`);
+  return !cached || JSON.stringify(cached.member) === JSON.stringify(member);
+}
+
 /** Candidates for the active tenant, in the order the session chooses them: the requested one (id or domain) first. */
 function preferredOrder(rows: Row[], requested: string): Row[] {
   const matches = (row: Row) => str(row.tenant_id) === requested || str(row.domain).toLowerCase() === requested.toLowerCase();
@@ -229,7 +267,7 @@ const rowStamp = (row: Row) => `${str(row.member_id)}\u0000${Number(row.tenant_m
  * A disabled or revoked account whose ID token is still valid can therefore wake at most this bounded set, read-only
  * (accepted, #537).
  */
-interface EarlyAdmission { readonly stamp: string; readonly member: Promise<Member | null> }
+interface EarlyAdmission { readonly stamp: string; readonly startedAt: number; readonly member: Promise<Member | null>; readonly admissionRevision?: Promise<number | undefined> }
 /**
  * #537 re-review: one FANOUT bound per sign-in. Prefetched admissions hold a slot until they settle; every admission
  * RPC the post-commit path starts takes one, so both phases together stay within FANOUT in flight (0012 R15).
@@ -256,9 +294,12 @@ export function prefetchAdmissions(ctx: Ctx, projectId: string, accountId: strin
   for (const row of wanted.slice(0, FANOUT)) {
     const tenantId = str(row.tenant_id);
     slots.take();
-    const member = admitMember(ctx, projectId, tenantId, accountId).then((admitted) => admitted.member, () => null);
+    const startedAt = Date.now();
+    const admitting = admitMember(ctx, projectId, tenantId, accountId);
+    const member = admitting.then((admitted) => admitted.member, () => null);
+    const admissionRevision = admitting.then((admitted) => admitted.revision, () => undefined);
     void member.finally(() => slots.release());
-    admissions.set(tenantId, { stamp: rowStamp(row), member });
+    admissions.set(tenantId, { stamp: rowStamp(row), startedAt, member, admissionRevision });
   }
   return { accountId, admissions, slots };
 }
@@ -270,9 +311,13 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
   const rows = directoryRows(ctx, projectId, accountId);
   const early = prefetched && accountId && prefetched.accountId === accountId ? prefetched.admissions : undefined;
   const slots = prefetched?.slots ?? new AdmissionSlots(FANOUT);
-  const admitNow = async (tenantId: string): Promise<Member> => {
+  const admitNow = async (tenantId: string): Promise<{ member: Member; revision: number; startedAt: number }> => {
     await slots.acquire();
-    try { return (await admitMember(ctx, projectId, tenantId, accountId)).member; } finally { slots.release(); }
+    try {
+      const startedAt = Date.now();
+      const admitted = await admitMember(ctx, projectId, tenantId, accountId);
+      return { member: admitted.member, revision: admitted.revision, startedAt };
+    } finally { slots.release(); }
   };
   const keyOf = (row: Row) => `${projectId}\u0000${str(row.tenant_id)}\u0000${accountId}`;
   const admitLive = async (row: Row): Promise<Member | null> => {
@@ -280,10 +325,13 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
     try {
       // An admission started during the account check, if the directory row it was read for is still this one.
       const started = early?.get(str(row.tenant_id));
-      const member = started && started.stamp === rowStamp(row) ? await started.member : await admitNow(str(row.tenant_id));
+      let member: Member | null, admissionRevision: number | undefined, startedAt: number;
+      if (started && started.stamp === rowStamp(row)) { member = await started.member; admissionRevision = await started.admissionRevision; startedAt = started.startedAt; }
+      else ({ member, revision: admissionRevision, startedAt } = await admitNow(str(row.tenant_id)));
       if (!member) throw new Error("admission failed");
       admissionCache.delete(key);
-      admissionCache.set(key, { member, memberId: str(row.member_id), revision: Number(row.tenant_membership_revision ?? -1), projectedAt: Number(row.projected_at ?? -1), at: Date.now() });
+      admissionCache.set(key, { member, memberId: str(row.member_id), revision: Number(row.tenant_membership_revision ?? -1), projectedAt: Number(row.projected_at ?? -1), at: startedAt,
+        ...(admissionRevision !== undefined ? { admissionRevision } : {}) });
       if (admissionCache.size > ADMISSION_CACHE_MAX) admissionCache.delete(admissionCache.keys().next().value!);
       return member;
     } catch {

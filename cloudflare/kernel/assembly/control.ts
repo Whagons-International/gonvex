@@ -67,10 +67,11 @@ export class SessionControlObject extends OperatorControlObject {
   }
   private readonly assemblyInstance = crypto.randomUUID();
   async runtimeInstance(): Promise<string> { return this.assemblyInstance; }
-  private auth(request: { token?: string; project?: string; tenant?: string; controlOnly?: boolean; public?: boolean; connectionId?: string }): Promise<AuthOutcome> {
+  private auth(request: { token?: string; project?: string; tenant?: string; controlOnly?: boolean; public?: boolean; connectionId?: string; liveOnly?: boolean }): Promise<AuthOutcome> {
     return this.authenticate({
       id: "", token: request.token ?? null, project: request.project ?? null, tenant: request.tenant ?? null,
       controlOnly: request.controlOnly ?? false, public: request.public ?? false, connectionId: request.connectionId ?? "",
+      ...(request.liveOnly ? { liveOnly: true } : {}),
     });
   }
 
@@ -110,10 +111,12 @@ export class SessionControlObject extends OperatorControlObject {
     return typeof at === "number" && Number.isFinite(at) ? { expiresAt: at } : {};
   }
 
-  async sessionAuthenticate(token: string, projectId: string | undefined, tenant: string | undefined): Promise<Outcome<TenantSession>> {
+  /** `options.liveOnly` (#540 x #539): admit the tenant live, not from a just-made sign-in admission. */
+  async sessionAuthenticate(token: string, projectId: string | undefined, tenant: string | undefined, options?: { liveOnly?: boolean }): Promise<Outcome<TenantSession>> {
     // An empty tenant asks for the first admitted one (`first_admitted_tenant`), as in K06's own branch.
     const started = Date.now();
-    const outcome = await this.auth({ token, ...(projectId !== undefined ? { project: projectId } : {}), ...(tenant !== undefined ? { tenant } : {}) });
+    const outcome = await this.auth({ token, ...(projectId !== undefined ? { project: projectId } : {}), ...(tenant !== undefined ? { tenant } : {}),
+      ...(options?.liveOnly ? { liveOnly: true } : {}) });
     span("control.rpc", { method: "sessionAuthenticate", ms: Date.now() - started });
     if (outcome.message.type !== "auth.result" || !outcome.connection.tenant) return failed(outcome);
     return { ok: true, value: sessionOf(outcome.connection.tenant), ...this.sessionExpiry(token) };

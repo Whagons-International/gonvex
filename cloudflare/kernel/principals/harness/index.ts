@@ -39,7 +39,7 @@ export interface PrincipalsEnv extends GatewayEnv {
 interface ControlRpc {
   sessionProject(projectId: string): Promise<Outcome<null>>;
   sessionIdentity(token: string, projectId: string | undefined): Promise<Outcome<SessionIdentity>>;
-  sessionAuthenticate(token: string, projectId: string | undefined, tenant: string | undefined): Promise<Outcome<TenantSession>>;
+  sessionAuthenticate(token: string, projectId: string | undefined, tenant: string | undefined, options?: { liveOnly?: boolean }): Promise<Outcome<TenantSession>>;
   sessionImpersonation(token: string, projectId: string | undefined, tenant: string | undefined, connectionId: string): Promise<Outcome<Impersonation>>;
   sessionPublicTenant(projectId: string, tenant: string): Promise<Outcome<TenantRoute>>;
   sessionRevalidate(items: RevalidationItem[]): Promise<boolean[]>;
