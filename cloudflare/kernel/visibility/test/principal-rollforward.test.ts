@@ -31,6 +31,12 @@ const SCHEMA = [
   // An integer key: the patch compares the typed key from the insert image.
   `CREATE TABLE "tasks" ("_id" INTEGER PRIMARY KEY, "spotId" TEXT, "workspaceId" TEXT, "createdBy" TEXT, "reportedByTeamId" TEXT, "deletedAt" TEXT)`,
   `CREATE TABLE "taskShares" ("_id" TEXT PRIMARY KEY, "taskId" INTEGER, "sharedToTeamId" TEXT, "revokedAt" TEXT, "deletedAt" TEXT)`,
+  // #555 R2 and M13: an untyped key column (BLOB, integer, real or text keys; no affinity converts them).
+  `CREATE TABLE "loose" ("_id" PRIMARY KEY, "memberId" TEXT, "spotId" TEXT, "deletedAt" TEXT)`,
+  // #555 R1: a declared ON CONFLICT REPLACE (a plain INSERT may delete another row), and a trigger that replaces.
+  `CREATE TABLE "claims" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON CONFLICT REPLACE)`,
+  `CREATE TABLE "claimRequests" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT)`,
+  `CREATE TRIGGER "claimRequests_apply" AFTER INSERT ON "claimRequests" BEGIN INSERT OR REPLACE INTO "claims" VALUES (NEW."_id", NEW."memberId", NEW."spotId"); END`,
 ];
 
 const live = (table: string) => ({ table, column: "deletedAt", value: { literal: null } });
@@ -42,7 +48,7 @@ function spotsPlan(): VisibilityPlan {
     version: 2,
     table: "spots",
     key: "_id",
-    permissionTables: ["memberTeams", "workspaceTeams", "workspaces", "spots", "memberSpots", "members"],
+    permissionTables: ["memberTeams", "workspaceTeams", "workspaces", "spots", "memberSpots", "members", "loose", "claims"],
     sets: {
       memberSpots: { kind: "principal", table: "memberSpots", select: "spotId", joins: [], where: [me("memberSpots"), live("memberSpots")] },
       memberSpotDescendants: {
@@ -77,10 +83,12 @@ function spotsPlan(): VisibilityPlan {
         where: [me("memberTeams"), { table: "taskShares", column: "revokedAt", value: { literal: null } }, live("taskShares"), live("memberTeams")],
       },
       sharedTeamTaskSpots: { kind: "derived", from: "sharedTeamTaskSpotsInput", table: "tasks", key: "_id", select: "spotId", where: [{ column: "deletedAt", value: { literal: null } }] },
+      looseSpots: { kind: "principal", table: "loose", select: "spotId", joins: [], where: [me("loose"), live("loose")] },
+      claimedSpots: { kind: "grant", table: "claims", select: "spotId", joins: [], where: [me("claims")] },
     },
     where: {
       operator: "or",
-      children: ["memberSpots", "memberSpotDescendants", "createdTaskSpots", "reportedTeamTaskSpots", "personalTeamTaskSpots", "teamWorkspaceTaskSpots", "sharedTeamTaskSpots"].map((set) => ({ operator: "inSet", column: "_id", set })),
+      children: ["memberSpots", "memberSpotDescendants", "createdTaskSpots", "reportedTeamTaskSpots", "personalTeamTaskSpots", "teamWorkspaceTaskSpots", "sharedTeamTaskSpots", "looseSpots", "claimedSpots"].map((set) => ({ operator: "inSet", column: "_id", set })),
     },
   });
 }
@@ -113,6 +121,8 @@ interface Harness {
   registry: VisibilityRegistry;
   commit(statements: Array<[string, unknown[]]>): Promise<number>;
   read<T>(body: (session: StorageSession) => T): Promise<T>;
+  /** Direct SQL outside any invocation (log surgery for the R05 probe). */
+  raw(text: string, ...binds: unknown[]): unknown[][];
 }
 
 async function withTenant<T>(body: (harness: Harness) => Promise<T>): Promise<T> {
@@ -129,6 +139,7 @@ async function withTenant<T>(body: (harness: Harness) => Promise<T>): Promise<T>
     let commands = 0;
     return body({
       registry: new VisibilityRegistry(),
+      raw: (text, ...binds) => [...state.storage.sql.exec(text, ...(binds as never[])).raw()] as unknown[][],
       async commit(statements) {
         const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (session) => {
           for (const [text, parameters] of statements) session.run(text, parameters);
@@ -213,7 +224,18 @@ function write(next: () => number, ids: { task: number; other: number }): [strin
   if (roll < 0.9) return [`INSERT OR IGNORE INTO spots VALUES ($1, $2)`, [looseSpot(), anySpot()]];
   if (roll < 0.92) return [`DELETE FROM spots WHERE "_id" = $1`, [looseSpot()]];
   if (roll < 0.94) return [`UPDATE spots SET "parentId" = $2 WHERE "_id" = $1`, [anySpot(), anySpot()]];
-  if (roll < 0.97) return [`UPDATE workspaces SET "type" = $2 WHERE "_id" = $1`, [workspace(), pick(["TEAM", "PERSONAL"])]];
+  if (roll < 0.95) return [`UPDATE workspaces SET "type" = $2 WHERE "_id" = $1`, [workspace(), pick(["TEAM", "PERSONAL"])]];
+  // #555 R1: REPLACE on a task (the old row's grant goes without a delete in the log).
+  if (roll < 0.96) return [pick([`REPLACE INTO tasks VALUES ($1, $2, $3, $4, $5, $6)`, `INSERT OR REPLACE INTO tasks VALUES ($1, $2, $3, $4, $5, $6)`]), [task(), spot(), workspace(), pick([...MEMBERS, "mx"]), pick([team(), null]), deleted()]];
+  // #555 R2 / M13: untyped keys of every storage class.
+  if (roll < 0.97) {
+    const n = ++ids.other;
+    const key = pick([`CAST('k${n}' AS BLOB)`, `${n}`, `${n}.5`, `'k${n}'`]);
+    return [`INSERT INTO loose VALUES (${key}, $1, $2, $3)`, [pick(MEMBERS), spot(), deleted()]];
+  }
+  // #555 R1: a declared ON CONFLICT REPLACE, and a trigger that replaces: another member's claim on the spot goes.
+  if (roll < 0.98) return [`INSERT INTO claims VALUES ($1, $2, $3)`, [`c-${++ids.other}`, pick(MEMBERS), spot()]];
+  if (roll < 0.985) return [`INSERT INTO "claimRequests" VALUES ($1, $2, $3)`, [`c-${++ids.other}`, pick(MEMBERS), spot()]];
   // A member row change: the entry is dropped, never rolled.
   return [`UPDATE members SET permissions = $2 WHERE id = $1`, [pick(MEMBERS), JSON.stringify({ n: ids.other++ })]];
 }
@@ -274,8 +296,9 @@ describe("principal cache roll-forward (X17p)", () => {
       // Per member: four grant sets on tasks patched.
       expect(after.setsPatched - before.setsPatched).toBe(12);
       // m1's roll-forward, the registry's first: the change summary, the capture triggers' key columns (read once
-      // per schema), four point queries, and the derived set (empty source: no SQL).
-      expect(statements).toBe(6);
+      // per schema), the inserted-keys exactness check (once per base table), four point queries, and the derived
+      // set (empty source: no SQL).
+      expect(statements).toBe(7);
     });
   });
 
@@ -298,6 +321,100 @@ describe("principal cache roll-forward (X17p)", () => {
       const after = harness.registry.principals.stats();
       expect(after.rolledForward).toBeGreaterThan(before.rolledForward);
       expect(after.setsRerun - before.setsRerun, "memberSpotDescendants, once per member").toBe(3);
+    });
+  });
+
+  /** Resolves every member (caching), runs `write`, then checks every member's cached resolution against fresh SQL. */
+  async function probe(harness: Harness, plan: VisibilityPlan, label: string, write: Array<[string, unknown[]]>): Promise<void> {
+    await harness.read((session) => checkMembers(session, harness, plan, `${label} before`));
+    await harness.commit(write);
+    await harness.read((session) => checkMembers(session, harness, plan, `${label} after`));
+  }
+
+  function cachedSet(harness: Harness, session: StorageSession, plan: VisibilityPlan, member: string, set: string): string[] {
+    const clock = readClock(session);
+    const plans = new Map([["spots", plan]]);
+    const resolved = resolveWithParents(session, sessionOf(member), plan, clock.revision, plans, harness.registry.acl.ensure(session, plans, [plan]), undefined, { cache: harness.registry.principals, clock });
+    return [...(resolved.sets.get(set) ?? [])];
+  }
+
+  it("#555 R1 P1: a REPLACE that moves a task to another member re-runs the set (the reviewer's probe)", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      await harness.commit([[`INSERT INTO tasks VALUES (100, 's7', 'w2', 'm1', NULL, NULL)`, []]]);
+      await probe(harness, plan, "REPLACE INTO", [[`REPLACE INTO tasks VALUES (100, 's7', 'w2', 'mx', NULL, NULL)`, []]]);
+      await harness.read((session) => expect(cachedSet(harness, session, plan, "m1", "createdTaskSpots")).toEqual([]));
+      // One marker for the table in that transaction, beside the logged insert.
+      const logged = harness.raw(`SELECT table_name, operation, row_id, new_value FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) ORDER BY ordinal`);
+      expect(logged.map((row) => [row[0], row[1]])).toEqual([["tasks", "insert"], ["_gonvex_replaced:tasks", "delete"]]);
+      expect(logged[1]![3]).toBeNull();
+      await harness.commit([[`INSERT INTO tasks VALUES (101, 's6', 'w2', 'm2', NULL, NULL)`, []]]);
+      await probe(harness, plan, "INSERT OR REPLACE", [[`INSERT OR REPLACE INTO tasks VALUES (101, 's6', 'w2', 'm3', NULL, NULL)`, []]]);
+      await harness.read((session) => expect(cachedSet(harness, session, plan, "m2", "createdTaskSpots")).toEqual([]));
+      expect(harness.registry.principals.stats().setsRerun).toBeGreaterThan(0);
+    });
+  });
+
+  it("#555 R1: a declared ON CONFLICT REPLACE and a REPLACE inside a trigger delete another key's row; the set re-runs", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      await harness.commit([[`INSERT INTO claims VALUES ('c1', 'm1', 's4')`, []], [`INSERT INTO claims VALUES ('c2', 'm2', 's5')`, []]]);
+      // A plain INSERT: the UNIQUE spotId conflict deletes c1 (m1's claim) without a log row.
+      await probe(harness, plan, "declared", [[`INSERT INTO claims VALUES ('c3', 'm3', 's4')`, []]]);
+      await harness.read((session) => {
+        expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual([]);
+        expect(cachedSet(harness, session, plan, "m3", "claimedSpots")).toEqual(["s4"]);
+      });
+      // A trigger's INSERT OR REPLACE deletes c2.
+      await probe(harness, plan, "trigger", [[`INSERT INTO "claimRequests" VALUES ('c4', 'm1', 's5')`, []]]);
+      await harness.read((session) => {
+        expect(cachedSet(harness, session, plan, "m2", "claimedSpots")).toEqual([]);
+        expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual(["s5"]);
+      });
+      const markers = () => harness.raw(`SELECT count(*) FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) AND table_name LIKE '\\_gonvex\\_replaced:%' ESCAPE '\\'`)[0]![0];
+      // Any UPDATE of a table declared ON CONFLICT REPLACE may replace: one marker.
+      await probe(harness, plan, "declared update", [[`UPDATE claims SET "memberId" = 'm2' WHERE "_id" = 'c3'`, []]]);
+      expect(markers()).toBe(1);
+      // A write that cannot replace logs none.
+      await probe(harness, plan, "plain", [[`UPDATE tasks SET "spotId" = 's2' WHERE "_id" = 1`, []], [`INSERT INTO tasks VALUES (300, 's3', 'w1', 'm1', NULL, NULL)`, []]]);
+      expect(markers()).toBe(0);
+    });
+  });
+
+  it("#555 R2 P2 and M13: inserted untyped keys (BLOB, integer, real, text) patch or re-run exactly", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      // A BLOB key: its image is hex text, which matches no stored row; the set re-runs.
+      await probe(harness, plan, "blob", [[`INSERT INTO loose VALUES (x'0102', 'm1', 's2', NULL)`, []]]);
+      await harness.read((session) => expect(cachedSet(harness, session, plan, "m1", "looseSpots")).toEqual(["s2"]));
+      const rerun = harness.registry.principals.stats().setsRerun;
+      // An integer and a real key in an untyped column: only the typed image matches (the row_id text '5' or
+      // '7.5' does not equal the stored number), and they patch.
+      const patched = harness.registry.principals.stats().setsPatched;
+      await probe(harness, plan, "integer", [[`INSERT INTO loose VALUES (5, 'm2', 's3', NULL)`, []]]);
+      await probe(harness, plan, "real", [[`INSERT INTO loose VALUES (7.5, 'm2', 's8', NULL)`, []]]);
+      await probe(harness, plan, "text", [[`INSERT INTO loose VALUES ('k9', 'm2', 's1', NULL)`, []]]);
+      await harness.read((session) => expect(cachedSet(harness, session, plan, "m2", "looseSpots")).toEqual(["s1", "s3", "s8"]));
+      const stats = harness.registry.principals.stats();
+      expect(stats.setsPatched - patched).toBeGreaterThanOrEqual(9);
+      expect(stats.setsRerun).toBe(rerun);
+    });
+  });
+
+  it("#555: an insert without a row image (R05) re-runs the set instead of patching nothing", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      await harness.read((session) => checkMembers(session, harness, plan, "before"));
+      const revision = await harness.commit([[`INSERT INTO tasks VALUES (200, 's5', 'w2', 'm1', NULL, NULL)`, []]]);
+      harness.raw(`UPDATE _gonvex_sync_changes SET new_value = NULL WHERE revision = ? AND table_name = 'tasks'`, revision);
+      await harness.read((session) => {
+        checkMembers(session, harness, plan, "after");
+        expect(cachedSet(harness, session, plan, "m1", "createdTaskSpots")).toEqual(["s5"]);
+      });
     });
   });
 

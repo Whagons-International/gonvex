@@ -17,6 +17,7 @@ import { readyNow } from "../visibility/acl-index.ts";
 import { scalar } from "../visibility/json.ts";
 import { withParentOverlay, type ParentOverlay, type ResolvedVisibility } from "../visibility/resolved.ts";
 import { jsonObjectExpr } from "../query/compile.ts";
+import { markedTable } from "../capture/replace-marker.ts";
 import type { JsonKind } from "../storage/values.ts";
 import { canonical } from "./canonical.ts";
 import { bounded, type ReplicaDefinition } from "./definition.ts";
@@ -150,6 +151,23 @@ function subscriptionConcernTables(subscription: Subscription): Set<string> {
     subscription.concernTables = tables;
   }
   return subscription.concernTables;
+}
+
+/** Tables the transaction's REPLACE markers name (`replace-marker.ts`). */
+function replacedTables(changes: readonly LogChange[]): Set<string> {
+  const out = new Set<string>();
+  for (const change of changes) {
+    const table = markedTable(change.table);
+    if (table !== undefined) out.add(table);
+  }
+  return out;
+}
+
+/** Whether a REPLACE on one of `replaced` can bear on the subscription's rows or visibility. */
+function replaceConcerns(subscription: Subscription, replaced: ReadonlySet<string>): boolean {
+  const tables = subscriptionConcernTables(subscription);
+  for (const table of replaced) if (tables.has(table) || subscription.plan.permissionTables.includes(table)) return true;
+  return false;
 }
 
 function subscriptionParentAclColumns(subscription: Subscription): Map<string, Set<string>> {
@@ -562,10 +580,15 @@ export function applyTransaction(
   const touches = new Map<string, EntityTouch>();
   const resynced: Subscription[] = [];
   const ordered = [...subscriptions.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const replaced = replacedTables(event.changes);
   for (const subscription of ordered) {
     if (event.revision <= subscription.cursor.revision) continue;
     let step: Step;
-    if (subscription.plan.version === 2) {
+    if (replaced.size && replaceConcerns(subscription, replaced)) {
+      // X17p (#555 R1): a REPLACE may have deleted rows of a table this subscription reads without a log row
+      // (no image to patch masks or rows from): reconcile against a snapshot.
+      step = { kind: "resync", reason: "consistency" };
+    } else if (subscription.plan.version === 2) {
       step = !indexesReady(subscription.resolved, event.revision, event.epoch)
         ? { kind: "resync", reason: "consistency" }
         : maskStep(subscription, event.revision, event.changes, collapsed, reads);

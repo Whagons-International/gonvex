@@ -18,14 +18,18 @@
 // joined tables changed, or whose base table changed other than by inserts, is
 // re-run with the same SQL; a set whose base table only gained rows adds what
 // those rows contribute (a set is inner joins and equality predicates, so it is
-// monotone in its rows); derived sets are re-run. The rolled sets are the sets a
-// fresh resolution at the open's revision returns. Rust drops the entry here;
-// both give the same resolution, fingerprint and frames.
+// monotone in its rows); derived sets are re-run. An insert without a row
+// image, a REPLACE marker (`../capture/replace-marker.ts`: rows may have been
+// deleted unlogged), or inserted keys that do not match their rows exactly
+// (`insertedKeysExact`) count as other changes, so the set re-runs. The rolled
+// sets are the sets a fresh resolution at the open's revision returns. Rust
+// drops the entry here; both give the same resolution, fingerprint and frames.
 //
 // Synchronous: Durable Object SQL is, and the object runs one event at a
 // time, so Rust's single-flight lock per key is not needed.
 
 import { sha256Hex } from "../capture/digest.ts";
+import { markedTable, replacedMarker } from "../capture/replace-marker.ts";
 import { activeSets, setOf, setsSignatureText, type VisibilityPlan } from "./plan.ts";
 import { addInsertedRowsInto, resolveDerived, resolveSetInto, visibilityFingerprint, type VisibilitySession, type VisibilitySql } from "./principal.ts";
 import type { DirectContext, ResolvedVisibility, TokenSets } from "./resolved.ts";
@@ -194,6 +198,12 @@ export class PrincipalCache {
     const core = entry.core;
     const keys = this.entityKeys(sql);
     const sets = new Map<string, ReadonlySet<string>>(core.sets);
+    const exact = new Map<string, boolean>();
+    const patchable = (table: string, key: string) => {
+      let found = exact.get(table);
+      if (found === undefined) exact.set(table, (found = insertedKeysExact(sql, table, key, entry.revision, clock.revision)));
+      return found;
+    };
     for (const name of activeSets(plan, core.role)) {
       const set = setOf(plan, name);
       if (set.kind === "derived") continue;
@@ -206,7 +216,7 @@ export class PrincipalCache {
       const base = changes.get(set.table);
       if (!base) continue;
       const key = keys.get(set.table);
-      if (base.insertsOnly && base.rows <= MAX_PATCHED_ROWS && key !== undefined) {
+      if (base.insertsOnly && base.rows <= MAX_PATCHED_ROWS && key !== undefined && patchable(set.table, key)) {
         addInsertedRowsInto(sql, name, set, core.direct, sets, key, entry.revision, clock.revision);
         this.counters.setsPatched += 1;
       } else {
@@ -340,17 +350,46 @@ interface TableChanges {
   readonly insertsOnly: boolean;
 }
 
-/** Per input table with changes in `(low, high]`: how many, and whether all are inserts. Index seeks on `(table_name, revision)`. */
+/**
+ * Per input table with changes in `(low, high]`: how many, and whether all are inserts that carry a row image.
+ * A REPLACE marker of a table (`replace-marker.ts`) makes it a non-insert change: rows may have gone unlogged.
+ * Index seeks on `(table_name, revision)`.
+ */
 export function changeSummary(sql: VisibilitySql, tables: readonly string[], low: number, high: number): Map<string, TableChanges> {
   const found = new Map<string, TableChanges>();
   if (!tables.length || low >= high) return found;
-  const list = tables.map((_, index) => `$${index + 3}`).join(", ");
+  const names = [...tables, ...tables.map(replacedMarker)];
+  const list = names.map((_, index) => `$${index + 3}`).join(", ");
   const rows = sql.run(
-    `SELECT table_name, count(*), sum(operation <> 'insert') FROM _gonvex_sync_changes WHERE table_name IN (${list}) AND revision > $1 AND revision <= $2 GROUP BY table_name`,
-    [low, high, ...tables],
+    `SELECT table_name, count(*), sum(operation <> 'insert' OR new_value IS NULL) FROM _gonvex_sync_changes WHERE table_name IN (${list}) AND revision > $1 AND revision <= $2 GROUP BY table_name`,
+    [low, high, ...names],
   ).rows;
-  for (const row of rows) found.set(String(row[0]), { rows: Number(row[1]), insertsOnly: Number(row[2]) === 0 });
+  for (const row of rows) {
+    const name = String(row[0]);
+    const marked = markedTable(name);
+    const table = marked ?? name;
+    const before = found.get(table);
+    found.set(table, { rows: Number(row[1]) + (before?.rows ?? 0), insertsOnly: marked === undefined && Number(row[2]) === 0 && (before?.insertsOnly ?? true) });
+  }
   return found;
+}
+
+/**
+ * Whether the inserts of `table` in `(low, high]` can be matched exactly by their typed key images (#555 R2):
+ * every image's key is an integer, real or text whose text form is the logged `row_id` (a BLOB key's image is
+ * hex text and fails this), and the distinct keys match as many stored rows as there are keys (under inserts
+ * only, every inserted row still exists). Otherwise the set re-runs.
+ */
+export function insertedKeysExact(sql: VisibilitySql, table: string, key: string, low: number, high: number): boolean {
+  const path = `$."${key}"`;
+  const inserted = `FROM _gonvex_sync_changes WHERE table_name = $1 AND revision > $2 AND revision <= $3 AND operation = 'insert'`;
+  const row = sql.run(
+    `SELECT (SELECT count(*) ${inserted} AND (json_type(new_value, $4) NOT IN ('integer', 'real', 'text') OR CAST(json_extract(new_value, $4) AS TEXT) IS NOT row_id)),
+            (SELECT count(DISTINCT json_extract(new_value, $4)) ${inserted}),
+            (SELECT count(*) FROM "${table.replace(/"/g, '""')}" WHERE "${key}" IN (SELECT json_extract(new_value, $4) ${inserted}))`,
+    [table, low, high, path],
+  ).rows[0];
+  return row !== undefined && Number(row[0]) === 0 && Number(row[1]) === Number(row[2]);
 }
 
 /**

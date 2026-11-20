@@ -300,6 +300,16 @@ describe("feed maintenance", () => {
         expect(index.get("t-w1-null-alice-finding-0")).toBeUndefined();
         checkAll(session, harness, data, "alice", "feed");
       });
+      // #555 R1: a REPLACE may delete rows without a log row; its marker makes the parent index reload.
+      await harness.read((session) => harness.registry.acl.ensure(session, plans, [notes]));
+      const loads = harness.registry.acl.stats().loads;
+      await harness.commit([[`INSERT INTO tasks VALUES ('t-plain', 'w1', NULL, 'alice', 'web', NULL)`, []]]);
+      await harness.read((session) => harness.registry.acl.ensure(session, plans, [notes]));
+      expect(harness.registry.acl.stats().loads, "an ordinary insert catches up").toBe(loads);
+      await harness.commit([[`REPLACE INTO tasks VALUES ('t-w1-null-alice-web-0', 'w1', NULL, 'alice', 'web', NULL)`, []]]);
+      await harness.read((session) => harness.registry.acl.ensure(session, plans, [notes]));
+      expect(harness.registry.acl.stats().loads, "the REPLACE's marker reloads the index").toBe(loads + 1);
+      await harness.read((session) => checkAll(session, harness, data, "alice", "feed"));
     });
   });
 
@@ -386,6 +396,11 @@ describe("permission bits from the manifest (permissionGrants)", () => {
       expect(failed.ok).toBe(false);
       await check();
       expect(bits.has("m1", "view", "w1")).toBe(false);
+      // #555 R1: a REPLACE moves g2 from m2 to m3 with only an insert in the log; its marker reloads the bits.
+      await harness.commit([[`REPLACE INTO grants VALUES ('g2', 'm3', 'view', NULL, NULL)`, []]]);
+      await check();
+      expect(bits.has("m2", "view", "")).toBe(false);
+      expect(bits.counters.loads, "reloaded after the REPLACE").toBe(2);
       expect(checked).toBeGreaterThan(300);
     });
   });

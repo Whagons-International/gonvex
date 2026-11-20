@@ -22,7 +22,7 @@
 //
 // Immediate foreign keys need no check: SQLite fails the statement itself.
 
-import { mainVerbIndex, writtenTable, type WriteOperation } from "./admission";
+import { mainVerbIndex, writtenTable, type WriteOperation, type WrittenTable } from "./admission";
 import { headWord, isSymbol, isWord, tokenize, closeParen, type Token } from "./lexer";
 
 export interface ForeignKey {
@@ -85,9 +85,9 @@ export function deferredClauses(createSql: string): boolean[] {
   return out;
 }
 
-interface TriggerWrites {
+export interface TriggerWrites {
   readonly events: ReadonlySet<WriteOperation>;
-  readonly writes: readonly { table: string; operations: ReadonlySet<WriteOperation> }[];
+  readonly writes: readonly WrittenTable[];
 }
 
 /** The event and the body's write statements of one CREATE TRIGGER. */
@@ -107,7 +107,7 @@ export function triggerWrites(createSql: string): TriggerWrites | undefined {
     else if (isWord(found, "update")) events.add("update");
     else if (isWord(found, "delete")) events.add("delete");
   }
-  const writes: { table: string; operations: ReadonlySet<WriteOperation> }[] = [];
+  const writes: WrittenTable[] = [];
   let statement: Token[] = [];
   let depth = 0;
   for (const found of tokens.slice(begin + 1)) {
