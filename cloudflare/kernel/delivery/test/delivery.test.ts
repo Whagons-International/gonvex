@@ -2023,7 +2023,8 @@ describe("#540 re-review B / X17m: the tenant checks the Member at attach", () =
       expect(engine.subscriptions("s1").size).toBe(0); // refused at attach
       const handoff = payloads.find(([, payload]) => payload.membership);
       expect(handoff?.[1].membership).toMatchObject({ members: ["m-alice"] });
-      expect(handoff![1].membership!.revision).toBeGreaterThan(admitted); // the holder drops sessions admitted before it
+      expect(handoff![1].membership!.revision).toBe(admitted + 1); // #543 review: filters at the refused admission + 1
+      expect(handoff![1].membership!.watermark).toBeGreaterThanOrEqual(demoted); // the watermark after auth.error is the clock
       expect(frames(payloads, "s1").some((f) => f.type === "replica.delta" || f.type === "replica.ready")).toBe(false);
       await commit([["INSERT INTO items VALUES ('b', 2, 'b')", []]]);
       expect(engine.subscriptions("s1").size).toBe(0);
@@ -2044,4 +2045,36 @@ describe("#540 re-review B / X17m: the tenant checks the Member at attach", () =
       expect(removed).toBeGreaterThan(at);
     });
   });
+});
+
+describe("#543 review: the attach refusal's hand-off drops only sessions that predate the change", () => {
+  const admittedAs = (id: string, admissionRevision: number, member: Partial<TenantSession["member"]> = {}, host = "h1"): SocketView => {
+    const view = socket(id, {}, host);
+    const tenant = { ...view.tenant!, member: { ...view.tenant!.member, ...member }, admissionRevision };
+    return { ...view, tenant, connection: { ...view.connection, tenant } };
+  };
+  const open = { type: "replica.open" as const, id: "sub", path: "items.all", args: {}, keys: [] as string[], hashes: {}, fullIntegrity: false };
+  for (const host of ["h1", "h2"]) {
+    it(`a fresh session of the same Member (admitted after the demotion, holder ${host}) keeps its subscription when a stale one is refused`, async () => {
+      await withEngine(async ({ engine, payloads, commit }) => {
+        const stale = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+        const demoted = await commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
+        // A second tab signs in live after the demotion: its admission is the current row at `demoted`.
+        engine.dispatch(admittedAs("fresh", demoted, { role: "member" }, host), open);
+        await engine.settled();
+        expect(engine.subscriptions("fresh").size).toBe(1);
+        await commit([["INSERT INTO items VALUES ('b', 2, 'b')", []]]); // an unrelated commit moves the clock past `demoted`
+        payloads.length = 0;
+        expect(() => engine.dispatch(admittedAs("old", stale), open)).toThrow(MemberAccessChangedError);
+        await engine.settled();
+        // The fresh session matches the current row: it must not be dropped (silently on another holder,
+        // or with auth.error membership-changed on the same one).
+        expect(engine.subscriptions("fresh").size).toBe(1);
+        const handoff = payloads.find(([, payload]) => payload.membership);
+        if (host === "h1") expect(handoff![1].membership!.revision).toBeLessThanOrEqual(demoted);
+        await commit([["INSERT INTO items VALUES ('c', 3, 'c')", []]]);
+        expect(frames(payloads, "fresh").some((f) => f.type === "replica.delta")).toBe(true);
+      }, MODULE, false, undefined, undefined, ["h1", "h2"]);
+    });
+  }
 });

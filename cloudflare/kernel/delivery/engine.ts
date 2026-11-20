@@ -637,7 +637,20 @@ export class ReplicaDeliveryEngine {
     catch (error) { console.warn("delivery: could not read the session Member at attach", error); return false; }
     if (!memberAccessChanged(session, current.row)) return false;
     span("delivery.attach.refused", { admissionRevision: session.admissionRevision, revision: current.revision });
-    this.membershipChanged(host, session.member.id, Math.max(current.revision, session.admissionRevision + 1));
+    // #543 review: the hand-off is scoped to what provably predates the change. The refused session's row differs, so
+    // the change committed after its admission R: every session of this Member admitted at <= R predates it, and one
+    // admitted later (a fresh sign-in after the change) may match the row and must stay. Filter at R + 1, not at the
+    // clock; drop engine connections on this holder only (the payload reaches only this holder; a stale session on
+    // another holder is refused at its own attach or was dropped by the commit loop). The watermark stays the clock.
+    const filter = session.admissionRevision + 1;
+    for (const connection of [...this.connections.values()]) {
+      if (connection.host !== host || connection.session.member.id !== session.member.id || connection.session.admissionRevision >= filter) continue;
+      this.drop(connection);
+      this.connections.delete(connection.id);
+    }
+    void this.sendOne(host, this.payload([], {}, undefined, {
+      revision: filter, members: [session.member.id], accounts: [], watermark: Math.max(current.revision, filter),
+    }), 0);
     return true;
   }
 

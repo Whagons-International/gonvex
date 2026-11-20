@@ -261,6 +261,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       if (socket.tenant && !socket.tenant.anonymous && !this.delivery.observe(socket, false)) throw new Error("stale tenant subscription scope");
     } catch (error) {
       // X17m: a stale admission refused at attach is answered like an admission refusal (the hand-off sent auth.error).
+      // The frame's error returns on this RPC reply and auth.error on the commit channel, so the client may see the
+      // error first; reducers get `transient` (retried), replica/query errors reach that path until it re-authenticates
+      // and resubscribes, as for DeliveryAdmissionError (#543 review, accepted).
       if (!(error instanceof DeliveryAdmissionError || error instanceof MemberAccessChangedError) || (socket as SocketView & {queryRecovery?:boolean}).queryRecovery) throw error;
       const refused = (id:string,path:string,trace?:MessageTrace) => frame.type.startsWith("reducer.") ? frames.reducerError(id,path,error.message,"transient",trace)
         : frame.type.startsWith("query.") ? frames.queryError(id,path,error.message) : frame.type.startsWith("action.") ? frames.actionError(id,path,error.message,trace) : frames.replicaError(id,path,error.message);

@@ -14,7 +14,8 @@ export function memberAccessChanged(session: TenantSession, current: MemberRow |
   if (!current) return true;
   const admitted = session.member;
   return admitted.accountId !== current.account_id || admitted.status !== current.status || admitted.role !== current.role
-    || JSON.stringify(admitted.permissions) !== JSON.stringify(JSON.parse(current.permissions || "null"))
+    // #543 review: empty permissions read as `{}`, as the admission reads them (assembly/memberships.ts).
+    || JSON.stringify(admitted.permissions) !== JSON.stringify(JSON.parse(current.permissions || "{}"))
     || admitted.membershipRevision !== Number(current.membership_revision);
 }
 
