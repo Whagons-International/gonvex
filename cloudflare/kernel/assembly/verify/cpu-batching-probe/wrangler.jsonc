@@ -1,0 +1,3 @@
+{ "name": "gonvex-cf-dev-cpuprobe-20261120", "main": "worker.js", "compatibility_date": "2026-10-23", "workers_dev": true, "preview_urls": false,
+  "limits": { "cpu_ms": 1000 }, "observability": { "enabled": true },
+  "durable_objects": { "bindings": [{ "name": "P", "class_name": "Probe" }] }, "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Probe"] }] }
