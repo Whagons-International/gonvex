@@ -14,7 +14,8 @@
  * timer-driven events, never per delivered frame.
  */
 import { type Negotiated, NOTHING_NEGOTIATED, negotiate, sessionReadyFrame, type ReadyOptions } from "./capabilities";
-import { decodeClientFrame, type AuthFrame, type ClientCapabilities, type ClientFrame, type Json } from "./decode";
+import { decodeClientFrame, type AuthFrame, type ClientCapabilities, type ClientFrame, type Json, type ReducerCallRequest } from "./decode";
+import { forwardRefused } from "./forward";
 import { replicaDirective, type ReplicaDirective } from "./directive";
 import { AUTH_ERRORS, CLOSE, type CloseFrame, LIMITS, UNAUTHENTICATED, echoTrace, exceedsUtf8, frames } from "./protocol";
 import {
@@ -251,6 +252,10 @@ export class Session {
   private queue: Promise<void> = Promise.resolve();
   private readonly actionWaiters = new Map<string, { result: Promise<string | null>; resolve(text: string | null): void; delivered: Promise<void>; done(error?: unknown): void }>();
   private queueDepth = 0;
+  /** X17o: the tenant Action this socket's active item is dispatching (its port call has not returned). */
+  private inflightAction: string | null = null;
+  /** X17o: the client contract was checked against the module for this socket's last frame (cleared on reload). */
+  private contractCurrent = false;
   private queueActive = false;
   /** X07 BUG-5: when the item now holding the queue started (null: idle). */
   private queueActiveSince: number | null = null;
@@ -385,10 +390,45 @@ export class Session {
 
   /** Enqueues one inbound message; resolves when it has been handled. */
   receive(message: string | ArrayBuffer): Promise<void> {
-    const run = () => (typeof message === "string" ? this.onText(message) : this.onBinary(message));
     // X07 BUG-5: a frame that finds the queue stuck closes the socket at once instead of waiting behind it.
     this.checkStall();
+    const forwarded = typeof message === "string" ? this.forwardBehindAction(message) : undefined;
+    if (forwarded) return this.serialQuiet(() => this.onForwarded(forwarded), "frame");
+    const run = () => (typeof message === "string" ? this.onText(message) : this.onBinary(message));
     return this.serialQuiet(run, "frame");
+  }
+
+  /**
+   * X17o (kernel/session/forward.ts): a Reducer call that arrives while this socket's only queued item is its
+   * tenant Action's dispatch is sent to the tenant now, marked with that Action. Its place in the socket's order is
+   * unchanged: the queued item below awaits the reply; frames after it queue behind that item as before. Forwarded
+   * only when nothing between the frame and its dispatch could change the outcome: an authenticated tenant session
+   * on the private transport, no public admission or service grant, the client contract checked for the Action's
+   * frame, a tenant-scoped call that presence cannot answer in the gateway, and an idempotency key (the tenant's
+   * receipt makes a fallback dispatch, or the client's retry after a lost socket, return the same result).
+   */
+  private forwardBehindAction(text: string): { call: ReducerCallRequest; frame: ClientFrame; reply: Promise<string[]> } | undefined {
+    const action = this.inflightAction, tenant = this.record.tenant;
+    if (action === null || this.closed || !this.queueActive || this.queueDepth !== 1 || !tenant || tenant.anonymous) return undefined;
+    if (this.record.publicTransport || this.record.service || this.record.admission || !this.contractCurrent) return undefined;
+    if (!text.includes('"reducer.call')) return undefined;
+    const decoded = decodeClientFrame(text);
+    if (!decoded.ok) return undefined;
+    const frame = decoded.frame;
+    const call: ReducerCallRequest | undefined = frame.type === "reducer.call" ? frame
+      : frame.type === "reducer.callMany" && frame.calls.length === 1 ? frame.calls[0] : undefined;
+    if (!call || call.scope === "control" || !call.idempotencyKey?.trim() || this.presence.mayShortCircuit(call)) return undefined;
+    const reply = this.ports.tenants.dispatch({ ...this.view(), afterAction: action }, { type: "reducer.call", ...call });
+    void reply.catch(() => {}); // a failed forward is dispatched again below
+    return { call, frame, reply };
+  }
+
+  /** X17o: the forwarded call's turn: `onText`'s checks that apply to it, then the call with its forwarded reply. */
+  private async onForwarded(forwarded: { call: ReducerCallRequest; frame: ClientFrame; reply: Promise<string[]> }): Promise<void> {
+    if (this.closed) return;
+    if (await this.updateRequiredBeforeFrame()) return;
+    this.activeLabel = frameLabel(forwarded.frame);
+    await this.reducerCall({ type: "reducer.call", ...forwarded.call }, forwarded.reply);
   }
 
   private async onBinary(bytes: ArrayBuffer): Promise<void> {
@@ -514,7 +554,8 @@ export class Session {
   private async updateRequiredBeforeFrame(): Promise<boolean> {
     if (!this.record.tenant) return false;
     const module = await this.modules.get(this.record.connection.projectId);
-    if (module?.clientContract == null || this.record.clientContract === String(module.clientContract)) return false;
+    if (module?.clientContract == null || this.record.clientContract === String(module.clientContract)) { this.contractCurrent = true; return false; }
+    this.contractCurrent = false;
     this.send(frames.clientUpdateRequired(module.clientContract));
     this.close(CLOSE.ended);
     return true;
@@ -607,7 +648,11 @@ export class Session {
           const turnWaitMs = this.turnWaitMs;
           if(!this.prepareAction(frame.id, frame.path))return;
           const called = this.now();
-          const replies = await this.forward(this.ports.tenants.dispatch({ ...this.view(), actionGeneration: this.record.actionGenerations?.[frame.id] }, frame));
+          // X17o: while this port call is out, a Reducer call arriving next may be forwarded behind it.
+          this.inflightAction = frame.id;
+          let replies: string[];
+          try { replies = await this.forward(this.ports.tenants.dispatch({ ...this.view(), actionGeneration: this.record.actionGenerations?.[frame.id] }, frame)); }
+          finally { this.inflightAction = null; }
           span("gateway.call", { kind: "action", path: frame.path, turnWaitMs, rpcMs: this.now() - called });
           // Review r4608249098: no early return here. `finishAction` starts no port call and must run
           // on a closed socket too: it settles the waiter that a pending `actionFinished()` awaits.
@@ -706,20 +751,24 @@ export class Session {
   }
 
   /** One Reducer call, with presence's in-memory answers first (`call_reducer_with_presence`, K14). */
-  private async reducerCall(call: Extract<ClientFrame, { type: "reducer.call" }>): Promise<void> {
+  private async reducerCall(call: Extract<ClientFrame, { type: "reducer.call" }>, forwarded?: Promise<string[]>): Promise<void> {
     if (this.closed) return;
     const tenant = this.record.tenant;
     if (call.scope !== "control" && !tenant) {
       return this.send(frames.reducerError(call.id, call.path, UNAUTHENTICATED.reducer, "unauthenticated", call.trace));
     }
-    const short = this.presence.shortCircuit(call);
+    const short = forwarded ? null : this.presence.shortCircuit(call);
     if (short) {
       for (const text of short.frames) this.send(text);
       if (short.after) await this.guard(short.after());
       return;
     }
     const turnWaitMs = this.turnWaitMs, called = this.now();
-    const replies = await this.forward(call.scope === "control" ? this.ports.control.dispatch(this.view(), call) : this.ports.tenants.dispatch(this.view(), call));
+    const dispatch = () => call.scope === "control" ? this.ports.control.dispatch(this.view(), call) : this.ports.tenants.dispatch(this.view(), call);
+    // X17o: a forwarded call's reply, unless the tenant refused it or the forward failed: then the ordinary dispatch.
+    const replies = await this.forward(forwarded
+      ? forwarded.then((out) => (forwardRefused(out) ? dispatch() : out), () => (this.closed ? [] : dispatch()))
+      : dispatch());
     // X13i: gateway side of one Reducer call: queue turn, then the port call (deferral + hops + tenant) to send.
     span("gateway.call", { kind: "reducer", path: call.path, turnWaitMs, rpcMs: this.now() - called });
     if (call.scope !== "control") this.awaitWatermark(replies);
@@ -1487,6 +1536,7 @@ export class Session {
 
   /** `RuntimeEvent::ModuleReloaded` for this socket's project (A.1.5 c). */
   moduleReloaded(module: ModuleInfo | null): Promise<void> {
+    this.contractCurrent = false; // X17o: the next frame re-checks the client contract before anything is forwarded
     return this.serialQuiet(() => {
       if (this.closed) return;
       if (module?.publicationId && this.record.publicationId === module.publicationId) return;

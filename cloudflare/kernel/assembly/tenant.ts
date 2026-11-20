@@ -15,6 +15,9 @@ import { identityOf, invocationInfoOf } from "../reducer/path";
 import type { ClientFrame } from "../session/decode";
 import type { SocketView, TenantSession } from "../session/ports";
 import { rpc, type GatewayRpc } from "../session/rpc";
+import { FORWARD_REFUSED } from "../session/forward";
+/** X17o: how long a socket Action dispatch is remembered for a call forwarded behind it. */
+const FORWARD_ACTION_MEMORY_MS = 60_000;
 import { TenantPresence } from "../presence/tenant";
 import { presenceConfig, type ConnectionReport } from "../presence/hub";
 import { type FilesRemapResult, TenantFiles } from "../files/tenant-files";
@@ -245,6 +248,24 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     return this.queryModule.module;
   }
   override async dispatch(socket: SocketView, frame: ClientFrame): Promise<string[]> {
+    if (frame.type === "action.call") return this.dispatchAction(socket, frame);
+    return this.dispatchTimed(socket, frame);
+  }
+  /**
+   * X17o: a socket Action's dispatch is registered before its first await, so a Reducer call forwarded right behind
+   * it always finds it. It releases that call when it returns frames (the result or error the gateway sends at once,
+   * after which the gateway's ordered queue would dispatch the next frame); a pending or failed dispatch refuses it.
+   */
+  private async dispatchAction(socket: SocketView, frame: Extract<ClientFrame, { type: "action.call" }>): Promise<string[]> {
+    let settle!: (inline: boolean) => void;
+    this.trackAction(socket.connectionId, frame.id, new Promise<boolean>((resolve) => { settle = resolve; }));
+    try {
+      const out = await this.dispatchTimed(socket, frame);
+      settle(out.length > 0);
+      return out;
+    } catch (error) { settle(false); throw error; }
+  }
+  private async dispatchTimed(socket: SocketView, frame: ClientFrame): Promise<string[]> {
     if (!spanTimingOn() || (frame.type !== "reducer.call" && frame.type !== "reducer.callMany")) return this.dispatchFrame(socket, frame);
     // X13i (dev spans only): the tenant's whole dispatch, then how long its writes took to become durable
     // after the reply was returned (the platform holds the reply and deliveries until then: the output gate).
@@ -277,6 +298,11 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       &&frame.type==="replica.openMany"&&!frame.opens.length){
       this.fixtureRecoveryFailure=false;throw new Error("assembly fixture: scope registration fault");
     }
+    // X17o (kernel/session/forward.ts): a Reducer call forwarded behind this socket's Action runs after that Action's
+    // inline result, as the gateway's ordered queue would have dispatched it; otherwise the gateway dispatches it.
+    if (socket.afterAction !== undefined) {
+      if (frame.type !== "reducer.call" || !await this.followsAction(socket.connectionId, socket.afterAction)) return [FORWARD_REFUSED];
+    }
     if (frame.type === "query.call" && frame.path === RECEIPT_QUERY) return super.dispatch(socket, frame);
     if (frame.type === "query.unsubscribe") {
       this.delivery.queryUnsubscribe(socket, frame.id);
@@ -304,6 +330,22 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
       return [this.actionFrame(frame.id, frame.path, result, frame.trace)];
     }
     return super.dispatch(socket, frame);
+  }
+  /** X17o: this object's socket Action dispatches, by connection and Action id: settled true for an inline result. */
+  private readonly actionDispatches = new Map<string, { readonly inline: Promise<boolean>; readonly at: number }>();
+  private trackAction(connectionId: string, actionId: string, inline: Promise<boolean>): void {
+    const now = Date.now();
+    for (const [key, entry] of this.actionDispatches) if (now - entry.at > FORWARD_ACTION_MEMORY_MS || this.actionDispatches.size > 1024) this.actionDispatches.delete(key); else break;
+    this.actionDispatches.set(`${connectionId}\u0000${actionId}`, { inline, at: now });
+  }
+  /**
+   * X17o: whether a forwarded call may run now: its Action's dispatch on this object returned an inline result.
+   * An Action this object does not know (reordered calls, a restarted object) or one that went pending or failed
+   * refuses the call, and the gateway dispatches it in its socket's order.
+   */
+  private async followsAction(connectionId: string, actionId: string): Promise<boolean> {
+    const entry = this.actionDispatches.get(`${connectionId}\u0000${actionId}`);
+    return entry ? await entry.inline : false;
   }
   async presenceLeave(id: string, host: string, previous?: ConnectionReport | null): Promise<void> { await this.presence.leave(id, host, previous ?? null); }
   override async connectionReset(id: string, epoch: number): Promise<void> { await super.connectionReset(id, epoch); this.queries.live.clear(id); }

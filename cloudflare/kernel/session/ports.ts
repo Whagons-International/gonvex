@@ -134,6 +134,11 @@ export interface SocketView {
   replica?: { scope: string; visibilityScope: string } | null;
   /** K10: bumped whenever the socket's subscriptions are dropped. */
   subscriptionEpoch?: number;
+  /**
+   * X17o (kernel/session/forward.ts): set only on a forwarded Reducer call: the id of the socket's Action it must
+   * follow. The tenant runs the call after that Action's inline result, or answers `FORWARD_REFUSED`.
+   */
+  afterAction?: string;
 }
 
 /** K17: a `gvx_svc_` credential's admission (`authenticate_service_principal`). */
