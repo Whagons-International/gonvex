@@ -334,7 +334,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       if (limited) return limited;
       const left = deadline - Date.now();
       let timedOut = false;
-      const answer = left < 100 ? null : await withDeadline(controller(this.env, direct.cell).admitDirect(direct, this.host.sessions.size), left).catch((error: unknown) => {
+      const answer = left < 100 ? null : await withDeadline(controller(this.env, direct.cell).admitDirect({ ...direct, wantReason: true }, this.host.sessions.size), left).catch((error: unknown) => {
         timedOut = String((error as Error)?.message ?? error) === "gateway RPC deadline";
         console.error("gateway: direct admission failed", { cause: String((error as Error)?.message ?? error).slice(0, 120) });
         return null;

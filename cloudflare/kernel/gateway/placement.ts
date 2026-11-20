@@ -35,7 +35,11 @@ export interface GatewayAssignment {
   expiresAt: number;
 }
 /** X17g: what the router asks a gateway to admit directly (no token: the gateway's `admitDirect` creates the lease). */
-export interface DirectAdmission { v: 1; cell: number; gateway: string; epoch: number; connectionId: string }
+export interface DirectAdmission {
+  v: 1; cell: number; gateway: string; epoch: number; connectionId: string;
+  /** #538 lead check: only callers that send this get `{ refused }`; older holders keep getting null on refusal. */
+  wantReason?: true;
+}
 /** #538 re-review: why `admitDirect` did not grant a lease (an older controller answers null). */
 export interface DirectRefusal { refused: "invalid" | "prior" | "pending-cap" | "slot" | "pressured" | "full" }
 export function isDirectRefusal(value: unknown): value is DirectRefusal { return !!value && typeof (value as DirectRefusal).refused === "string"; }

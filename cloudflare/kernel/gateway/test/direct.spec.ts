@@ -49,12 +49,16 @@ describe("X17g controller admitDirect", () => {
     expect(granted).toMatchObject({ v: 1, cell: 3, gateway: a.gateway, epoch: a.epoch, connectionId: d.connectionId });
     // Already claimed: the token cannot be claimed again, and the same connection is not admitted twice.
     expect(await c.claim(granted)).toBe(false);
-    expect(await c.admitDirect(d, 1)).toEqual({ refused: "prior" });
+    // An older holder (no wantReason) gets null on refusal: its `if (!granted)` must never see a truthy refusal.
+    expect(await c.admitDirect(d, 1)).toBeNull();
+    expect(await c.admitDirect({ ...d, connectionId: connection(3), epoch: a.epoch + 1 }, 1)).toBeNull();
+    expect(await c.admitDirect({ ...d, wantReason: true }, 1)).toEqual({ refused: "prior" });
+    const why = (x: DirectAdmission, n = 1) => c.admitDirect({ ...x, wantReason: true }, n);
     // Wrong epoch, holder, cell or a full holder: refused (the router falls back to acquire).
-    expect(await c.admitDirect({ ...d, connectionId: connection(3), epoch: a.epoch + 1 }, 1)).toEqual({ refused: "slot" });
-    expect(await c.admitDirect({ ...d, connectionId: connection(3), gateway: "auto-gw-3-99" }, 1)).toEqual({ refused: "slot" });
-    expect(await c.admitDirect({ ...d, connectionId: connection(4) }, 1)).toEqual({ refused: "invalid" });
-    expect(await c.admitDirect({ ...d, connectionId: connection(3) }, MAX_SOCKETS)).toEqual({ refused: "full" });
+    expect(await why({ ...d, connectionId: connection(3), epoch: a.epoch + 1 })).toEqual({ refused: "slot" });
+    expect(await why({ ...d, connectionId: connection(3), gateway: "auto-gw-3-99" })).toEqual({ refused: "slot" });
+    expect(await why({ ...d, connectionId: connection(4) })).toEqual({ refused: "invalid" });
+    expect(await why({ ...d, connectionId: connection(3) }, MAX_SOCKETS)).toEqual({ refused: "full" });
   });
 });
 

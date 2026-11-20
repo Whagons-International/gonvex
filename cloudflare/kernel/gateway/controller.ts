@@ -210,14 +210,15 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
    * and every unexpired lease, as `acquire` counts them. Otherwise null: the router falls back to `acquire`, which
    * balances, probes and allocates. Saved unconfirmed like any lease (see `save`). Idempotent per connection.
    */
-  admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | DirectRefusal> {
+  admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | DirectRefusal | null> {
     const queued = Date.now();
     return this.serial(async () => {
       const now = Date.now(), cell = this.cell();
       // #538 re-review: every refusal names its reason (span and answer), so stale hints can be told from systematic ones.
-      const refuse = (reason: DirectRefusal["refused"], detail: Record<string, number> = {}): DirectRefusal => {
+      // Mixed versions: an older holder treats any truthy answer as a grant, so the reason goes back only on request.
+      const refuse = (reason: DirectRefusal["refused"], detail: Record<string, number> = {}): DirectRefusal | null => {
         span("controller.admitDirect", { refused: reason, ...detail, totalMs: Date.now() - queued });
-        return { refused: reason };
+        return request?.wantReason === true ? { refused: reason } : null;
       };
       if (!request || request.v !== 1 || request.cell !== cell || typeof request.connectionId !== "string" || request.connectionId.length > 100
         || controllerCell(request.connectionId) !== cell || !Number.isSafeInteger(sockets) || sockets < 0) return refuse("invalid");
