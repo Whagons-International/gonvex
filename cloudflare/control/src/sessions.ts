@@ -230,18 +230,37 @@ const rowStamp = (row: Row) => `${str(row.member_id)}\u0000${Number(row.tenant_m
  * (accepted, #537).
  */
 interface EarlyAdmission { readonly stamp: string; readonly member: Promise<Member | null> }
-export interface PrefetchedAdmissions { readonly accountId: string; readonly admissions: ReadonlyMap<string, EarlyAdmission> }
+/**
+ * #537 re-review: one FANOUT bound per sign-in. Prefetched admissions hold a slot until they settle; every admission
+ * RPC the post-commit path starts takes one, so both phases together stay within FANOUT in flight (0012 R15).
+ */
+class AdmissionSlots {
+  private used = 0;
+  private readonly waiters: Array<() => void> = [];
+  constructor(private readonly max: number) {}
+  take(): void { this.used++; }
+  async acquire(): Promise<void> {
+    if (this.used < this.max) { this.used++; return; }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+  release(): void { const next = this.waiters.shift(); if (next) next(); else this.used--; }
+}
+export interface PrefetchedAdmissions { readonly accountId: string; readonly admissions: ReadonlyMap<string, EarlyAdmission>; readonly slots: AdmissionSlots }
 export function prefetchAdmissions(ctx: Ctx, projectId: string, accountId: string, requested = ""): PrefetchedAdmissions {
   const rows = directoryRows(ctx, projectId, accountId);
   const first = preferredOrder(rows, requested)[0];
   const wanted = rows.filter((row) => row === first || !cachedAdmission(projectId, accountId, row));
   if (first && wanted[0] !== first) { wanted.splice(wanted.indexOf(first), 1); wanted.unshift(first); }
   const admissions = new Map<string, EarlyAdmission>();
+  const slots = new AdmissionSlots(FANOUT);
   for (const row of wanted.slice(0, FANOUT)) {
     const tenantId = str(row.tenant_id);
-    admissions.set(tenantId, { stamp: rowStamp(row), member: admitMember(ctx, projectId, tenantId, accountId).then((admitted) => admitted.member, () => null) });
+    slots.take();
+    const member = admitMember(ctx, projectId, tenantId, accountId).then((admitted) => admitted.member, () => null);
+    void member.finally(() => slots.release());
+    admissions.set(tenantId, { stamp: rowStamp(row), member });
   }
-  return { accountId, admissions };
+  return { accountId, admissions, slots };
 }
 
 export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, result: Record<string, unknown>, prefetched?: PrefetchedAdmissions): Promise<Record<string, unknown>> {
@@ -250,13 +269,18 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
   const requested = typeof result.activeTenantId === "string" ? result.activeTenantId : "";
   const rows = directoryRows(ctx, projectId, accountId);
   const early = prefetched && accountId && prefetched.accountId === accountId ? prefetched.admissions : undefined;
+  const slots = prefetched?.slots ?? new AdmissionSlots(FANOUT);
+  const admitNow = async (tenantId: string): Promise<Member> => {
+    await slots.acquire();
+    try { return (await admitMember(ctx, projectId, tenantId, accountId)).member; } finally { slots.release(); }
+  };
   const keyOf = (row: Row) => `${projectId}\u0000${str(row.tenant_id)}\u0000${accountId}`;
   const admitLive = async (row: Row): Promise<Member | null> => {
     const key = keyOf(row);
     try {
       // An admission started during the account check, if the directory row it was read for is still this one.
       const started = early?.get(str(row.tenant_id));
-      const member = started && started.stamp === rowStamp(row) ? await started.member : (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
+      const member = started && started.stamp === rowStamp(row) ? await started.member : await admitNow(str(row.tenant_id));
       if (!member) throw new Error("admission failed");
       admissionCache.delete(key);
       admissionCache.set(key, { member, memberId: str(row.member_id), revision: Number(row.tenant_membership_revision ?? -1), projectedAt: Number(row.projected_at ?? -1), at: Date.now() });

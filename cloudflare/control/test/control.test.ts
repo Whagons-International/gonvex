@@ -464,7 +464,7 @@ describe("X17h admissions started during the provider's account check", () => {
       expect(ctx.tenantCalls).toBe(calls + 1);
       // A failed prefetched admission is a failed admission: that tenant is skipped, the next becomes active.
       sessions.clearAdmissionCache();
-      const failed = { accountId: sid, admissions: new Map([...prefetched.admissions].map(([id, e]) => [id, id === seeded.tenants.a ? { ...e, member: Promise.resolve(null) } : e])) };
+      const failed = { ...prefetched, admissions: new Map([...prefetched.admissions].map(([id, e]) => [id, id === seeded.tenants.a ? { ...e, member: Promise.resolve(null) } : e])) };
       const after = await sessions.sessionResultFromDirectory(ctx, seeded.project, { account: { id: sid } }, failed);
       expect((after.tenants as Array<{ id: string }>).map((t) => t.id)).toEqual([seeded.tenants.b]);
       expect(after.activeTenantId).toBe(seeded.tenants.b);
