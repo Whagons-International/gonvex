@@ -178,3 +178,59 @@ describe("live queries", () => {
     });
   });
 });
+
+describe("#555 C3: a REPLACE marker reruns live queries that read its table", () => {
+  // A REPLACE deletes rows without a log row: the replacing insert's image names another member, so no change is
+  // "mine" by images alone. The global marker `_gonvex_replaced:*` makes the query rerun.
+  const SPOTS: LiveQueryPlan = { table: "spots", key: "_id", columns: ["_id"] };
+  const MANIFEST2 = {
+    functions: { "spots.mine": { kind: "query", delivery: "live", dependencies: { liveQueryPlan: SPOTS } } },
+    visibility: {
+      spots: {
+        version: 2, table: "spots", key: "_id", permissionTables: ["loose", "claims", "members"],
+        sets: {
+          looseSpots: { kind: "principal", table: "loose", select: "spotId", joins: [], where: [{ table: "loose", column: "memberId", context: "member.id" }] },
+          claimedSpots: { kind: "grant", table: "claims", select: "spotId", joins: [], where: [{ table: "claims", column: "memberId", context: "member.id" }] },
+        },
+        where: { operator: "or", children: [{ operator: "inSet", column: "_id", set: "looseSpots" }, { operator: "inSet", column: "_id", set: "claimedSpots" }] },
+      },
+    },
+  };
+  const SCHEMA2 = `CREATE TABLE spots ("_id" TEXT PRIMARY KEY);
+CREATE TABLE loose ("_id" PRIMARY KEY, "memberId" TEXT, "spotId" TEXT, "deletedAt" TEXT);
+CREATE TABLE claims ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON CONFLICT REPLACE);`;
+  const tx = (revision: number, changes: Array<Record<string, unknown>>) => ({ kind: "transaction" as const, revision, epoch: "epoch-1", changes: changes.map((c) => ({ changedColumns: [], oldValue: null, newValue: null, ...c })) as never });
+  const marker = (_table?: string) => ({ table: "_gonvex_replaced:*", rowId: "", operation: "delete" });
+  const rows = (frames: Map<string, string[]>) => frames.get("s1")?.map((f) => JSON.parse(f).result?.map((r: { _id: string }) => r._id));
+
+  it("same-key REPLACE on a principal table, and a declared conflict on a grant table: rerun only with the marker", async () => {
+    await withObject(async (state) => {
+      provision(state, { revision: 3, members: MEMBERS, migration: SCHEMA2 });
+      state.storage.sql.exec("INSERT INTO spots VALUES ('s6'), ('s7'); INSERT INTO loose VALUES ('k1', 'm-alice', 's6', NULL); INSERT INTO claims VALUES ('c1', 'm-alice', 's7')");
+      const { engine: queries } = engine(state, module(MANIFEST2));
+      const [initial] = (await queries.dispatch(view("s1", alice), frame({ type: "query.subscribe", id: "q1", path: "spots.mine", args: {} })))!;
+      expect(JSON.parse(initial!).result.map((r: { _id: string }) => r._id)).toEqual(["s6", "s7"]);
+
+      // REPLACE INTO loose VALUES ('k1','m-bob','s6',NULL): the log holds only the insert naming bob.
+      state.storage.sql.exec("REPLACE INTO loose VALUES ('k1', 'm-bob', 's6', NULL)");
+      setRevision(state, 4);
+      const insertK1 = { table: "loose", rowId: "k1", operation: "insert", newValue: { _id: "k1", memberId: "m-bob", spotId: "s6", deletedAt: null } };
+      // Without the marker (the gap the reviewer found): not relevant, certified unchanged.
+      expect((await queries.live.applyFeed(tx(4, [insertK1]))).size).toBe(0);
+      // With it, the next commit's marker reruns the query: s6 leaves.
+      setRevision(state, 5);
+      expect(rows(await queries.live.applyFeed(tx(5, [marker("loose")])))).toEqual([["s7"]]);
+
+      // INSERT INTO claims VALUES ('c3','m-bob','s7'): the UNIQUE conflict deletes alice's c1, unlogged.
+      state.storage.sql.exec("INSERT INTO claims VALUES ('c3', 'm-bob', 's7')");
+      setRevision(state, 6);
+      expect(rows(await queries.live.applyFeed(tx(6, [{ table: "claims", rowId: "c3", operation: "insert", newValue: { _id: "c3", memberId: "m-bob", spotId: "s7" } }, marker("claims")])))).toEqual([[]]);
+
+      // The marker is global: a REPLACE elsewhere still reruns the query; the result is unchanged, so no frame.
+      setRevision(state, 7);
+      const stats: FeedStats = { reruns: 0, executions: 0, skipped: 0, statements: 0, rowsRead: 0 };
+      expect((await queries.live.applyFeed(tx(7, [marker()]), stats)).size).toBe(0);
+      expect(stats.reruns).toBe(1);
+    });
+  });
+});

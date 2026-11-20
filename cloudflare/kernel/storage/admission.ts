@@ -206,6 +206,8 @@ export type WriteOperation = "insert" | "update" | "delete";
 export interface WrittenTable {
   readonly table: string;
   readonly operations: ReadonlySet<WriteOperation>;
+  /** The statement resolves conflicts with REPLACE (`REPLACE`, `INSERT OR REPLACE`, `UPDATE OR REPLACE`). */
+  readonly replace?: boolean;
 }
 
 /**
@@ -220,11 +222,18 @@ export function writtenTable(tokens: readonly Token[]): WrittenTable | undefined
   const head = headWord(tokens, verb);
   let index = verb + 1;
   const operations = new Set<WriteOperation>();
+  let replace = false;
   if (head === "insert" || head === "replace") {
     operations.add("insert");
-    if (head === "replace") operations.add("delete");
+    if (head === "replace") {
+      operations.add("delete");
+      replace = true;
+    }
     if (isWord(tokens[index], "or")) {
-      if (isWord(tokens[index + 1], "replace")) operations.add("delete");
+      if (isWord(tokens[index + 1], "replace")) {
+        operations.add("delete");
+        replace = true;
+      }
       index += 2;
     }
     if (!isWord(tokens[index], "into")) return undefined;
@@ -234,7 +243,10 @@ export function writtenTable(tokens: readonly Token[]): WrittenTable | undefined
   } else if (head === "update") {
     operations.add("update");
     if (isWord(tokens[index], "or")) {
-      if (isWord(tokens[index + 1], "replace")) operations.add("delete");
+      if (isWord(tokens[index + 1], "replace")) {
+        operations.add("delete");
+        replace = true;
+      }
       index += 2;
     }
   } else if (head === "delete") {
@@ -243,7 +255,7 @@ export function writtenTable(tokens: readonly Token[]): WrittenTable | undefined
     index++;
   } else return undefined;
   const table = qualifiedName(tokens, index);
-  return table === undefined ? undefined : { table, operations };
+  return table === undefined ? undefined : { table, operations, ...(replace ? { replace } : {}) };
 }
 
 export { splitTopLevel };

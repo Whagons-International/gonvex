@@ -12,12 +12,27 @@
 // tables (their changes are logged under the record's name); the record view
 // itself is cacheable.
 //
+// X17p: when an input table changed between the entry and a later open, the
+// entry is rolled forward through those commits instead of dropped. A change to
+// `members` (role, member row) or the REPLACE marker
+// (`../capture/replace-marker.ts`: rows of any table may have been deleted
+// unlogged) still drops it. Otherwise each active set whose joined tables
+// changed, or whose base table changed other than by inserts, is re-run with
+// the same SQL; a set whose base table only gained rows adds what those rows
+// contribute (a set is inner joins and equality predicates, so it is monotone
+// in its rows); derived sets are re-run. An insert without a row image, or
+// inserted keys that do not match their rows exactly (`insertedKeysExact`),
+// count as other changes, so the set re-runs. The rolled
+// sets are the sets a fresh resolution at the open's revision returns. Rust
+// drops the entry here; both give the same resolution, fingerprint and frames.
+//
 // Synchronous: Durable Object SQL is, and the object runs one event at a
 // time, so Rust's single-flight lock per key is not needed.
 
 import { sha256Hex } from "../capture/digest.ts";
+import { REPLACED_MARKER } from "../capture/replace-marker.ts";
 import { activeSets, setOf, setsSignatureText, type VisibilityPlan } from "./plan.ts";
-import { visibilityFingerprint, type VisibilitySession, type VisibilitySql } from "./principal.ts";
+import { addInsertedRowsInto, resolveDerived, resolveSetInto, visibilityFingerprint, type VisibilitySession, type VisibilitySql } from "./principal.ts";
 import type { DirectContext, ResolvedVisibility, TokenSets } from "./resolved.ts";
 import type { JsonValue } from "./json.ts";
 
@@ -57,8 +72,14 @@ export interface PrincipalCacheStats {
   probedHits: number;
   /** Resolved with SQL: no entry. */
   misses: number;
-  /** Resolved with SQL: an input table changed since the entry. */
+  /** Resolved with SQL: an input table changed since the entry and the entry could not be rolled forward. */
   invalidated: number;
+  /** Rolled forward through changed input tables (X17p): only the affected sets ran SQL. */
+  rolledForward: number;
+  /** Sets re-run by roll-forwards. */
+  setsRerun: number;
+  /** Sets patched with their base table's inserted rows by roll-forwards. */
+  setsPatched: number;
   /** Resolved with SQL and not stored: an input table has no change capture. */
   uncacheable: number;
   evictions: number;
@@ -81,7 +102,8 @@ export class PrincipalCache {
   private readonly entries = new Map<string, Entry>();
   private captured: ReadonlySet<string> | undefined;
   private inserts = 0;
-  private readonly counters = { hits: 0, probedHits: 0, misses: 0, invalidated: 0, uncacheable: 0, evictions: 0 };
+  private readonly counters = { hits: 0, probedHits: 0, misses: 0, invalidated: 0, rolledForward: 0, setsRerun: 0, setsPatched: 0, uncacheable: 0, evictions: 0 };
+  private keys: ReadonlyMap<string, string> | undefined;
   private readonly signatures = new WeakMap<VisibilityPlan, string>();
 
   constructor(config: Partial<PrincipalCacheConfig> = {}) {
@@ -102,6 +124,7 @@ export class PrincipalCache {
   /** Call when the schema changes (migrations, a new generation): capture classes may have changed. */
   invalidateSchema(): void {
     this.captured = undefined;
+    this.keys = undefined;
     this.entries.clear();
   }
 
@@ -142,7 +165,20 @@ export class PrincipalCache {
       this.counters.misses += 1;
       return undefined;
     }
-    if (changed(sql, entry.tables, low, high)) {
+    if (clock.revision > entry.revision) {
+      const changes = changeSummary(sql, entry.tables, entry.revision, clock.revision);
+      if (changes.size) {
+        const rolled = this.rollForward(entry, plan, sql, clock, changes);
+        if (!rolled) {
+          this.counters.invalidated += 1;
+          this.entries.delete(key);
+          return undefined;
+        }
+        this.entries.set(key, rolled);
+        this.counters.rolledForward += 1;
+        return this.shared(rolled, plan);
+      }
+    } else if (changed(sql, entry.tables, low, high)) {
       this.counters.invalidated += 1;
       this.entries.delete(key);
       return undefined;
@@ -152,6 +188,84 @@ export class PrincipalCache {
     entry.revision = Math.max(entry.revision, clock.revision);
     this.counters.probedHits += 1;
     return this.shared(entry, plan);
+  }
+
+  /**
+   * `entry` at `clock.revision`, from the input tables' changes in `(entry.revision, clock.revision]`, or undefined
+   * when the member must be resolved again (a `members` change).
+   */
+  private rollForward(entry: Entry, plan: VisibilityPlan, sql: VisibilitySql, clock: PrincipalClock, changes: ReadonlyMap<string, TableChanges>): Entry | undefined {
+    // A member row change, or a REPLACE marker (rows of any table may be gone unlogged): resolve again.
+    if (changes.has("members") || changes.has(REPLACED_MARKER)) return undefined;
+    const core = entry.core;
+    const keys = this.entityKeys(sql);
+    const sets = new Map<string, ReadonlySet<string>>(core.sets);
+    const exact = new Map<string, boolean>();
+    const patchable = (table: string, key: string) => {
+      let found = exact.get(table);
+      if (found === undefined) exact.set(table, (found = insertedKeysExact(sql, table, key, entry.revision, clock.revision)));
+      return found;
+    };
+    for (const name of activeSets(plan, core.role)) {
+      const set = setOf(plan, name);
+      if (set.kind === "derived") continue;
+      // A changed joined table (including the base table joined to itself) can change any row's contribution.
+      if (set.joins.some((join) => changes.has(join.table))) {
+        resolveSetInto(sql, plan, name, set, core.direct, sets);
+        this.counters.setsRerun += 1;
+        continue;
+      }
+      const base = changes.get(set.table);
+      if (!base) continue;
+      const key = keys.get(set.table);
+      if (base.insertsOnly && base.rows <= MAX_PATCHED_ROWS && key !== undefined && patchable(set.table, key)) {
+        addInsertedRowsInto(sql, name, set, core.direct, sets, key, entry.revision, clock.revision);
+        this.counters.setsPatched += 1;
+      } else {
+        resolveSetInto(sql, plan, name, set, core.direct, sets);
+        this.counters.setsRerun += 1;
+      }
+    }
+    const resolved: ResolvedVisibility = {
+      ephemeralMember: false,
+      revision: clock.revision,
+      direct: core.direct,
+      role: core.role,
+      permissions: core.permissions,
+      sets,
+      fingerprint: "",
+      inherited: new Map(),
+      indexes: new Map(),
+    };
+    // Re-runs every derived set from the rolled sets (and sets the fingerprint).
+    resolveDerived(sql, plan, resolved);
+    const fingerprints = new WeakMap<VisibilityPlan, string>();
+    fingerprints.set(plan, resolved.fingerprint);
+    return {
+      epoch: entry.epoch,
+      low: clock.revision,
+      revision: clock.revision,
+      core: { direct: core.direct, role: core.role, permissions: core.permissions, sets: resolved.sets },
+      active: entry.active,
+      fingerprints,
+      tables: entry.tables,
+      used: entry.used,
+    };
+  }
+
+  /** Each entity-captured table's key column: the column its insert capture trigger logs as `row_id`. */
+  private entityKeys(sql: VisibilitySql): ReadonlyMap<string, string> {
+    if (this.keys) return this.keys;
+    const captured = this.capturedTables(sql);
+    const keys = new Map<string, string>();
+    for (const row of sql.run("SELECT name, coalesce(sql, '') FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '\\_gonvex\\_sync\\_%' ESCAPE '\\'").rows) {
+      const match = /^_gonvex_sync_(.*)_insert$/.exec(String(row[0]));
+      if (!match || !captured.has(match[1]!)) continue;
+      const key = entityKeyColumn(String(row[1]));
+      if (key !== undefined) keys.set(match[1]!, key);
+    }
+    this.keys = keys;
+    return keys;
   }
 
   private shared(entry: Entry, plan: VisibilityPlan): (revision: number) => ResolvedVisibility {
@@ -228,6 +342,61 @@ export function inputTables(plan: VisibilityPlan, role: string): string[] {
     if (set.kind !== "derived") for (const join of set.joins) tables.add(join.table);
   }
   return [...tables].sort();
+}
+
+/** Bound on a base table's changes patched into a set; above it the set is re-run. */
+const MAX_PATCHED_ROWS = 256;
+
+interface TableChanges {
+  readonly rows: number;
+  readonly insertsOnly: boolean;
+}
+
+/**
+ * Per input table with changes in `(low, high]`: how many, and whether all are inserts that carry a row image.
+ * The REPLACE marker (`replace-marker.ts`) appears under its own name: rows of any table may have gone unlogged,
+ * and the roll-forward drops the entry. Index seeks on `(table_name, revision)`.
+ */
+export function changeSummary(sql: VisibilitySql, tables: readonly string[], low: number, high: number): Map<string, TableChanges> {
+  const found = new Map<string, TableChanges>();
+  if (!tables.length || low >= high) return found;
+  const names = [...tables, REPLACED_MARKER];
+  const list = names.map((_, index) => `$${index + 3}`).join(", ");
+  const rows = sql.run(
+    `SELECT table_name, count(*), sum(operation <> 'insert' OR new_value IS NULL) FROM _gonvex_sync_changes WHERE table_name IN (${list}) AND revision > $1 AND revision <= $2 GROUP BY table_name`,
+    [low, high, ...names],
+  ).rows;
+  for (const row of rows) found.set(String(row[0]), { rows: Number(row[1]), insertsOnly: Number(row[2]) === 0 });
+  return found;
+}
+
+/**
+ * Whether the inserts of `table` in `(low, high]` can be matched exactly by their typed key images (#555 R2):
+ * every image's key is an integer, real or text whose text form is the logged `row_id` (a BLOB key's image is
+ * hex text and fails this), and the distinct keys match as many stored rows as there are keys (under inserts
+ * only, every inserted row still exists). Otherwise the set re-runs.
+ */
+export function insertedKeysExact(sql: VisibilitySql, table: string, key: string, low: number, high: number): boolean {
+  const path = `$."${key}"`;
+  const inserted = `FROM _gonvex_sync_changes WHERE table_name = $1 AND revision > $2 AND revision <= $3 AND operation = 'insert'`;
+  const row = sql.run(
+    `SELECT (SELECT count(*) ${inserted} AND (json_type(new_value, $4) NOT IN ('integer', 'real', 'text') OR CAST(json_extract(new_value, $4) AS TEXT) IS NOT row_id)),
+            (SELECT count(DISTINCT json_extract(new_value, $4)) ${inserted}),
+            (SELECT count(*) FROM "${table.replace(/"/g, '""')}" WHERE "${key}" IN (SELECT json_extract(new_value, $4) ${inserted}))`,
+    [table, low, high, path],
+  ).rows[0];
+  return row !== undefined && Number(row[0]) === 0 && Number(row[1]) === Number(row[2]);
+}
+
+/**
+ * The key column of an entity insert capture trigger (`entityCaptureSql`: `row_id` is `CAST(NEW."key" AS TEXT)`),
+ * or undefined when the trigger has another form or the key cannot be a plain JSON path member.
+ */
+export function entityKeyColumn(trigger: string): string | undefined {
+  const match = /VALUES\s*\(\s*'(?:[^']|'')*'\s*,\s*CAST\(NEW\."((?:[^"]|"")*)" AS TEXT\)\s*,\s*'insert'/.exec(trigger);
+  if (!match) return undefined;
+  const key = match[1]!.replace(/""/g, '"');
+  return /^[^"\\]+$/.test(key) ? key : undefined;
 }
 
 /** `EXISTS` per table, each an index seek on `(table_name, revision)`. */

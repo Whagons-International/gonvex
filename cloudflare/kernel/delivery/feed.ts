@@ -17,6 +17,7 @@ import { readyNow } from "../visibility/acl-index.ts";
 import { scalar } from "../visibility/json.ts";
 import { withParentOverlay, type ParentOverlay, type ResolvedVisibility } from "../visibility/resolved.ts";
 import { jsonObjectExpr } from "../query/compile.ts";
+import { isReplacedMarker } from "../capture/replace-marker.ts";
 import type { JsonKind } from "../storage/values.ts";
 import { canonical } from "./canonical.ts";
 import { bounded, type ReplicaDefinition } from "./definition.ts";
@@ -151,6 +152,7 @@ function subscriptionConcernTables(subscription: Subscription): Set<string> {
   }
   return subscription.concernTables;
 }
+
 
 function subscriptionParentAclColumns(subscription: Subscription): Map<string, Set<string>> {
   if (!subscription.parentAclColumns) {
@@ -562,10 +564,15 @@ export function applyTransaction(
   const touches = new Map<string, EntityTouch>();
   const resynced: Subscription[] = [];
   const ordered = [...subscriptions.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const replaced = event.changes.some((change) => isReplacedMarker(change.table));
   for (const subscription of ordered) {
     if (event.revision <= subscription.cursor.revision) continue;
     let step: Step;
-    if (subscription.plan.version === 2) {
+    if (replaced) {
+      // X17p (#555): the transaction may have REPLACE-deleted rows of any table without a log row (no image to
+      // patch masks or rows from): every subscription reconciles against a snapshot.
+      step = { kind: "resync", reason: "consistency" };
+    } else if (subscription.plan.version === 2) {
       step = !indexesReady(subscription.resolved, event.revision, event.epoch)
         ? { kind: "resync", reason: "consistency" }
         : maskStep(subscription, event.revision, event.changes, collapsed, reads);

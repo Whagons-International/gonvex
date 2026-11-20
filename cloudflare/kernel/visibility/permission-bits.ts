@@ -17,6 +17,7 @@
 // reads them; a Reducer reads the committed state, not its own uncommitted
 // grant rows, as in Rust.
 
+import { isReplacedMarker, REPLACED_MARKER } from "../capture/replace-marker.ts";
 import { readChanges, readClock, type FeedTransaction, type LogChange } from "./feed.ts";
 import { get, isObject, serdeJson, type JsonValue } from "./json.ts";
 import { identifier, quote } from "./plan.ts";
@@ -246,12 +247,16 @@ export class PermissionBits {
     const clock = readClock(sql);
     const index = this.index;
     if (index && !index.poisoned && index.epoch === clock.epoch && index.revision >= clock.retained) {
-      for (const transaction of readChanges(sql, clock.epoch, [this.source.table], index.revision, clock.revision)) {
-        index.apply(this.source, transaction.revision, transaction.changes);
-        this.counters.applied += 1;
+      const transactions = readChanges(sql, clock.epoch, [this.source.table, REPLACED_MARKER], index.revision, clock.revision);
+      // X17p (#555): a REPLACE may have deleted grant rows unlogged; reload instead.
+      if (!transactions.some((transaction) => transaction.changes.some((change) => isReplacedMarker(change.table)))) {
+        for (const transaction of transactions) {
+          index.apply(this.source, transaction.revision, transaction.changes);
+          this.counters.applied += 1;
+        }
+        index.advance(clock.revision);
+        return index;
       }
-      index.advance(clock.revision);
-      return index;
     }
     index?.poison();
     this.index = loadPermissionIndex(sql, this.source);
@@ -263,7 +268,7 @@ export class PermissionBits {
   apply(transaction: FeedTransaction): void {
     const index = this.index;
     if (!index || index.poisoned || transaction.revision <= index.revision) return;
-    if (index.epoch !== transaction.epoch) {
+    if (index.epoch !== transaction.epoch || transaction.changes.some((change) => isReplacedMarker(change.table))) {
       index.poison();
       return;
     }

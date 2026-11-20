@@ -16,6 +16,7 @@
 
 import type { CaptureSql } from "../capture/sql.ts";
 import { integerLiteral, quoteIdentifier, quoteLiteral } from "../capture/sql.ts";
+import { isReplacedMarker, REPLACED_MARKER } from "../capture/replace-marker.ts";
 
 /** The manifest's `permissionGrants` declaration (`PermissionGrantSource`). */
 export interface PermissionGrantSource {
@@ -143,14 +144,19 @@ export class PermissionBits {
       return;
     }
     if (revision <= this.revision) return;
-    // Committed transactions since the index's revision, in order (permission_bits.rs `apply`).
+    // Committed transactions since the index's revision, in order (permission_bits.rs `apply`), with the X17p REPLACE
+    // marker (#555): grant rows may have been deleted with no log row, so patching by row_id would keep their bits.
     const changes = sql.run(
-      `SELECT revision, row_id, new_value FROM _gonvex_sync_changes INDEXED BY gonvex_sync_changes_table
-       WHERE table_name = ?1 AND revision > ${integerLiteral(this.revision)} AND revision <= ${integerLiteral(revision)}
+      `SELECT revision, row_id, new_value, table_name FROM _gonvex_sync_changes INDEXED BY gonvex_sync_changes_table
+       WHERE table_name IN (?1, ?2) AND revision > ${integerLiteral(this.revision)} AND revision <= ${integerLiteral(revision)}
        ORDER BY revision, ordinal`,
-      [source.table],
+      [source.table, REPLACED_MARKER],
     );
     this.stats.rowsRead += changes.rowsRead;
+    if (changes.rows.some((row) => isReplacedMarker(String(row[3])))) {
+      this.load(sql, source, epoch, revision);
+      return;
+    }
     for (const [, rowId, newValue] of changes.rows) {
       const id = String(rowId);
       this.removeRow(id);

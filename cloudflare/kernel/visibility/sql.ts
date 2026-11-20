@@ -171,7 +171,25 @@ export function compileSetWithParameters(set: VisibilitySet, direct: DirectConte
   return setWithParameters(set, direct, new SqlParameters(parameters));
 }
 
-function setWithParameters(set: VisibilitySet, direct: DirectContext, parameters: SqlParameters): string {
+/**
+ * X17p: `compileSet` restricted to the base rows `table` inserted in `(low, high]`: the base row's `key` is one of
+ * those insert images' keys (typed, from the captured image, so the comparison is the stored value's). A set is
+ * inner joins and equality predicates, so it is monotone in its base rows: when its base table only gained these
+ * rows and no joined table changed, the set at `high` is the set at `low` plus what this returns.
+ */
+export function compileSetInsertedRows(set: VisibilitySet, direct: DirectContext, table: string, key: string, low: number, high: number): { sql: string; parameters: JsonValue[] } {
+  const parameters: JsonValue[] = [];
+  const holder = new SqlParameters(parameters);
+  const sql = setWithParameters(set, direct, holder, (predicates) => {
+    predicates.push(
+      `v0.${quote(key)} IN (SELECT json_extract(new_value, ${holder.argument(`$.${quote(key)}`)}) FROM _gonvex_sync_changes ` +
+        `WHERE table_name = ${holder.argument(table)} AND revision > ${holder.argument(low)} AND revision <= ${holder.argument(high)} AND operation = 'insert')`,
+    );
+  });
+  return { sql, parameters };
+}
+
+function setWithParameters(set: VisibilitySet, direct: DirectContext, parameters: SqlParameters, extra?: (predicates: string[]) => void): string {
   const baseAlias = set.alias || set.table;
   const aliases = new Map<string, string>([[baseAlias, "v0"]]);
   let from = `${quote(set.table)} AS v0`;
@@ -208,6 +226,7 @@ function setWithParameters(set: VisibilitySet, direct: DirectContext, parameters
       predicates.push(literalComparison(alias, constraint.column, visibilityLiteral(constraint.value), parameters, false));
     }
   }
+  extra?.(predicates);
   if (predicates.length) query += ` WHERE ${predicates.join(" AND ")}`;
   return query;
 }

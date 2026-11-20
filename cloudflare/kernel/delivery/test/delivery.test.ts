@@ -529,6 +529,79 @@ describe("X17n: a commit's delivery reads the new log rows, not the retained log
   });
 });
 
+describe("#555 R1: a REPLACE's unlogged delete reaches live subscriptions as a resync", () => {
+  // REPLACE conflict resolution deletes rows without firing delete triggers, so the log holds only the replacing
+  // insert. Before the marker, a live mask kept a revoked grant (the insert's old image is none, so grantDelta
+  // removed nothing) and a public replica kept the row a UNIQUE conflict deleted, until some later re-open.
+  const APP: ReplicaModule = {
+    ...MODULE,
+    functions: new Map([
+      ["items2.mine", { path: "items2.mine", kind: "query", delivery: "replica", replica: parseDefinition({ table: "items2", key: "id", columns: ["id", "label"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 1000 }) }],
+      ["uitems.all", { path: "uitems.all", kind: "query", delivery: "replica", replica: parseDefinition({ table: "uitems", key: "id", columns: ["id", "slot"], orderBy: "id", orderDirection: "asc", mode: "eager", maxRows: 1000 }) }],
+    ]),
+    visibility: new Map([
+      ["items2", parsePlan({
+        version: 2, table: "items2", key: "id", permissionTables: ["grants", "members"],
+        sets: { mine: { kind: "grant", table: "grants", select: "itemId", joins: [], where: [{ table: "grants", column: "memberId", context: "member.id" }] } },
+        where: { operator: "inSet", column: "id", set: "mine" },
+      })],
+      ["uitems", parsePlan({ table: "uitems", key: "id", sets: {}, where: { operator: "public" } })],
+    ]),
+  };
+  const kinds = (payloads: Array<[string, ReplicaDelivery]>, id: string) => frames(payloads, "s1").filter((f) => f.id === id).map((f) => f.type);
+
+  it("a REPLACE that moves a grant to another member, and an INSERT OR REPLACE that deletes another key's row, ask for hashes", async () => {
+    await withEngine(async ({ engine, payloads, commit, sql, schemaChanged }) => {
+      await sql((s) => {
+        s.run(`CREATE TABLE grants ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "itemId" TEXT)`);
+        s.run(`CREATE TABLE items2 (id TEXT PRIMARY KEY, label TEXT)`);
+        s.run(`CREATE TABLE uitems (id TEXT PRIMARY KEY, slot TEXT UNIQUE)`);
+        installChangeFeed(s);
+      });
+      schemaChanged();
+      const seeded = await commit([
+        ["INSERT INTO items2 VALUES ('i1', 'one'), ('i2', 'two')", []],
+        ["INSERT INTO grants VALUES ('g1', 'm-alice', 'i1')", []],
+        ["INSERT INTO uitems VALUES ('u1', 'A')", []],
+      ]);
+      const view = readmitted(socket("s1"), {}, seeded);
+      engine.dispatch(view, { type: "replica.open", id: "mine", path: "items2.mine", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      engine.dispatch(view, { type: "replica.open", id: "slots", path: "uitems.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      const opened = frames(payloads, "s1").filter((f) => f.type === "replica.snapshotPage");
+      expect(opened.find((f) => f.id === "mine")!.result.map((r: { id: string }) => r.id)).toEqual(["i1"]);
+      expect(opened.find((f) => f.id === "slots")!.result.map((r: { id: string }) => r.id)).toEqual(["u1"]);
+
+      // An ordinary grant insert for another member is not a resync (control).
+      payloads.length = 0;
+      await commit([["INSERT INTO grants VALUES ('g2', 'm-bob', 'i2')", []]]);
+      expect(kinds(payloads, "mine")).not.toContain("replica.needHashes");
+
+      // g1 moves to bob: alice must lose i1.
+      payloads.length = 0;
+      await commit([["REPLACE INTO grants VALUES ('g1', 'm-bob', 'i1')", []]]);
+      expect(kinds(payloads, "mine")).toContain("replica.needHashes");
+      expect(kinds(payloads, "slots"), "the marker is global: every subscription reconciles").toContain("replica.needHashes");
+
+      // Both now wait for the client's hashes; open the public list again (the client would reconcile it).
+      const current = await commit([["INSERT INTO items2 VALUES ('i3', 'three')", []]]);
+      engine.dispatch(readmitted(socket("s1"), {}, current), { type: "replica.open", id: "slots2", path: "uitems.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      // u2 takes slot A: u1 is deleted by the UNIQUE conflict, with no log row.
+      payloads.length = 0;
+      await commit([["INSERT OR REPLACE INTO uitems VALUES ('u2', 'A')", []]]);
+      expect(kinds(payloads, "slots2")).toContain("replica.needHashes");
+      // Control: an ordinary commit after it is a plain delta, not a resync.
+      engine.dispatch(readmitted(socket("s1"), {}, current + 1), { type: "replica.open", id: "slots3", path: "uitems.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      payloads.length = 0;
+      await commit([["INSERT INTO uitems VALUES ('u3', 'B')", []]]);
+      expect(kinds(payloads, "slots3")).not.toContain("replica.needHashes");
+      expect(kinds(payloads, "slots3")).toContain("replica.delta");
+    }, APP);
+  });
+});
+
 describe("K22 ordered query and replica commits", () => {
   // Receiver controls below test the engine/barrier wiring; actual holder
   // scope validation and rebuilding are covered separately on Gateway/Session.

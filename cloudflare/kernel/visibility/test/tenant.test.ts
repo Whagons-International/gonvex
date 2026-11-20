@@ -20,6 +20,7 @@ import { principalChangeConcerns, resolveWithParents, type ResolutionMetrics, ty
 import type { ResolvedVisibility } from "../resolved.ts";
 import { compilePredicate } from "../sql.ts";
 import { VisibilityRegistry } from "../tenant.ts";
+import { PermissionBits as ReducerPermissionBits } from "../../reducer/permissions.ts";
 import { createQueryVisibility, maskChangeRelevant } from "../query-port.ts";
 import { planToJson } from "../plan.ts";
 import { corpus, type Corpus, type Principal } from "./corpus.ts";
@@ -277,7 +278,15 @@ describe("feed maintenance", () => {
         const resolutions = checkAll(session, harness, data, "alice", "feed");
         expect(asArray(resolutions.get("tasks")!.sets.get("workspaces"))).toEqual(["w1", "w3"]);
       });
-      expect(harness.registry.principals.stats().invalidated).toBeGreaterThan(afterData.invalidated);
+      // X17p: rolled forward through the commit (the workspaces set gained the inserted workspaceTeams row), not dropped.
+      const afterJoin = harness.registry.principals.stats();
+      expect(afterJoin.rolledForward).toBeGreaterThan(afterData.rolledForward);
+      expect(afterJoin.setsPatched).toBeGreaterThan(afterData.setsPatched);
+      expect(afterJoin.invalidated).toBe(afterData.invalidated);
+      // A member row change still drops the entry.
+      await harness.commit([[`UPDATE members SET permissions = '{"x":1}' WHERE id = 'alice'`, []]]);
+      await harness.read((session) => checkAll(session, harness, data, "alice", "feed"));
+      expect(harness.registry.principals.stats().invalidated).toBeGreaterThan(afterJoin.invalidated);
       // An anchored write naming bob is not alice's principal.
       const bobs = await harness.commit([[`INSERT INTO "memberSpots" VALUES ('bob-spot', 'bob', 's2')`, []]]);
       await harness.read((session) => {
@@ -292,6 +301,31 @@ describe("feed maintenance", () => {
         expect(index.get("t-w1-null-alice-finding-0")).toBeUndefined();
         checkAll(session, harness, data, "alice", "feed");
       });
+      // #555 R1: a REPLACE may delete rows without a log row; its marker makes the parent index reload.
+      await harness.read((session) => harness.registry.acl.ensure(session, plans, [notes]));
+      const loads = harness.registry.acl.stats().loads;
+      await harness.commit([[`INSERT INTO tasks VALUES ('t-plain', 'w1', NULL, 'alice', 'web', NULL)`, []]]);
+      await harness.read((session) => harness.registry.acl.ensure(session, plans, [notes]));
+      expect(harness.registry.acl.stats().loads, "an ordinary insert catches up").toBe(loads);
+      await harness.commit([[`REPLACE INTO tasks VALUES ('t-w1-null-alice-web-0', 'w1', NULL, 'alice', 'web', NULL)`, []]]);
+      await harness.read((session) => harness.registry.acl.ensure(session, plans, [notes]));
+      expect(harness.registry.acl.stats().loads, "the REPLACE's marker reloads the index").toBe(loads + 1);
+      await harness.read((session) => checkAll(session, harness, data, "alice", "feed"));
+      // #555 M-d, the push path (delivery hands each committed transaction to `apply`): an ordinary transaction
+      // advances the index; one carrying a marker of its table poisons it.
+      const pushed = await harness.read((session) => harness.registry.acl.ensure(session, plans, [notes]).get("tasks", "_id"));
+      const push = async (statement: string) => {
+        const revision = await harness.commit([[statement, []]]);
+        return harness.read((session) => readChanges(session, readClock(session).epoch, ["tasks", "_gonvex_replaced:*"], revision - 1, revision)[0]!);
+      };
+      const ordinary = await push(`INSERT INTO tasks VALUES ('t-push', 'w1', NULL, 'alice', 'web', NULL)`);
+      harness.registry.acl.apply(ordinary, ordinary.revision - 1);
+      expect(pushed.poisoned).toBe(false);
+      expect(pushed.revision).toBe(ordinary.revision);
+      const replaced = await push(`REPLACE INTO tasks VALUES ('t-push', 'w2', NULL, 'alice', 'web', NULL)`);
+      expect(replaced.changes.map((change) => change.table)).toEqual(["tasks", "_gonvex_replaced:*"]);
+      harness.registry.acl.apply(replaced, replaced.revision - 1);
+      expect(pushed.poisoned, "a pushed REPLACE marker poisons the index").toBe(true);
     });
   });
 
@@ -378,7 +412,51 @@ describe("permission bits from the manifest (permissionGrants)", () => {
       expect(failed.ok).toBe(false);
       await check();
       expect(bits.has("m1", "view", "w1")).toBe(false);
+      // #555 R1: a REPLACE moves g2 from m2 to m3 with only an insert in the log; its marker reloads the bits.
+      await harness.commit([[`REPLACE INTO grants VALUES ('g2', 'm3', 'view', NULL, NULL)`, []]]);
+      await check();
+      expect(bits.has("m2", "view", "")).toBe(false);
+      expect(bits.counters.loads, "reloaded after the REPLACE").toBe(2);
       expect(checked).toBeGreaterThan(300);
+      // #555 M-e, the push path: a pushed transaction carrying the grants marker poisons the bits ("rebuilding").
+      const push = async (statement: string) => {
+        const revision = await harness.commit([[statement, []]]);
+        return harness.read((session) => readChanges(session, readClock(session).epoch, ["grants", "_gonvex_replaced:*"], revision - 1, revision)[0]!);
+      };
+      const ordinary = await push(`INSERT INTO grants VALUES ('g9', 'm1', 'lead', 'w1', NULL)`);
+      bits.apply(ordinary);
+      expect(bits.has("m1", "lead", "w1")).toBe(true);
+      const replaced = await push(`REPLACE INTO grants VALUES ('g9', 'm2', 'lead', 'w1', NULL)`);
+      bits.apply(replaced);
+      expect(bits.has("m1", "lead", "w1"), "a pushed REPLACE marker poisons the bits").toBe("rebuilding");
+      await check();
+    });
+  });
+
+  it("#555 C4: the Reducer's permission index (ctx.permissions.has) reloads after a REPLACE deletes another grant", async () => {
+    await withTenant(async (harness) => {
+      harness.state.storage.transactionSync(() => {
+        const sql = directSql(harness.state.storage.sql);
+        sql.run(`CREATE TABLE "grants2" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "permission" TEXT, "scope" TEXT, UNIQUE ("permission", "scope"))`);
+        installChangeFeed(sql);
+      });
+      harness.storage.invalidateSchema();
+      const bits = new ReducerPermissionBits({ table: "grants2", member: "memberId", permission: "permission", scope: "scope" });
+      const sql = directSql(harness.state.storage.sql);
+      await harness.commit([[`INSERT INTO grants2 VALUES ('g1', 'm1', 'admin', 'org')`, []]]);
+      bits.ensure(sql);
+      expect(bits.has("m1", "admin", "org")).toBe(true);
+      // The UNIQUE (permission, scope) conflict deletes g1 with no log row; the marker is logged.
+      await harness.commit([[`REPLACE INTO grants2 VALUES ('g2', 'm2', 'admin', 'org')`, []]]);
+      bits.ensure(sql);
+      expect(bits.has("m1", "admin", "org"), "m1 lost the grant").toBe(false);
+      expect(bits.has("m2", "admin", "org")).toBe(true);
+      expect(bits.stats.loads).toBe(2);
+      // An ordinary grant catches up without a reload.
+      await harness.commit([[`INSERT INTO grants2 VALUES ('g3', 'm1', 'view', 'org')`, []]]);
+      bits.ensure(sql);
+      expect(bits.has("m1", "view", "org")).toBe(true);
+      expect(bits.stats.loads).toBe(2);
     });
   });
 });

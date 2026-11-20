@@ -55,6 +55,8 @@ import {
   type SqlBind,
 } from "./parameters";
 import { projectionKinds } from "./projection";
+import { ReplaceModel } from "./replace-model";
+import { REPLACED_MARKER_SQL } from "../capture/replace-marker.ts";
 import { RegexpRewriteError, regexpRewrites, RegexpUnsupportedError } from "./regexp";
 import {
   decodeCell,
@@ -155,6 +157,15 @@ export class TenantStorage {
   invalidateSchema(): void {
     this.catalog.invalidate();
     this.model = undefined;
+    this.replaces = undefined;
+  }
+
+  private replaces: { generation: number; model: ReplaceModel } | undefined;
+
+  /** X17p: the REPLACE targets model for the current schema generation. */
+  replaceModel(reader: (sql: string) => Record<string, unknown>[]): ReplaceModel {
+    if (this.replaces?.generation !== this.catalog.generation) this.replaces = { generation: this.catalog.generation, model: new ReplaceModel(reader) };
+    return this.replaces.model;
   }
 
   /** The foreign key model for the current schema generation. */
@@ -319,7 +330,10 @@ export class StorageSession {
       this.tenant.invalidateSchema();
     }
     // A statement that changed no row cannot have broken a foreign key.
-    else if (result.rowsWritten > 0) this.noteStatement(admitted.tokens);
+    else if (result.rowsWritten > 0) {
+      this.noteStatement(admitted.tokens);
+      this.markReplaces(admitted.tokens);
+    }
     if (recovers) this.aborted = undefined;
     const kinds = result.columnNames.map((name, index) => {
       const fromProjection = projection && projection.length === result.columnNames.length ? projection[index] : undefined;
@@ -490,7 +504,10 @@ export class StorageSession {
       throw new Error(`kernel statement binds ${writer.binds.length} parameters; chunk it under ${MAX_BOUND_PARAMETERS} (see chunkParameters)`);
     }
     const result = this.execute(text, writer.binds);
-    if (result.rowsWritten > 0) this.noteStatement(tokens);
+    if (result.rowsWritten > 0) {
+      this.noteStatement(tokens);
+      this.markReplaces(tokens);
+    }
     return { ...result, columnNames: result.columnNames.map((name) => restoreColumnName(name, writer.renames, sql)) };
   }
 
@@ -541,6 +558,12 @@ export class StorageSession {
     const mode = this.tenant.writeTracking;
     if (mode === "statements") this.written.noteStatement(tokens, this.foreignKeyModel());
     else if (mode === "mixed") this.written.noteStatement(tokens, this.foreignKeyModel(), this.tenant.rowReported ?? (() => false));
+  }
+
+  /** X17p (#555): the transaction's REPLACE marker when this write may have REPLACE-deleted rows (`replace-model.ts`). */
+  private markReplaces(tokens: readonly Token[]): void {
+    const model = this.tenant.replaceModel((sql) => this.objects(this.execute(sql, [], this.stats.schema)));
+    if (model.marks(tokens)) this.execute(REPLACED_MARKER_SQL, []);
   }
 
   /** Change capture (K03) or a writer reports the exact rows it wrote, for a row-level FK check. */
