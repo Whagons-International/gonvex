@@ -263,7 +263,9 @@ export function gatedEnv<E extends object>(env: E, origin: CallOrigin): E {
 export const FRESH_ENTRIES: ReadonlySet<string> = new Set(["fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError"]);
 
 /** X17e: Control's notifications, sent only from Control's alarm (depth 1). See `InboundKind`. */
-export const NOTICE_ENTRIES: ReadonlySet<string> = new Set(["controlChanged", "presenceChanged"]);
+// DEV EXPERIMENT (not for merge; unsafe for depth): deliveries treated as bounded notices, to measure the upper bound
+// of what an inline openMany reply could save (no X02 deferral behind a delivery).
+export const NOTICE_ENTRIES: ReadonlySet<string> = new Set(["controlChanged", "presenceChanged", "deliverReplica", "deliverReplicaBatch", "deliverReplicaInitial"]);
 
 const WRAPPED = Symbol("gonvex.origin.wrapped");
 type Wrapped = ((this: any, ...args: unknown[]) => unknown) & { [WRAPPED]?: (...args: unknown[]) => unknown };
