@@ -227,6 +227,45 @@ describe("external tokens (C.3.4)", () => {
     await expect(verifyExternalToken(lookupConfig, fetcher, { ...firebase, firebaseAdminCredentials: "{}" }, token)).rejects.toThrow("Firebase account status is unavailable");
   });
 
+  it("X17h: the account-check hook runs after the token is verified and before accounts:lookup, never for a bad token", async () => {
+    clearJwksCache();
+    const { pair, jwk } = await keyPair("k1");
+    const service = (await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair;
+    const pkcs8 = Buffer.from(await crypto.subtle.exportKey("pkcs8", service.privateKey)).toString("base64");
+    const credentials = JSON.stringify({ project_id: "demo-x", client_email: "svc-hook@demo-x.iam.test", private_key: `-----BEGIN PRIVATE KEY-----\n${pkcs8}\n-----END PRIVATE KEY-----\n` });
+    let user: Record<string, unknown> = { localId: "uid-1", disabled: false, validSince: "0" };
+    const calls: string[] = [];
+    const fetcher = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === JWKS) return Response.json({ keys: [jwk] });
+      if (url === "https://token.gonvex.test") return Response.json({ access_token: "access" });
+      if (url === "https://identity.gonvex.test/v1/projects/demo-x/accounts:lookup") return Response.json({ users: [user] });
+      return new Response("unexpected", { status: 500 });
+    }) as typeof fetch;
+    const firebase: ExternalAuthConfiguration = { ...oidc, provider: "firebase", issuer: "https://securetoken.google.com/demo-x", audience: "demo-x", firebaseProjectId: "demo-x", firebaseAdminCredentials: credentials };
+    const lookupConfig: ControlConfig = { ...config, googleTokenUrl: "https://token.gonvex.test", identityToolkitUrl: "https://identity.gonvex.test" };
+    const now = Math.floor(Date.now() / 1000);
+    const claims = { iss: firebase.issuer, aud: "demo-x", sub: "uid-1", iat: now, exp: now + 600, auth_time: now - 100, firebase: {} };
+    const seen: Array<{ subject: string; lookupsBefore: number }> = [];
+    const hooks = { beforeAccountCheck: (identity: { subject: string }) => { seen.push({ subject: identity.subject, lookupsBefore: calls.filter((u) => u.endsWith("accounts:lookup")).length }); } };
+    await verifyExternalToken(lookupConfig, fetcher, firebase, await sign(pair.privateKey, "k1", claims), undefined, hooks);
+    expect(seen).toEqual([{ subject: "uid-1", lookupsBefore: 0 }]);
+    expect(calls.filter((u) => u.endsWith("accounts:lookup"))).toHaveLength(1);
+    // A disabled account: the hook ran (read-only work may have started), the verification still fails.
+    user = { localId: "uid-1", disabled: true };
+    await expect(verifyExternalToken(lookupConfig, fetcher, firebase, await sign(pair.privateKey, "k1", claims), undefined, hooks)).rejects.toThrow("Firebase account is disabled or its sessions were revoked");
+    expect(seen).toHaveLength(2);
+    // A token that fails verification never reaches the hook.
+    await expect(verifyExternalToken(lookupConfig, fetcher, firebase, await sign(pair.privateKey, "k1", { ...claims, aud: "other" }), undefined, hooks)).rejects.toThrow();
+    await expect(verifyExternalToken(lookupConfig, fetcher, firebase, await sign(pair.privateKey, "k1", { ...claims, exp: now - 100 }), undefined, hooks)).rejects.toThrow();
+    expect(seen).toHaveLength(2);
+  });
+
   it("X14: reuses the service-account access token until it expires; the lookup still runs every time", async () => {
     clearJwksCache();
     const { pair, jwk } = await keyPair("k1");
@@ -400,6 +439,75 @@ describe("re-review #530: a Reducer write committed while the tenant's projectio
     await tenantStub(b).flushMemberships();
     if (expected) expect(await roleIn()).toMatchObject(expected);
     else expect(await roleIn()).toBeUndefined();
+  });
+});
+
+describe("X17h admissions started during the provider's account check", () => {
+  type Internals = { context(): Parameters<typeof import("../src/sessions").sessionResultFromDirectory>[0] };
+  it("are used for the same account without new tenant calls; another account's or a failed one is not", async () => {
+    const sessions = await import("../src/sessions");
+    sessions.clearAdmissionCache();
+    const seeded = await seed({ a: ["sid", "kim"], b: ["sid"] });
+    const sid = seeded.members.sid!.accountId, kim = seeded.members.kim!.accountId;
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const ctx = (instance as unknown as Internals).context();
+      const prefetched = sessions.prefetchAdmissions(ctx, seeded.project, sid);
+      expect([...prefetched.admissions.keys()].sort()).toEqual([seeded.tenants.a, seeded.tenants.b].sort());
+      const calls = ctx.tenantCalls;
+      const result = await sessions.sessionResultFromDirectory(ctx, seeded.project, { account: { id: sid } }, prefetched);
+      expect((result.tenants as Array<{ id: string }>).map((t) => t.id).sort()).toEqual([seeded.tenants.a, seeded.tenants.b].sort());
+      expect(ctx.tenantCalls).toBe(calls);
+      // Another account's admissions are ignored: kim's sign-in admits live.
+      sessions.clearAdmissionCache();
+      const other = await sessions.sessionResultFromDirectory(ctx, seeded.project, { account: { id: kim } }, prefetched);
+      expect((other.tenants as Array<{ id: string }>).map((t) => t.id)).toEqual([seeded.tenants.a]);
+      expect(ctx.tenantCalls).toBe(calls + 1);
+      // A failed prefetched admission is a failed admission: that tenant is skipped, the next becomes active.
+      sessions.clearAdmissionCache();
+      const failed = { ...prefetched, admissions: new Map([...prefetched.admissions].map(([id, e]) => [id, id === seeded.tenants.a ? { ...e, member: Promise.resolve(null) } : e])) };
+      const after = await sessions.sessionResultFromDirectory(ctx, seeded.project, { account: { id: sid } }, failed);
+      expect((after.tenants as Array<{ id: string }>).map((t) => t.id)).toEqual([seeded.tenants.b]);
+      expect(after.activeTenantId).toBe(seeded.tenants.b);
+    });
+  });
+});
+
+describe("#537 review: an admission started during the account check is never cached under a newer row", () => {
+  type Internals = { context(): Parameters<typeof import("../src/sessions").sessionResultFromDirectory>[0] };
+  it("a projection that lands during the lookup makes the post-commit path admit live", async () => {
+    const sessions = await import("../src/sessions");
+    sessions.clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"], b: ["sid"] });
+    const sid = seeded.members.sid!.accountId, email = seeded.members.sid!.email, b = seeded.tenants.b!;
+    const prefetched = await runInDurableObject(control(), async (instance: ControlObject) => {
+      const p = sessions.prefetchAdmissions((instance as unknown as Internals).context(), seeded.project, sid);
+      await Promise.all([...p.admissions.values()].map((e) => e.member));
+      return p;
+    });
+    // The tenant projects a role change while the lookup is in flight (a Reducer write, no revision bump).
+    await runInDurableObject(tenantStub(b), (instance: StubTenantObject) => {
+      (instance as unknown as { sql: { run(q: string, ...a: unknown[]): void } }).sql.run("UPDATE members SET role='member',permissions='{}' WHERE account_id=$1", sid);
+    });
+    await tenantStub(b).flushMemberships();
+    await runInDurableObject(control(), (instance: ControlObject) => sessions.sessionResultFromDirectory((instance as unknown as Internals).context(), seeded.project, { account: { id: sid } }, prefetched));
+    const { session } = await login(seeded.project, email); // b served from the cache
+    expect((session.tenants as Array<Record<string, unknown>>).find((t) => t.id === b)).toMatchObject({ role: "member" });
+  });
+
+  it("prefetches only the first candidate and the rows the cache cannot serve", async () => {
+    const sessions = await import("../src/sessions");
+    sessions.clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"], b: ["sid"], c: ["sid"] });
+    const sid = seeded.members.sid!.accountId;
+    await login(seeded.project, seeded.members.sid!.email); // caches a, b and c
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const ctx = (instance as unknown as Internals).context();
+      const calls = ctx.tenantCalls;
+      const p = sessions.prefetchAdmissions(ctx, seeded.project, sid, seeded.tenants.c!);
+      expect([...p.admissions.keys()]).toEqual([seeded.tenants.c]);
+      expect(ctx.tenantCalls).toBe(calls + 1);
+      await Promise.all([...p.admissions.values()].map((e) => e.member));
+    });
   });
 });
 

@@ -201,6 +201,7 @@ async function identityFromClaims(
   configuration: ExternalAuthConfiguration,
   claims: Record<string, unknown>,
   timings?: ExchangeTimings,
+  hooks?: ExternalVerifyHooks,
 ): Promise<VerifiedExternalIdentity> {
   const subject = typeof claims.sub === "string" ? claims.sub.trim() : "";
   if (!subject) throw external.missingSubject();
@@ -231,6 +232,9 @@ async function identityFromClaims(
     signInProvider: typeof firebase?.sign_in_provider === "string" ? firebase.sign_in_provider : configuration.provider,
     authTime,
   };
+  // X17h: the token itself is verified (signature, issuer, audience, expiry, tenant); the caller may start read-only
+  // work for this identity while the provider's account check runs. Nothing it starts may grant anything on its own.
+  hooks?.beforeAccountCheck?.(identity);
   if (configuration.firebaseAdminCredentials !== null) {
     await verifyFirebaseAccount(config, fetcher, configuration, configuration.firebaseAdminCredentials, identity, timings);
   }
@@ -353,12 +357,16 @@ async function verifyFirebaseAccount(
 }
 
 /** `verify_external_token`. */
+/** X17h: called once the token is verified and before the provider's account check (see `identityFromClaims`). */
+export interface ExternalVerifyHooks { beforeAccountCheck?(identity: VerifiedExternalIdentity): void }
+
 export async function verifyExternalToken(
   config: ControlConfig,
   fetcher: typeof fetch,
   configuration: ExternalAuthConfiguration,
   token: string,
   timings?: ExchangeTimings,
+  hooks?: ExternalVerifyHooks,
 ): Promise<VerifiedExternalIdentity> {
   if (!token.trim()) throw external.invalidToken();
   const verifyAt = Date.now();
@@ -370,5 +378,5 @@ export async function verifyExternalToken(
         })()
     : await verifiedClaims(config, fetcher, configuration, token, timings);
   if (timings) timings.verifyMs = Date.now() - verifyAt;
-  return identityFromClaims(config, fetcher, configuration, claims, timings);
+  return identityFromClaims(config, fetcher, configuration, claims, timings, hooks);
 }

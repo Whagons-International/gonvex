@@ -61,6 +61,8 @@ import {
   resolveExternalAccount,
   sessionResult,
   sessionResultFromDirectory,
+  prefetchAdmissions,
+  type PrefetchedAdmissions,
 } from "./sessions";
 import { NOW_MS, blob, bool, json, num, optNum, str, type Row } from "./sql";
 import type { ControlConnection, ControlKind, SessionIdentity, TenantSession } from "./types";
@@ -1308,13 +1310,25 @@ async function executeAuthAction(ctx: Ctx, connection: ControlConnection, path: 
   const started = Date.now();
   const timings: ExchangeTimings = {};
   let externalIdentity: VerifiedExternalIdentity | null = null;
+  let prefetched: PrefetchedAdmissions | undefined;
+  const callsAtStart = ctx.tenantCalls;
   if (path === "control.auth.exchangeExternalToken") {
     const object = exactObject(args, ["provider", "token", "tenantId", "previousRefreshToken"]);
     const provider = requiredString(object, "provider");
     if (provider !== "firebase" && provider !== "external-oidc") throw invalid("provider must be firebase or external-oidc");
     const configuration = loadExternalConfiguration(ctx, project, provider);
     // Token verification (network) happens before the writer transaction.
-    externalIdentity = await verifyExternalToken(ctx.config, ctx.fetch, configuration, requiredString(object, "token"), timings);
+    // X17h: an existing account's tenant admissions run while the provider's account check (`accounts:lookup`, the
+    // disabled and revocation check) is in flight; they are used only if it passes (`sessionResultFromDirectory`).
+    externalIdentity = await verifyExternalToken(ctx.config, ctx.fetch, configuration, requiredString(object, "token"), timings, {
+      beforeAccountCheck: (identity) => {
+        const accountId = ctx.sql.value<string>(
+          "SELECT account_id FROM account_identities WHERE project_id=$1 AND provider=$2 AND issuer=$3 AND subject=$4",
+          project, identity.provider, identity.issuer, identity.subject,
+        );
+        if (typeof accountId === "string" && accountId) prefetched = prefetchAdmissions(ctx, project, accountId, optionalString(object, "tenantId") ?? "");
+      },
+    });
   }
   const verified = Date.now();
   const subject = authSubject(path, args);
@@ -1383,9 +1397,11 @@ async function executeAuthAction(ctx: Ctx, connection: ControlConnection, path: 
   if ("reuse" in outcome) throw invalid(outcome.reuse);
   const result = "replay" in outcome ? (outcome.replay as Record<string, unknown>) : outcome.result;
   const committed = Date.now();
-  const calls = ctx.tenantCalls;
-  const answer = await sessionResultFromDirectory(ctx, project, result ?? {});
+  const calls = callsAtStart;
+  const answer = await sessionResultFromDirectory(ctx, project, result ?? {}, prefetched);
   // X14: wall time per part of one sign-in (opt-in dev spans only; no identifiers, tokens or tenant names).
+  // X17h: for an exchange, `admits` counts every tenant admission of the sign-in, including those started during the
+  // account check (some may be discarded), and `admitMs` is the post-commit part only (it no longer covers them).
   span("control.auth", { path, totalMs: Date.now() - started, externalMs: verified - started, ...timings,
     txMs: committed - verified, admitMs: Date.now() - committed, admits: ctx.tenantCalls - calls });
   return answer;
