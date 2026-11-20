@@ -64,6 +64,17 @@ let claim: { owner: WeakRef<object>; host: string } | undefined;
  * A waiter that has not checked in for `WAITER_LIVE_MS` (its object was reset) is skipped and dropped.
  */
 const waiters = new Map<OrderedOutlet, number>();
+/**
+ * #550 follow-up: work-conserving handoff. When a settling outlet would leave a freed slot idle for a waiter ahead
+ * (that waiter can only start from its own context, at its next poll), it grants that waiter a reservation and uses
+ * the slot itself now. The waiter claims the reservation at its next poll and starts one RPC even with every slot
+ * taken. At most `MAX_RPCS` reservations are outstanding, so `credits.running` stays under 2 x `MAX_RPCS`; a
+ * reservation not claimed within `WAITER_LIVE_MS` (its object was reset, or its timer ran that late) lapses.
+ */
+const reservations = new Map<OrderedOutlet, number>();
+const reservationCounts = { reservationsGranted: 0, reservationsClaimed: 0, reservationsLapsed: 0 };
+/** Drops `outlet`'s reservation unclaimed (its object was reset, its work moved on, or it was claimed too late). */
+function lapse(outlet: OrderedOutlet): void { if (reservations.delete(outlet)) reservationCounts.reservationsLapsed++; }
 /** A blocked outlet's own timer re-checks for a free slot this often (another object's settlement cannot wake it). */
 export const WAIT_POLL_MS = 5;
 const WAITER_LIVE_MS = 250;
@@ -105,7 +116,13 @@ const owners = new Set<WeakRef<OrderedOutlet>>();
  * (workerd, 45 pages per tenant, 25 ms RPCs). On the dead-object wedge path every blocked tenant polls (~200/s) until
  * the 60 s stale bound, and its object cannot hibernate meanwhile. Polling CPU stays small (1.3-3.1% of a core for
  * 1-200 blocked tenants). A resolver wake is not an alternative: a continuation of a promise another object resolves
- * runs in that object's context (probed). Follow-up: a work-conserving handoff with per-waiter reservations.
+ * runs in that object's context (probed).
+ * Work-conserving handoff (follow-up PR): a settling outlet that would leave its freed slot idle for a waiter ahead
+ * grants that waiter a reservation and uses the slot itself; the waiter claims it from its own poll even with every
+ * slot taken (`reservations`, at most `MAX_RPCS`, so `running` < 2 x `MAX_RPCS`; unclaimed ones lapse after
+ * `WAITER_LIVE_MS`). Contention benchmark (`test/outlet-contention.bench.ts`): 4 tenants 662 -> 625 ms, 16 tenants
+ * 5,433 -> 4,044 ms, 32 tenants 17,644 -> 12,820 ms. What remains: a settler with nothing queued cannot use its
+ * slot, which then idles until the next waiter polls (dispatch stays in each owner's own context).
  * Cost when a stale RPC was only slow and settles later: what was queued behind it at that moment goes out uncounted,
  * at most one holder backlog (`HOST_PENDING_BYTES`; `sendFirst` items up to `FIRST_BYTES` each, capped by
  * `MAX_PENDING`) per stale RPC; the engine's holder-stall recovery (`HOLDER_STALL_MS` < the stale bound) discards and
@@ -134,7 +151,7 @@ const holding = new Set<OrderedOutlet>();
 /** `byObject` entries kept before dead ones are pruned (one short string per Durable Object id the isolate saw). */
 const BY_OBJECT_PRUNE_AT = 1_024;
 /** Bounded isolate totals, never a per-tenant/member series. Byte values are credits, not heap measurements. */
-export function deliveryPressure() { return { ...credits, ...pressureCounts, ...reclaimCounts, holding: holding.size }; }
+export function deliveryPressure() { return { ...credits, ...pressureCounts, ...reclaimCounts, holding: holding.size, reservations: reservations.size, ...reservationCounts }; }
 
 interface Pending {
   payload: ReplicaDelivery;
@@ -230,7 +247,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     }
     credits.hosts = Math.max(0, credits.hosts - this.queues.size);
     this.queues.clear();
-    waiters.delete(this);
+    waiters.delete(this); lapse(this);
     holding.delete(this); this.heldSlots = 0;
     owners.delete(this.owner);
     if (claim?.owner.deref() === this) claim = undefined;
@@ -258,6 +275,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     // #550 round 4: `waiters` holds outlets strongly; a dead waiter behind every live one would stay referenced (with its
     // queued payloads) until some pump walked past it. The sweep drops them too.
     for (const [outlet, seen] of waiters) if (outlet.retired || now - seen > WAITER_LIVE_MS || !outlet.waiting()) waiters.delete(outlet);
+    for (const [outlet, at] of reservations) if (outlet.retired || now - at > WAITER_LIVE_MS || !outlet.waiting()) lapse(outlet);
     if (!stale) return;
     OrderedOutlet.recount();
     reclaimCounts.staleSlots += stale;
@@ -300,21 +318,41 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     if (now >= nextStaleCheck) OrderedOutlet.expireStaleSlots(now);
     while (this.waiting()) {
       waiters.set(this, now); // keeps its place (Map order), refreshes its liveness
+      // A reservation another outlet granted this one: claimed here, in this outlet's own context, cap or not.
+      const reserved = reservations.get(this);
+      if (reserved !== undefined) {
+        if (now - reserved <= WAITER_LIVE_MS && credits.running < 2 * MAX_RPCS) {
+          reservations.delete(this); reservationCounts.reservationsClaimed++;
+          this.dispatchTurn(now); continue;
+        }
+        lapse(this);
+      }
       const free = MAX_RPCS - credits.running;
       if (free <= 0) break;
-      let ahead = 0;
+      // Live waiters ahead that hold no reservation yet (a reserved one already has its slot coming).
+      let first: OrderedOutlet | undefined, ahead = 0;
       for (const [outlet, seen] of waiters) {
         if (outlet === this) break;
-        if (outlet.retired || now - seen > WAITER_LIVE_MS || !outlet.waiting()) { waiters.delete(outlet); continue; }
-        ahead++;
+        if (outlet.retired || now - seen > WAITER_LIVE_MS || !outlet.waiting()) { waiters.delete(outlet); lapse(outlet); continue; }
+        if (reservations.has(outlet)) continue;
+        first ??= outlet; ahead++;
       }
-      if (ahead >= free) break;
-      this.startOne();
-      waiters.delete(this); // one dispatch per turn: back of the line if it still waits
-      if (this.waiting()) waiters.set(this, now);
+      if (ahead >= free) {
+        // Work-conserving: the slot would idle until that waiter's own timer fires. Reserve it one, use this slot now.
+        if (!first || reservations.size >= MAX_RPCS) break;
+        reservations.set(first, now); reservationCounts.reservationsGranted++;
+      }
+      this.dispatchTurn(now);
     }
-    if (!this.waiting()) { waiters.delete(this); this.disarm(); return; }
+    if (!this.waiting()) { waiters.delete(this); lapse(this); this.disarm(); return; }
     this.arm(now);
+  }
+
+  /** One dispatch, then the back of the line if this outlet still waits (fairness: one RPC per turn). */
+  private dispatchTurn(now: number): void {
+    this.startOne();
+    waiters.delete(this); // one dispatch per turn: back of the line if it still waits
+    if (this.waiting()) waiters.set(this, now);
   }
 
   /** One wake timer per outlet, armed from this outlet's own context (only `pump` arms it). */

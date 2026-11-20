@@ -145,7 +145,23 @@ The fix is in `outlet.ts`. Nothing changes what a live holder receives or its or
      Polling CPU is 1.3–3.1% of one core for 1–200 blocked tenants.
    - A resolver wake (a promise the settling object resolves) is not an alternative: its continuation, and any timer
      it arms, run in the resolver's context (probed in review), which would bring back P1.
-   - Follow-up PR: a work-conserving handoff with per-waiter reservations.
+   - Follow-up (work-conserving handoff with per-waiter reservations): a settler that would idle its freed slot for
+     a waiter ahead reserves one for it (claimed from the waiter's own poll, even above the cap) and uses the slot
+     itself. Outstanding reservations are capped at `MAX_RPCS` (so `running` < 2 × `MAX_RPCS`) and lapse after
+     `WAITER_LIVE_MS`. Benchmark `kernel/gateway/test/outlet-contention.bench.ts` (one scenario per run; 45 pages
+     per tenant, 25 ms RPCs, plain outlets in one workerd isolate):
+
+     | Tenants × holders | Before round 3 (`6f9ce45d`, cross-context dispatch, P1-unsafe) | #550 (`d53ea39e`) | Reservations |
+     | --- | --- | --- | --- |
+     | 1 × 3 | | 397 ms | 397 ms |
+     | 4 × 3 | 609 ms | 656–662 ms | 605–625 ms |
+     | 8 × 3 | | 1,522 ms | 1,463 ms |
+     | 16 × 3 | 3,000 ms | 5,433–5,450 ms | 3,994–4,044 ms |
+     | 32 × 3 | 8,963 ms | 17,101–17,644 ms | 12,820–13,364 ms |
+     | 16 × 8 | | 5,448 ms | 4,034 ms |
+
+     What remains: a settler with nothing queued of its own cannot use its freed slot, which then idles until the
+     next waiter polls. Dispatching for it would mean dispatching from another object's context (P1).
 
    Tests: P1 (B's settlement no longer starts A's RPC, so B's reset leaves A delivering; `pending` forever on the
    previous head), and a dropped wake timer replaced on the next owner call. With `heal` disabled, that test fails.
