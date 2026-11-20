@@ -98,8 +98,14 @@ const owners = new Set<WeakRef<OrderedOutlet>>();
  * cannot hide a reset instance's slots from either reclaim; and an outlet whose work waits for a slot keeps one wake
  * timer of its own (`WAIT_POLL_MS`, or the next stale deadline), so the sweep runs then even if nothing else happens.
  * A timer more than `WAKE_SLACK_MS` overdue is treated as lost and replaced on the outlet's next own call (`heal`).
- * Cost: a blocked outlet's timer fires every `WAIT_POLL_MS` until a slot is its turn, which can also delay its object's
- * hibernation by that long; a slot freed by one tenant's settlement goes to the next tenant in line within one poll.
+ * Cost (measured, #550 round 4; accepted by the lead for #550): a single tenant pays nothing (its own settlement
+ * pumps it). With tenants contending for slots, a slot freed by one tenant's settlement stays idle until the next
+ * tenant in line wakes, and its timer fires late under load (avg 28 ms past the 5 ms deadline at 16 tenants, 63 ms at
+ * 32), so each handoff costs one idle slot: +15% makespan at 4 contending tenants, +75% at 16, +114% at 32
+ * (workerd, 45 pages per tenant, 25 ms RPCs). On the dead-object wedge path every blocked tenant polls (~200/s) until
+ * the 60 s stale bound, and its object cannot hibernate meanwhile. Polling CPU stays small (1.3-3.1% of a core for
+ * 1-200 blocked tenants). A resolver wake is not an alternative: a continuation of a promise another object resolves
+ * runs in that object's context (probed). Follow-up: a work-conserving handoff with per-waiter reservations.
  * Cost when a stale RPC was only slow and settles later: what was queued behind it at that moment goes out uncounted,
  * at most one holder backlog (`HOST_PENDING_BYTES`; `sendFirst` items up to `FIRST_BYTES` each, capped by
  * `MAX_PENDING`) per stale RPC; the engine's holder-stall recovery (`HOLDER_STALL_MS` < the stale bound) discards and
@@ -249,6 +255,9 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       }
     }
     nextStaleCheck = next;
+    // #550 round 4: `waiters` holds outlets strongly; a dead waiter behind every live one would stay referenced (with its
+    // queued payloads) until some pump walked past it. The sweep drops them too.
+    for (const [outlet, seen] of waiters) if (outlet.retired || now - seen > WAITER_LIVE_MS || !outlet.waiting()) waiters.delete(outlet);
     if (!stale) return;
     OrderedOutlet.recount();
     reclaimCounts.staleSlots += stale;

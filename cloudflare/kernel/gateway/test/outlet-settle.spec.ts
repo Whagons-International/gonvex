@@ -159,3 +159,38 @@ it("a lost wake timer is replaced on the outlet's next own call once overdue (#5
     expect(totals()).toEqual(before);
   } finally { dropWakeTimersForTests(false); setRpcSlotStaleMs(previous); }
 });
+
+it("dead waiters ahead in line (objects reset while waiting) do not block a live tenant", async () => {
+  const previous = setRpcSlotStaleMs(300);
+  try {
+    const dead = new GatewayOutlet("dw-holder", () => never, async () => []);
+    for (let i = 0; i < MAX_RPCS; i++) void dead.send(`h${i}`, payload(`d${i}`));
+    await sleep(10);
+    // MAX_RPCS tenants queue behind the full slots, then their objects are reset: their wake timers die with them.
+    dropWakeTimersForTests(true);
+    const ghosts = Array.from({ length: MAX_RPCS }, (_, i) => new GatewayOutlet(`dw-ghost${i}`, () => never, async () => []));
+    for (const g of ghosts) void g.send("g", payload("g"));
+    await sleep(10);
+    dropWakeTimersForTests(false);
+    const live = new GatewayOutlet("dw-live", () => quick, async () => []);
+    expect(await within(live.send("l", payload("l")), 2_000)).toBe("delivered");
+  } finally { dropWakeTimersForTests(false); setRpcSlotStaleMs(previous); }
+});
+
+it("dead waiters ahead in line are skipped by a live pump within WAITER_LIVE_MS, not only by the 60 s sweep", async () => {
+  // As above, but the slots come back by settlement (no stale sweep runs: the bound stays 60 s), so only `pump`'s
+  // liveness check can let the live tenant past the dead waiters within the 2 s window.
+  const h = lateHolder();
+  const holder = new GatewayOutlet("dw2-holder", () => h.rpc, async () => []);
+  const held = Array.from({ length: MAX_RPCS }, (_, i) => holder.send(`h${i}`, payload(`d${i}`)));
+  await sleep(10);
+  dropWakeTimersForTests(true);
+  try {
+    const ghosts = Array.from({ length: MAX_RPCS }, (_, i) => new GatewayOutlet(`dw2-ghost${i}`, () => never, async () => []));
+    for (const g of ghosts) void g.send("g", payload("g"));
+    await sleep(10);
+  } finally { dropWakeTimersForTests(false); }
+  h.release(); await Promise.all(held); // every slot is free again; the ghosts never poll
+  const live = new GatewayOutlet("dw2-live", () => quick, async () => []);
+  expect(await within(live.send("l", payload("l")), 2_000)).toBe("delivered");
+});

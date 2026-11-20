@@ -132,9 +132,20 @@ The fix is in `outlet.ts`. Nothing changes what a live holder receives or its or
    next waiter, which takes it from its own poll (`WAIT_POLL_MS` = 5 ms). A blocked outlet keeps one wake timer of its
    own, for the next poll or stale deadline. The timer records its deadline, and every owner call on the outlet
    (`send`, `admits`, `queued`, `idle`) replaces it if it is missing or more than `WAKE_SLACK_MS` (1 s) overdue
-   (`heal`). Costs:
-   - A blocked tenant wakes every 5 ms until it gets a slot, which can also delay its object's hibernation that long.
-   - Cross-tenant handoff takes up to one poll.
+   (`heal`). Costs, measured in the round-4 review and accepted by the lead for #550:
+   - **Single tenant** (the incident's shape): no cost. Its own settlement pumps it; base and head have equal
+     makespans (52, 61, 163 ms for 1, 8, 45 holders).
+   - **Tenants contending for slots:** one idle slot per handoff. The freed slot waits for the next tenant's timer,
+     and timers fire late under load (on average 28 ms past the 5 ms deadline at 16 tenants, 63 ms at 32). Makespan
+     goes up 15% at 4 contending tenants, 15–22% at 8, 75% at 16 and 114% at 32 (45 pages per tenant over 3 holders,
+     25 ms RPCs, workerd). A 1 ms poll barely helps (32 tenants: 4,517 → 3,701 ms): the idle slot is the cost, not
+     the constant.
+   - **Dead-object wedge path:** every blocked tenant polls about 200 times a second until the 60 s stale bound
+     returns the slots, and its object cannot hibernate meanwhile (billed duration). This only happens on a failure.
+     Polling CPU is 1.3–3.1% of one core for 1–200 blocked tenants.
+   - A resolver wake (a promise the settling object resolves) is not an alternative: its continuation, and any timer
+     it arms, run in the resolver's context (probed in review), which would bring back P1.
+   - Follow-up PR: a work-conserving handoff with per-waiter reservations.
 
    Tests: P1 (B's settlement no longer starts A's RPC, so B's reset leaves A delivering; `pending` forever on the
    previous head), and a dropped wake timer replaced on the next owner call. With `heal` disabled, that test fails.
@@ -216,7 +227,7 @@ port runs only on dev. Without this fix, the Cloudflare port would be exposed in
 With the fix:
 - A returning tenant recovers at once.
 - Other tenants' RPCs are started only from their own contexts, so another object's reset cannot wedge their channels.
-- Their blocked payloads get slots back within 60 s, plus at most one poll.
+- Their blocked payloads get slots back at the 60 s stale bound, plus the timer lateness of their next poll.
 
 ## What is not fixed (follow-ups)
 
