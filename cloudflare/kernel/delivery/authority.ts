@@ -12,6 +12,11 @@ export class DeliveryAdmissionError extends Error {
  readonly code = 'GONVEX_DELIVERY_ADMISSION';
  constructor(){super('tenant subscription authority admission exhausted; retry');}
 }
+/** X17m: the session's admitted Member differs from the tenant's current row (refused at attach; the hand-off was sent). */
+export class MemberAccessChangedError extends Error {
+ readonly code = 'GONVEX_MEMBER_ACCESS_CHANGED';
+ constructor(){super('tenant membership changed; authenticate again');}
+}
 export class AuthorityAdmission {
  private readonly entries = new Map<string,number>();
  private readonly owner = new WeakRef(this);

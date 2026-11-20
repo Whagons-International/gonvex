@@ -14,12 +14,13 @@
 import { span, spanTimingOn } from "./spans";
 import { sqlTotals } from "../storage/session.ts";
 import { captureRecoveryInitials, recoveryInitialCleanup, type RecoveryInitialCapture } from "./recovery-initials";
-import { AuthorityAdmission } from "./authority";
+import { AuthorityAdmission, MemberAccessChangedError } from "./authority";
 import { type RecoveryDelivery, type RecoveryReceipt, type ScopedSocketWork } from "./recovery";
 import type { LiveQueries } from "../query/live.ts";
 import type { ClientFrame } from "../session/decode.ts";
 import type { Negotiated } from "../session/capabilities.ts";
 import type { SocketView, TenantSession } from "../session/ports.ts";
+import { memberAccessChanged, memberChecked, type MemberRow } from "../session/member-access.ts";
 import type { StorageSession } from "../storage/index.ts";
 import { EvalMemo } from "../visibility/class.ts";
 import type { JsonValue } from "../visibility/json.ts";
@@ -196,6 +197,12 @@ export interface DeliveryOptions {
   readonly stallMs?: number;
   /** BUG-4b: the timers of the deferral (stall ticks, room backoff); tests drive them explicitly. */
   readonly clock?: DeliveryClock;
+  /**
+   * X17m: the session Member's current `members` row and the tenant's clock revision, read synchronously (one indexed
+   * read). Set: a connection's first registration (or a new admission on it) is refused when the row differs from the
+   * admitted Member. Unset: no attach-time check (engine unit tests that have no members table).
+   */
+  readonly currentMember?: (memberId: string) => { readonly row: MemberRow | undefined; readonly revision: number };
 }
 
 export interface DeliveryClock {
@@ -521,7 +528,7 @@ export class ReplicaDeliveryEngine {
       this.drop(connection);
       this.connections.delete(connection.id);
     }
-    void this.sendOne(host, this.payload([], {}, undefined, { revision, members: [memberId], accounts: [] }), 0);
+    void this.sendOne(host, this.payload([], {}, undefined, { revision, members: [memberId], accounts: [] }), 0, true); // membership-only (#543 re-review)
   }
 
   /** K07's call watermark rule: undefined without subscriptions, else the revision this socket's holder accepted. */
@@ -579,6 +586,15 @@ export class ReplicaDeliveryEngine {
     const epoch = (socket as SocketView & { subscriptionEpoch?: number }).subscriptionEpoch ?? 0;
     if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error("invalid tenant subscription epoch");
     if (epoch < (this.epochs.get(socket.connectionId) ?? 0)) return undefined;
+    // X17m: a first registration, or a new admission on this connection, is checked against the Member's current row.
+    const registered = this.connections.get(socket.connectionId);
+    if (!registered || epoch > registered.epoch || registered.session.member.id !== session.member.id
+      || registered.session.admissionRevision !== session.admissionRevision) {
+      if (this.attachRefused(socket.host, session)) {
+        if (registered) { this.drop(registered); this.accepted.delete(registered.id); this.connections.delete(registered.id); }
+        throw new MemberAccessChangedError();
+      }
+    }
     this.authority.set(socket.connectionId, 1024 + (socket.connectionId.length + socket.host.length + (socket.replica?.scope.length??0) + (socket.replica?.visibilityScope.length??0) + JSON.stringify(session).length) * 8);
     this.epochs.set(socket.connectionId, epoch);
     let connection = this.connections.get(socket.connectionId);
@@ -603,6 +619,43 @@ export class ReplicaDeliveryEngine {
       if (replica) { connection.scope = replica.scope; connection.visibilityScope = replica.visibilityScope; }
     }
     return connection;
+  }
+
+  /**
+   * X17m attach-time member check (#540 re-review B): the session's admitted Member is compared with the tenant's
+   * current `members` row (`memberAccessChanged`, as the reducer's own-member re-check). A change committed before the
+   * attach (a demotion or removal not yet projected to Control, a reused or leased admission) refuses the connection:
+   * the own-membership hand-off on the commit channel (`membershipChanged`) discards the Member's sessions on that
+   * holder whose admission predates it, which sends `auth.error membership-changed`, the later-change frame, and the
+ * frame that attached is refused (`MemberAccessChangedError`; the tenant answers it with that frame's error). Rust
+   * admits live right before the attach, so this only narrows the window in which a stale admission can enter.
+   */
+  private attachRefused(host: string, session: TenantSession): boolean {
+    if (!this.options.currentMember || !memberChecked(session)) return false;
+    // #543 re-review: a project developer who is not a Member has the synthesized `developer:<account>` principal and
+    // no members row (admitDeveloper; visibility/principal.ts accepts it by the same predicate). Rust never checks at
+    // attach, so it is not checked here; a developer who is a Member carries the real row and is.
+    if (session.developerSession != null && session.member.id === `developer:${session.identity.account.id}`) return false;
+    let current: { row: MemberRow | undefined; revision: number };
+    try { current = this.options.currentMember(session.member.id); }
+    catch (error) { console.warn("delivery: could not read the session Member at attach", error); return false; }
+    if (!memberAccessChanged(session, current.row)) return false;
+    span("delivery.attach.refused", { admissionRevision: session.admissionRevision, revision: current.revision });
+    // #543 review: the hand-off is scoped to what provably predates the change. The refused session's row differs, so
+    // the change committed after its admission R: every session of this Member admitted at <= R predates it, and one
+    // admitted later (a fresh sign-in after the change) may match the row and must stay. Filter at R + 1, not at the
+    // clock; drop engine connections on this holder only (the payload reaches only this holder; a stale session on
+    // another holder is refused at its own attach or was dropped by the commit loop). The watermark stays the clock.
+    const filter = session.admissionRevision + 1;
+    for (const connection of [...this.connections.values()]) {
+      if (connection.host !== host || connection.session.member.id !== session.member.id || connection.session.admissionRevision >= filter) continue;
+      this.drop(connection);
+      this.connections.delete(connection.id);
+    }
+    void this.sendOne(host, this.payload([], {}, undefined, {
+      revision: filter, members: [session.member.id], accounts: [], watermark: Math.max(current.revision, filter),
+    }), 0, true); // #543 re-review: membership-only, so a paused holder still gets it (as the commit loop's hand-off)
+    return true;
   }
 
   private drop(connection: Connection, clearLive = true): void {

@@ -208,7 +208,14 @@ export interface ReplicaDelivery {
   /** A commit's watermark for every other socket of the tenant on the holder. */
   readonly watermark?: number;
   /** A commit changed these Members' rows (lib.rs `membership_affects`): their sessions are discarded. */
-  readonly membership?: { readonly revision: number; readonly members: readonly string[]; readonly accounts: readonly string[] };
+  readonly membership?: {
+    readonly revision: number; readonly members: readonly string[]; readonly accounts: readonly string[];
+    /**
+     * X17m (#543 review): the watermark the holder sends after `auth.error` when it differs from `revision` (an attach
+     * refusal filters at the refused admission + 1 but certifies the clock). Absent: `revision`.
+     */
+    readonly watermark?: number;
+  };
 }
 
 /** The holder's answer: connections it no longer has (the tenant drops their state). */

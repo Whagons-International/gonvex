@@ -2,6 +2,7 @@
 // and the two-pass scan of a large window, the feed's per-socket work with
 // shared texts, digests, the socket side's batches and instance resets.
 
+import { MemberAccessChangedError } from "../authority";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { CaptureState, ChangeWake, directSql, installChangeFeed, invokeCaptured } from "../../capture/index.ts";
@@ -45,6 +46,12 @@ function socket(id: string, negotiated: Partial<Negotiated> = {}, host = "h1"): 
   };
 }
 
+/** X17m: `view` re-authenticated as its Member's current row (`patch`), admitted at `admissionRevision`. */
+function readmitted(view: SocketView, patch: Partial<TenantSession["member"]>, admissionRevision: number): SocketView {
+  const tenant = { ...view.tenant!, member: { ...view.tenant!.member, ...patch }, admissionRevision };
+  return { ...view, tenant, connection: { ...view.connection, tenant } };
+}
+
 const MODULE: ReplicaModule = {
   projectId: "p",
   artifactHash: "h",
@@ -82,7 +89,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
     const sql = directSql(state.storage.sql);
     state.storage.transactionSync(() => {
       installChangeFeed(sql);
-      sql.run("CREATE TABLE members (id TEXT PRIMARY KEY, account_id TEXT, status TEXT, role TEXT, permissions JSON)");
+      sql.run("CREATE TABLE members (id TEXT PRIMARY KEY, account_id TEXT, status TEXT, role TEXT, permissions JSON, membership_revision INTEGER NOT NULL DEFAULT 0)");
       sql.run("CREATE TABLE items (id TEXT PRIMARY KEY, rank INTEGER, label TEXT)");
       sql.run("CREATE INDEX items_rank ON items (rank)");
       sql.run("CREATE TABLE tasks (id TEXT PRIMARY KEY, state TEXT)");
@@ -90,7 +97,7 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       sql.run("CREATE INDEX tnotes_task ON tnotes (task_id)");
       sql.run("CREATE TABLE apiKeys (_id TEXT PRIMARY KEY, _creationTime REAL, name TEXT, keyHash TEXT, keyHint TEXT, scopes JSON, isActive INTEGER, lastUsedAt REAL, expiresAt REAL, revokedAt REAL, createdByUserId TEXT)");
       installChangeFeed(sql);
-      sql.run("INSERT INTO members VALUES ('m-alice', 'acct-alice', 'active', 'admin', '{}')");
+      sql.run("INSERT INTO members (id, account_id, status, role, permissions) VALUES ('m-alice', 'acct-alice', 'active', 'admin', '{}')");
     });
     const storage = new TenantStorage(state.storage);
     const context = { state: new CaptureState(), wake: new ChangeWake() };
@@ -135,6 +142,11 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
       ...(activity ? { activity } : {}),
       ...(stallMs !== undefined ? { stallMs } : {}),
       ...(clock ? { clock } : {}),
+      // X17m: the attach-time member check, as the tenant object wires it.
+      currentMember: (memberId) => ({
+        row: state.storage.sql.exec<{ account_id: string; status: string; role: string; permissions: string; membership_revision: number }>("SELECT account_id, status, role, permissions, membership_revision FROM members WHERE id = ?", memberId).toArray()[0],
+        revision: Number(state.storage.sql.exec<{ revision: number }>("SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1").toArray()[0]?.revision ?? 0),
+      }),
     });
     let commands = 0;
     return body({
@@ -1244,25 +1256,26 @@ describe("BUG-8 apiKeys.list visibility is the Member's direct permission grant,
   // The row `apiKeys.createRecord` inserts (no revokedAt, isActive true, createdByUserId = the creator's Member id).
   const insertKey = (id: string, at: number): [string, unknown[]] =>
     ["INSERT INTO apiKeys (_id, _creationTime, name, keyHash, keyHint, scopes, isActive, createdByUserId) VALUES ($1, $2, $3, 'h', 'abcd', '[\"ext:read\",\"ext:tasks:write\"]', 1, 'm-alice')", [id, at, `key ${id}`]];
-  const open = (engine: ReplicaDeliveryEngine, id: string) =>
-    engine.dispatch(socket("s1"), { type: "replica.open", id, path: "apiKeys.list", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+  // X17m: the socket is admitted as the Member's current row (a stale session is refused at attach).
+  const open = (engine: ReplicaDeliveryEngine, id: string, permissions: TenantSession["member"]["permissions"], admissionRevision: number) =>
+    engine.dispatch(readmitted(socket("s1"), { permissions }, admissionRevision), { type: "replica.open", id, path: "apiKeys.list", args: {}, keys: [], hashes: {}, fullIntegrity: false });
   const rowsOf = (payloads: Array<[string, ReplicaDelivery]>) => frames(payloads, "s1").filter((f) => f.type === "replica.snapshotPage").flatMap((p) => p.result);
 
   it("an admin seeded with {\"e2e\":true} sees none of its own keys; a direct config.integrations grant shows them, newest first", async () => {
     await withEngine(async ({ engine, payloads, commit }) => {
       await commit([["UPDATE members SET role = 'admin', permissions = '{\"e2e\":true}' WHERE id = 'm-alice'", []]]);
-      await commit([insertKey("k1", 1000)]);
-      open(engine, "hidden");
+      const seeded = await commit([insertKey("k1", 1000)]);
+      open(engine, "hidden", { e2e: true }, seeded);
       await engine.settled();
       const hidden = frames(payloads, "s1");
       expect(hidden.find((f) => f.type === "replica.ready")).toBeDefined();
       expect(rowsOf(payloads)).toEqual([]);
-      engine.dispatch(socket("s1"), { type: "replica.close", id: "hidden" });
+      engine.dispatch(readmitted(socket("s1"), { permissions: { e2e: true } }, seeded), { type: "replica.close", id: "hidden" });
       await engine.settled();
 
-      await commit([["UPDATE members SET permissions = '{\"e2e\":true,\"config.integrations\":true}' WHERE id = 'm-alice'", []]]);
+      const granted = await commit([["UPDATE members SET permissions = '{\"e2e\":true,\"config.integrations\":true}' WHERE id = 'm-alice'", []]]);
       payloads.length = 0;
-      open(engine, "granted");
+      open(engine, "granted", { e2e: true, "config.integrations": true }, granted);
       await engine.settled();
       expect(rowsOf(payloads).map((r: { _id: string }) => r._id)).toEqual(["k1"]);
       expect(rowsOf(payloads)[0]).toMatchObject({ isActive: 1, revokedAt: null, createdByUserId: "m-alice" });
@@ -1559,8 +1572,8 @@ describe("X17d snapshot cache: ACL, membership and a write during a populating o
       const { snapshotCache } = await import("../snapshot-cache.ts");
       const first = await openRows(h, socket("A1"));
       const hits = snapshotCache.stats.hits, misses = snapshotCache.stats.misses;
-      await h.commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
-      const after = await openRows(h, socket("A2"));
+      const demoted = await h.commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
+      const after = await openRows(h, readmitted(socket("A2"), { role: "member" }, demoted)); // X17m: admitted as the new row
       expect(snapshotCache.stats.hits).toBe(hits);
       expect(snapshotCache.stats.misses).toBe(misses + 1);
       expect(after.text).toBe(first.text); // same data; served by a fresh scan
@@ -1576,6 +1589,8 @@ describe("X17d snapshot cache: ACL, membership and a write during a populating o
       const misses = snapshotCache.stats.misses;
       const base = socket("B2");
       const tenant = { ...base.tenant!, member: { ...base.tenant!.member, membershipRevision: 7 } };
+      // The identity is the cache key under test, not the attach check (X17m): the row is set to match the identity.
+      await h.sql((sql) => sql.run("UPDATE members SET membership_revision = 7 WHERE id = 'm-alice'"));
       await openRows(h, { ...base, tenant, connection: { ...base.connection, tenant } } as SocketView);
       expect(snapshotCache.stats.misses).toBe(misses + 1);
     }, MODULE, true);
@@ -1662,8 +1677,8 @@ describe("X17d snapshot cache review (#528): every way the rows can change is a 
       const open = opener(h);
       await open("R1", "tasks.mine");
       const before = await stats();
-      await h.commit([["UPDATE members SET permissions = '{\"x\":true}' WHERE id = 'm-alice'", []]]);
-      await open("R2", "tasks.mine");
+      const changed = await h.commit([["UPDATE members SET permissions = '{\"x\":true}' WHERE id = 'm-alice'", []]]);
+      await open("R2", "tasks.mine", readmitted(socket("R2"), { permissions: { x: true } }, changed)); // X17m: admitted as the new row
       expect((await stats()).hits).toBe(before.hits);
     }, GRANTED);
   });
@@ -1693,7 +1708,7 @@ describe("X17d snapshot cache review (#528): every way the rows can change is a 
   it("another member or other args never share an entry", { timeout: 60_000 }, async () => {
     await withEngine(async (h) => {
       await h.commit([["INSERT INTO tasks VALUES ('t1', 'open')", []], ["INSERT INTO tnotes VALUES ('g1', 't1', 'm-alice')", []],
-        ["INSERT INTO members VALUES ('m-bob', 'acct-bob', 'active', 'admin', '{}')", []]]);
+        ["INSERT INTO members (id, account_id, status, role, permissions) VALUES ('m-bob', 'acct-bob', 'active', 'admin', '{}')", []]]);
       const open = opener(h);
       expect((await open("M1", "tasks.mine")).rows.length).toBe(1);
       const before = await stats();
@@ -1986,5 +2001,153 @@ describe("#528 re-review 4: a cold open after module DDL does not change live su
     const without = await run(false);
     expect(without).toContain("replica.delta");
     expect(await run(true)).toEqual(without);
+  });
+});
+
+describe("#540 re-review B / X17m: the tenant checks the Member at attach", () => {
+  const stale = (id: string, admissionRevision: number): SocketView => {
+    const view = socket(id);
+    const tenant = { ...view.tenant!, admissionRevision };
+    return { ...view, tenant, connection: { ...view.connection, tenant } };
+  };
+  it("a demotion committed BEFORE the attach refuses the attach: membership hand-off, no subscription", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      const admitted = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]); // the sign-in's tenant read
+      const demoted = await commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]); // not yet projected
+      expect(demoted).toBeGreaterThan(admitted);
+      payloads.length = 0;
+      // X17k: the socket attaches with the reused admission (admissionRevision = the sign-in's read, older than the demotion).
+      // The tenant answers the refusal with the frame's error (assembly/tenant.ts `dispatchFrame`).
+      expect(() => engine.dispatch(stale("s1", admitted), { type: "replica.open", id: "sub", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false })).toThrow(MemberAccessChangedError);
+      await engine.settled();
+      expect(engine.subscriptions("s1").size).toBe(0); // refused at attach
+      const handoff = payloads.find(([, payload]) => payload.membership);
+      expect(handoff?.[1].membership).toMatchObject({ members: ["m-alice"] });
+      expect(handoff![1].membership!.revision).toBe(admitted + 1); // #543 review: filters at the refused admission + 1
+      expect(handoff![1].membership!.watermark).toBeGreaterThanOrEqual(demoted); // the watermark after auth.error is the clock
+      expect(frames(payloads, "s1").some((f) => f.type === "replica.delta" || f.type === "replica.ready")).toBe(false);
+      await commit([["INSERT INTO items VALUES ('b', 2, 'b')", []]]);
+      expect(engine.subscriptions("s1").size).toBe(0);
+    });
+  });
+
+  it("an unchanged Member attaches as before (one indexed read), and a removed Member is refused", async () => {
+    await withEngine(async ({ engine, commit }) => {
+      const at = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      engine.dispatch(stale("ok", at), { type: "replica.open", id: "sub", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      expect(engine.subscriptions("ok").size).toBe(1);
+      const removed = await commit([["DELETE FROM members WHERE id = 'm-alice'", []]]);
+      expect(() => engine.dispatch(stale("gone", at), { type: "replica.open", id: "sub", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false })).toThrow(MemberAccessChangedError);
+      expect(() => engine.observe(stale("gone3", removed), false)).toThrow(MemberAccessChangedError); // live-query / call sockets too
+      await engine.settled();
+      expect(engine.subscriptions("gone").size).toBe(0);
+      expect(removed).toBeGreaterThan(at);
+    });
+  });
+});
+
+describe("#543 review: the attach refusal's hand-off drops only sessions that predate the change", () => {
+  const admittedAs = (id: string, admissionRevision: number, member: Partial<TenantSession["member"]> = {}, host = "h1"): SocketView => {
+    const view = socket(id, {}, host);
+    const tenant = { ...view.tenant!, member: { ...view.tenant!.member, ...member }, admissionRevision };
+    return { ...view, tenant, connection: { ...view.connection, tenant } };
+  };
+  const open = { type: "replica.open" as const, id: "sub", path: "items.all", args: {}, keys: [] as string[], hashes: {}, fullIntegrity: false };
+  for (const host of ["h1", "h2"]) {
+    it(`a fresh session of the same Member (admitted after the demotion, holder ${host}) keeps its subscription when a stale one is refused`, async () => {
+      await withEngine(async ({ engine, payloads, commit }) => {
+        const stale = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+        const demoted = await commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
+        // A second tab signs in live after the demotion: its admission is the current row at `demoted`.
+        engine.dispatch(admittedAs("fresh", demoted, { role: "member" }, host), open);
+        await engine.settled();
+        expect(engine.subscriptions("fresh").size).toBe(1);
+        await commit([["INSERT INTO items VALUES ('b', 2, 'b')", []]]); // an unrelated commit moves the clock past `demoted`
+        payloads.length = 0;
+        expect(() => engine.dispatch(admittedAs("old", stale), open)).toThrow(MemberAccessChangedError);
+        await engine.settled();
+        // The fresh session matches the current row: it must not be dropped (silently on another holder,
+        // or with auth.error membership-changed on the same one).
+        expect(engine.subscriptions("fresh").size).toBe(1);
+        const handoff = payloads.find(([, payload]) => payload.membership);
+        if (host === "h1") expect(handoff![1].membership!.revision).toBeLessThanOrEqual(demoted);
+        await commit([["INSERT INTO items VALUES ('c', 3, 'c')", []]]);
+        expect(frames(payloads, "fresh").some((f) => f.type === "replica.delta")).toBe(true);
+      }, MODULE, false, undefined, undefined, ["h1", "h2"]);
+    });
+  }
+});
+
+describe("#543 re-review: attach-check gaps", () => {
+  const admittedAs = (id: string, admissionRevision: number, member: Partial<TenantSession["member"]> = {}, host = "h1"): SocketView => {
+    const view = socket(id, {}, host);
+    const tenant = { ...view.tenant!, member: { ...view.tenant!.member, ...member }, admissionRevision };
+    return { ...view, tenant, connection: { ...view.connection, tenant } };
+  };
+  const open = { type: "replica.open" as const, id: "sub", path: "items.all", args: {}, keys: [] as string[], hashes: {}, fullIntegrity: false };
+
+  it("a developer-mode session with a synthesized Member (no members row) is not refused at attach", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      const at = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      // control/src/directory.ts admitDeveloper: a project developer who is not a tenant Member gets
+      // `developer:<account>` (role admin, permissions {developer:true}, revision 0). There is no members row.
+      const base = admittedAs("dev", 0, { id: "developer:acct-alice", role: "admin", permissions: { developer: true }, membershipRevision: 0 });
+      // As visibility/principal.ts recognises it: a developer grant on the session and member id `developer:<account>`.
+      const developerSession = { grantId: "devmode_1", accountId: "acct-alice", tenantId: "t", expiresAt: Date.now() + 60_000 } as unknown as TenantSession["developerSession"];
+      const tenant = { ...base.tenant!, developerSession };
+      const dev: SocketView = { ...base, tenant, connection: { ...base.connection, tenant } };
+      payloads.length = 0;
+      engine.dispatch(dev, open);
+      await engine.settled();
+      expect(engine.subscriptions("dev").size).toBe(1);
+      expect(payloads.some(([, p]) => p.membership)).toBe(false);
+      expect(at).toBeGreaterThan(0);
+    });
+  });
+
+  it("the attach refusal's hand-off is sent even while the holder is paused (recovery/fence), as the commit loop's is", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      const stale = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      await commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
+      // White-box: the holder is in recovery without catch-up (engine.paused(h1) is true).
+      const recovering = (engine as unknown as { recovering: Map<string, { catchup?: unknown }> }).recovering;
+      recovering.set("h1", {});
+      payloads.length = 0;
+      try {
+        expect(() => engine.dispatch(admittedAs("old", stale), open)).toThrow(MemberAccessChangedError);
+        await new Promise((r) => setTimeout(r, 0));
+        // engine.send() sends `membership` alone while paused ("Auth invalidation must not disappear behind a
+        // capacity/restart barrier"); attachRefused calls sendOne(host, …, 0) without membershipOnly, so it is dropped.
+        expect(payloads.some(([, p]) => p.membership?.members.includes("m-alice"))).toBe(true);
+      } finally { recovering.delete("h1"); }
+    });
+  });
+
+  it("several stale sessions with different admissions: each is refused (hand-off or own attach); a fresh one stays", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      const r1 = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      const r2 = await commit([["INSERT INTO items VALUES ('b', 2, 'b')", []]]);
+      const demoted = await commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
+      engine.dispatch(admittedAs("fresh", demoted, { role: "member" }), open);
+      await engine.settled();
+      await commit([["INSERT INTO items VALUES ('c', 3, 'c')", []]]);
+      payloads.length = 0;
+      // The older stale attaches first: its hand-off filters at r1+1 (only <= r1 discarded on the holder).
+      expect(() => engine.dispatch(admittedAs("s1", r1), open)).toThrow(MemberAccessChangedError);
+      await engine.settled(); await new Promise((r) => setTimeout(r, 0));
+      expect(payloads.find(([, p]) => p.membership)![1].membership!.revision).toBe(r1 + 1);
+      // The newer stale (r1 < r2 < demoted), on this holder and on another: refused at its own attach.
+      expect(() => engine.dispatch(admittedAs("s2", r2), open)).toThrow(MemberAccessChangedError);
+      expect(() => engine.dispatch(admittedAs("s3", r2, {}, "h2"), open)).toThrow(MemberAccessChangedError);
+      expect(() => engine.observe(admittedAs("s3", r2, {}, "h2"), false)).toThrow(MemberAccessChangedError); // every later frame too
+      await engine.settled();
+      for (const id of ["s1", "s2", "s3"]) expect(engine.subscriptions(id).size).toBe(0);
+      expect(engine.subscriptions("fresh").size).toBe(1);
+      payloads.length = 0;
+      await commit([["INSERT INTO items VALUES ('d', 4, 'd')", []]]);
+      expect(frames(payloads, "fresh").some((f) => f.type === "replica.delta")).toBe(true);
+      for (const id of ["s1", "s2", "s3"]) expect(frames(payloads, id)).toEqual([]);
+    }, MODULE, false, undefined, undefined, ["h1", "h2"]);
   });
 });

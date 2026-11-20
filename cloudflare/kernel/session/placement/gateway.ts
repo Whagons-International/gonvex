@@ -574,7 +574,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       seen.add(id);
       if (membership && membership.revision > tenant.admissionRevision
         && (membership.members.includes(tenant.member.id) || membership.accounts.includes(tenant.identity.account.id))) {
-        work.push(session.membershipChanged(membership.revision));
+        work.push(session.membershipChanged(membership.watermark ?? membership.revision));
         continue;
       }
       const own = payload.sockets[id];

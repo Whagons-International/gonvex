@@ -29,7 +29,7 @@ export interface ReducerTenantEnv {
 function memberOf(row: Record<string, SqlStorageValue>): Member {
   return {
     id: String(row.id), accountId: String(row.account_id), status: String(row.status), displayName: String(row.display_name),
-    avatarUrl: String(row.avatar_url ?? ""), role: String(row.role), permissions: JSON.parse(String(row.permissions ?? "null")) as Json,
+    avatarUrl: String(row.avatar_url ?? ""), role: String(row.role), permissions: JSON.parse(String(row.permissions || "{}")) as Json, // #543 review: empty reads as {} (as memberships.ts)
     membershipRevision: Number(row.membership_revision),
   };
 }
