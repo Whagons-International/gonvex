@@ -32,6 +32,11 @@ export interface AuthRequest {
   controlOnly: boolean;
   public: boolean;
   connectionId: string;
+  /**
+   * #540 x #539 review: admit the tenant live, never from `recentAdmission`. The gateway sets it when its own direct
+   * tenant admission (identity-lease path) refused the member, so Control's answer reflects that refusal.
+   */
+  liveOnly?: boolean;
 }
 
 export type AuthMessage =
@@ -203,7 +208,7 @@ export async function authenticate(ctx: Ctx, request: AuthRequest): Promise<Auth
     // X17k: a tenant auth right after the sign-in reuses the sign-in's live admission (sessions.ts `recentAdmission`).
     const session = await authenticateSession(ctx, token, requestedProject, tenant, async (c, projectId, tenantId, accountId) => {
       const route = resolveTenant(c, projectId, tenantId);
-      const recent = recentAdmission(c, projectId, route.tenantId, accountId);
+      const recent = request.liveOnly ? undefined : recentAdmission(c, projectId, route.tenantId, accountId);
       return recent ? { route, member: recent.member, revision: recent.admissionRevision } : admitMember(c, projectId, tenantId, accountId);
     });
     const deployed = module(session.identity.projectId);

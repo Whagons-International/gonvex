@@ -852,3 +852,56 @@ describe("review #532 (e80f28e6): a notice retry never postpones an alarm that i
     });
   });
 });
+
+describe("#540 review: the reuse window bounds the tenant read, not the cache write", () => {
+  type Internals = { context(): Parameters<typeof import("../src/sessions").sessionResultFromDirectory>[0] };
+  it("a prefetched admission whose tenant read is older than AUTH_REUSE_MS is not reused", async () => {
+    const sessions = await import("../src/sessions");
+    const { authenticate } = await import("../src/auth");
+    const seeded = await seed({ a: ["sid"] });
+    const tenant = seeded.tenants.a!, account = seeded.members.sid!.accountId;
+    const { session } = await login(seeded.project, seeded.members.sid!.email);
+    const token = session.accessToken as string;
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const ctx = (instance as unknown as Internals).context();
+      sessions.clearAdmissionCache();
+      // X17h: the admission starts while accounts:lookup is in flight (up to 8 s per attempt, external-auth.ts).
+      const prefetched = sessions.prefetchAdmissions(ctx, seeded.project, account, tenant);
+      await prefetched.admissions.get(tenant)!.member; // the tenant read is done now
+      await new Promise((resolve) => setTimeout(resolve, sessions.AUTH_REUSE_MS + 500)); // a slow accounts:lookup
+      await sessions.sessionResultFromDirectory(ctx, seeded.project, { account: { id: account }, activeTenantId: tenant }, prefetched);
+      const calls = ctx.tenantCalls;
+      await authenticate(ctx, { id: "r1", token, project: seeded.project, tenant, connectionId: "r1" } as never);
+      expect(ctx.tenantCalls).toBe(calls + 1); // the tenant read is > AUTH_REUSE_MS old: admit live
+    });
+  }, 20_000);
+});
+
+describe("#540 x #539 review: a tenant that just refused the member is not overridden by the reuse", () => {
+  type Internals = { context(): Parameters<typeof import("../src/sessions").sessionResultFromDirectory>[0] };
+  it("the gateway's lease fallback (tenant admit returned null) gets Control's normal error", async () => {
+    const sessions = await import("../src/sessions");
+    const { authenticate } = await import("../src/auth");
+    sessions.clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"] });
+    const tenant = seeded.tenants.a!, account = seeded.members.sid!.accountId;
+    const { session } = await login(seeded.project, seeded.members.sid!.email); // admits tenant a live
+    const token = session.accessToken as string;
+    // The member is removed in the tenant; its projection has not reached Control yet (normal outbox lag).
+    await runInDurableObject(tenantStub(tenant), (instance: StubTenantObject) => {
+      (instance as unknown as { sql: { run(q: string, ...a: unknown[]): void } }).sql.run("UPDATE members SET status='removed' WHERE account_id=$1", account);
+    });
+    // #539's lease path: the gateway's direct tenant admit refuses the member, so it falls back to Control.
+    expect(await tenantStub(tenant).admit(account)).toBeNull();
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const ctx = (instance as unknown as Internals).context();
+      // Without the flag the reuse window applies (the residual X17k documents: at most AUTH_REUSE_MS of a refusal not yet projected).
+      const reused = await authenticate(ctx, { id: "f0", token, project: seeded.project, tenant, connectionId: "f0" } as never);
+      expect(reused.message.type).toBe("auth.result");
+      // #539's fallback passes `liveOnly` (gateway.ts -> SessionControlObject.sessionAuthenticate -> AuthRequest.liveOnly).
+      const auth = await authenticate(ctx, { id: "f1", token, project: seeded.project, tenant, connectionId: "f1", liveOnly: true } as never);
+      expect(auth.message.type).toBe("auth.error"); // #539: "falls back to Control, which returns its normal error"
+    });
+  });
+});
+
