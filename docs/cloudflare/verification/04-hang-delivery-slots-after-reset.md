@@ -220,13 +220,11 @@ With the fix:
 
 ## What is not fixed (follow-ups)
 
-- **The CPU overrun itself.** Only an inference, not proven: the single invocation that used 7,500 ms CPU is most
-  likely the delivery engine's `run()` loop. `kick()` starts it from whichever frame first finds it idle, and it keeps
-  going while other invocations add work. Its continuations run in, and are charged to, that invocation's context.
-  Snapshot-cache hits and small opens never yield, because SQL is synchronous and the outlet sends are not awaited.
-  Under a burst of concurrent cold loads, one invocation can exceed `cpu_ms`. A CPU budget per loop invocation (stop,
-  then resume from an alarm or self-RPC, as X10 did for migration alarms and transfers) would remove this trigger.
-  Owner: the perf loop (X17).
+- **The CPU overrun itself.** The guess first written here (the engine's `run()` loop charged to the invocation that
+  kicked it) was **wrong**. Measured on Cloudflare in #552
+  (`docs/cloudflare/verification/04-cpu-overrun-batched-invocations.md`): calls queued at a saturated object are
+  delivered as one invocation with one `cpu_ms` budget, and -04's cold-load burst exceeded it. Engine loops stay at
+  ≤ 440 ms. The options (raise `TENANT_CPU_LIMIT_MS`, bound the accepted backlog, cut per-load CPU) are there.
 - **A delivery RPC that never settles in a live instance** (a holder that never answers) still blocks that one
   holder's ordered channel. The engine's stall reset cannot help: its recovery barrier queues behind the same RPC.
   This is not observed. The stale-slot warn line now makes it visible.
