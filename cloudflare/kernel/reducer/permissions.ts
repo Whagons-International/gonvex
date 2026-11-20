@@ -16,6 +16,7 @@
 
 import type { CaptureSql } from "../capture/sql.ts";
 import { integerLiteral, quoteIdentifier, quoteLiteral } from "../capture/sql.ts";
+import { replacedMarker } from "../capture/replace-marker.ts";
 
 /** The manifest's `permissionGrants` declaration (`PermissionGrantSource`). */
 export interface PermissionGrantSource {
@@ -143,6 +144,18 @@ export class PermissionBits {
       return;
     }
     if (revision <= this.revision) return;
+    // X17p (#555 C4): a REPLACE marker says grant rows may have been deleted with no log row; patching by row_id
+    // would keep their bits, so reload.
+    const marker = sql.run(
+      `SELECT EXISTS (SELECT 1 FROM _gonvex_sync_changes INDEXED BY gonvex_sync_changes_table
+       WHERE table_name = ?1 AND revision > ${integerLiteral(this.revision)} AND revision <= ${integerLiteral(revision)})`,
+      [replacedMarker(source.table)],
+    );
+    this.stats.rowsRead += marker.rowsRead;
+    if (Number(marker.rows[0]?.[0] ?? 0) !== 0) {
+      this.load(sql, source, epoch, revision);
+      return;
+    }
     // Committed transactions since the index's revision, in order (permission_bits.rs `apply`).
     const changes = sql.run(
       `SELECT revision, row_id, new_value FROM _gonvex_sync_changes INDEXED BY gonvex_sync_changes_table

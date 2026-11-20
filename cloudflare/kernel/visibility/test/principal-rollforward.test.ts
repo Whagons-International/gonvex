@@ -37,6 +37,14 @@ const SCHEMA = [
   `CREATE TABLE "claims" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON CONFLICT REPLACE)`,
   `CREATE TABLE "claimRequests" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT)`,
   `CREATE TRIGGER "claimRequests_apply" AFTER INSERT ON "claimRequests" BEGIN INSERT OR REPLACE INTO "claims" VALUES (NEW."_id", NEW."memberId", NEW."spotId"); END`,
+  // #555 C1: comments inside the declared clause (SQLite keeps them in sqlite_schema.sql).
+  `CREATE TABLE "claims2" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT UNIQUE ON /* c */ CONFLICT REPLACE)`,
+  `CREATE TABLE "claims3" ("_id" TEXT PRIMARY KEY, "memberId" TEXT, "spotId" TEXT, UNIQUE ("spotId") ON -- c
+     CONFLICT REPLACE)`,
+  // #555 C2: a REPLACE in a trigger reached through a foreign key action (parent delete -> CASCADE -> child trigger).
+  `CREATE TABLE owners ("_id" TEXT PRIMARY KEY)`,
+  `CREATE TABLE "ownerLinks" ("_id" TEXT PRIMARY KEY, "ownerId" TEXT REFERENCES owners("_id") ON DELETE CASCADE, "memberId" TEXT, "spotId" TEXT)`,
+  `CREATE TRIGGER "ownerLinks_gone" AFTER DELETE ON "ownerLinks" BEGIN INSERT OR REPLACE INTO claims VALUES (OLD."_id", OLD."memberId", OLD."spotId"); END`,
 ];
 
 const live = (table: string) => ({ table, column: "deletedAt", value: { literal: null } });
@@ -48,7 +56,7 @@ function spotsPlan(): VisibilityPlan {
     version: 2,
     table: "spots",
     key: "_id",
-    permissionTables: ["memberTeams", "workspaceTeams", "workspaces", "spots", "memberSpots", "members", "loose", "claims"],
+    permissionTables: ["memberTeams", "workspaceTeams", "workspaces", "spots", "memberSpots", "members", "loose", "claims", "claims2", "claims3"],
     sets: {
       memberSpots: { kind: "principal", table: "memberSpots", select: "spotId", joins: [], where: [me("memberSpots"), live("memberSpots")] },
       memberSpotDescendants: {
@@ -85,10 +93,12 @@ function spotsPlan(): VisibilityPlan {
       sharedTeamTaskSpots: { kind: "derived", from: "sharedTeamTaskSpotsInput", table: "tasks", key: "_id", select: "spotId", where: [{ column: "deletedAt", value: { literal: null } }] },
       looseSpots: { kind: "principal", table: "loose", select: "spotId", joins: [], where: [me("loose"), live("loose")] },
       claimedSpots: { kind: "grant", table: "claims", select: "spotId", joins: [], where: [me("claims")] },
+      claimed2Spots: { kind: "grant", table: "claims2", select: "spotId", joins: [], where: [me("claims2")] },
+      claimed3Spots: { kind: "grant", table: "claims3", select: "spotId", joins: [], where: [me("claims3")] },
     },
     where: {
       operator: "or",
-      children: ["memberSpots", "memberSpotDescendants", "createdTaskSpots", "reportedTeamTaskSpots", "personalTeamTaskSpots", "teamWorkspaceTaskSpots", "sharedTeamTaskSpots", "looseSpots", "claimedSpots"].map((set) => ({ operator: "inSet", column: "_id", set })),
+      children: ["memberSpots", "memberSpotDescendants", "createdTaskSpots", "reportedTeamTaskSpots", "personalTeamTaskSpots", "teamWorkspaceTaskSpots", "sharedTeamTaskSpots", "looseSpots", "claimedSpots", "claimed2Spots", "claimed3Spots"].map((set) => ({ operator: "inSet", column: "_id", set })),
     },
   });
 }
@@ -380,6 +390,44 @@ describe("principal cache roll-forward (X17p)", () => {
       // A write that cannot replace logs none.
       await probe(harness, plan, "plain", [[`UPDATE tasks SET "spotId" = 's2' WHERE "_id" = 1`, []], [`INSERT INTO tasks VALUES (300, 's3', 'w1', 'm1', NULL, NULL)`, []]]);
       expect(markers()).toBe(0);
+    });
+  });
+
+  it("#555 C1: a comment inside a declared ON CONFLICT REPLACE does not hide it (the reviewer's claims2/claims3 probes)", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      for (const table of ["claims2", "claims3"]) {
+        const set = table === "claims2" ? "claimed2Spots" : "claimed3Spots";
+        await harness.commit([[`INSERT INTO ${table} VALUES ('c1', 'm1', 's4')`, []]]);
+        // The UNIQUE spotId conflict deletes m1's c1 with no log row: the marker must be logged.
+        await probe(harness, plan, table, [[`INSERT INTO ${table} VALUES ('c3', 'm3', 's4')`, []]]);
+        await harness.read((session) => {
+          expect(cachedSet(harness, session, plan, "m1", set), `${table} m1`).toEqual([]);
+          expect(cachedSet(harness, session, plan, "m3", set), `${table} m3`).toEqual(["s4"]);
+        });
+        expect(harness.raw(`SELECT count(*) FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) AND table_name = ?`, `_gonvex_replaced:${table}`)[0]![0]).toBe(1);
+      }
+    });
+  });
+
+  it("#555 C2: a REPLACE in a trigger reached through ON DELETE CASCADE logs the marker (the reviewer's owners probe)", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      await harness.commit([
+        [`INSERT INTO claims VALUES ('c1', 'm1', 's4')`, []],
+        [`INSERT INTO owners VALUES ('o1')`, []],
+        [`INSERT INTO "ownerLinks" VALUES ('l1', 'o1', 'm3', 's4')`, []],
+      ]);
+      // The cascade deletes l1; its trigger's INSERT OR REPLACE takes spot s4 from c1 (m1).
+      await probe(harness, plan, "cascade", [[`DELETE FROM owners WHERE "_id" = 'o1'`, []]]);
+      expect(harness.raw(`SELECT "_id", "memberId", "spotId" FROM claims ORDER BY 1`)).toEqual([["l1", "m3", "s4"]]);
+      await harness.read((session) => {
+        expect(cachedSet(harness, session, plan, "m1", "claimedSpots")).toEqual([]);
+        expect(cachedSet(harness, session, plan, "m3", "claimedSpots")).toEqual(["s4"]);
+      });
+      expect(harness.raw(`SELECT count(*) FROM _gonvex_sync_changes WHERE revision = (SELECT revision FROM _gonvex_sync_clock) AND table_name = '_gonvex_replaced:claims'`)[0]![0]).toBe(1);
     });
   });
 
