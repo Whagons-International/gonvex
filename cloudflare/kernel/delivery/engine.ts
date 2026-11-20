@@ -29,7 +29,7 @@ import type { ReplicaModule } from "./definition.ts";
 import { applyTransaction, EventShare, TransactionReads, type FeedFrame } from "./feed.ts";
 import { compactTransaction, deltaBody, deltaFrame, deltaTail, errorFrame, needHashesFrame, readyFrame, resetFrame, transactionFrame, watermarkFrame } from "./frames.ts";
 import { CollapsedChanges, readClock, readTransactions, type FeedTransaction } from "./log.ts";
-import { REPLICA_DELIVERY_VERSION, initialCompletion, type InitialCompletion, type ReplicaDelivery, type ReplicaReceipt, type InitialRequestRef, type SocketOp, type SocketWork } from "./protocol.ts";
+import { BUSY_FRAME_TYPE, type BusyReply, REPLICA_DELIVERY_VERSION, initialCompletion, type InitialCompletion, type ReplicaDelivery, type ReplicaReceipt, type InitialRequestRef, type SocketOp, type SocketWork } from "./protocol.ts";
 import type { ScanProgress } from "./scan.ts";
 import { openReplica, sqlOf, type OpenRequest, type Subscription } from "./subscription.ts";
 
@@ -46,6 +46,9 @@ function withoutWatermark(work: SocketWork): SocketWork {
 
 /** One open request: `json_len * 2 + 1024 <= 32 MiB` (replica_open_queue.rs `MAX_BYTES`). */
 export const OPEN_REQUEST_MAX_BYTES = 32 * 1024 * 1024;
+/** SQL rows of a path's opens before any was measured, and how many rows make one backlog unit beyond the first. */
+const DEFAULT_OPEN_ROWS = 100, ROWS_PER_UNIT = 100;
+
 /** Payloads queued to one holder before its sockets are reset `change-feed-lagged`. */
 export const MAX_QUEUED_PAYLOADS = 256;
 /**
@@ -203,6 +206,11 @@ export interface DeliveryOptions {
    * admitted Member. Unset: no attach-time check (engine unit tests that have no members table).
    */
   readonly currentMember?: (memberId: string) => { readonly row: MemberRow | undefined; readonly revision: number };
+  /**
+   * #554: the backlog budget in work units (`GONVEX_TENANT_BACKLOG_UNITS`). Unset or 0: off, every open is queued as
+   * before. Set: a gateway that advertised `acceptsBusy` gets `BusyReply` for opens beyond the budget.
+   */
+  readonly backlogUnits?: number;
 }
 
 export interface DeliveryClock {
@@ -280,6 +288,10 @@ export class ReplicaDeliveryEngine {
   private readonly watch = new Map<string, { ticks: number; seen: number }>();
   private ticker: unknown;
   private waitingOpens = 0;
+  /** #554: EWMA of the SQL rows each path's opens read (the backlog cost estimate; no clock is usable in production). */
+  private readonly openRows = new Map<string, number>();
+  /** #554: opens refused busy (bounded counter, dev evidence). */
+  busyRefusals = 0;
   private lastOpened: string | undefined;
 
   constructor(private readonly options: DeliveryOptions) {
@@ -302,7 +314,10 @@ export class ReplicaDeliveryEngine {
     const connection = this.connection(socket, session);
     if (!connection) return [];
     const internalRecovery = (socket as SocketView & { queryRecovery?: boolean }).queryRecovery === true;
-    if (!internalRecovery) this.retryBarriers(connection.host);
+    // #557 review R2: a gateway's busy resend (`busyRetry`) is timer-driven, not a fresh external client event, so it
+    // gets no recovery-barrier allowance (`retryBarriers`: exactly one per client frame).
+    const busyRetry = (socket as SocketView & { busyRetry?: boolean }).busyRetry === true;
+    if (!internalRecovery && !busyRetry) this.retryBarriers(connection.host);
     if (frame.type === "replica.close") {
       this.removePending(connection, frame.id);
       this.remove(connection, frame.id);
@@ -316,8 +331,20 @@ export class ReplicaDeliveryEngine {
     if (internalRecovery && opens.length === 0) return [];
     const refused: SocketOp[] = [];
     const refusedCompletions: InitialCompletion[] = [];
+    // #554: a gateway that understands busy gets the opens beyond the backlog budget back (it resends them later).
+    const budget = this.options.backlogUnits ?? 0;
+    const busyOk = budget > 0 && (socket as SocketView & { acceptsBusy?: boolean }).acceptsBusy === true && !internalRecovery;
+    let backlog = busyOk ? this.backlogUnits() : 0;
+    const holderFull = busyOk && (this.paused(connection.host) || this.behind.has(connection.host) || !!this.options.outlet.backlogged?.(connection.host));
+    const busy: string[] = [];
     connection.openingCohort = true;
     for (const [openIndex,raw] of opens.entries()) {
+      if (busyOk) {
+        const units = this.openUnits(raw.path);
+        // #557 review R1: with nothing queued an open is always admitted, however heavy its path's estimate.
+        if (holderFull || (backlog > 0 && backlog + units > budget)) { busy.push(raw.id); continue; }
+        backlog += units;
+      }
       const candidate=socket.initialRequests?.[openIndex];
       const initial=candidate?.kind==="replica"&&candidate.id===raw.id&&candidate.path===raw.path&&candidate.epoch===connection.epoch?candidate:undefined;
       const request: OpenRequest = {
@@ -348,7 +375,23 @@ export class ReplicaDeliveryEngine {
     if (refused.length) this.post(connection, { ops: refused, initialCompletions: refusedCompletions });
     this.kick();
     this.options.activity?.();
-    return [];
+    if (!busy.length) return [];
+    this.busyRefusals += busy.length;
+    span("tenant.busy", { refused: busy.length, backlog, budget, holderFull });
+    const reply: BusyReply = { type: BUSY_FRAME_TYPE, ids: busy, retryAfterMs: Math.min(1_000, 50 * Math.ceil(Math.max(backlog, budget) / budget)) };
+    return [JSON.stringify(reply)];
+  }
+
+  /** #554: one open's estimated cost in backlog units. */
+  private openUnits(path: string): number {
+    return 1 + (this.openRows.get(path) ?? DEFAULT_OPEN_ROWS) / ROWS_PER_UNIT;
+  }
+
+  /** #554: the queued opens' estimated cost, every connection. */
+  backlogUnits(): number {
+    let units = 0;
+    for (const connection of this.connections.values()) for (const request of connection.pending) units += this.openUnits(request.path);
+    return units;
   }
 
   /** Live-query-only sockets also participate in the single commit channel. */
@@ -961,6 +1004,8 @@ export class ReplicaDeliveryEngine {
     this.stats.opens += 1;
     this.stats.statements += progress.statements;
     this.stats.rowsRead += progress.rowsRead;
+    const seen = this.openRows.get(request.path);
+    this.openRows.set(request.path, seen === undefined ? progress.rowsRead : 0.7 * seen + 0.3 * progress.rowsRead);
     if (!current()) return;
     const opened: Record<string, string> = {};
     if (subscription) {

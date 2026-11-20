@@ -1,6 +1,6 @@
 # Design note: bound a tenant's backlog and answer "busy" (gateway-absorbed)
 
-Status: **design only, not implemented.** This is option 2 of #552, after option 1 (#553: runtime `cpu_ms` 30000).
+Status: **v1 implemented behind `GONVEX_TENANT_BACKLOG_UNITS`, default off** (see "Implementation v1" at the end). This is option 2 of #552, after option 1 (#553: runtime `cpu_ms` 30000).
 Option 3 (per-load CPU) belongs to X17 and F01.
 
 ## Problem
@@ -121,3 +121,59 @@ the UI, not retried). A future capability could let the SDK show "busy" progress
   sub-budget.
 - **Accepted latency:** first loads under a burst get slower by design, and the bound trades a reset for a wait. A
   cap on the extra wait (e.g. `ORIGIN_MAX_WAIT_MS`) sets the worst case. The value needs a decision.
+
+## Implementation v1 (behind `GONVEX_TENANT_BACKLOG_UNITS`, default off)
+
+**Flag.** The runtime var `GONVEX_TENANT_BACKLOG_UNITS` is the budget in work units. Unset or `0` means off: a
+tenant never answers busy, and every open is queued as before. It is not set in any wrangler config. Turn it on per
+deployment after the calibration run (rollout step 1).
+
+**What it does:**
+- **Tenant (`kernel/delivery/engine.ts`).**
+  - **Cost:** an open costs `1 + rows / 100` units. `rows` is the EWMA of the SQL rows that path's opens read
+    (`progress.rowsRead`), and 100 before the path was ever measured.
+  - **Admission:** for a `replica.open`/`openMany` whose view carries `acceptsBusy`, opens are queued while
+    `backlogUnits() + cost <= budget`. The rest come back as one reply,
+    `{"type":"gonvex.busy","ids":[...],"retryAfterMs"}`, with `retryAfterMs` between 50 and 1,000.
+  - **Outlet pressure:** a holder that is paused, deferred (`behind`) or `backlogged` refuses all of a frame's opens.
+  - **Idle tenant:** with nothing queued, an open is always admitted, however heavy its path's estimate (#557 review
+    R1). Otherwise one heavy path would wait the whole hold on an idle tenant.
+  - **Recovery allowance:** a gateway resend carries `busyRetry`. The tenant gives it no recovery-barrier allowance
+    (`retryBarriers`), so one client frame still requests at most one recovery attempt (#557 review R2).
+  - **Visibility:** a `tenant.busy` span, and a `busyRefusals` counter.
+- **Gateway (`kernel/session/session.ts` `forwardOpens`).**
+  - Every replica open/openMany dispatch carries `acceptsBusy`, which is harmless while the tenant flag is off. The
+    busy reply is stripped in `forward` and never reaches the client.
+  - The refused subset is resent after `retryAfterMs` (jittered ±25%, through the session's timers) as an `openMany`
+    with its original initial-request refs, aligned by index as the engine matches them, and marked `busyRetry`.
+  - After `BUSY_MAX_ATTEMPTS` (3), or at `BUSY_MAX_WAIT_MS` (**2,000 ms after the first refusal**, the lead's cap),
+    whichever comes first, the gateway sends without `acceptsBusy`, and the tenant queues them. No retry wait runs
+    past that deadline. This is the aging lane and the max-wait fallthrough in one rule: nothing waits for good.
+  - It stops resending if the socket closes, its subscription epoch changes (a reset cleared the opens), or it loses
+    its tenant.
+- **Shared** (`kernel/delivery/protocol.ts`): `BUSY_FRAME_TYPE`, `BusyReply`, `busyReply()` and the two limits. This
+  is a leaf module, so there is no new import edge between the session and the engine.
+
+**v1 differs from the design in three ways, all deliberately:**
+1. **Opens only.** Live-query subscribes (`query.subscribe`, the heaviest single units) are not gated yet.
+2. **The hold blocks the socket's frame queue.** Refused opens wait inside the socket's ordered turn, so that
+   socket's later frames wait behind them, Reducer calls included. That keeps order trivially. The worst case is
+   bounded: at most 2,000 ms after the first refusal (plus the final dispatch), well under the 60 s stall close. The design's non-blocking hold, where
+   Reducer calls overtake held opens, needs the order check against `lib.rs` first.
+3. **Aging is attempt-based at the gateway,** not a tenant-side lane.
+
+**Tests:**
+- `kernel/delivery/test/backlog-busy.test.ts`:
+  - off by default;
+  - the budget split, and busy for a second socket while the backlog is full;
+  - never busy without `acceptsBusy`.
+- `kernel/session/test/backlog-busy.test.ts`:
+  - the refused subset is resent with its initial refs, and the busy reply is never sent to the client;
+  - a later Reducer call keeps its order behind the held opens;
+  - after 3 attempts the gateway stops advertising `acceptsBusy`;
+  - with long retries, it falls through no later than 2,000 ms after the first refusal.
+
+**Not done yet:**
+- the calibration run on dev (needs a dev window coordinated with X17);
+- subscribes;
+- the non-blocking hold.
