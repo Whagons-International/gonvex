@@ -183,11 +183,9 @@ export function clearAdmissionCache(): void { admissionCache.clear(); }
  * not projected to Control yet (its outbox push from the tenant alarm, retried every second). `auth` admits the
  * tenant it enters live, so the cache never grants entry to a tenant.
  */
-export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, result: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const account = (result.account ?? {}) as Record<string, unknown>;
-  const accountId = typeof account.id === "string" ? account.id : "";
-  const requested = typeof result.activeTenantId === "string" ? result.activeTenantId : "";
-  const rows = ctx.sql.all(
+/** The account's active directory rows, in the session result's order. */
+function directoryRows(ctx: Ctx, projectId: string, accountId: string): Row[] {
+  return ctx.sql.all(
     `SELECT tenant.tenant_id,tenant.name,tenant.domain,tenant.timezone,
             tenant.description,tenant.profile,directory.member_id,directory.tenant_membership_revision,
             directory.updated_at AS projected_at
@@ -200,11 +198,37 @@ export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, re
     projectId,
     accountId,
   );
+}
+
+/**
+ * X17h: tenant admissions started before the session exists, while the external provider's account check
+ * (`accounts:lookup`) is in flight. Each is the same read-only tenant admission `sessionResultFromDirectory` makes; it
+ * is used only for this account, only after the account check passed and the session committed, and it is still a
+ * live admission (started at most one lookup earlier). A failed one counts as a failed admission.
+ */
+export interface PrefetchedAdmissions { readonly accountId: string; readonly admissions: ReadonlyMap<string, Promise<Member | null>> }
+export function prefetchAdmissions(ctx: Ctx, projectId: string, accountId: string): PrefetchedAdmissions {
+  const admissions = new Map<string, Promise<Member | null>>();
+  for (const row of directoryRows(ctx, projectId, accountId)) {
+    const tenantId = str(row.tenant_id);
+    admissions.set(tenantId, admitMember(ctx, projectId, tenantId, accountId).then((admitted) => admitted.member, () => null));
+  }
+  return { accountId, admissions };
+}
+
+export async function sessionResultFromDirectory(ctx: Ctx, projectId: string, result: Record<string, unknown>, prefetched?: PrefetchedAdmissions): Promise<Record<string, unknown>> {
+  const account = (result.account ?? {}) as Record<string, unknown>;
+  const accountId = typeof account.id === "string" ? account.id : "";
+  const requested = typeof result.activeTenantId === "string" ? result.activeTenantId : "";
+  const rows = directoryRows(ctx, projectId, accountId);
+  const early = prefetched && accountId && prefetched.accountId === accountId ? prefetched.admissions : undefined;
   const keyOf = (row: Row) => `${projectId}\u0000${str(row.tenant_id)}\u0000${accountId}`;
   const admitLive = async (row: Row): Promise<Member | null> => {
     const key = keyOf(row);
     try {
-      const member = (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
+      const started = early?.get(str(row.tenant_id));
+      const member = started ? await started : (await admitMember(ctx, projectId, str(row.tenant_id), accountId)).member;
+      if (!member) throw new Error("admission failed");
       admissionCache.delete(key);
       admissionCache.set(key, { member, memberId: str(row.member_id), revision: Number(row.tenant_membership_revision ?? -1), projectedAt: Number(row.projected_at ?? -1), at: Date.now() });
       if (admissionCache.size > ADMISSION_CACHE_MAX) admissionCache.delete(admissionCache.keys().next().value!);
