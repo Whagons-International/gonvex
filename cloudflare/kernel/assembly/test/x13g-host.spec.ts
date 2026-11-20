@@ -18,7 +18,7 @@ async function fixture(run: (object: CompositionTenant, state: DurableObjectStat
   const release = await buildReleasePlan(await migrationsFromFiles(files)); plans.add(release);
   await tenant.activate('p', manifest, release.id);
   await (tenant as unknown as { setupScheduled(): Promise<void> }).setupScheduled();
-  await run(tenant, state);
+  try { await run(tenant, state); } finally { tenant.hostWanted = undefined; } // an unwanted host lets go at its next check
  });
 }
 function view(tenantId: string): SocketView {
@@ -26,23 +26,34 @@ function view(tenantId: string): SocketView {
  return { connectionId: crypto.randomUUID(), host: 'fixture', actionGeneration: 1, tenant, connection: { projectId: 'p', identity: tenant.identity, tenant, impersonationId: '', authToken: '' }, subscriptionEpoch: 1, publicTransport: false,
   negotiated: { snapshotPages: false, noOldValues: false, fieldPatches: false, batchFrames: false, nativeRows: false, setDigest: false, telemetryBatch: false, presence: false } };
 }
+// The fixture's host checks every 200 ms (GONVEX_ACTION_HOST_CHECK_MS) whether its tenant still wants it, and a
+// tenant with no subscriptions says no: the host lets go. A test that reads the host's residency after more
+// than one check period (any test under load) pins the tenant's answer instead of racing that timer.
+const wanted = (object: CompositionTenant) => { object.hostWanted = true; };
 const runs = (state: DurableObjectState) => state.storage.sql.exec<{ state: string; attempts: number; dispatch_count: number }>('SELECT state,attempts,dispatch_count FROM _gonvex_st_action_runs').toArray();
+// X13b: an inline run's completion is recorded after its reply leaves (the runner's `waitUntil`), so a reply
+// does not mean its run is `done` yet. Wait for that durable signal (every run has left `live`), bounded.
+async function settled(state: DurableObjectState, count: number) {
+ for (let i = 0; i < 500 && !(runs(state).length === count && runs(state).every((r) => r.state !== 'live')); i++) await new Promise((r) => setTimeout(r, 10));
+ return runs(state);
+}
 
 it('X13g warm reuse: two agent Actions from a socket run in the ActionHost, with one module evaluation', async () => fixture(async (object, state) => {
- resetActionModule();
+ resetActionModule(); wanted(object);
  const socket = view(state.id.name!);
  for (const id of ['first', 'second']) {
   const replies = await object.dispatch(socket, { type: 'action.call', id, path: 'probe.agentNoop', args: {} });
   expect(replies.map((r) => JSON.parse(r))).toEqual([{ type: 'action.result', id, path: 'probe.agentNoop', result: null }]);
  }
  expect(moduleEvaluations()).toBe(1);
- expect(await host(state.id.name!).hostState()).toMatchObject({ held: true, holding: true });
- // Still durable inline runs (X13), claimed once each.
- expect(runs(state).filter((r) => r.state === 'done').length).toBe(2);
+ // Held by the calls themselves: no `hold` (no prewarm) was ever sent.
+ expect(await host(state.id.name!).hostState()).toEqual({ held: true, holding: true, prewarms: 0 });
+ // Still durable inline runs (X13), claimed once each; each completes after its reply (X13b).
+ expect((await settled(state, 2)).map((r) => [r.state, r.attempts])).toEqual([['done', 1], ['done', 1]]);
 }));
 
 it('X13g prewarm: the tenant\'s first subscriber holds the host and evaluates the module before any Action', async () => fixture(async (object, state) => {
- resetActionModule();
+ resetActionModule(); wanted(object);
  (object as unknown as { subscribersChanged(holding: boolean): void }).subscribersChanged(true);
  let s: HostState = { held: false, holding: false, prewarms: 0 };
  for (let i = 0; i < 100 && !s.prewarms; i++) { await new Promise((r) => setTimeout(r, 5)); s = await host(state.id.name!).hostState(); }
@@ -74,12 +85,14 @@ it('X13g eviction fallback: after the host is evicted, the next agent Action tak
  await evictDurableObject(host(state.id.name!) as unknown as DurableObjectStub);
  resetActionModule(); // a new isolate would evaluate again
  expect((await host(state.id.name!).hostState()).held).toBe(false);
+ wanted(object); // residency is read from here on (pinned only now: evictDurableObject did not complete while the host kept re-checking a pinned tenant)
  expect(JSON.parse((await object.dispatch(socket, { type: 'action.call', id: 'after', path: 'probe.agentNoop', args: {} }))[0]!)).toEqual({ type: 'action.result', id: 'after', path: 'probe.agentNoop', result: null });
  expect(moduleEvaluations()).toBe(1);
  expect(await host(state.id.name!).hostState()).toMatchObject({ held: true, holding: true });
 }));
 
 it('X13g limits: the host applies the same capability checks; standard Actions keep the ActionWorker', async () => fixture(async (object, state) => {
+ wanted(object);
  const socket = view(state.id.name!);
  const refused = JSON.parse((await object.dispatch(socket, { type: 'action.call', id: 'secret', path: 'probe.agentSecret', args: {} }))[0]!);
  expect(refused).toMatchObject({ type: 'action.error', id: 'secret' });
@@ -98,8 +111,7 @@ it('X13g review (a): a host that fails before starting the run (e.g. an Actions 
  withHost(object, { call: async () => { throw new Error('Durable Object class "ActionHost" is not exported by script gonvex-cf-dev-k22-actions'); }, hold: async () => ({}), release: async () => ({}) });
  const replies = await object.dispatch(view(state.id.name!), { type: 'action.call', id: 'rolled-back', path: 'probe.agentNoop', args: {} });
  expect(replies.map((r) => JSON.parse(r))).toEqual([{ type: 'action.result', id: 'rolled-back', path: 'probe.agentNoop', result: null }]);
- for (let i = 0; i < 100 && runs(state).some((r) => r.state !== 'done'); i++) await new Promise((r) => setTimeout(r, 10)); // completion follows the reply (X13b)
- expect(runs(state).map((r) => [r.state, r.attempts])).toEqual([['done', 1]]); // one run, by the ActionWorker
+ expect((await settled(state, 1)).map((r) => [r.state, r.attempts])).toEqual([['done', 1]]); // one run, by the ActionWorker
 }));
 
 it('X13g review (a): a host that fails after its run started is not retried (the Action runs at most once)', async () => fixture(async (object, state) => {
@@ -113,6 +125,7 @@ it('X13g review (a): a host that fails after its run started is not retried (the
 }));
 
 it('X13g review (c): a reordered older release cannot drop a newer hold', async () => fixture(async (object, state) => {
+ wanted(object);
  const stub = (bindings.ACTION_HOST as unknown as { getByName(n: string): { hold(r: unknown): Promise<unknown>; release(r?: unknown): Promise<unknown>; hostState(): Promise<HostState> } }).getByName(state.id.name!);
  await stub.hold({ v: 1, projectId: 'p', tenantId: state.id.name!, generation: 5 });
  await stub.release({ v: 1, generation: 4 }); // sent before the hold, delivered after it

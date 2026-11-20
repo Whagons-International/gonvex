@@ -26,6 +26,9 @@ export const plans = new MemoryPlanStore();
 export class CompositionTenant extends AssemblyTenant {
  protected override bundle() { return exports; }
  protected override plans() { return plans; }
+ /** X13g test seam: pins this tenant's answer to its ActionHost's residency check (unset: the real answer). */
+ hostWanted: boolean | undefined;
+ override async actionHostWanted() { return this.hostWanted ?? super.actionHostWanted(); }
 }
 export class CompositionControl extends ControlObject {}
 function publicationEnv(env:any){return {...env,GONVEX_DASHBOARD_SESSION_SECRET:'synthetic-publication-secret',GONVEX_ASSEMBLY_FIXTURE_KEY:'synthetic-inspection',CONTROL:env.PUB_CONTROL,TENANT:env.PUB_TENANT,GATEWAY:env.PUB_GATEWAY};}

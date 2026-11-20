@@ -31,6 +31,8 @@ export class ActionHost extends DurableObject<ActionEnv> {
   /** The newest hold/release generation applied: an older (reordered) one is ignored. */
   private generation = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /** The hold a check in flight is confirming: it is still held until the tenant answers. */
+  private checking: HoldRequest | undefined;
   /** Test and operator view: module evaluations requested by prewarm (not by calls). */
   private prewarms = 0;
 
@@ -74,9 +76,10 @@ export class ActionHost extends DurableObject<ActionEnv> {
     return { v: 1, held: false };
   }
 
-  /** Test seam: whether a timer holds the object, and how often prewarm ran. */
+  /** Test seam: whether the object is held (a pending timer, or a check of the current hold in flight), and how often prewarm ran. */
   async hostState(): Promise<{ held: boolean; holding: boolean; prewarms: number }> {
-    return { held: this.held !== undefined, holding: this.timer !== undefined, prewarms: this.prewarms };
+    const checking = this.checking !== undefined && this.checking === this.held;
+    return { held: this.held !== undefined, holding: this.timer !== undefined || checking, prewarms: this.prewarms };
   }
 
   /** One pending timer while held (the platform does not hibernate an object with a pending timer). */
@@ -90,10 +93,11 @@ export class ActionHost extends DurableObject<ActionEnv> {
     const held = this.held;
     if (!held) return;
     let wanted = false;
+    this.checking = held;
     try {
       const tenant = (this.env.TENANT as unknown as { getByName(name: string): TenantWant }).getByName(held.tenantId);
       wanted = await tenant.actionHostWanted();
-    } catch { wanted = false; }
+    } catch { wanted = false; } finally { if (this.checking === held) this.checking = undefined; }
     if (this.held !== held) return;
     if (wanted) this.arm(); else this.letGo();
   }
