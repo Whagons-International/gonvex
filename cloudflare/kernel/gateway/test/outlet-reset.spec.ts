@@ -98,3 +98,23 @@ it("a live tenant's RPC is never started from another tenant's invocation, so th
   const after = await sender("probe-p1").pressure();
   expect({ running: after.running, count: after.count }).toEqual({ running: before.running, count: before.count });
 });
+
+it("P1 through the reservation path: B grants A a reservation, B is reset, A is still delivered (#556 review)", async () => {
+  const before = await sender("probe-p1r").pressure();
+  // B holds every slot and has one more payload queued behind each in-flight RPC (so it is not in line itself).
+  expect((await sender("tenant-B2").fill(MAX_RPCS)).running - before.running).toBe(MAX_RPCS);
+  for (let i = 0; i < MAX_RPCS; i++) await sender("tenant-B2").enqueueMore(`h${i}`, 1);
+  await sender("tenant-A2").sendAsync("a0");
+  await new Promise((r) => setTimeout(r, 20)); // A is in line
+  // B's RPCs settle in B's context: each settlement grants A a reservation and re-dispatches B's next payload.
+  expect(await holder().releaseHeld()).toBe(MAX_RPCS);
+  for (let i = 0; i < 100 && (await holder().held()) < MAX_RPCS + 1; i++) await new Promise((r) => setTimeout(r, 10));
+  expect(await holder().held()).toBe(MAX_RPCS + 1); // B's 8 again, plus A's claimed from A's own poll
+  const p = await sender("probe-p1r").pressure();
+  expect(p.reservationsGranted - before.reservationsGranted).toBeGreaterThanOrEqual(1);
+  expect(p.reservationsClaimed - before.reservationsClaimed).toBeGreaterThanOrEqual(1);
+  await reset("tenant-B2");
+  await holder().release();
+  // A's RPC was started by A, not by B's settlement: B's reset does not take it down.
+  expect(await sender("tenant-A2").outcome("a0", 3_000)).toBe("delivered");
+});

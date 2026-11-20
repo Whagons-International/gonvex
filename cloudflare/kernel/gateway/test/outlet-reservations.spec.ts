@@ -51,7 +51,7 @@ it("a settling tenant keeps its freed slot busy and the waiter ahead still start
   expect(deliveryPressure().running).toBe(0);
 });
 
-it("reservations stay at most MAX_RPCS and running under 2 x MAX_RPCS, and every waiter is served", async () => {
+it("reservations stay at most MAX_RPCS and running at most 2 x MAX_RPCS, and every waiter is served", async () => {
   const busy = gated();
   const b = new GatewayOutlet("rs-busy2", () => busy.rpc, async () => []);
   const work = Array.from({ length: 40 }, (_, i) => b.send(`b${i}`, payload(`b${i}`)));
@@ -66,7 +66,7 @@ it("reservations stay at most MAX_RPCS and running under 2 x MAX_RPCS, and every
   await all;
   const { maxRunning, maxReserved } = await seen;
   expect(maxReserved).toBeLessThanOrEqual(MAX_RPCS);
-  expect(maxRunning).toBeLessThan(2 * MAX_RPCS);
+  expect(maxRunning).toBeLessThanOrEqual(2 * MAX_RPCS);
   expect(deliveryPressure()).toMatchObject({ running: 0, reservations: 0 });
 });
 
@@ -113,11 +113,32 @@ it("at most MAX_RPCS reservations are outstanding even when waiters cannot claim
   for (let i = 0; i < 20; i++) { busy.held.shift()?.(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); }
   const p = deliveryPressure();
   expect(p.reservations).toBe(MAX_RPCS);
-  expect(p.running).toBeLessThan(2 * MAX_RPCS);
+  expect(p.running).toBeLessThanOrEqual(2 * MAX_RPCS);
   // Cleanup: the waiters heal (an owner call after the lost timer is overdue) and everything drains.
   await sleep(WAKE_SLACK_MS + 50);
   for (const o of outlets) o.queued("w");
   busy.releaseAll();
   await Promise.all([...waiting, ...work]);
   expect(deliveryPressure()).toMatchObject({ running: 0, reservations: 0 });
+});
+
+it("a reserved waiter whose object is replaced leaves no reservation behind", async () => {
+  const busy = gated();
+  const b = new GatewayOutlet("rv-busy6", () => busy.rpc, async () => []);
+  const work = Array.from({ length: 12 }, (_, i) => b.send(`b${i}`, payload(`b${i}`)));
+  await sleep(5);
+  dropWakeTimersForTests(true); // the waiter cannot claim before its object is replaced
+  const ghost = new GatewayOutlet("rv-ghost", () => quick, async () => [], "rv-object-1");
+  void ghost.send("g", payload("g")).catch(() => {});
+  await sleep(10);
+  dropWakeTimersForTests(false);
+  const r0 = deliveryPressure().reservations;
+  busy.held.shift()!(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  busy.held.shift()!(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  const granted = deliveryPressure().reservations - r0;
+  new GatewayOutlet("rv-ghost", () => quick, async () => [], "rv-object-1"); // next instance retires the ghost
+  busy.releaseAll(); await Promise.all(work);
+  await sleep(400); // past WAITER_LIVE_MS; nothing holds a slot any more
+  const p = deliveryPressure();
+  expect({ granted, running: p.running, reservations: p.reservations }).toEqual({ granted: 1, running: 0, reservations: 0 });
 });

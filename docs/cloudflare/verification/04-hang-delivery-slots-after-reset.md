@@ -147,7 +147,7 @@ The fix is in `outlet.ts`. Nothing changes what a live holder receives or its or
      it arms, run in the resolver's context (probed in review), which would bring back P1.
    - Follow-up (work-conserving handoff with per-waiter reservations): a settler that would idle its freed slot for
      a waiter ahead reserves one for it (claimed from the waiter's own poll, even above the cap) and uses the slot
-     itself. Outstanding reservations are capped at `MAX_RPCS` (so `running` < 2 × `MAX_RPCS`) and lapse after
+     itself. Outstanding reservations are capped at `MAX_RPCS` (so `running` is at most 2 × `MAX_RPCS`: overshoot ≤ `MAX_RPCS`, reached in review) and lapse after
      `WAITER_LIVE_MS`. Benchmark `kernel/gateway/test/outlet-contention.bench.ts` (one scenario per run; 45 pages
      per tenant, 25 ms RPCs, plain outlets in one workerd isolate):
 

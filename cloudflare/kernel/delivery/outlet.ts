@@ -68,7 +68,8 @@ const waiters = new Map<OrderedOutlet, number>();
  * #550 follow-up: work-conserving handoff. When a settling outlet would leave a freed slot idle for a waiter ahead
  * (that waiter can only start from its own context, at its next poll), it grants that waiter a reservation and uses
  * the slot itself now. The waiter claims the reservation at its next poll and starts one RPC even with every slot
- * taken. At most `MAX_RPCS` reservations are outstanding, so `credits.running` stays under 2 x `MAX_RPCS`; a
+ * taken. At most `MAX_RPCS` reservations are outstanding, so `credits.running` is at most 2 x `MAX_RPCS` (overshoot
+ * <= `MAX_RPCS`: with X = running - MAX_RPCS and R = reservations, X + R <= MAX_RPCS always holds); a
  * reservation not claimed within `WAITER_LIVE_MS` (its object was reset, or its timer ran that late) lapses.
  */
 const reservations = new Map<OrderedOutlet, number>();
@@ -119,7 +120,7 @@ const owners = new Set<WeakRef<OrderedOutlet>>();
  * runs in that object's context (probed).
  * Work-conserving handoff (follow-up PR): a settling outlet that would leave its freed slot idle for a waiter ahead
  * grants that waiter a reservation and uses the slot itself; the waiter claims it from its own poll even with every
- * slot taken (`reservations`, at most `MAX_RPCS`, so `running` < 2 x `MAX_RPCS`; unclaimed ones lapse after
+ * slot taken (`reservations`, at most `MAX_RPCS`, so `running` is at most 2 x `MAX_RPCS`; unclaimed ones lapse after
  * `WAITER_LIVE_MS`). Contention benchmark (`test/outlet-contention.bench.ts`): 4 tenants 662 -> 625 ms, 16 tenants
  * 5,433 -> 4,044 ms, 32 tenants 17,644 -> 12,820 ms. What remains: a settler with nothing queued cannot use its
  * slot, which then idles until the next waiter polls (dispatch stays in each owner's own context).
@@ -321,6 +322,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       // A reservation another outlet granted this one: claimed here, in this outlet's own context, cap or not.
       const reserved = reservations.get(this);
       if (reserved !== undefined) {
+        // `running < 2 x MAX_RPCS` always holds here (X + R <= MAX_RPCS); the check is a backstop, not a limit in use.
         if (now - reserved <= WAITER_LIVE_MS && credits.running < 2 * MAX_RPCS) {
           reservations.delete(this); reservationCounts.reservationsClaimed++;
           this.dispatchTurn(now); continue;
