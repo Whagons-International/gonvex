@@ -1,7 +1,7 @@
 // #550 review: accounting of the 04-hang reclaims when the RPC involved does settle later. Plain outlets in the test
 // isolate (a real reset object's RPCs never settle, so these paths need a holder that answers late).
 import { expect, it } from "vitest";
-import { GatewayOutlet, MAX_RPCS, deliveryPressure, setRpcSlotStaleMs, type ReplicaHolderRpc } from "../../delivery/outlet";
+import { GatewayOutlet, MAX_RPCS, WAKE_SLACK_MS, deliveryPressure, dropWakeTimersForTests, setRpcSlotStaleMs, type ReplicaHolderRpc } from "../../delivery/outlet";
 import type { ReplicaDelivery } from "../../delivery/protocol";
 
 const payload = (instance: string): ReplicaDelivery => ({ v: 1, instance, shared: ["x".repeat(64)], sockets: {} });
@@ -138,4 +138,24 @@ it("pruning keeps a live outlet's entry, so its object's next outlet still retir
   new GatewayOutlet("t", () => quick, async () => [], "object-prune-live");
   expect(deliveryPressure().retiredOutlets - p0.retiredOutlets).toBe(1);
   expect(live).toBeDefined();
+});
+
+it("a lost wake timer is replaced on the outlet's next own call once overdue (#550 round 3, item 1)", async () => {
+  const previous = setRpcSlotStaleMs(300);
+  dropWakeTimersForTests(true);
+  try {
+    const before = totals();
+    const dead = new GatewayOutlet("dead-timer", () => never, async () => []);
+    for (let i = 0; i < MAX_RPCS; i++) void dead.send(`h${i}`, payload(`d${i}`));
+    await sleep(20);
+    const quiet = new GatewayOutlet("quiet-timer", () => quick, async () => []);
+    const sent = quiet.send("q", payload("q"));
+    // Its wake timer is lost (the seam records it and never sets it): past the stale deadline nothing moves.
+    expect(await within(sent, 300 + WAKE_SLACK_MS + 100)).toBe("timeout");
+    dropWakeTimersForTests(false);
+    // The owner's next call on its outlet (any: here a `queued` probe) finds the timer overdue and pumps from its context.
+    quiet.queued("q");
+    expect(await within(sent, 1_000)).toBe("delivered");
+    expect(totals()).toEqual(before);
+  } finally { dropWakeTimersForTests(false); setRpcSlotStaleMs(previous); }
 });

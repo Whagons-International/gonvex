@@ -49,6 +49,9 @@ export class OutletHolder extends DurableObject<OutletEnv> {
   release(): number { this.holding = false; const n = this.gates.length; for (const g of this.gates.splice(0)) g(); return n; }
   received(): string[] { return [...this.seen]; }
   hold(): void { this.holding = true; }
+  /** Answers the RPCs held now and keeps holding later ones. */
+  releaseHeld(): number { const n = this.gates.length; for (const g of this.gates.splice(0)) g(); return n; }
+  held(): number { return this.gates.length; }
 }
 
 /** A tenant-like object that owns one `GatewayOutlet` (module-global RPC slots and credits are shared by the isolate). */
@@ -67,6 +70,18 @@ export class OutletSender extends DurableObject<OutletEnv> {
     for (let i = 0; i < k; i++) void this.outlet.send(host, outletPayload(`queued-${host}-${i}`)).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 10));
     return deliveryPressure();
+  }
+  private outcomes = new Map<string, string>();
+  /** Starts one payload for `host` and returns at once; `outcome(host)` reports it later. */
+  async sendAsync(host: string): Promise<void> {
+    this.outcomes.set(host, "pending");
+    void this.outlet.send(host, outletPayload(`async-${host}`)).then(() => this.outcomes.set(host, "delivered"), (e: Error) => this.outcomes.set(host, `rejected: ${e.message}`));
+  }
+  /** Waits up to `ms` for `host`'s payload from `sendAsync`. */
+  async outcome(host: string, ms: number): Promise<string> {
+    const until = Date.now() + ms;
+    while (this.outcomes.get(host) === "pending" && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+    return this.outcomes.get(host) ?? "none";
   }
   /** One payload; whether its RPC completed within `ms`. */
   async sendOne(host: string, ms: number): Promise<{ outcome: string; pressure: ReturnType<typeof deliveryPressure> }> {

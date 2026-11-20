@@ -15,6 +15,11 @@ problem in the engine's queues, the attach check, output gates or alarms.
   object in the isolate. The isolate survived the reset. The reset object's RPC continuations belong to its dead I/O
   context, so they never run, and `run()`'s `finally` never returned their slots. With all 8 slots held this way, no
   outlet in the isolate could start another delivery RPC.
+- **Second form of the same bug (found in review, round 3):** the scheduler was isolate-global too. One tenant's RPC
+  settlement started other tenants' waiting RPCs, and an RPC belongs to the context that started it. So a reset of
+  that tenant also killed RPCs it had started for **live** tenants. Their holder channels stayed `running` for good
+  (reproduced in workerd, `outlet-reset.spec.ts` P1). Returning the slot does not unstick a channel. The fix
+  therefore also makes every outlet start its RPCs only from its own object's contexts.
 - **Effect:** the new instance of the -04 object (it woke at 14:30:52Z) ran every open it was sent and queued the
   payloads. Its holder queues grew to 6 items. No delivery RPC completed for 20 minutes, and no error was logged.
   The client waited for replies that never came. The 14:50Z redeploy replaced the isolate and cleared it.
@@ -73,7 +78,7 @@ After the fix: both pass.
 before:  × a tenant reset with every isolate RPC slot in flight does not wedge its next instance or other tenants
          AssertionError: expected 'timeout' to be 'delivered'
          × a reset object that never comes back holds the isolate's RPC slots only up to the stale bound
-after:   ✓ both (kernel/gateway 93/93, root 589/589 incl. kernel/delivery, kernel/assembly 141/141)
+after:   ✓ both (kernel/gateway 99/99, root 589/589 incl. kernel/delivery, kernel/assembly 141/141, Node GC 2/2)
 ```
 
 The #550 review added accounting coverage (`outlet-reset.spec.ts` test 3, `outlet-settle.spec.ts`). Each mutation
@@ -107,12 +112,32 @@ More mutations, each failing at least one test:
 | `pruneObjects` clears live entries | a live outlet survives pruning and is still retired |
 | No deadline timer | delivered at the deadline with no later activity |
 | No strong hold (sweep via `WeakRef` owners) | both GC tests |
+| Round 3: the previous head's isolate-global `schedule()` (one outlet's settlement starts another's RPCs) | P1: A's payload `pending` forever after B's reset |
+| Round 3: `heal` disabled | a lost wake timer is replaced on the outlet's next own call |
 
 No separate dev Worker was needed. The shared dev Worker was not touched (no deploys, read-only log queries).
 
 ## Fix
 
-The fix is in `outlet.ts` and is bookkeeping only. Nothing changes what a live holder receives or its order.
+The fix is in `outlet.ts`. Nothing changes what a live holder receives or its order.
+
+0. **Each outlet dispatches only its own RPCs, from its own object's contexts (round 3).** `pump()` starts an
+   outlet's RPCs from three places only: its enqueue microtask, the settlement of an RPC it started (which resumes in
+   the context that started it), or its own wake timer. The isolate-wide parts are turn order and bookkeeping:
+   - `waiters` is a FIFO of outlets blocked on slots, with liveness. A waiter not seen for 250 ms is skipped and
+     dropped, so a reset object cannot hold the line.
+   - The stale sweep.
+
+   It is still one dispatch per turn, then back of the line. A slot freed by one tenant's settlement is left to the
+   next waiter, which takes it from its own poll (`WAIT_POLL_MS` = 5 ms). A blocked outlet keeps one wake timer of its
+   own, for the next poll or stale deadline. The timer records its deadline, and every owner call on the outlet
+   (`send`, `admits`, `queued`, `idle`) replaces it if it is missing or more than `WAKE_SLACK_MS` (1 s) overdue
+   (`heal`). Costs:
+   - A blocked tenant wakes every 5 ms until it gets a slot, which can also delay its object's hibernation that long.
+   - Cross-tenant handoff takes up to one poll.
+
+   Tests: P1 (B's settlement no longer starts A's RPC, so B's reset leaves A delivering; `pending` forever on the
+   previous head), and a dropped wake timer replaced on the next owner call. With `heal` disabled, that test fails.
 
 1. **Retire the reset instance's outlet (deterministic).** `GatewayOutlet` takes the owning object's id
    (`ctx.id.toString()`, passed by `ReplicaTenantObject`). A Durable Object id has at most one live instance, so a
@@ -126,8 +151,11 @@ The fix is in `outlet.ts` and is bookkeeping only. Nothing changes what a live h
    none of them can move until that RPC settles. The isolate's `normal`/`count`/`recovery`/`hosts` totals are then
    recounted from the unreleased payloads of live outlets (`WeakRef`s, as `sweepOwners` does for `hosts`). This covers
    a reset object that never comes back to this isolate: its RPC slots and its queued byte and item credits come back
-   at the 60 s deadline. A payload of another tenant that waits for a slot arms one timer (from that tenant's own
-   invocation, never the dead one's) for the next stale deadline, so the sweep runs then even if nothing else happens.
+   at the 60 s deadline. A payload of another tenant that waits for a slot polls with its own wake timer (item 0), so
+   the sweep runs at the deadline even if nothing else happens.
+   This rule returns a **slot**, never a **channel**: the stuck holder keeps waiting for its RPC. That is why item 0
+   matters. A live tenant's channel can no longer be tied to another object's context, so only the reset object's own
+   holders can wait on a dead RPC, and its next instance serves them under a new `instance` (item 1).
    The sweep walks the strongly held `holding` set, so GC cannot hide a slot holder. Its stuck queues still count in `hosts` until GC collects the outlet, and they are bounded by
    `MAX_HOSTS` with the existing sweep. Its holder's ordered channel is unchanged: that holder still waits for the RPC.
    **Bound when the RPC was only slow** and settles later: the payloads that were queued behind it at that moment go
@@ -144,14 +172,14 @@ The fix is in `outlet.ts` and is bookkeeping only. Nothing changes what a live h
    - `delivery: outlet of a reset object retired { slots, running, count }`
    - `delivery: stale RPC slots returned { slots, running, count }`
 
-   Each reclaim is also counted in `deliveryPressure()` (`retiredOutlets`, `retiredSlots`, `staleSlots`). `schedule()`
+   Each reclaim is also counted in `deliveryPressure()` (`retiredOutlets`, `retiredSlots`, `staleSlots`). `pump()`
    sweeps only once the oldest held slot's deadline has passed (one comparison per call otherwise). When work is
    blocked on slots, the deadline timer runs the sweep. Below the cap, a delivery RPC stuck for more than 60 s is
    logged at the next enqueue or settlement in the isolate. `byObject` drops dead entries in `sweepOwners` and whenever
    it reaches 1,024 ids.
 
-Runtime bundle (`wrangler deploy --dry-run -c kernel/assembly/runtime.wrangler.jsonc`): 1109.30 -> 1115.96 KiB
-(gzip 276.58 -> 278.47 KiB). No SQL, no rows read or written, no new runtime imports.
+Runtime bundle (`wrangler deploy --dry-run -c kernel/assembly/runtime.wrangler.jsonc`): 1109.30 -> 1117.56 KiB
+(gzip 276.58 -> 279.01 KiB). No SQL, no rows read or written, no new runtime imports.
 
 ## Ruled out
 
@@ -176,13 +204,19 @@ port runs only on dev. Without this fix, the Cloudflare port would be exposed in
   longer accessible".
 - **A reset only wedges when RPCs are in flight.** `321cab79` was reset at 2026-11-19 18:45 and delivered normally
   afterwards. But in-flight RPCs are most likely during load bursts, which is also when CPU overruns happen.
-- **The blast radius is the isolate,** not one tenant: every tenant object sharing it stops delivering until the
-  isolate is recycled. Subscriber keep-alive and reconnecting clients keep the isolate busy, so it does not recycle
-  on its own.
+- **The blast radius is the isolate,** not one tenant, in two ways:
+  - Every tenant object sharing the isolate stops delivering until the isolate is recycled (all slots leaked).
+  - Live tenants whose RPCs the reset object's settlements had started have those holder channels wedged for good,
+    even after the slots come back. During a burst, one tenant's settlements start everyone's RPCs, so this is likely.
+
+  Subscriber keep-alive and reconnecting clients keep the isolate busy, so it does not recycle on its own.
 - **A partial leak** (1-7 slots) is silent: the isolate just has fewer delivery RPC slots. I did not check whether
   this explains any earlier dev latency anomaly.
 
-With the fix, a returning tenant recovers at once, and other tenants of the isolate recover within 60 s.
+With the fix:
+- A returning tenant recovers at once.
+- Other tenants' RPCs are started only from their own contexts, so another object's reset cannot wedge their channels.
+- Their blocked payloads get slots back within 60 s, plus at most one poll.
 
 ## What is not fixed (follow-ups)
 

@@ -58,7 +58,20 @@ const credits = { normal: 0, recovery: 0, count: 0, running: 0, hosts: 0 };
  * stops waiting for that holder (`unclaim`), or when its outlet is gone.
  */
 let claim: { owner: WeakRef<object>; host: string } | undefined;
-const ready = new Set<OrderedOutlet>();
+/**
+ * #550 round 3: outlets whose work waits for an isolate RPC slot, in arrival order, with when each last checked in.
+ * Turn order only: an outlet starts its RPCs itself, from its own object's context (`pump`), never another outlet's.
+ * A waiter that has not checked in for `WAITER_LIVE_MS` (its object was reset) is skipped and dropped.
+ */
+const waiters = new Map<OrderedOutlet, number>();
+/** A blocked outlet's own timer re-checks for a free slot this often (another object's settlement cannot wake it). */
+export const WAIT_POLL_MS = 5;
+const WAITER_LIVE_MS = 250;
+/** A wake timer this far past its deadline is treated as lost and re-armed on the outlet's next own call. */
+export const WAKE_SLACK_MS = 1_000;
+let dropWakeTimers = false;
+/** Test seam: wake timers are recorded but never set (a timer lost with the context that armed it). */
+export function dropWakeTimersForTests(on: boolean): void { dropWakeTimers = on; }
 const owners = new Set<WeakRef<OrderedOutlet>>();
 /**
  * 04-hang (dev, 2026-11-20): the RPC slots and byte credits above outlive the object that took them. When the platform
@@ -66,6 +79,12 @@ const owners = new Set<WeakRef<OrderedOutlet>>();
  * delivery RPCs never settle in it: their continuations belong to its dead I/O context, so `run`'s `finally` never
  * returns the slot. With `MAX_RPCS` slots taken that way, no outlet in the isolate starts another RPC: opens keep
  * running and queueing, nothing is delivered, and only a new isolate (a redeploy) clears it.
+ *
+ * An RPC belongs to the context that STARTED it, not to the outlet it serves. So (#550 round 3) an outlet starts its
+ * RPCs only from its own object's contexts (`pump`: its enqueue, the settlement of an RPC it started, its own wake
+ * timer). An isolate-global scheduler that started outlet A's RPC from object B's settlement would tie A's holder
+ * channel to B's context: a reset of B would leave A's queue `running` for good, and the stale rule below returns a
+ * slot, not a channel. The isolate-wide parts are turn order (`waiters`) and bookkeeping (the sweep), never a dispatch.
  *
  * Two reclaims, both isolate-local bookkeeping (neither changes what a live holder receives or in which order):
  * - The same object again (deterministic): one Durable Object id has at most one live instance, so a new outlet for
@@ -76,8 +95,11 @@ const owners = new Set<WeakRef<OrderedOutlet>>();
  *   `normal`/`count`/`recovery` totals are then recounted from live outlets (`WeakRef`s, as `hosts` is). Its holder's
  *   channel stays ordered: that holder still waits for the RPC.
  * Both are deterministic: an outlet holding a slot is strongly reachable (`holding`) until the slot is returned, so GC
- * cannot hide a reset instance's slots from either reclaim; and an outlet whose work waits for a slot arms one timer
- * (from its own invocation) for the next stale deadline, so the sweep runs then even if nothing else happens.
+ * cannot hide a reset instance's slots from either reclaim; and an outlet whose work waits for a slot keeps one wake
+ * timer of its own (`WAIT_POLL_MS`, or the next stale deadline), so the sweep runs then even if nothing else happens.
+ * A timer more than `WAKE_SLACK_MS` overdue is treated as lost and replaced on the outlet's next own call (`heal`).
+ * Cost: a blocked outlet's timer fires every `WAIT_POLL_MS` until a slot is its turn, which can also delay its object's
+ * hibernation by that long; a slot freed by one tenant's settlement goes to the next tenant in line within one poll.
  * Cost when a stale RPC was only slow and settles later: what was queued behind it at that moment goes out uncounted,
  * at most one holder backlog (`HOST_PENDING_BYTES`; `sendFirst` items up to `FIRST_BYTES` each, capped by
  * `MAX_PENDING`) per stale RPC; the engine's holder-stall recovery (`HOLDER_STALL_MS` < the stale bound) discards and
@@ -85,9 +107,9 @@ const owners = new Set<WeakRef<OrderedOutlet>>();
  * RPCs not yet settled), a number that grows by at most `MAX_RPCS` per `RPC_SLOT_STALE_MS` and is capped only by
  * `MAX_HOSTS`. The isolate may also run more than `MAX_RPCS` RPCs, at most one per holder.
  * Each reclaim logs one warn line (`delivery: outlet of a reset object retired`, `delivery: stale RPC slots returned`,
- * counts only) and counts it in `deliveryPressure()`. The sweep runs in `schedule()` once the oldest held slot's
- * deadline has passed, and at that deadline when work is blocked on slots; a delivery RPC stuck past the bound below
- * the cap is logged at the next enqueue or settlement in the isolate.
+ * counts only) and counts it in `deliveryPressure()`. The sweep runs in `pump` once the oldest held slot's deadline
+ * has passed, and by then whenever work is blocked on slots; a delivery RPC stuck past the bound below the cap is
+ * logged at the next enqueue or settlement in the isolate.
  */
 export const RPC_SLOT_STALE_MS = 60_000;
 let slotStaleMs = RPC_SLOT_STALE_MS;
@@ -95,7 +117,7 @@ let slotStaleMs = RPC_SLOT_STALE_MS;
 export function setRpcSlotStaleMs(ms: number): number { const previous = slotStaleMs; slotStaleMs = ms; nextStaleCheck = 0; return previous; }
 const byObject = new Map<string, WeakRef<OrderedOutlet>>();
 const reclaimCounts = { retiredOutlets: 0, retiredSlots: 0, staleSlots: 0 };
-/** When the oldest held slot can first be stale: `schedule()` sweeps only from then (not on every call of a burst). */
+/** When the oldest held slot can first be stale: `pump` sweeps only from then (not on every call of a burst). */
 let nextStaleCheck = Number.POSITIVE_INFINITY;
 /**
  * #550 re-review: every outlet with an RPC slot not yet returned, held STRONGLY. A reset instance's outlet is otherwise
@@ -172,8 +194,9 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   private retired = false;
   /** RPC slots this outlet holds (taken, not yet returned); while any, `holding` keeps it reachable. */
   private heldSlots = 0;
-  /** #550 re-review: this outlet's one timer for the next stale deadline while its work waits for a slot. */
-  private staleTimer: unknown;
+  /** #550 round 3: this outlet's one wake timer while its work waits for a slot, and when it is due. */
+  private wakeTimer: unknown;
+  private wakeAt = 0;
 
   /** `object`: the owning Durable Object's id (one live instance per id); a newer outlet for it retires this one. */
   constructor(object?: string) {
@@ -201,14 +224,13 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     }
     credits.hosts = Math.max(0, credits.hosts - this.queues.size);
     this.queues.clear();
-    ready.delete(this);
+    waiters.delete(this);
     holding.delete(this); this.heldSlots = 0;
     owners.delete(this.owner);
     if (claim?.owner.deref() === this) claim = undefined;
     reclaimCounts.retiredOutlets++;
     reclaimCounts.retiredSlots += slots;
     console.warn("delivery: outlet of a reset object retired", { slots, running: credits.running, count: credits.count });
-    void Promise.resolve().then(() => OrderedOutlet.schedule());
   }
 
   /**
@@ -247,21 +269,69 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     return true;
   }
 
+  /** Whether a holder of this outlet has a payload waiting for an RPC slot (not behind its own RPC in flight). */
+  private waiting(): boolean {
+    for (const queue of this.queues.values()) if (queue.pending.length && !queue.running) return true;
+    return false;
+  }
+
   /**
-   * #550 re-review: this outlet's work waits for an isolate slot (all `MAX_RPCS` taken). The stale sweep runs only in
-   * `schedule()`, and nothing else calls it at the deadline (a reset object's RPCs never settle, and a quiet tenant sends
-   * nothing more), so this outlet wakes the scheduler at the next stale deadline itself. The timer belongs to this
-   * outlet's own invocation (its enqueue or settlement), never to the context of the instance holding the slots; one
-   * per outlet, re-armed while it stays blocked.
+   * #550 round 3: starts this outlet's RPCs, from its OWN object's context only: its enqueue microtask, the settlement
+   * of an RPC it started (which resumes in the context that started it), or its own wake timer. An RPC started from
+   * another object's context belongs to that context: were that object reset, the RPC would never settle and this
+   * live outlet's holder channel would stay `running` for good. So the isolate-wide part is turn order (`waiters`)
+   * and bookkeeping (the stale sweep), never a dispatch: one outlet never starts another outlet's RPC.
+   *
+   * Fairness as before: one dispatch per turn, then the outlet goes to the back of the line. An outlet whose work
+   * still waits for a slot polls with its own timer (`WAIT_POLL_MS`, and the next stale deadline).
    */
-  private armStaleTimer(): void {
-    if (this.staleTimer !== undefined || this.retired) return;
-    if (credits.running < MAX_RPCS || !ready.has(this) || !Number.isFinite(nextStaleCheck)) return;
-    this.staleTimer = setTimeout(() => {
-      this.staleTimer = undefined;
-      OrderedOutlet.schedule();
-      this.armStaleTimer();
-    }, Math.max(1, nextStaleCheck - Date.now()));
+  private pump(): void {
+    if (this.retired) return;
+    const now = Date.now();
+    if (now >= nextStaleCheck) OrderedOutlet.expireStaleSlots(now);
+    while (this.waiting()) {
+      waiters.set(this, now); // keeps its place (Map order), refreshes its liveness
+      const free = MAX_RPCS - credits.running;
+      if (free <= 0) break;
+      let ahead = 0;
+      for (const [outlet, seen] of waiters) {
+        if (outlet === this) break;
+        if (outlet.retired || now - seen > WAITER_LIVE_MS || !outlet.waiting()) { waiters.delete(outlet); continue; }
+        ahead++;
+      }
+      if (ahead >= free) break;
+      this.startOne();
+      waiters.delete(this); // one dispatch per turn: back of the line if it still waits
+      if (this.waiting()) waiters.set(this, now);
+    }
+    if (!this.waiting()) { waiters.delete(this); this.disarm(); return; }
+    this.arm(now);
+  }
+
+  /** One wake timer per outlet, armed from this outlet's own context (only `pump` arms it). */
+  private arm(now: number): void {
+    const due = Math.min(now + WAIT_POLL_MS, Number.isFinite(nextStaleCheck) ? Math.max(now + 1, nextStaleCheck) : Number.POSITIVE_INFINITY);
+    if (this.wakeTimer !== undefined && this.wakeAt <= due) return;
+    this.disarm();
+    this.wakeAt = due;
+    this.wakeTimer = dropWakeTimers ? "dropped" : setTimeout(() => { this.wakeTimer = undefined; this.pump(); }, Math.max(1, due - now));
+  }
+
+  private disarm(): void {
+    if (this.wakeTimer !== undefined && this.wakeTimer !== "dropped") clearTimeout(this.wakeTimer as ReturnType<typeof setTimeout>);
+    this.wakeTimer = undefined;
+  }
+
+  /**
+   * #550 round 3: self-healing. Every call the owning object makes on this outlet checks that waiting work has a live
+   * wake timer; one missing, or more than `WAKE_SLACK_MS` past its deadline (lost with the context that armed it), is
+   * replaced by a pump from this call's context, which is this outlet's own.
+   */
+  private heal(): void {
+    if (this.retired || !this.waiting()) return;
+    if (this.wakeTimer !== undefined && Date.now() <= this.wakeAt + WAKE_SLACK_MS) return;
+    this.wakeTimer = undefined;
+    void Promise.resolve().then(() => this.pump());
   }
 
   /** The isolate's byte and item totals from the unreleased payloads of live outlets (an outlet gone to GC drops out). */
@@ -329,6 +399,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
   }
 
   send(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined> {
+    this.heal();
     if (!validRecoveryInitialDelivery(payload)) return Promise.reject(new Error("invalid recovery initial offer"));
     if (payload.initialFailure && !initialFailureOnly(payload)) return Promise.reject(new Error("invalid initial-failure-only delivery"));
     if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length)&&!initialDeliveryOnly(payload))return Promise.reject(new Error("invalid initial-only delivery"));
@@ -350,6 +421,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
    * recovery barrier, or an earlier `sendFirst` payload). The same admission and credits as `send`.
    */
   sendFirst(host: string, payload: ReplicaDelivery): Promise<ReplicaReceipt | undefined> {
+    this.heal();
     if (!validRecoveryInitialDelivery(payload)) return Promise.reject(new Error("invalid recovery initial offer"));
     if (payload.initialFailure && !initialFailureOnly(payload)) return Promise.reject(new Error("invalid initial-failure-only delivery"));
     if(Object.values(payload.sockets).some(work=>work.initialScope||work.initialCompletions?.length)&&!initialDeliveryOnly(payload))return Promise.reject(new Error("invalid initial-only delivery"));
@@ -395,6 +467,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
 
   /** BUG-4: whether `send` would accept `payload` now (no side effects); the engine waits for room instead of tripping recovery. */
   admits(host: string, payload: ReplicaDelivery): boolean {
+    this.heal();
     const queue = this.queues.get(host), bytes = retainedBytes(payload);
     const mine = claim?.owner.deref() === this && claim.host === host;
     if (claim && !claim.owner.deref()) claim = undefined;
@@ -476,21 +549,8 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     if (recovery) credits.recovery += bytes;
     else { queue.bytes += bytes; credits.normal += bytes; credits.count++; }
     // Begin in a microtask so reset publishes its coalescing promise before a local RPC can finish.
-    ready.add(this);
-    void Promise.resolve().then(() => { OrderedOutlet.schedule(); this.armStaleTimer(); });
+    void Promise.resolve().then(() => this.pump());
     return next;
-  }
-
-  private static schedule(): void {
-    const now = Date.now();
-    if (now >= nextStaleCheck) OrderedOutlet.expireStaleSlots(now);
-    while (credits.running < MAX_RPCS && ready.size) {
-      const outlet = ready.values().next().value!;
-      ready.delete(outlet);
-      outlet.startOne();
-      // One dispatch per owner per turn: a busy tenant cannot monopolize shared RPC credits.
-      if ([...outlet.queues.values()].some(q => q.pending.length && !q.running)) ready.add(outlet);
-    }
   }
 
   private startOne(): void {
@@ -584,11 +644,9 @@ abstract class OrderedOutlet implements DeliveryOutlet {
           // Rotate a busy holder behind other ready holders; no cross-holder ordering requirement.
           this.queues.delete(host); this.queues.set(host, queue);
         }
-        // A different tenant may be waiting for the isolate's RPC or oversize credit.
-        if ([...this.queues.values()].some(q => q.pending.length && !q.running)) ready.add(this);
       }
-      OrderedOutlet.schedule();
-      this.armStaleTimer();
+      // This settlement resumes in the context that started the RPC, which is this outlet's own (`pump`).
+      this.pump();
     }
   }
 
@@ -616,9 +674,10 @@ abstract class OrderedOutlet implements DeliveryOutlet {
       this.queues.delete(host); credits.hosts--;
       if (!this.queues.size) owners.delete(this.owner);
     }
-    if (![...this.queues.values()].some(q => q.pending.length && !q.running)) ready.delete(this);
+    if (!this.waiting()) waiters.delete(this);
   }
   queued(host: string): number {
+    this.heal();
     const queue = this.queues.get(host);
     // Items, not RPCs: a batch in flight counts every payload it carries (#453/#473 deferral bound).
     return queue ? queue.pending.length + (queue.running ? Math.max(1, queue.inflight.length) : 0) : 0;
@@ -638,7 +697,7 @@ abstract class OrderedOutlet implements DeliveryOutlet {
     queue.pending = keep;
     this.settleEmpty(host, queue);
   }
-  async idle(host: string): Promise<void> { await this.queues.get(host)?.idle; }
+  async idle(host: string): Promise<void> { this.heal(); await this.queues.get(host)?.idle; }
 }
 
 /** Gateway placement (0016 G0-1): one RPC per payload to the gateway holding the sockets. */

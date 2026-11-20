@@ -81,3 +81,20 @@ it("a reset object that never comes back also gives back the credits of what it 
     await probe.staleMs(previous);
   }
 });
+
+it("a live tenant's RPC is never started from another tenant's invocation, so that tenant's reset cannot wedge it (#550 round 3, P1)", async () => {
+  const before = await sender("probe-p1").pressure();
+  // B holds every isolate slot; A's payload waits for one.
+  expect((await sender("tenant-B").fill(MAX_RPCS)).running - before.running).toBe(MAX_RPCS);
+  await sender("tenant-A").sendAsync("a0");
+  // B's RPCs settle in B's invocation. Before round 3 that settlement started A's RPC there, in B's context.
+  expect(await holder().releaseHeld()).toBe(MAX_RPCS);
+  for (let i = 0; i < 100 && (await holder().held()) < 1; i++) await new Promise((r) => setTimeout(r, 10));
+  expect(await holder().held()).toBe(1); // A's RPC is in flight at the holder
+  await reset("tenant-B");
+  await holder().release();
+  // Before: "pending" for good (A's RPC belonged to B's dead context; A's channel stayed `running`). Now A started it.
+  expect(await sender("tenant-A").outcome("a0", 3_000)).toBe("delivered");
+  const after = await sender("probe-p1").pressure();
+  expect({ running: after.running, count: after.count }).toEqual({ running: before.running, count: before.count });
+});
