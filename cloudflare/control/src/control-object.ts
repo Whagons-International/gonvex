@@ -203,8 +203,10 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
 
   async write(connection: ControlConnection, path: string, args: unknown, idempotencyKey: string, kind: "reducer" | "action"): Promise<Outcome> {
     const outcome = await this.run((ctx) => executeControlWrite(ctx, this, connection, path, args, idempotencyKey, kind));
-    // `notify_control_changed` after any successful Control write (lib.rs:4036).
-    if (outcome.ok) this.notify(connection.projectId);
+    // `notify_control_changed` after any successful Control write (lib.rs:4036). X17j: also after a failed refresh that
+    // committed rows (refresh-token reuse revokes its whole family, then answers an error), so the gateways' identity
+    // leases (kernel/session/identity-lease.ts) drop that project's tokens; an unchanged refresh sends no frame.
+    if (outcome.ok || (path === "control.auth.refreshSession" && this.lastCost.rowsWritten > 0)) this.notify(connection.projectId);
     return outcome;
   }
 
