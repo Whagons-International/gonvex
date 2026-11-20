@@ -528,7 +528,7 @@ export class ReplicaDeliveryEngine {
       this.drop(connection);
       this.connections.delete(connection.id);
     }
-    void this.sendOne(host, this.payload([], {}, undefined, { revision, members: [memberId], accounts: [] }), 0);
+    void this.sendOne(host, this.payload([], {}, undefined, { revision, members: [memberId], accounts: [] }), 0, true); // membership-only (#543 re-review)
   }
 
   /** K07's call watermark rule: undefined without subscriptions, else the revision this socket's holder accepted. */
@@ -632,6 +632,10 @@ export class ReplicaDeliveryEngine {
    */
   private attachRefused(host: string, session: TenantSession): boolean {
     if (!this.options.currentMember || !memberChecked(session)) return false;
+    // #543 re-review: a project developer who is not a Member has the synthesized `developer:<account>` principal and
+    // no members row (admitDeveloper; visibility/principal.ts accepts it by the same predicate). Rust never checks at
+    // attach, so it is not checked here; a developer who is a Member carries the real row and is.
+    if (session.developerSession != null && session.member.id === `developer:${session.identity.account.id}`) return false;
     let current: { row: MemberRow | undefined; revision: number };
     try { current = this.options.currentMember(session.member.id); }
     catch (error) { console.warn("delivery: could not read the session Member at attach", error); return false; }
@@ -650,7 +654,7 @@ export class ReplicaDeliveryEngine {
     }
     void this.sendOne(host, this.payload([], {}, undefined, {
       revision: filter, members: [session.member.id], accounts: [], watermark: Math.max(current.revision, filter),
-    }), 0);
+    }), 0, true); // #543 re-review: membership-only, so a paused holder still gets it (as the commit loop's hand-off)
     return true;
   }
 

@@ -2078,3 +2078,76 @@ describe("#543 review: the attach refusal's hand-off drops only sessions that pr
     });
   }
 });
+
+describe("#543 re-review: attach-check gaps", () => {
+  const admittedAs = (id: string, admissionRevision: number, member: Partial<TenantSession["member"]> = {}, host = "h1"): SocketView => {
+    const view = socket(id, {}, host);
+    const tenant = { ...view.tenant!, member: { ...view.tenant!.member, ...member }, admissionRevision };
+    return { ...view, tenant, connection: { ...view.connection, tenant } };
+  };
+  const open = { type: "replica.open" as const, id: "sub", path: "items.all", args: {}, keys: [] as string[], hashes: {}, fullIntegrity: false };
+
+  it("a developer-mode session with a synthesized Member (no members row) is not refused at attach", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      const at = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      // control/src/directory.ts admitDeveloper: a project developer who is not a tenant Member gets
+      // `developer:<account>` (role admin, permissions {developer:true}, revision 0). There is no members row.
+      const base = admittedAs("dev", 0, { id: "developer:acct-alice", role: "admin", permissions: { developer: true }, membershipRevision: 0 });
+      // As visibility/principal.ts recognises it: a developer grant on the session and member id `developer:<account>`.
+      const developerSession = { grantId: "devmode_1", accountId: "acct-alice", tenantId: "t", expiresAt: Date.now() + 60_000 } as unknown as TenantSession["developerSession"];
+      const tenant = { ...base.tenant!, developerSession };
+      const dev: SocketView = { ...base, tenant, connection: { ...base.connection, tenant } };
+      payloads.length = 0;
+      engine.dispatch(dev, open);
+      await engine.settled();
+      expect(engine.subscriptions("dev").size).toBe(1);
+      expect(payloads.some(([, p]) => p.membership)).toBe(false);
+      expect(at).toBeGreaterThan(0);
+    });
+  });
+
+  it("the attach refusal's hand-off is sent even while the holder is paused (recovery/fence), as the commit loop's is", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      const stale = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      await commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
+      // White-box: the holder is in recovery without catch-up (engine.paused(h1) is true).
+      const recovering = (engine as unknown as { recovering: Map<string, { catchup?: unknown }> }).recovering;
+      recovering.set("h1", {});
+      payloads.length = 0;
+      try {
+        expect(() => engine.dispatch(admittedAs("old", stale), open)).toThrow(MemberAccessChangedError);
+        await new Promise((r) => setTimeout(r, 0));
+        // engine.send() sends `membership` alone while paused ("Auth invalidation must not disappear behind a
+        // capacity/restart barrier"); attachRefused calls sendOne(host, …, 0) without membershipOnly, so it is dropped.
+        expect(payloads.some(([, p]) => p.membership?.members.includes("m-alice"))).toBe(true);
+      } finally { recovering.delete("h1"); }
+    });
+  });
+
+  it("several stale sessions with different admissions: each is refused (hand-off or own attach); a fresh one stays", async () => {
+    await withEngine(async ({ engine, payloads, commit }) => {
+      const r1 = await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      const r2 = await commit([["INSERT INTO items VALUES ('b', 2, 'b')", []]]);
+      const demoted = await commit([["UPDATE members SET role = 'member' WHERE id = 'm-alice'", []]]);
+      engine.dispatch(admittedAs("fresh", demoted, { role: "member" }), open);
+      await engine.settled();
+      await commit([["INSERT INTO items VALUES ('c', 3, 'c')", []]]);
+      payloads.length = 0;
+      // The older stale attaches first: its hand-off filters at r1+1 (only <= r1 discarded on the holder).
+      expect(() => engine.dispatch(admittedAs("s1", r1), open)).toThrow(MemberAccessChangedError);
+      await engine.settled(); await new Promise((r) => setTimeout(r, 0));
+      expect(payloads.find(([, p]) => p.membership)![1].membership!.revision).toBe(r1 + 1);
+      // The newer stale (r1 < r2 < demoted), on this holder and on another: refused at its own attach.
+      expect(() => engine.dispatch(admittedAs("s2", r2), open)).toThrow(MemberAccessChangedError);
+      expect(() => engine.dispatch(admittedAs("s3", r2, {}, "h2"), open)).toThrow(MemberAccessChangedError);
+      expect(() => engine.observe(admittedAs("s3", r2, {}, "h2"), false)).toThrow(MemberAccessChangedError); // every later frame too
+      await engine.settled();
+      for (const id of ["s1", "s2", "s3"]) expect(engine.subscriptions(id).size).toBe(0);
+      expect(engine.subscriptions("fresh").size).toBe(1);
+      payloads.length = 0;
+      await commit([["INSERT INTO items VALUES ('d', 4, 'd')", []]]);
+      expect(frames(payloads, "fresh").some((f) => f.type === "replica.delta")).toBe(true);
+      for (const id of ["s1", "s2", "s3"]) expect(frames(payloads, id)).toEqual([]);
+    }, MODULE, false, undefined, undefined, ["h1", "h2"]);
+  });
+});
