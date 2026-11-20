@@ -98,7 +98,8 @@ describe('X17j the gateway drops a project\'s leases on controlChanged', () => {
   it('AssemblyGateway.controlChanged(project) invalidates that project only', async () => {
     const { env, runInDurableObject } = await import('cloudflare:test');
     const gateways = (env as unknown as { GATEWAY: DurableObjectNamespace }).GATEWAY;
-    await runInDurableObject(gateways.getByName('x17j-gw'), async (gateway: { controlChanged(p: string): Promise<void> }) => {
+    await runInDurableObject(gateways.getByName('x17j-gw'), async (instance: unknown) => {
+      const gateway = instance as { controlChanged(p: string): Promise<void> };
       const { identityLeases: leases } = await import('../../session/identity-lease');
       leases.putIdentity('tok-p', 'p', identity);
       leases.putIdentity('tok-q', 'q', { ...identity, projectId: 'q' });
