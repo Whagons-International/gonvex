@@ -8,6 +8,7 @@ import type { ControlConnection } from "../../control/src/types";
 import type { ClientFrame, Json } from "../session/decode";
 import { echoTrace } from "../session/protocol";
 import { span } from "../delivery/spans";
+import { sha256Hex } from "../../control/src/util";
 import { replicaEpoch } from "../session/directive";
 import { deployedManifest, derivedOf } from "../../control/src/manifest-cache";
 import type { Failure, FailureKind, Impersonation, ModuleInfo, Outcome, RevalidationItem, ServiceAuthOutcome, SessionIdentity, SocketView, TenantRoute, TenantSession } from "../session/ports";
@@ -98,7 +99,15 @@ export class SessionControlObject extends OperatorControlObject {
   async sessionIdentity(token: string, projectId: string | undefined): Promise<Outcome<SessionIdentity>> {
     const outcome = await this.auth({ token, ...(projectId !== undefined ? { project: projectId } : {}), controlOnly: true });
     if (outcome.message.type !== "auth.result" || !outcome.connection.identity) return failed(outcome);
-    return { ok: true, value: outcome.connection.identity as SessionIdentity };
+    return { ok: true, value: outcome.connection.identity as SessionIdentity, ...this.sessionExpiry(token) };
+  }
+
+  /** X17j: the session's `expires_at`, so a gateway identity lease never outlives the token. */
+  private sessionExpiry(token: string): { expiresAt?: number } {
+    const trimmed = token.trim();
+    if (!trimmed.startsWith("gvx_session_")) return {};
+    const at = this.sql.value<number>("SELECT expires_at FROM gonvex_auth_sessions WHERE token_hash=$1 AND revoked_at IS NULL", sha256Hex(trimmed));
+    return typeof at === "number" && Number.isFinite(at) ? { expiresAt: at } : {};
   }
 
   async sessionAuthenticate(token: string, projectId: string | undefined, tenant: string | undefined): Promise<Outcome<TenantSession>> {
@@ -107,7 +116,7 @@ export class SessionControlObject extends OperatorControlObject {
     const outcome = await this.auth({ token, ...(projectId !== undefined ? { project: projectId } : {}), ...(tenant !== undefined ? { tenant } : {}) });
     span("control.rpc", { method: "sessionAuthenticate", ms: Date.now() - started });
     if (outcome.message.type !== "auth.result" || !outcome.connection.tenant) return failed(outcome);
-    return { ok: true, value: sessionOf(outcome.connection.tenant) };
+    return { ok: true, value: sessionOf(outcome.connection.tenant), ...this.sessionExpiry(token) };
   }
 
   async sessionImpersonation(token: string, projectId: string | undefined, tenant: string | undefined, connectionId: string): Promise<Outcome<Impersonation>> {

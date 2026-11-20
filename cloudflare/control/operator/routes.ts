@@ -531,6 +531,7 @@ const deleteProject: Handler = async (op, request, _url, [project]) => {
     // Deletion committed: the id is free again, as in Rust (a later sync or create of it proceeds normally).
     op.ctx.sql.run("DELETE FROM gonvex_cf_project_deletions WHERE project_id=$1", project);
   });
+  op.controlChanged(project!); // X17j: no gateway lease or cached read outlives the project
   return json({ ok: true });
 };
 
@@ -880,7 +881,9 @@ async function setAccountDisabled(op: Op, request: Request, project: string, acc
     }
     return updated;
   });
-  // Live sockets of a disabled account fail their next revalidation (C.3.8 item 10).
+  // Live sockets of a disabled account fail their next revalidation (C.3.8 item 10). X17j: gateways drop the project's
+  // identity leases and cached Control reads now (the account's sessions were revoked).
+  if (changed !== 0) op.controlChanged(project);
   return changed === 0 ? error(404, "account not found") : json({ ok: true, disabled });
 }
 
@@ -1159,6 +1162,7 @@ const deleteTenantShard: Handler = async (op, request, url, [tenantRaw]) => {
   if (!row) return error(422, dbError.tenantNotFound(project, tenant));
   if (!bool(row.runtime_created) || str(row.database_mode) !== "multiTenant") return error(422, dbError.protocol("only runtime-created multi-tenant shards may be deleted through this operation"));
   op.ctx.sql.tx(() => op.ctx.sql.run(`UPDATE gonvex_runtime_tenants SET status='deleting',updated_at=${NOW} WHERE project_id=$1 AND tenant_id=$2`, project, tenant));
+  op.controlChanged(project!); // X17j: the tenant is rejected from now on; gateways drop leases that skip resolveTenant
   await op.deleteTenantStorage(tenant);
   op.ctx.sql.tx(() => op.ctx.sql.run("DELETE FROM gonvex_runtime_tenants WHERE project_id=$1 AND tenant_id=$2 AND status='deleting'", project, tenant));
   return json({ ok: true });
