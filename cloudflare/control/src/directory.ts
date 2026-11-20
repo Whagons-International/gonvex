@@ -216,10 +216,10 @@ export async function firstAdmittedTenant(ctx: Ctx, projectId: string, accountId
 }
 
 /** `ControlPlane::authenticate_session`. */
-export async function authenticateSession(ctx: Ctx, token: string, requestedProject: string | null, requestedTenant: string | null): Promise<TenantSession> {
+export async function authenticateSession(ctx: Ctx, token: string, requestedProject: string | null, requestedTenant: string | null, admit: typeof admitMember = admitMember): Promise<TenantSession> {
   const identity = loadSessionIdentity(ctx, token, requestedProject);
   const tenant = (requestedTenant ?? "").trim() || (await firstAdmittedTenant(ctx, identity.projectId, identity.account.id));
-  const { route, member, revision } = await admitMember(ctx, identity.projectId, tenant, identity.account.id);
+  const { route, member, revision } = await admit(ctx, identity.projectId, tenant, identity.account.id);
   return { identity, route, member, admissionRevision: revision, delegation: null, developerSession: null };
 }
 

@@ -511,6 +511,40 @@ describe("#537 review: an admission started during the account check is never ca
   });
 });
 
+describe("X17k a tenant auth right after the sign-in reuses its admission", () => {
+  type Internals = { context(): Parameters<typeof import("../src/sessions").sessionResultFromDirectory>[0] };
+  it("no second tenant call while the directory row is unchanged; a projected change or an old admission admits live", async () => {
+    const sessions = await import("../src/sessions");
+    const { authenticate } = await import("../src/auth");
+    sessions.clearAdmissionCache();
+    const seeded = await seed({ a: ["sid"] });
+    const tenant = seeded.tenants.a!, account = seeded.members.sid!.accountId;
+    const { session } = await login(seeded.project, seeded.members.sid!.email); // admits tenant a live
+    const token = session.accessToken as string;
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const ctx = (instance as unknown as Internals).context();
+      const calls = ctx.tenantCalls;
+      const auth = await authenticate(ctx, { id: "a1", token, project: seeded.project, tenant, connectionId: "c1" } as never);
+      expect(auth.message.type).toBe("auth.result");
+      expect(auth.connection.tenant?.member).toMatchObject({ role: "admin" });
+      expect(ctx.tenantCalls).toBe(calls);
+      expect(sessions.recentAdmission(ctx, seeded.project, tenant, account, 0)).toBeUndefined(); // older than the window
+    });
+    // A projected change (a Reducer role write): the next auth admits live and sees it.
+    await runInDurableObject(tenantStub(tenant), (instance: StubTenantObject) => {
+      (instance as unknown as { sql: { run(q: string, ...a: unknown[]): void } }).sql.run("UPDATE members SET role='member',permissions='{}' WHERE account_id=$1", account);
+    });
+    await tenantStub(tenant).flushMemberships();
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const ctx = (instance as unknown as Internals).context();
+      const calls = ctx.tenantCalls;
+      const auth = await authenticate(ctx, { id: "a2", token, project: seeded.project, tenant, connectionId: "c2" } as never);
+      expect(auth.connection.tenant?.member).toMatchObject({ role: "member" });
+      expect(ctx.tenantCalls).toBe(calls + 1);
+    });
+  });
+});
+
 describe("X14 sign-in spans", () => {
   it("emit control.auth per sign-in only when span timing is on", async () => {
     const { fixtureSpans } = await import("../../kernel/delivery/spans");
