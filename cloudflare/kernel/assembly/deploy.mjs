@@ -36,10 +36,11 @@ export function accountApi(credentials) {
 /**
  * 0089: CPU limit of the script that hosts tenant objects, the only stop for a synchronous runaway
  * Reducer (workerd cannot interrupt same-isolate JS). Pinned so it changes only with a ruling.
- * 0022 §5b's 5000, after X10/X10b (#471, #492) bounded the migration alarm and P03 transfer
- * (re-measured on dev 2026-11-18, see 0089).
+ * Revised by the lead 2026-11-20 (0089 "Revision", #552): 30000, not 5000. The platform budget is per
+ * invocation, and calls that queue at a saturated tenant are delivered as ONE invocation, so 5000 bounded
+ * a busy tenant's backlog (a burst of 5-7 concurrent cold loads reset -04 on dev), not one event.
  */
-export const TENANT_CPU_LIMIT_MS = 5000;
+export const TENANT_CPU_LIMIT_MS = 30000;
 export function assertTenantCpuLimit(config) {
   if (config.limits?.cpu_ms !== TENANT_CPU_LIMIT_MS) throw new Error(`tenant runtime limits.cpu_ms must be ${TENANT_CPU_LIMIT_MS} (0089), found ${config.limits?.cpu_ms}`);
   return config;

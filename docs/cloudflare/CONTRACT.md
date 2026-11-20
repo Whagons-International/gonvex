@@ -1798,7 +1798,7 @@ new note and waits for the lead.
 | 0085 | Owned-dispatch and T-retirement result consumers | conditional native exact-data/disposal consumers only; actual assembly/quiescence plan precedes wiring and serving activation remains separate | K22 |
 | 0086 | Private authority publication and issuer finalization | bounded known/UNKNOWN publication before dispatch; explicit durable revocation/witness is distinct from wake and remote quiescence | K22 |
 | 0087 | Private rebuild refresh and retained initials | one-use durable refresh and exact semantic carry; lifecycle closure is distinct from collection and delivery facts | K22 |
-| 0089 | Runaway Reducer on the assembled runtime | adapt accepted by lead 2026-11-18, conditional on measurement; met after X10/X10b (worst legitimate event 1,836 ms on dev), runtime `cpu_ms` 5000, pinned | X09, K22, K02, X10 |
+| 0089 | Runaway Reducer on the assembled runtime | adapt accepted by lead 2026-11-18, conditional on measurement; met after X10/X10b (worst legitimate event 1,836 ms on dev). Revised by lead 2026-11-20 (#552): runtime `cpu_ms` 30000, pinned, because calls queued at a saturated tenant share one invocation budget; the `errors.spin` conformance timing regresses again | X09, K22, K02, X10 |
 
 Nothing from `cloudflare/integration` reaches Gonvex `staging` or the app repository before cutover
 (`AGENT_BRIEF.md`). G1 cannot pass until A01 lands.

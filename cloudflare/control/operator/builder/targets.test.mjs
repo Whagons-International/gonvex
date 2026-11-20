@@ -10,7 +10,7 @@ test('app deployment replaces only runtime and Actions; stable socket owner is n
  const runtime=sent[1].config;assert.deepEqual(Object.keys(runtime.exports),['AssemblyTenant']);assert.equal(runtime.durable_objects.code_update_strategy.mode,'immediate');
  assert.equal(runtime.durable_objects.bindings.find(b=>b.name==='GATEWAY').script_name,'gonvex-cf-dev-topology');
  assert.equal(sent[0].config.durable_objects.bindings.find(b=>b.name==='TENANT').script_name,'gonvex-cf-dev-topology-runtime');
- assert.equal(runtime.limits.cpu_ms,5000); // 0089: pinned tenant-script CPU limit (stops a runaway Reducer).
+ assert.equal(runtime.limits.cpu_ms,30000); // 0089 (revised 2026-11-20, #552): pinned tenant-script CPU limit (stops a runaway Reducer).
  assert.equal(runtime.vars.GONVEX_TOPOLOGY_TRANSITION,'0'); // --keep-vars must clear a retained bridge guard.
 }));
 test('app deployment records the release source label, never the committed development default',()=>owned(async dir=>{
