@@ -136,12 +136,16 @@ deployment after the calibration run (rollout step 1).
     `backlogUnits() + cost <= budget`. The rest come back as one reply,
     `{"type":"gonvex.busy","ids":[...],"retryAfterMs"}`, with `retryAfterMs` between 50 and 1,000.
   - **Outlet pressure:** a holder that is paused, deferred (`behind`) or `backlogged` refuses all of a frame's opens.
+  - **Idle tenant:** with nothing queued, an open is always admitted, however heavy its path's estimate (#557 review
+    R1). Otherwise one heavy path would wait the whole hold on an idle tenant.
+  - **Recovery allowance:** a gateway resend carries `busyRetry`. The tenant gives it no recovery-barrier allowance
+    (`retryBarriers`), so one client frame still requests at most one recovery attempt (#557 review R2).
   - **Visibility:** a `tenant.busy` span, and a `busyRefusals` counter.
 - **Gateway (`kernel/session/session.ts` `forwardOpens`).**
   - Every replica open/openMany dispatch carries `acceptsBusy`, which is harmless while the tenant flag is off. The
     busy reply is stripped in `forward` and never reaches the client.
   - The refused subset is resent after `retryAfterMs` (jittered ±25%, through the session's timers) as an `openMany`
-    with its original initial-request refs, aligned by index as the engine matches them.
+    with its original initial-request refs, aligned by index as the engine matches them, and marked `busyRetry`.
   - After `BUSY_MAX_ATTEMPTS` (3), or at `BUSY_MAX_WAIT_MS` (**2,000 ms after the first refusal**, the lead's cap),
     whichever comes first, the gateway sends without `acceptsBusy`, and the tenant queues them. No retry wait runs
     past that deadline. This is the aging lane and the max-wait fallthrough in one rule: nothing waits for good.

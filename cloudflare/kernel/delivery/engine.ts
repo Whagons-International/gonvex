@@ -314,7 +314,10 @@ export class ReplicaDeliveryEngine {
     const connection = this.connection(socket, session);
     if (!connection) return [];
     const internalRecovery = (socket as SocketView & { queryRecovery?: boolean }).queryRecovery === true;
-    if (!internalRecovery) this.retryBarriers(connection.host);
+    // #557 review R2: a gateway's busy resend (`busyRetry`) is timer-driven, not a fresh external client event, so it
+    // gets no recovery-barrier allowance (`retryBarriers`: exactly one per client frame).
+    const busyRetry = (socket as SocketView & { busyRetry?: boolean }).busyRetry === true;
+    if (!internalRecovery && !busyRetry) this.retryBarriers(connection.host);
     if (frame.type === "replica.close") {
       this.removePending(connection, frame.id);
       this.remove(connection, frame.id);
@@ -338,7 +341,8 @@ export class ReplicaDeliveryEngine {
     for (const [openIndex,raw] of opens.entries()) {
       if (busyOk) {
         const units = this.openUnits(raw.path);
-        if (holderFull || backlog + units > budget) { busy.push(raw.id); continue; }
+        // #557 review R1: with nothing queued an open is always admitted, however heavy its path's estimate.
+        if (holderFull || (backlog > 0 && backlog + units > budget)) { busy.push(raw.id); continue; }
         backlog += units;
       }
       const candidate=socket.initialRequests?.[openIndex];

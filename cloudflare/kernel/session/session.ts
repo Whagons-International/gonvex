@@ -689,7 +689,8 @@ export class Session {
     for (let attempt = 0; ; attempt++) {
       const acceptsBusy = attempt < BUSY_MAX_ATTEMPTS && (deadline === undefined || this.now() < deadline);
       let busy: BusyReply | undefined;
-      const view = { ...this.view(), initialRequests: refs, ...(acceptsBusy ? { acceptsBusy: true } : {}) } as SocketView;
+      // A resend (attempt > 0) is marked: the tenant gives it no fresh-event allowance for recovery barriers (#557 R2).
+      const view = { ...this.view(), initialRequests: refs, ...(acceptsBusy ? { acceptsBusy: true } : {}), ...(attempt > 0 ? { busyRetry: true } : {}) } as SocketView;
       await this.forward(this.ports.tenants.dispatch(view, frame), refs, acceptsBusy ? (reply) => { busy = reply; } : undefined);
       if (!busy || this.closed) return;
       const held = new Set((busy as BusyReply).ids);
