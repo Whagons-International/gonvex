@@ -237,3 +237,19 @@ export interface ReplicaReceipt {
 export const BATCH_TICK_MS = 50;
 export const BATCH_IDLE_MS = 1000;
 export const BATCH_MAX_BYTES = 512 << 10;
+
+/**
+ * #554 (tenant flag `GONVEX_TENANT_BACKLOG_UNITS`, default off): the internal reply a tenant gives a gateway that
+ * advertised `acceptsBusy` (a `SocketView` field) for the opens it did not queue because its backlog was full. Never
+ * sent to a client: the gateway holds those opens and resends them (`Session`), without `acceptsBusy` once they waited
+ * `BUSY_MAX_ATTEMPTS` times or `BUSY_MAX_WAIT_MS`, when the tenant must queue them.
+ */
+export const BUSY_FRAME_TYPE = "gonvex.busy";
+export interface BusyReply { readonly type: typeof BUSY_FRAME_TYPE; readonly ids: readonly string[]; readonly retryAfterMs: number }
+export const BUSY_MAX_ATTEMPTS = 3;
+export const BUSY_MAX_WAIT_MS = 10_000;
+/** The busy reply in `replies`, if any (it is the only frame of that type a tenant ever returns). */
+export function busyReply(replies: readonly string[]): BusyReply | undefined {
+  for (const text of replies) if (text.startsWith(`{"type":"${BUSY_FRAME_TYPE}"`)) return JSON.parse(text) as BusyReply;
+  return undefined;
+}

@@ -59,6 +59,8 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
       delivered: () => this.dataChanged(tenantId),
       get live() { return owner.liveQueries(); },
       activity: () => owner.keepAlive.touch(),
+      // #554 (default off): the backlog budget in work units; a gateway that advertised `acceptsBusy` holds the rest.
+      backlogUnits: Number((env as { GONVEX_TENANT_BACKLOG_UNITS?: string }).GONVEX_TENANT_BACKLOG_UNITS ?? 0) || 0,
       // X17m: the attach-time member check (one indexed read per attach).
       currentMember: (memberId) => {
         const row = ctx.storage.sql.exec<MemberRow & Record<string, SqlStorageValue>>(MEMBER_ACCESS_SQL, memberId).toArray()[0];

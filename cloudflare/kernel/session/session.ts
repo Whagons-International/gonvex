@@ -30,7 +30,7 @@ import { SocketDelivery, type TrackedReplicas } from "../delivery/socket";
 import { recoveryOf, type RecoverySocketView, type ScopedSocketWork } from "../delivery/recovery";
 import { assertInitialState } from "./initial-state";
 import { InitialAdmission } from "./initial-admission";
-import { validRecoveryInitialRefs, sameInitialRef, initialCompletion, validInitialCompletions, validInitialRef, type InitialCompletion, type InitialCompletionStatus, type InitialRequestRef, type ReplicaDelivery, type SocketOp, type SocketWork } from "../delivery/protocol";
+import { validRecoveryInitialRefs, sameInitialRef, initialCompletion, validInitialCompletions, validInitialRef, type InitialCompletion, type InitialCompletionStatus, type InitialRequestRef, type ReplicaDelivery, type SocketOp, type SocketWork, BUSY_MAX_ATTEMPTS, BUSY_MAX_WAIT_MS, busyReply, type BusyReply } from "../delivery/protocol";
 import { ADMISSION_MAX_AGE_MS } from "../public/config";
 import { UNKNOWN_ADDRESS } from "../public/address";
 import { ADMISSION_ERROR, frameCost, publicAdmissionErrors, publicLimitErrors, runsTenantCode } from "../public/frames";
@@ -622,7 +622,7 @@ export class Session {
           this.forgetInitials("replica", frame.id, initial.generation);
           this.delivery.opening(frame.id, frame.path);
           if (this.closed) return;
-          return void await this.forward(this.ports.tenants.dispatch({ ...this.view(), initialRequests: [initial] }, frame), initial);
+          return this.forwardOpens(frame, [initial]);
         }
         return this.send(frames.replicaError(frame.id, frame.path, UNAUTHENTICATED.replica));
       case "replica.openMany":
@@ -642,7 +642,7 @@ export class Session {
           };
           if (this.hooks.batchPersists) this.hooks.batchPersists(register); else register();
           if (this.closed || (frame.opens.length && !opens.length)) return;
-          return void await this.forward(this.ports.tenants.dispatch({ ...this.view(), initialRequests: initials }, { ...frame, opens }), initials);
+          return this.forwardOpens({ ...frame, opens }, initials);
         }
         for (const open of frame.opens) this.send(frames.replicaError(open.id, open.path, UNAUTHENTICATED.replica));
         return;
@@ -673,7 +673,38 @@ export class Session {
     }
   }
 
-  private async forward(reply: Promise<string[]>, initial?: InitialRequestRef | readonly InitialRequestRef[]): Promise<string[]> {
+  /**
+   * #554: replica opens go to the tenant advertising `acceptsBusy`. A tenant whose backlog is full (its flag on) answers
+   * the opens it did not queue with one busy reply; they wait here, in this socket's ordered queue (so its later frames
+   * keep their order behind them), and go again after the tenant's `retryAfterMs` (jittered) with the same initial
+   * refs. After `BUSY_MAX_ATTEMPTS` or `BUSY_MAX_WAIT_MS` they go without `acceptsBusy`, and the tenant queues them:
+   * nothing waits for good, and the client sees no error, only a later snapshot. A tenant with the flag off never
+   * answers busy, so this is one dispatch as before.
+   */
+  private async forwardOpens(first: Extract<ClientFrame, { type: "replica.open" | "replica.openMany" }>, initials: readonly InitialRequestRef[]): Promise<void> {
+    let frame: Extract<ClientFrame, { type: "replica.open" | "replica.openMany" }> = first, refs = initials;
+    const started = this.now(), epoch = this.record.subscriptionEpoch ?? 0;
+    for (let attempt = 0; ; attempt++) {
+      const acceptsBusy = attempt < BUSY_MAX_ATTEMPTS && this.now() - started < BUSY_MAX_WAIT_MS;
+      let busy: BusyReply | undefined;
+      const view = { ...this.view(), initialRequests: refs, ...(acceptsBusy ? { acceptsBusy: true } : {}) } as SocketView;
+      await this.forward(this.ports.tenants.dispatch(view, frame), refs, acceptsBusy ? (reply) => { busy = reply; } : undefined);
+      if (!busy || this.closed) return;
+      const held = new Set((busy as BusyReply).ids);
+      const list = frame.type === "replica.open" ? [frame] : frame.opens;
+      const opens: typeof list = [], kept: InitialRequestRef[] = [];
+      list.forEach((open, index) => { if (held.has(open.id)) { opens.push(open); if (refs[index]) kept.push(refs[index]!); } });
+      if (!opens.length) return;
+      span("gateway.busy", { held: opens.length, attempt, retryAfterMs: (busy as BusyReply).retryAfterMs });
+      await new Promise<void>((resolve) => { this.timers.later(Math.max(10, Math.round((busy as BusyReply).retryAfterMs * (0.75 + Math.random() / 2))), resolve); });
+      // A subscription reset meanwhile (re-auth, discard) cleared these opens with every other; the client reopens.
+      if (this.closed || (this.record.subscriptionEpoch ?? 0) !== epoch || !this.record.tenant) return;
+      frame = { type: "replica.openMany", opens };
+      refs = kept;
+    }
+  }
+
+  private async forward(reply: Promise<string[]>, initial?: InitialRequestRef | readonly InitialRequestRef[], busy?: (reply: BusyReply) => void): Promise<string[]> {
     let out: string[];
     try {
       out = await reply;
@@ -681,6 +712,11 @@ export class Session {
       console.error("session: port call failed", error);
       this.close(CLOSE.failed);
       return [];
+    }
+    if (busy) {
+      // #554: the tenant's busy reply is for this gateway only, never for the client.
+      const held = busyReply(out);
+      if (held) { busy(held); out = out.filter((text) => busyReply([text]) === undefined); }
     }
     const origins = initial ? (Array.isArray(initial) ? [...initial] : [initial as InitialRequestRef]) : [];
     // X15: an openMany reply completes many initials in this one synchronous loop; one recovery write covers them.
