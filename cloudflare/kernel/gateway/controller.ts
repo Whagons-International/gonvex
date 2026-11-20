@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   COOLDOWN_MS, LEASE_MS, MAX_GATEWAYS_PER_CELL, MAX_PENDING, MAX_SOCKETS, SCALE_IN_MS, SCALE_IN_GRACE_MS, SCALE_IN_CHECK_MS, PRESSURE_DRAIN_START_MS,
   controllerCell, pressured, quiet, withDeadline, checkedCapacitySample, completedWindow, windowPressured, freshWindow, WINDOW_FIELDS,
-  type CapacitySample, type DirectAdmission, type GatewayAssignment, type GatewayCapacityRpc,
+  type CapacitySample, type DirectAdmission, type DirectRefusal, type GatewayAssignment, type GatewayCapacityRpc,
 } from "./placement";
 import { setSpanTiming, span, spanTimingFromEnv } from "../delivery/spans";
 
@@ -210,21 +210,35 @@ export class GatewayControllerObject extends DurableObject<ControllerEnv> {
    * and every unexpired lease, as `acquire` counts them. Otherwise null: the router falls back to `acquire`, which
    * balances, probes and allocates. Saved unconfirmed like any lease (see `save`). Idempotent per connection.
    */
-  admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | null> {
+  admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | DirectRefusal | null> {
     const queued = Date.now();
     return this.serial(async () => {
       const now = Date.now(), cell = this.cell();
+      // #538 re-review: every refusal names its reason (span and answer), so stale hints can be told from systematic ones.
+      // Mixed versions: an older holder treats any truthy answer as a grant, so the reason goes back only on request.
+      const refuse = (reason: DirectRefusal["refused"], detail: Record<string, number> = {}): DirectRefusal | null => {
+        span("controller.admitDirect", { refused: reason, ...detail, totalMs: Date.now() - queued });
+        return request?.wantReason === true ? { refused: reason } : null;
+      };
       if (!request || request.v !== 1 || request.cell !== cell || typeof request.connectionId !== "string" || request.connectionId.length > 100
-        || controllerCell(request.connectionId) !== cell || !Number.isSafeInteger(sockets) || sockets < 0) return null;
+        || controllerCell(request.connectionId) !== cell || !Number.isSafeInteger(sockets) || sockets < 0) return refuse("invalid");
       this.prune(now);
       const prior = this.state.leases.find(l => l.assignment.connectionId === request.connectionId);
-      if (prior) return prior.claimed || prior.assignment.gateway !== request.gateway || prior.assignment.epoch !== request.epoch ? null : (prior.claimed = true, prior.assignment);
-      if (this.state.leases.length >= MAX_PENDING) return null;
+      if (prior) {
+        if (prior.claimed || prior.assignment.gateway !== request.gateway || prior.assignment.epoch !== request.epoch) return refuse("prior");
+        prior.claimed = true;
+        return prior.assignment;
+      }
+      if (this.state.leases.length >= MAX_PENDING) return refuse("pending-cap", { leases: this.state.leases.length });
       const slot = this.state.slots.find(s => s.name === request.gateway && s.epoch === request.epoch && s.mode === "active");
-      if (!slot) return null;
+      if (!slot) {
+        const named = this.state.slots.find(s => s.name === request.gateway);
+        return refuse("slot", { known: named ? 1 : 0, epochMatch: named?.epoch === request.epoch ? 1 : 0, active: named?.mode === "active" ? 1 : 0 });
+      }
       const sample = slot.sample;
-      if (sample && sample.epoch === slot.epoch && now - sample.at <= FRESH_SAMPLE_MS && pressured(sample)) return null;
-      if (Math.max(sockets, sample?.epoch === slot.epoch ? sample.sockets : 0) + this.pending(slot) >= MAX_SOCKETS) return null;
+      if (sample && sample.epoch === slot.epoch && now - sample.at <= FRESH_SAMPLE_MS && pressured(sample)) return refuse("pressured");
+      const counted = Math.max(sockets, sample?.epoch === slot.epoch ? sample.sockets : 0) + this.pending(slot);
+      if (counted >= MAX_SOCKETS) return refuse("full", { counted });
       const assignment: GatewayAssignment = { v: 1, cell, gateway: slot.name, epoch: slot.epoch, token: crypto.randomUUID(), connectionId: request.connectionId, expiresAt: now + LEASE_MS };
       this.state.leases.push({ assignment, claimed: true });
       const saved = Date.now();

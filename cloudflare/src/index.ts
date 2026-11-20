@@ -23,7 +23,7 @@ export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/") return Response.json({ ok: true, service: "gonvex-cloudflare" });
-    if (url.pathname === "/ws") return handleWebSocketUpgrade(request, env);
+    if (url.pathname === "/ws") return handleWebSocketUpgrade(request, env, ctx);
     const transfer = await handleTenantTransfer(request, env);
     if (transfer) return transfer;
     const fixture = await fixtureControl(request, env);

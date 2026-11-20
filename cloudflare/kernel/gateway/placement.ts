@@ -35,7 +35,14 @@ export interface GatewayAssignment {
   expiresAt: number;
 }
 /** X17g: what the router asks a gateway to admit directly (no token: the gateway's `admitDirect` creates the lease). */
-export interface DirectAdmission { v: 1; cell: number; gateway: string; epoch: number; connectionId: string }
+export interface DirectAdmission {
+  v: 1; cell: number; gateway: string; epoch: number; connectionId: string;
+  /** #538 lead check: only callers that send this get `{ refused }`; older holders keep getting null on refusal. */
+  wantReason?: true;
+}
+/** #538 re-review: why `admitDirect` did not grant a lease (an older controller answers null). */
+export interface DirectRefusal { refused: "invalid" | "prior" | "pending-cap" | "slot" | "pressured" | "full" }
+export function isDirectRefusal(value: unknown): value is DirectRefusal { return !!value && typeof (value as DirectRefusal).refused === "string"; }
 export interface GatewayPlacement {
   acquire(connectionId: string): Promise<GatewayAssignment>;
   release(assignment: GatewayAssignment): Promise<void>;
@@ -81,7 +88,7 @@ export interface ControllerRpc {
   release(assignment: GatewayAssignment): Promise<void>;
   claim(assignment: GatewayAssignment): Promise<boolean>;
   /** X17g: a claimed lease on `gateway` at `epoch` for `connectionId`, or null when that holder must not take it. */
-  admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | null>;
+  admitDirect(request: DirectAdmission, sockets: number): Promise<GatewayAssignment | DirectRefusal | null>;
   /** X17g follow-up: removes a lease `admitDirect` granted for `request` after the holder had given up on it. */
   cancelDirect(request: DirectAdmission): Promise<boolean>;
   drainReady(gateway: string, epoch: number, replacement: string): Promise<boolean>;
