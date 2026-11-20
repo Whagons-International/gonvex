@@ -15,6 +15,6 @@ test('X13g the ActionHost is an Actions Worker class with its limits and binding
   assert.deepEqual(actions.r2_buckets.map(b=>b.binding),['FILES']);
   assert.deepEqual(actions.services.map(b=>b.binding),['SANDBOX']);
   assert.deepEqual(runtime.durable_objects.bindings.find(b=>b.name==='ACTION_HOST'),{name:'ACTION_HOST',class_name:'ActionHost',script_name:'gonvex-cf-dev-x13g-actions'});
-  assert.equal(runtime.limits.cpu_ms,5000,'the tenant keeps its own limit; Actions do not run under it');
+  assert.equal(runtime.limits.cpu_ms,30000,'the tenant keeps its own limit; Actions do not run under it');
  }finally{await rm(dir,{recursive:true,force:true});}
 });

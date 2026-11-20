@@ -1,6 +1,7 @@
 # 0089: a runaway Reducer on the assembled kernel (`reducer-errors`, `errors.spin`)
 
 Raised by X09 on 2026-11-17. **Status: adapt accepted by lead 2026-11-18 (conditional on measurement).**
+**Revised by lead 2026-11-20: the runtime `cpu_ms` is 30000 again** (see "Revision 2026-11-20" at the end; #552).
 **Condition met 2026-11-18 (X10c): the runtime `cpu_ms` is 5000**, pinned by the same deploy guard. The first
 measurement failed it (migration alarms up to 10.6 s, imports up to 5.0 s; below). After X10 (#471) and X10b (#492),
 re-measured on dev on a fresh import of the largest copy, the worst legitimate tenant event is 1,836 ms (see
@@ -130,3 +131,38 @@ Adapt (accepted by lead 2026-11-18, conditional on measurement):
    assertion and its 15 s wait.
 2. The condition is not met yet: legitimate migration alarms reach 10.6 s of CPU. The limit stays 30000 until
    the "Path to 5000" work is done and the measurement is repeated.
+
+## Revision 2026-11-20 (lead decision): `cpu_ms` 30000
+
+**Change.** `TENANT_CPU_LIMIT_MS` (deploy guard) and the runtime script's `limits.cpu_ms` go from 5000 to **30000**,
+the platform default. The deploy guard still pins the value, so it changes only with a ruling.
+
+**Reason** (#552, `docs/cloudflare/verification/04-cpu-overrun-batched-invocations.md`). The 3.5 s-per-event
+measurement above assumed one invocation per call. On the platform, calls that queue at a busy Durable Object are
+delivered as **one invocation with one `cpu_ms` budget**, and while the object stays saturated that invocation keeps
+absorbing calls. This was measured on a throwaway Worker:
+- 40 concurrent calls reset at `cpu_ms` 1000.
+- The same calls with idle gaps did not, and neither did 10 s of steady load that never saturates the object.
+
+So 5000 bounded the backlog of a saturated tenant, not one event. On dev on 2026-11-20 at 14:30:41Z, a burst of
+concurrent cold loads after a deploy reset `devcopy-stg1117-04`: one invocation recorded 7,500 ms CPU over 7,811 ms
+wall. Locally, a cold -04 load costs 0.7–1 s of tenant CPU, so 5–7 concurrent cold loads reach 5 s. Each such reset
+fails every call in the batch, drops the tenant's queued delivery output and forces full holder recovery. Before
+#550 it could also wedge the isolate's deliveries. Dev logged CPU-limit resets on 5 tenant objects over Nov 17–20.
+
+**Accepted costs** (they reverse what 5000 bought; see "What remains different from Rust"):
+- A runaway Reducer (`errors.spin`) holds its tenant for up to about 30 s of CPU before the reset, measured at
+  37.6–44.9 s of wall time above. It used to be about 5–8 s. The tenant's other calls wait or fail transient for
+  that long; sockets stay in their gateways.
+- **Conformance:** the `reducer-errors` step "transient: invocation deadline" again misses its 15 s harness wait on
+  Cloudflare, as it did before X10c. The caller mapping (`recordOverrun`) and the error frame are unchanged. Only
+  the timing regresses.
+- The X10/X10b chunking stays: migration alarms and P03 transfer pages still stop at their CPU budgets, which keeps
+  every legitimate single event far under the limit.
+
+**Follow-ups:**
+- Bound the backlog a tenant accepts and answer a retryable "busy" (design note, next).
+- Cut per-load CPU (X17, F01).
+
+With both in place, a lower limit can be reconsidered with a new measurement of **batched** invocations under burst
+load, not of single events.

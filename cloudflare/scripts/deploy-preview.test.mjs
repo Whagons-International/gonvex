@@ -39,7 +39,7 @@ test("composes every development service, bucket, workflow and queue under one i
     assert.equal(configs.kernel.config.limits.cpu_ms, 30000);
     // 0089: tenant objects live in the runtime script; its CPU limit is what stops `errors.spin`.
     assert.equal(configs.runtime.config.limits.cpu_ms, TENANT_CPU_LIMIT_MS);
-    assert.equal(TENANT_CPU_LIMIT_MS, 5000);
+    assert.equal(TENANT_CPU_LIMIT_MS, 30000); // 0089, revised 2026-11-20 (#552)
     // Publication must reach the newly serving Worker through public ingress,
     // including after the builder deploys from this same source configuration.
     for (const kind of ['kernel', 'bootstrap']) {
@@ -56,8 +56,8 @@ test("composes every development service, bucket, workflow and queue under one i
 });
 
 test("refuses a tenant runtime CPU limit other than the pinned value (0089)", () => {
-  for (const cpu_ms of [30000, 300000, undefined]) {
-    assert.throws(() => assertTenantCpuLimit({ limits: cpu_ms === undefined ? undefined : { cpu_ms } }), /limits\.cpu_ms must be 5000/);
+  for (const cpu_ms of [5000, 300000, undefined]) {
+    assert.throws(() => assertTenantCpuLimit({ limits: cpu_ms === undefined ? undefined : { cpu_ms } }), /limits\.cpu_ms must be 30000/);
   }
-  assert.doesNotThrow(() => assertTenantCpuLimit({ limits: { cpu_ms: 5000 } }));
+  assert.doesNotThrow(() => assertTenantCpuLimit({ limits: { cpu_ms: 30000 } }));
 });

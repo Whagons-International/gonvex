@@ -104,10 +104,10 @@
       "script_name": "gonvex-cf-dev-k22-actions"
     }
   ],
-  // 0089: pinned by deploy.mjs TENANT_CPU_LIMIT_MS. 0022 §5b's 5000 since X10/X10b (#471, #492):
-  // re-measured on dev 2026-11-18, every legitimate tenant event is under 3.5 s CPU (see 0089).
+  // 0089: pinned by deploy.mjs TENANT_CPU_LIMIT_MS. 30000 since the 0089 revision of 2026-11-20 (#552): calls
+  // queued at a saturated tenant share one invocation's budget, so 5000 reset busy tenants (-04 on dev).
   "limits": {
-    "cpu_ms": 5000
+    "cpu_ms": 30000
   },
   "vars": {
     "GONVEX_RUNTIME_VERSION": "development",
