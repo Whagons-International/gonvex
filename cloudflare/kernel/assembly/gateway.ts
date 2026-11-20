@@ -10,6 +10,7 @@ import type { ReplicaDelivery } from "../delivery/protocol";
 import { telemetrySubject } from "../telemetry/limiter";
 import { fixtureSpans } from "../delivery/spans";
 import { admittedMember, leasesFor } from "../session/identity-lease";
+import { controlReadKey, controlReadsFor, controlWrite } from "../session/control-read-cache";
 
 type Control = Pick<SessionControlObject,
   "sessionProject" | "sessionIdentity" | "sessionAuthenticate" | "sessionImpersonation" |
@@ -23,10 +24,12 @@ export interface AssemblyGatewayEnv extends GatewayEnv, PublicGuardEnv {
   GONVEX_ASSEMBLY_FIXTURE_KEY?: string;
 }
 
+
 export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
   const control = () => rpc<Control>(env.CONTROL, "control");
   const tenant = (id: string) => rpc<Required<TenantRpc>>(env.TENANT, id);
   const leases = leasesFor(env);
+  const controlReads = controlReadsFor(env);
   return {
     control: {
       project: (id) => control().sessionProject(id),
@@ -58,12 +61,35 @@ export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
       resolvePublicTenant: (project, id) => control().sessionPublicTenant(project, id),
       revalidate: (items) => control().sessionRevalidate(items),
       dispatch: async (socket, frame) => {
-        if (frame.type === "query.subscribe") await control().watch(socket.connection.projectId, "GATEWAY", env.GATEWAY.idFromName(socket.host).toString());
-        const write = frame.type === "action.call" || frame.type === "reducer.call";
+        // X17l: the Control reads a cold load repeats (kernel/session/control-read-cache.ts).
+        const project = socket.connection.projectId;
+        const key = controlReadKey(socket, frame);
+        let cached = key ? controlReads.get(key) : undefined;
+        let watched = false;
+        if (cached && "id" in frame) {
+          if (frame.type === "query.subscribe" && !controlReads.watchedRecently(project)) {
+            await control().watch(project, "GATEWAY", env.GATEWAY.idFromName(socket.host).toString());
+            controlReads.noteWatched(project);
+            watched = true;
+            // #542 re-review: an invalidation during the awaited watch drops the entry; read live instead.
+            cached = controlReads.get(key!);
+          }
+          if (cached) return [JSON.stringify({ type: "query.result", id: frame.id, path: (frame as { path: string }).path, reason: "initial", result: cached.result })];
+        }
+        if (frame.type === "query.subscribe" && !watched) { await control().watch(project, "GATEWAY", env.GATEWAY.idFromName(socket.host).toString()); controlReads.noteWatched(project); }
+        const write = controlWrite(frame);
+        if (write) controlReads.invalidate(project);
+        const generation = controlReads.generation(project); // #542 review: a read across an invalidation is not stored
         const replies = await control().sessionDispatch(socket, frame);
-        // X17j: a Control write this gateway forwarded (logout, refresh, ...) drops the project's leases here at once;
-        // other gateways drop theirs on Control's notice (one Control alarm later).
-        if (write) leases.invalidate(socket.connection.projectId);
+        // X17j + X17l: a Control write this gateway forwarded (logout, refresh, ...) drops the project's leases and
+        // cached reads here at once; other gateways drop theirs on Control's notice (one Control alarm later).
+        if (write) { leases.invalidate(project); controlReads.invalidate(project); }
+        if (key && replies.length === 1) {
+          try {
+            const reply = JSON.parse(replies[0]!) as { type?: string; result?: unknown };
+            if (reply.type === "query.result") controlReads.put(key, project, reply.result, generation);
+          } catch { /* not cached */ }
+        }
         return replies;
       },
       authenticateService: (token, project, id) => control().serviceAuthenticate(token, project, id),
@@ -166,6 +192,9 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
       await control.watch(project, "GATEWAY", this.ctx.id.toString());
       // A Control restart loses its in-memory watcher set. Refresh also covers
       // changes in the interval before this gateway registered again.
+      // X17j + X17l (#542 re-review): leases and cached reads go first, so the refresh that recovers lost notices reads
+      // live and no lease outlives a revocation whose notice the restart lost.
+      if (restarted) { leasesFor(this.env).invalidate(project); controlReadsFor(this.env).invalidate(project); }
       if (restarted) this.ctx.waitUntil(Promise.all([...this.host.sessions.values()].map((session) => session.controlChanged(project))));
     }
   }
@@ -177,6 +206,8 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
   async controlChanged(projectId: string): Promise<void> {
     // X17j: a revocation (session, account, membership) reaches the gateway as this notice: no lease outlives it.
     leasesFor(this.env).invalidate(projectId);
+    // X17l: cached Control reads of the project go before the subscription refresh reads live.
+    controlReadsFor(this.env).invalidate(projectId);
     this.ctx.waitUntil(refreshSessions([...this.host.sessions.values()], projectId, "control-change"));
   }
   async presenceChanged(projectId: string): Promise<void> {

@@ -814,6 +814,7 @@ const putGoogle: Handler = async (op, request, _url, [project]) => {
     op.ctx.sql.run("INSERT INTO gonvex_auth_redirect_uris(project_id,provider,redirect_uri) VALUES($1,'google',$2) ON CONFLICT DO NOTHING", project, redirect);
     op.ctx.sql.run(`UPDATE gonvex_runtime_projects SET auth_mode=CASE WHEN auth_mode IN('firebase','external-oidc') THEN 'hybrid' ELSE 'gonvex-native' END,updated_at=${NOW} WHERE id=$1`, project);
   });
+  op.controlChanged(project!); // X17l: control.auth.publicSettings reads the providers and auth mode
   return json(googleView(op, project!));
 };
 
@@ -831,6 +832,7 @@ const deleteGoogle: Handler = async (op, request, url, [project]) => {
     }
     op.ctx.sql.tx(() => op.ctx.sql.run("DELETE FROM gonvex_auth_redirect_uris WHERE project_id=$1 AND provider='google' AND redirect_uri=$2", project, redirect));
   }
+  op.controlChanged(project!); // X17l: control.auth.publicSettings
   return json({ ok: true });
 };
 
@@ -1207,16 +1209,16 @@ const e2eMember: Handler = async (op, request) => {
     return error(400, "role and permissions apply to a tenant Member; omit accountOnly");
   }
   try {
-    return json(
-      await provision(op.ctx, {
-        projectId,
-        email,
-        password: typeof p.password === "string" ? p.password : "",
-        ...(accountOnly ? { accountOnly } : { tenantId }),
-        ...(typeof p.name === "string" ? { name: p.name } : {}),
-        ...overrides,
-      }),
-    );
+    const provisioned = await provision(op.ctx, {
+      projectId,
+      email,
+      password: typeof p.password === "string" ? p.password : "",
+      ...(accountOnly ? { accountOnly } : { tenantId }),
+      ...(typeof p.name === "string" ? { name: p.name } : {}),
+      ...overrides,
+    });
+    op.controlChanged(projectId); // X17l: control.tenants.mine reads account_tenant_index
+    return json(provisioned);
   } catch (cause) {
     const message = (cause as Error).message;
     return message === "test actor account not found" ? error(404, message) : error(422, message);
