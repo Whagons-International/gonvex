@@ -161,6 +161,8 @@ function random(seed: number): () => number {
 interface Harness {
   registry: VisibilityRegistry;
   commit(statements: Array<[string, unknown[]]>): Promise<number>;
+  /** The same through the module path (`session.query`, module SQL admission), as a Reducer's ctx.db SQL runs. */
+  commitModule(statements: Array<[string, unknown[]]>): Promise<number>;
   read<T>(body: (session: StorageSession) => T): Promise<T>;
   /** Direct SQL outside any invocation (log surgery for the R05 probe). */
   raw(text: string, ...binds: unknown[]): unknown[][];
@@ -192,6 +194,13 @@ async function withTenant<T>(body: (harness: Harness) => Promise<T>, extra: read
       async commit(statements) {
         const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (session) => {
           for (const [text, parameters] of statements) session.run(text, parameters);
+        }, context);
+        if (!result.ok) throw result.error;
+        return result.notice?.revision ?? 0;
+      },
+      async commitModule(statements) {
+        const result = await invokeCaptured(storage, "reducer", { commandId: `c${++commands}` }, async (session) => {
+          for (const [text, parameters] of statements) await session.query(text, parameters);
         }, context);
         if (!result.ok) throw result.error;
         return result.notice?.revision ?? 0;
@@ -548,6 +557,52 @@ describe("principal cache roll-forward (X17p)", () => {
         expect(cachedSet(harness, session, plan, "m3", "claimedSpots")).toEqual(["s4"]);
       });
     }, DECLARED_CASCADE);
+  });
+
+  it("#555 module path (session.query): S marks a REPLACE, a plain write does not, and the cache stays exact", async () => {
+    const plan = spotsPlan();
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      await harness.commitModule([[`INSERT INTO tasks VALUES (100, 's7', 'w2', 'm1', NULL, NULL)`, []]]);
+      expect(harness.marked(), "plain module write").toBe(false);
+      await harness.read((session) => checkMembers(session, harness, plan, "before"));
+      await harness.commitModule([[`REPLACE INTO tasks VALUES (100, 's7', 'w2', 'mx', NULL, NULL)`, []]]);
+      expect(harness.marked(), "S through session.query").toBe(true);
+      await harness.read((session) => {
+        checkMembers(session, harness, plan, "after");
+        expect(cachedSet(harness, session, plan, "m1", "createdTaskSpots")).toEqual([]);
+      });
+    });
+  });
+
+  it("#555 module path (session.query): under H a plain write is marked and the replaced claim leaves its member", async () => {
+    const plan = spotsPlan(true);
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      await harness.commitModule([[`INSERT INTO dclaims VALUES ('c1', 'm1', 's4')`, []]]);
+      await harness.read((session) => checkMembers(session, harness, plan, "before"));
+      await harness.commitModule([[`INSERT INTO dclaims VALUES ('c3', 'm3', 's4')`, []]]);
+      expect(harness.marked(), "H through session.query").toBe(true);
+      await harness.read((session) => {
+        checkMembers(session, harness, plan, "after");
+        expect(cachedSet(harness, session, plan, "m1", "declaredSpots")).toEqual([]);
+      });
+    }, DECLARED);
+  });
+
+  it("#555 N5: under H, a write that stages no captured change logs no marker and makes no commit", async () => {
+    await withTenant(async (harness) => {
+      await harness.commit(seed());
+      // An uncaptured table (created after the change feed install, so it has no capture triggers).
+      harness.raw(`CREATE TABLE scratch (id TEXT PRIMARY KEY)`);
+      const revision = Number(harness.raw(`SELECT revision FROM _gonvex_sync_clock`)[0]![0]);
+      expect(await harness.commit([[`INSERT INTO scratch VALUES ('x')`, []]]), "no commit").toBe(0);
+      expect(Number(harness.raw(`SELECT revision FROM _gonvex_sync_clock`)[0]![0])).toBe(revision);
+      expect(harness.raw(`SELECT count(*) FROM _gonvex_sync_changes WHERE table_name = ?`, REPLACED_MARKER)[0]![0], "only the seed's marker").toBe(1);
+      // The same transaction with a captured change is marked.
+      await harness.commit([[`INSERT INTO scratch VALUES ('y')`, []], [`INSERT INTO tasks VALUES (1, 's1', 'w1', 'm1', NULL, NULL)`, []]]);
+      expect(harness.marked()).toBe(true);
+    }, DECLARED);
   });
 
   it("#555 R2 P2 and M13: inserted untyped keys (BLOB, integer, real, text) patch or re-run exactly", async () => {

@@ -33,6 +33,7 @@
 
 import type { CaptureHooks, CaptureSql, CommitNotice, InstallUnit } from "./capture-port.ts";
 import { unitKey, type PlanManifest, type PlanStore, type PlannedMigration, type PlannedPrelude } from "./plan.ts";
+import { migrationMarkerSql } from "../capture/replace-marker.ts";
 
 export const PROGRESS_KEY = "gonvex/migrate/progress";
 export const APPLIED_PREFIX = "gonvex/migrate/applied/";
@@ -623,11 +624,23 @@ export class TenantMigrator {
   /** The end of one migration's transaction, in Rust's order: after_migration, finalize, ledger row (the FK check ran before). */
   private finishMigration(m: PlannedMigration, durationMs: number, manifest: PlanManifest): CommitNotice | undefined {
     (this.options.afterMigration ?? refuseDeclaredReferences)(this.sql);
+    this.markReplaces();
     const notice = this.options.capture.finalize(this.options.capture.directSql(this.sql), { commandId: `migration:${m.name}`, channel: "system" });
     this.sql.exec("INSERT INTO gonvex_migrations(name,checksum,duration_ms) VALUES(?,?,?)", m.name, m.checksum, Math.round(durationMs));
     // 0014 rule 1: the transform version is recorded in the ledger metadata, outside Rust's table.
     this.storage.kv.put(APPLIED_PREFIX + m.name, { planId: manifest.id, transformVersion: manifest.transformVersion, chunks: m.chunks, statements: m.statements });
     return notice;
+  }
+
+  /**
+   * X17p (#555 E1): plan statements run as raw SQL, outside the storage session's REPLACE check, so a migration
+   * that staged any change logs the global REPLACE marker before its finalize (`migrationMarkerSql`). Readers that
+   * patch from row images then rebuild over the migration's commit.
+   */
+  private markReplaces(): void {
+    const tables = new Set(this.sql.exec<{ name: string }>("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('_gonvex_sync_changes', '_gonvex_record_pending')").toArray().map((row) => row.name));
+    if (!tables.has("_gonvex_sync_changes")) return;
+    this.sql.exec(migrationMarkerSql(tables.has("_gonvex_record_pending")));
   }
 
   /**

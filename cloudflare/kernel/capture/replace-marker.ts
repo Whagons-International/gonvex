@@ -23,6 +23,24 @@ export function isReplacedMarker(tableName: string): boolean {
   return tableName === REPLACED_MARKER;
 }
 
-/** Logs the marker once per transaction. */
+/**
+ * Logs the marker once per transaction, and only once the transaction has staged a captured change (#555 N5): a
+ * write that changed no captured row (kernel bookkeeping under a schema hazard) neither makes a commit nor forces
+ * resyncs. A REPLACE that deletes captured rows always stages the replacing row on that table.
+ */
 export const REPLACED_MARKER_SQL = `INSERT INTO _gonvex_sync_changes (table_name, row_id, operation)
-  SELECT '${REPLACED_MARKER}', '', 'delete' WHERE NOT EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL AND table_name = '${REPLACED_MARKER}')`;
+  SELECT '${REPLACED_MARKER}', '', 'delete'
+  WHERE EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL AND table_name = '${REPLACED_MARKER}')`;
+
+/**
+ * #555 E1: the migrator runs plan statements as raw SQL (no storage session, so no S or H check). Every migration
+ * that staged any change (a change row, or a logical record image) logs the marker before its finalize; migrations
+ * are rare, so full invalidation costs nothing that matters. `records` adds the record staging table's check.
+ */
+export function migrationMarkerSql(records: boolean): string {
+  return `INSERT INTO _gonvex_sync_changes (table_name, row_id, operation)
+  SELECT '${REPLACED_MARKER}', '', 'delete'
+  WHERE (EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL)${records ? " OR EXISTS (SELECT 1 FROM _gonvex_record_pending)" : ""})
+    AND NOT EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL AND table_name = '${REPLACED_MARKER}')`;
+}
