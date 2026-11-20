@@ -10,9 +10,12 @@
     { "name": "ID_ONLY_CONTROLLER", "class_name": "IdOnlyController" },
     { "name": "CONTROL_STUB", "class_name": "ControlStubObject" },
     { "name": "TENANT_STUB", "class_name": "TenantStubObject" },
-    { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" }
+    { "name": "PUBLIC_LIMITER", "class_name": "PublicLimiterObject" },
+    { "name": "OUTLET_SENDER", "class_name": "OutletSender" },
+    { "name": "OUTLET_HOLDER", "class_name": "OutletHolder" }
   ] },
   "vars": { "GONVEX_RUNTIME_VERSION": "x01-test", "GONVEX_STUB_ADMIN_KEY": "test-key", "GONVEX_PRESENCE": "1" },
   "migrations": [{ "tag": "x01-test-v1", "new_sqlite_classes": ["HelloObject", "GatewayObject", "GatewayControllerObject", "ControlStubObject", "TenantStubObject", "PublicLimiterObject"] },
-    { "tag": "admission-identity-test-v1", "new_sqlite_classes": ["IdOnlyGateway", "IdOnlyController"] }]
+    { "tag": "admission-identity-test-v1", "new_sqlite_classes": ["IdOnlyGateway", "IdOnlyController"] },
+    { "tag": "outlet-reset-test-v1", "new_sqlite_classes": ["OutletSender", "OutletHolder"] }]
 }

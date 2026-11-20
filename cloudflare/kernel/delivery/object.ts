@@ -53,7 +53,9 @@ export abstract class ReplicaTenantObject<E extends ReducerTenantEnv = ReducerTe
       serial: (fn) => this.kernel.reducers.serial(fn),
       read: snapshotRunner(this.kernel.storage),
       module: () => this.replicaModule(),
-      outlet: new GatewayOutlet(tenantId, (name) => rpc<ReplicaHolderRpc>(env.GATEWAY, name), () => this.gateways.list()),
+      // 04-hang: keyed by this object's id, so this instance's outlet returns the isolate's delivery slots and credits
+      // a reset predecessor in the same isolate still held (its RPCs never settle there).
+      outlet: new GatewayOutlet(tenantId, (name) => rpc<ReplicaHolderRpc>(env.GATEWAY, name), () => this.gateways.list(), ctx.id.toString()),
       delivered: () => this.dataChanged(tenantId),
       get live() { return owner.liveQueries(); },
       activity: () => owner.keepAlive.touch(),

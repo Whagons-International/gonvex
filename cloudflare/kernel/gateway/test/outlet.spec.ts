@@ -131,7 +131,9 @@ it("gives quiet tenants shared RPC credits while a busy tenant still has queued 
     expect(held.length).toBe(8);
     const quietWork = quiet.send("quiet", payload("quiet"));
     held[0]!(); held[1]!();
-    for (let i = 0; i < 20; i++) await Promise.resolve();
+    // #550 round 3: the busy tenant's settlement leaves the freed slot to the quiet tenant (ahead of it in line), which
+    // starts its RPC from its own context: its own wake timer (`WAIT_POLL_MS`), never the busy tenant's settlement.
+    for (let i = 0; i < 400 && !quietStarted; i++) await new Promise((r) => setTimeout(r, 5)); // up to 2 s (timer lateness on a loaded runner)
     expect(quietStarted).toBe(true);
     expect(held.length).toBeLessThan(12);
     await quietWork;

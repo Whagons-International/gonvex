@@ -1,0 +1,255 @@
+# 04-hang: tenant deliveries stopped after a CPU-limit reset (dev, 2026-11-20 14:30-14:50Z)
+
+On the integration dev deployment, logins on `devcopy-stg1117-04` hung from about 14:29 to 14:57Z. The tenant object
+accepted `replica.open`/`openMany` frames, ran the opens, and delivered nothing back. A redeploy at 14:50Z cleared it.
+
+## Verdict
+
+This is a real liveness bug in the replica delivery outlet (`cloudflare/kernel/delivery/outlet.ts`). It is not a
+problem in the engine's queues, the attach check, output gates or alarms.
+
+- **Trigger:** at 14:30:41.133Z the platform reset the -04 tenant object: `Durable Object exceeded its CPU time
+  limit and was reset`. One invocation had used 7,500 ms CPU against `cpu_ms = 5000`. About eight delivery RPCs to
+  gateways were in flight at that moment.
+- **Bug:** the outlet's RPC slots (`MAX_RPCS = 8`) and its byte credits are module globals shared by every tenant
+  object in the isolate. The isolate survived the reset. The reset object's RPC continuations belong to its dead I/O
+  context, so they never run, and `run()`'s `finally` never returned their slots. With all 8 slots held this way, no
+  outlet in the isolate could start another delivery RPC.
+- **Second form of the same bug (found in review, round 3):** the scheduler was isolate-global too. One tenant's RPC
+  settlement started other tenants' waiting RPCs, and an RPC belongs to the context that started it. So a reset of
+  that tenant also killed RPCs it had started for **live** tenants. Their holder channels stayed `running` for good
+  (reproduced in workerd, `outlet-reset.spec.ts` P1). Returning the slot does not unstick a channel. The fix
+  therefore also makes every outlet start its RPCs only from its own object's contexts.
+- **Effect:** the new instance of the -04 object (it woke at 14:30:52Z) ran every open it was sent and queued the
+  payloads. Its holder queues grew to 6 items. No delivery RPC completed for 20 minutes, and no error was logged.
+  The client waited for replies that never came. The 14:50Z redeploy replaced the isolate and cleared it.
+
+Reproduced in workerd, and fixed: PR into `cloudflare/integration`.
+
+## Timeline (UTC, Workers Logs, object `f6011e77` = devcopy-stg1117-04)
+
+| Time | Evidence |
+| --- | --- |
+| 13:20 | x18r (diag) deployed: runtime `eba04be3`. |
+| 14:28:31-14:28:48 | `release-x18m/run-back3.out`: kernel, runtime and actions roll back to `ca4a2b89`. |
+| 14:29:07 | -04 wakes on the new version (`tenant.wake`). |
+| 14:30:33-14:30:41 | A burst of concurrent cold loads after the deploy: at least 5 clients, an empty snapshot cache, `tasks.recentWorkspaceTasks` reading about 3,300 SQL rows per open. The object uses about 11 s CPU in 8 s. One invocation records **7,500 ms CPU over 7,811 ms wall** (`exceededCpu`). |
+| 14:30:40-14:30:41.120 | Last `tenant.delivery` spans of the old instance. Eight RPCs complete in the last batch; the channel is busy. |
+| 14:30:41.133 | **`Durable Object exceeded its CPU time limit and was reset`** (14 log lines). Every invocation in flight ends `exceededCpu`. |
+| 14:30:52 | New instance (`tenant.wake`). Opens run (`tenant.open` with `queuedAfter` 1-6), snapshot-cache misses as usual. **No `tenant.delivery` span from here until 14:51.** The span is logged in `run()`'s `finally`, so a failed RPC would still log one. |
+| 14:31-14:50 | 2,121 invocations all end `ok`. 2 alarms ran. No error or warn lines, no `delivery.attach.refused`. The holder gateways never log `gateway.receive` or `replica batch sent` for -04. |
+| 14:40:44, 14:42:37 | X17's login probes (`logs/broken04-open.jsonl`, `logs/broken04.jsonl`): gateway `tenant` auth succeeds, then the two first opens (`members.listMembers`, `settings.plugins`) run with `queuedAfter: 2`. Nothing reaches the client, so it never sends its cohort. |
+| 14:50:11-14:50:31 | `run-back4.out`: the same build is redeployed (new isolate). |
+| 14:51 | -04 delivers again: 211 opens, 70 `tenant.delivery` spans. |
+
+Another tenant (`321cab79`, possibly in another isolate) delivered normally the whole time. The -04 log pulls are a
+read-only Workers Logs telemetry query filtered on `$workers.durableObjectId starts_with f6011e77`, one minute per query.
+
+## Mechanism (code)
+
+`OrderedOutlet` keeps `credits = { normal, recovery, count, running, hosts }` and the `ready` set at module scope:
+"Shared by EVERY outlet/tenant in this module's Worker isolate". `startOne` takes a slot (`credits.running++`), and
+only `run()`'s `finally` gives it back once the holder RPC settles. `schedule()` starts nothing while
+`credits.running >= MAX_RPCS`.
+
+When workerd resets an object but keeps its isolate, module state survives and the object's I/O context is
+discarded. Promises from that context's RPCs never settle in JS, so their `finally` blocks never run. The new instance
+gets a fresh engine and outlet but the same module-level `credits`, with `running` still at 8.
+
+The engine's stall rule (`HOLDER_STALL_MS`, BUG-4b) cannot see this. Its ticker runs only while some holder is
+deferred, and the items never even start an RPC. `claimTick` returns only byte credits, never RPC slots.
+
+## Reproduction (workerd, real Durable Objects)
+
+`cloudflare/kernel/gateway/test/outlet-reset.spec.ts` with `OutletSender` and `OutletHolder` in the gateway test
+Worker. The sender owns a real `GatewayOutlet`; the holder keeps delivery RPCs in flight.
+
+1. The sender `fill(8)`: 8 RPCs in flight, `running` 0 -> 8.
+2. `ctx.abort()` resets the sender. The holder then answers all 8 RPCs.
+3. The same object comes back and sends one payload.
+
+Before the fix: `timeout`, with `deliveryPressure()` = `{ running: 8, count: 9, hosts: 9 }` after the holder answered
+everything. That matches the dev incident. The second test (another tenant, with the reset object never coming back)
+also fails: no RPC can start.
+
+After the fix: both pass.
+
+```
+before:  × a tenant reset with every isolate RPC slot in flight does not wedge its next instance or other tenants
+         AssertionError: expected 'timeout' to be 'delivered'
+         × a reset object that never comes back holds the isolate's RPC slots only up to the stale bound
+after:   ✓ both (kernel/gateway 99/99, root 589/589 incl. kernel/delivery, kernel/assembly 141/141, Node GC 2/2)
+```
+
+The #550 review added accounting coverage (`outlet-reset.spec.ts` test 3, `outlet-settle.spec.ts`). Each mutation
+below fails at least one test:
+
+| Mutation | Fails |
+| --- | --- |
+| Stale rule releases only in-flight credits (the first head's behavior) | dead object's queued credits; live stale-then-settle |
+| `credits.running--` unconditional in `run`'s `finally` | live stale-then-settle (`running` goes to -1) |
+| `release` not idempotent | live stale-then-settle; retired late settlement |
+| No retired guard in `finally` | retired late batch refusal (resends `b`, `c`) |
+
+Removing the recount survives these tests: releasing the queued credits at stale time already restores the totals,
+and the recount is defense in depth against drift and for outlets the GC has collected.
+
+The #550 re-review found two liveness gaps in the first reclaim, both reproduced and now covered:
+
+- **GC.** A reset object's outlet was reachable only through `WeakRef`s. Once V8 collected it, neither the stale
+  sweep nor retirement could return its slots: `running` stayed at 8. Covered by `kernel/delivery/outlet-gc.test.mjs`
+  (Node with a real `gc()`, which workerd lacks). Both tests fail without the strong hold and pass with it.
+- **No sweep at the deadline.** A quiet tenant's payload queued before the stale bound waited until some later
+  enqueue or settlement in the isolate. Covered by `outlet-settle.spec.ts` ("delivered at the deadline with no later
+  activity").
+
+More mutations, each failing at least one test:
+
+| Mutation | Fails |
+| --- | --- |
+| Retirement returns a slot the stale rule already returned | stale then retire (`running` -1), and 3 others |
+| The sweep drops not-yet-stale deadlines | younger slot reclaimed after an older one |
+| `pruneObjects` clears live entries | a live outlet survives pruning and is still retired |
+| No deadline timer | delivered at the deadline with no later activity |
+| No strong hold (sweep via `WeakRef` owners) | both GC tests |
+| Round 3: the previous head's isolate-global `schedule()` (one outlet's settlement starts another's RPCs) | P1: A's payload `pending` forever after B's reset |
+| Round 3: `heal` disabled | a lost wake timer is replaced on the outlet's next own call |
+
+No separate dev Worker was needed. The shared dev Worker was not touched (no deploys, read-only log queries).
+
+## Fix
+
+The fix is in `outlet.ts`. Nothing changes what a live holder receives or its order.
+
+0. **Each outlet dispatches only its own RPCs, from its own object's contexts (round 3).** `pump()` starts an
+   outlet's RPCs from three places only: its enqueue microtask, the settlement of an RPC it started (which resumes in
+   the context that started it), or its own wake timer. The isolate-wide parts are turn order and bookkeeping:
+   - `waiters` is a FIFO of outlets blocked on slots, with liveness. A waiter not seen for 250 ms is skipped and
+     dropped, so a reset object cannot hold the line.
+   - The stale sweep.
+
+   It is still one dispatch per turn, then back of the line. A slot freed by one tenant's settlement is left to the
+   next waiter, which takes it from its own poll (`WAIT_POLL_MS` = 5 ms). A blocked outlet keeps one wake timer of its
+   own, for the next poll or stale deadline. The timer records its deadline, and every owner call on the outlet
+   (`send`, `admits`, `queued`, `idle`) replaces it if it is missing or more than `WAKE_SLACK_MS` (1 s) overdue
+   (`heal`). Costs, measured in the round-4 review and accepted by the lead for #550:
+   - **Single tenant** (the incident's shape): no cost. Its own settlement pumps it; base and head have equal
+     makespans (52, 61, 163 ms for 1, 8, 45 holders).
+   - **Tenants contending for slots:** one idle slot per handoff. The freed slot waits for the next tenant's timer,
+     and timers fire late under load (on average 28 ms past the 5 ms deadline at 16 tenants, 63 ms at 32). Makespan
+     goes up 15% at 4 contending tenants, 15–22% at 8, 75% at 16 and 114% at 32 (45 pages per tenant over 3 holders,
+     25 ms RPCs, workerd). A 1 ms poll barely helps (32 tenants: 4,517 → 3,701 ms): the idle slot is the cost, not
+     the constant.
+   - **Dead-object wedge path:** every blocked tenant polls about 200 times a second until the 60 s stale bound
+     returns the slots, and its object cannot hibernate meanwhile (billed duration). This only happens on a failure.
+     Polling CPU is 1.3–3.1% of one core for 1–200 blocked tenants.
+   - A resolver wake (a promise the settling object resolves) is not an alternative: its continuation, and any timer
+     it arms, run in the resolver's context (probed in review), which would bring back P1.
+   - Follow-up PR: a work-conserving handoff with per-waiter reservations.
+
+   Tests: P1 (B's settlement no longer starts A's RPC, so B's reset leaves A delivering; `pending` forever on the
+   previous head), and a dropped wake timer replaced on the next owner call. With `heal` disabled, that test fails.
+
+1. **Retire the reset instance's outlet (deterministic).** `GatewayOutlet` takes the owning object's id
+   (`ctx.id.toString()`, passed by `ReplicaTenantObject`). A Durable Object id has at most one live instance, so a
+   new outlet for an id that already has one in this isolate means the earlier instance is gone. Its slots, byte
+   credits, host entries and claim are returned at once, and it leaves the scheduler. If one of its RPCs did settle
+   late, the slot is not returned twice (`slotReturned`, idempotent `release`). This covers the incident, where the
+   same tenant came back 11 s later in the same isolate. It does not depend on GC: an outlet with an unreturned slot is
+   held strongly (`holding`) until the slot is returned, so its `byObject` entry cannot be pruned before it retires.
+2. **Stale slots (bounded, other tenants).** An RPC that has held a slot for `RPC_SLOT_STALE_MS` (60 s) stops counting
+   against `MAX_RPCS`. The credits of its batch, and of every payload queued behind it on that holder, are returned:
+   none of them can move until that RPC settles. The isolate's `normal`/`count`/`recovery`/`hosts` totals are then
+   recounted from the unreleased payloads of live outlets (`WeakRef`s, as `sweepOwners` does for `hosts`). This covers
+   a reset object that never comes back to this isolate: its RPC slots and its queued byte and item credits come back
+   at the 60 s deadline. A payload of another tenant that waits for a slot polls with its own wake timer (item 0), so
+   the sweep runs at the deadline even if nothing else happens.
+   This rule returns a **slot**, never a **channel**: the stuck holder keeps waiting for its RPC. That is why item 0
+   matters. A live tenant's channel can no longer be tied to another object's context, so only the reset object's own
+   holders can wait on a dead RPC, and its next instance serves them under a new `instance` (item 1).
+   The sweep walks the strongly held `holding` set, so GC cannot hide a slot holder. Its stuck queues still count in `hosts` until GC collects the outlet, and they are bounded by
+   `MAX_HOSTS` with the existing sweep. Its holder's ordered channel is unchanged: that holder still waits for the RPC.
+   **Bound when the RPC was only slow** and settles later: the payloads that were queued behind it at that moment go
+   out uncounted. That is at most one holder backlog per stale RPC: `HOST_PENDING_BYTES` = 8 MiB, with `sendFirst`
+   items up to `FIRST_BYTES` each, capped by `MAX_PENDING`. After that, the engine's holder-stall recovery
+   (`HOLDER_STALL_MS` = 30 s, below the stale bound) discards and fences what that holder had counted. Cumulatively,
+   the uncounted bytes are about `HOST_PENDING_BYTES` × (stale RPCs not yet settled). That number grows by at most
+   `MAX_RPCS` per 60 s and is capped only by `MAX_HOSTS`. The isolate may run more than `MAX_RPCS` RPCs, at most one
+   per holder. No cap is added: once reached, a cap on released bytes would again leave a dead object's queue credits
+   pinned, which is the failure this rule exists for.
+   A late settlement of a **retired** outlet returns its slot at most once and returns early: it never requeues,
+   rotates or re-enters the scheduler.
+3. **Watchdog.** Each reclaim logs one warn line with counts only (no ids):
+   - `delivery: outlet of a reset object retired { slots, running, count }`
+   - `delivery: stale RPC slots returned { slots, running, count }`
+
+   Each reclaim is also counted in `deliveryPressure()` (`retiredOutlets`, `retiredSlots`, `staleSlots`). `pump()`
+   sweeps only once the oldest held slot's deadline has passed (one comparison per call otherwise). When work is
+   blocked on slots, the deadline timer runs the sweep. Below the cap, a delivery RPC stuck for more than 60 s is
+   logged at the next enqueue or settlement in the isolate. `byObject` drops dead entries in `sweepOwners` and whenever
+   it reaches 1,024 ids.
+
+Runtime bundle (`wrangler deploy --dry-run -c kernel/assembly/runtime.wrangler.jsonc`): 1109.30 -> 1117.56 KiB
+(gzip 276.58 -> 279.01 KiB). No SQL, no rows read or written, no new runtime imports.
+
+## Ruled out
+
+| Candidate | Why not |
+| --- | --- |
+| Engine `serial` / admission chain left pending | Opens kept running after the reset (22 `tenant.open` spans 14:31-14:50), so the serial queue moved. |
+| Paused, fenced or deferred holder that never recovers | The opens ran: `nextOpen` skips paused and deferred holders, so the holder was neither. `queuedAfter` grew because the outlet had items no RPC ever started. |
+| Attach check (#543) or member read throwing | No `delivery.attach.refused` and no `could not read the session Member` line. Gateway `tenant` auth succeeded and the opens were admitted. |
+| Output gate / `blockConcurrencyWhile` | Every invocation from 14:31 to 14:50 ended `ok` with no broken-gate errors, and calls answered in 1-8 s wall at about 1 ms CPU. |
+| Alarm stopped re-arming | Two alarms ran 14:31-14:50, and the outlet path does not depend on alarms. |
+| Gateway side (receive, batch apply) | The holders logged no `gateway.receive`, which is logged at the start of every apply. The RPCs were never sent. |
+| The 14:28 deploy itself | -04 woke and served normally from 14:29. The wedge starts at the 14:30:41 CPU reset, and the identical 14:50 redeploy cleared it. |
+
+## Production risk
+
+Production users today are not affected: staging and production are served by the Rust runtime, and the Cloudflare
+port runs only on dev. Without this fix, the Cloudflare port would be exposed in production:
+
+- **Trigger is reachable under ordinary load.** `TENANT_CPU_LIMIT_MS = 5000` is enforced for every runtime deploy
+  (`kernel/assembly/deploy.mjs`). Dev logged CPU-limit resets on 5 tenant objects from 2026-11-17 to 2026-11-20
+  (36 lines). Any platform reset that keeps the isolate counts, not only CPU: a broken output gate, or "storage is no
+  longer accessible".
+- **A reset only wedges when RPCs are in flight.** `321cab79` was reset at 2026-11-19 18:45 and delivered normally
+  afterwards. But in-flight RPCs are most likely during load bursts, which is also when CPU overruns happen.
+- **The blast radius is the isolate,** not one tenant, in two ways:
+  - Every tenant object sharing the isolate stops delivering until the isolate is recycled (all slots leaked).
+  - Live tenants whose RPCs the reset object's settlements had started have those holder channels wedged for good,
+    even after the slots come back. During a burst, one tenant's settlements start everyone's RPCs, so this is likely.
+
+  Subscriber keep-alive and reconnecting clients keep the isolate busy, so it does not recycle on its own.
+- **A partial leak** (1-7 slots) is silent: the isolate just has fewer delivery RPC slots. I did not check whether
+  this explains any earlier dev latency anomaly.
+
+With the fix:
+- A returning tenant recovers at once.
+- Other tenants' RPCs are started only from their own contexts, so another object's reset cannot wedge their channels.
+- Their blocked payloads get slots back at the 60 s stale bound, plus the timer lateness of their next poll.
+
+## What is not fixed (follow-ups)
+
+- **The CPU overrun itself.** The guess first written here (the engine's `run()` loop charged to the invocation that
+  kicked it) was **wrong**. Measured on Cloudflare in #552
+  (`docs/cloudflare/verification/04-cpu-overrun-batched-invocations.md`): calls queued at a saturated object are
+  delivered as one invocation with one `cpu_ms` budget, and -04's cold-load burst exceeded it. Engine loops stay at
+  ≤ 440 ms. The options (raise `TENANT_CPU_LIMIT_MS`, bound the accepted backlog, cut per-load CPU) are there.
+- **A delivery RPC that never settles in a live instance** (a holder that never answers) still blocks that one
+  holder's ordered channel. The engine's stall reset cannot help: its recovery barrier queues behind the same RPC.
+  This is not observed. The stale-slot warn line now makes it visible.
+- **`hosts` entries** of a never-returning object's stuck queues stay counted until GC collects its outlet (recount
+  and `sweepOwners` use live `WeakRef`s). `AuthorityAdmission` uses the same pattern.
+
+## Monitoring that would catch a recurrence
+
+1. **Workers Logs alert** on `delivery: outlet of a reset object retired` or `delivery: stale RPC slots returned`
+   (runtime service). Either means a reclaim happened; repeats on one deployment mean resets during load.
+2. **Workers Logs alert** on `Durable Object exceeded its CPU time limit and was reset` for `AssemblyTenant`. It is
+   the trigger, and frequent on dev today.
+3. **Liveness probe (synthetic):** for a test tenant, the time from a socket's first `replica.open` to its first
+   replica frame. Alert when it exceeds 30 s. This catches any delivery wedge whatever the cause, including ones that
+   log nothing, as this one did.
+4. **Dev evidence:** `deliveryPressure()` (isolate totals) belongs in the tenant's dev stats endpoint, next to
+   `deliveryStats`. A `running` value pinned at 8 while `count > 0` is this signature.
