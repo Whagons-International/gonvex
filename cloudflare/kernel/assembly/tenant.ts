@@ -18,6 +18,8 @@ import { rpc, type GatewayRpc } from "../session/rpc";
 import { FORWARD_REFUSED } from "../session/forward";
 /** X17o: how long a socket Action dispatch is remembered for a call forwarded behind it. */
 const FORWARD_ACTION_MEMORY_MS = 60_000;
+/** X17o review: an Action dispatch's identity: connection, client id and the gateway's per-socket generation (ids may be reused). */
+const actionKey = (connectionId: string, actionId: string, generation: number) => `${connectionId}\u0000${actionId}\u0000${generation}`;
 import { TenantPresence } from "../presence/tenant";
 import { presenceConfig, type ConnectionReport } from "../presence/hub";
 import { type FilesRemapResult, TenantFiles } from "../files/tenant-files";
@@ -258,7 +260,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
    */
   private async dispatchAction(socket: SocketView, frame: Extract<ClientFrame, { type: "action.call" }>): Promise<string[]> {
     let settle!: (inline: boolean) => void;
-    this.trackAction(socket.connectionId, frame.id, new Promise<boolean>((resolve) => { settle = resolve; }));
+    this.trackAction(socket.connectionId, frame.id, socket.actionGeneration, new Promise<boolean>((resolve) => { settle = resolve; }));
     try {
       const out = await this.dispatchTimed(socket, frame);
       settle(out.length > 0);
@@ -276,6 +278,13 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     return out;
   }
   private async dispatchFrame(socket: SocketView, frame: ClientFrame): Promise<string[]> {
+    // X17o (kernel/session/forward.ts): a Reducer call forwarded behind this socket's Action runs after that Action's
+    // inline result, as the gateway's ordered queue would have dispatched it; otherwise the gateway dispatches it.
+    // The hold comes first (review): the scope and attach checks below then run at execution time, so a socket that
+    // closed (connectionReset) or was refused meanwhile rejects the call, as today's in-order dispatch would.
+    if (socket.afterAction !== undefined) {
+      if (frame.type !== "reducer.call" || !await this.followsAction(socket.connectionId, socket.afterAction, socket.actionGeneration)) return [FORWARD_REFUSED];
+    }
     // Every real caller supplies its current server-owned scope, including a
     // writer with no subscriptions. Its no-op commit watermark is scoped too.
     try {
@@ -297,11 +306,6 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     if(this.env.GONVEX_ASSEMBLY_FIXTURE_KEY&&this.fixtureRecoveryFailure&&(socket as SocketView & {queryRecovery?:boolean}).queryRecovery
       &&frame.type==="replica.openMany"&&!frame.opens.length){
       this.fixtureRecoveryFailure=false;throw new Error("assembly fixture: scope registration fault");
-    }
-    // X17o (kernel/session/forward.ts): a Reducer call forwarded behind this socket's Action runs after that Action's
-    // inline result, as the gateway's ordered queue would have dispatched it; otherwise the gateway dispatches it.
-    if (socket.afterAction !== undefined) {
-      if (frame.type !== "reducer.call" || !await this.followsAction(socket.connectionId, socket.afterAction)) return [FORWARD_REFUSED];
     }
     if (frame.type === "query.call" && frame.path === RECEIPT_QUERY) return super.dispatch(socket, frame);
     if (frame.type === "query.unsubscribe") {
@@ -333,18 +337,20 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   }
   /** X17o: this object's socket Action dispatches, by connection and Action id: settled true for an inline result. */
   private readonly actionDispatches = new Map<string, { readonly inline: Promise<boolean>; readonly at: number }>();
-  private trackAction(connectionId: string, actionId: string, inline: Promise<boolean>): void {
+  private trackAction(connectionId: string, actionId: string, generation: number | undefined, inline: Promise<boolean>): void {
     const now = Date.now();
     for (const [key, entry] of this.actionDispatches) if (now - entry.at > FORWARD_ACTION_MEMORY_MS || this.actionDispatches.size > 1024) this.actionDispatches.delete(key); else break;
-    this.actionDispatches.set(`${connectionId}\u0000${actionId}`, { inline, at: now });
+    if (generation === undefined) return; // not followable: a forward names its Action by generation (review)
+    this.actionDispatches.set(actionKey(connectionId, actionId, generation), { inline, at: now });
   }
   /**
    * X17o: whether a forwarded call may run now: its Action's dispatch on this object returned an inline result.
    * An Action this object does not know (reordered calls, a restarted object) or one that went pending or failed
    * refuses the call, and the gateway dispatches it in its socket's order.
    */
-  private async followsAction(connectionId: string, actionId: string): Promise<boolean> {
-    const entry = this.actionDispatches.get(`${connectionId}\u0000${actionId}`);
+  private async followsAction(connectionId: string, actionId: string, generation: number | undefined): Promise<boolean> {
+    if (generation === undefined) return false;
+    const entry = this.actionDispatches.get(actionKey(connectionId, actionId, generation));
     return entry ? await entry.inline : false;
   }
   async presenceLeave(id: string, host: string, previous?: ConnectionReport | null): Promise<void> { await this.presence.leave(id, host, previous ?? null); }

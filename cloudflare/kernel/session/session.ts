@@ -15,7 +15,7 @@
  */
 import { type Negotiated, NOTHING_NEGOTIATED, negotiate, sessionReadyFrame, type ReadyOptions } from "./capabilities";
 import { decodeClientFrame, type AuthFrame, type ClientCapabilities, type ClientFrame, type Json, type ReducerCallRequest } from "./decode";
-import { forwardRefused } from "./forward";
+import { carriesCommand, forwardRefused } from "./forward";
 import { replicaDirective, type ReplicaDirective } from "./directive";
 import { AUTH_ERRORS, CLOSE, type CloseFrame, LIMITS, UNAUTHENTICATED, echoTrace, exceedsUtf8, frames } from "./protocol";
 import {
@@ -254,8 +254,13 @@ export class Session {
   private queueDepth = 0;
   /** X17o: the tenant Action this socket's active item is dispatching (its port call has not returned). */
   private inflightAction: string | null = null;
-  /** X17o: the client contract was checked against the module for this socket's last frame (cleared on reload). */
-  private contractCurrent = false;
+  /**
+   * X17o review: the forwarded call's id while it is out, and, once a frame carrying its own commit (`originCommandId`)
+   * reaches `sendRaw` before the Action's reply was sent, that frame and every later one: released in order right
+   * after the Action's reply (as today, where the call is not executed until the Action's result was sent).
+   */
+  private forwardGuard: { callId: string; held: string[] | null } | null = null;
+  private sendingActionReply = false;
   private queueActive = false;
   /** X07 BUG-5: when the item now holding the queue started (null: idle). */
   private queueActiveSince: number | null = null;
@@ -410,7 +415,8 @@ export class Session {
   private forwardBehindAction(text: string): { call: ReducerCallRequest; frame: ClientFrame; reply: Promise<string[]> } | undefined {
     const action = this.inflightAction, tenant = this.record.tenant;
     if (action === null || this.closed || !this.queueActive || this.queueDepth !== 1 || !tenant || tenant.anonymous) return undefined;
-    if (this.record.publicTransport || this.record.service || this.record.admission || !this.contractCurrent) return undefined;
+    // `service` never reaches here (service sockets take `serviceFrame`, which sets no `inflightAction`): kept as a guard.
+    if (this.record.publicTransport || this.record.service || this.record.admission) return undefined;
     if (!text.includes('"reducer.call')) return undefined;
     const decoded = decodeClientFrame(text);
     if (!decoded.ok) return undefined;
@@ -418,8 +424,9 @@ export class Session {
     const call: ReducerCallRequest | undefined = frame.type === "reducer.call" ? frame
       : frame.type === "reducer.callMany" && frame.calls.length === 1 ? frame.calls[0] : undefined;
     if (!call || call.scope === "control" || !call.idempotencyKey?.trim() || this.presence.mayShortCircuit(call)) return undefined;
-    const reply = this.ports.tenants.dispatch({ ...this.view(), afterAction: action }, { type: "reducer.call", ...call });
+    const reply = this.ports.tenants.dispatch({ ...this.view(), afterAction: action, actionGeneration: this.record.actionGenerations?.[action] }, { type: "reducer.call", ...call });
     void reply.catch(() => {}); // a failed forward is dispatched again below
+    this.forwardGuard = { callId: call.id, held: null };
     return { call, frame, reply };
   }
 
@@ -554,8 +561,7 @@ export class Session {
   private async updateRequiredBeforeFrame(): Promise<boolean> {
     if (!this.record.tenant) return false;
     const module = await this.modules.get(this.record.connection.projectId);
-    if (module?.clientContract == null || this.record.clientContract === String(module.clientContract)) { this.contractCurrent = true; return false; }
-    this.contractCurrent = false;
+    if (module?.clientContract == null || this.record.clientContract === String(module.clientContract)) return false;
     this.send(frames.clientUpdateRequired(module.clientContract));
     this.close(CLOSE.ended);
     return true;
@@ -651,8 +657,8 @@ export class Session {
           // X17o: while this port call is out, a Reducer call arriving next may be forwarded behind it.
           this.inflightAction = frame.id;
           let replies: string[];
-          try { replies = await this.forward(this.ports.tenants.dispatch({ ...this.view(), actionGeneration: this.record.actionGenerations?.[frame.id] }, frame)); }
-          finally { this.inflightAction = null; }
+          try { replies = await this.forward(this.ports.tenants.dispatch({ ...this.view(), actionGeneration: this.record.actionGenerations?.[frame.id] }, frame), undefined, true); }
+          finally { this.inflightAction = null; this.releaseForwardGuard(); }
           span("gateway.call", { kind: "action", path: frame.path, turnWaitMs, rpcMs: this.now() - called });
           // Review r4608249098: no early return here. `finishAction` starts no port call and must run
           // on a closed socket too: it settles the waiter that a pending `actionFinished()` awaits.
@@ -718,7 +724,7 @@ export class Session {
     }
   }
 
-  private async forward(reply: Promise<string[]>, initial?: InitialRequestRef | readonly InitialRequestRef[]): Promise<string[]> {
+  private async forward(reply: Promise<string[]>, initial?: InitialRequestRef | readonly InitialRequestRef[], actionReply = false): Promise<string[]> {
     let out: string[];
     try {
       out = await reply;
@@ -730,6 +736,11 @@ export class Session {
     const origins = initial ? (Array.isArray(initial) ? [...initial] : [initial as InitialRequestRef]) : [];
     // X15: an openMany reply completes many initials in this one synchronous loop; one recovery write covers them.
     const sendAll = () => {
+      // X17o review: an Action's reply passes a held forward (its frames precede the forwarded call's rows).
+      if (actionReply) this.sendingActionReply = true;
+      try { sendEach(); } finally { this.sendingActionReply = false; }
+    };
+    const sendEach = () => {
       for (const text of out) {
         const at=origins.findIndex(ref=>!!initialCompletion(ref,["f",text],0));
         const ref=at<0?undefined:origins.splice(at,1)[0];
@@ -1536,7 +1547,6 @@ export class Session {
 
   /** `RuntimeEvent::ModuleReloaded` for this socket's project (A.1.5 c). */
   moduleReloaded(module: ModuleInfo | null): Promise<void> {
-    this.contractCurrent = false; // X17o: the next frame re-checks the client contract before anything is forwarded
     return this.serialQuiet(() => {
       if (this.closed) return;
       if (module?.publicationId && this.record.publicationId === module.publicationId) return;
@@ -1697,9 +1707,24 @@ export class Session {
       return false;
     }
     this.lastOutboundAt = this.now();
+    const guard = this.forwardGuard;
+    if (guard && !this.sendingActionReply && (guard.held || carriesCommand(text, guard.callId))) {
+      // X17o review: accepted (in order) now, written after the Action's reply.
+      (guard.held ??= []).push(text);
+      this.sinkSequence++;
+      return true;
+    }
     this.sink.send(text);
     this.sinkSequence++;
     return true;
+  }
+
+  /** X17o review: the Action's reply was sent (or its dispatch ended): held frames go out in their order. */
+  private releaseForwardGuard(): void {
+    const held = this.forwardGuard?.held;
+    this.forwardGuard = null;
+    if (!held || this.closed) return;
+    for (const text of held) this.sink.send(text);
   }
 
   close(frame: CloseFrame): void {
@@ -1707,6 +1732,7 @@ export class Session {
     // and never resumes (review r4608249098): a waiting `actionFinished()` then answers "obsolete".
     for (const waiter of this.actionWaiters.values()) { waiter.resolve(null); waiter.done(); }
     if (this.closed) return;
+    this.releaseForwardGuard();
     // BUG-9: every server-initiated close is attributable. Close codes and reasons are fixed protocol strings.
     console.log("session: server close", { code: frame.code, reason: frame.reason, socket: this.record.tenant ? "tenant" : "control" });
     if (this.delivery.batcher.hasOpen) this.delivery.batcher.flush();

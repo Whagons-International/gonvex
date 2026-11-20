@@ -1,7 +1,9 @@
 // X17o: a Reducer call that arrives while the socket's Action is in flight is forwarded to the tenant at once,
 // marked with that Action, and keeps its place in the socket's order. Synthetic ports.
 import { describe, expect, it } from "vitest";
-import { Session } from "../session";
+import { ModuleCache, Session } from "../session";
+import { DEFAULT_PRESENCE_CONFIG } from "../../presence/hub";
+import { REPLICA_DELIVERY_VERSION } from "../../delivery/protocol";
 import { FORWARD_REFUSED } from "../forward";
 import { CLOSE } from "../protocol";
 import type { ClientFrame } from "../decode";
@@ -17,7 +19,7 @@ function tenant(name: string, id = "t"): TenantSession {
 }
 type Call = { socket: SocketView; frame: ClientFrame; release(out?: string[] | Error): void; settled: boolean };
 
-function fixture() {
+function fixture(opts: { legacyBeat?: string } = {}) {
   const sent: string[] = [], calls: Call[] = [];
   const reply = (frame: ClientFrame) => frame.type === "action.call"
     ? [JSON.stringify({ type: "action.result", id: frame.id, path: frame.path, result: null })]
@@ -41,8 +43,10 @@ function fixture() {
       connectionReset: async () => {},
     },
   };
+  const modules = new ModuleCache(ports);
   const session = Session.open({
-    ports, host: "holder", connectionId: "c", publicTransport: false,
+    ports, host: "holder", connectionId: "c", publicTransport: false, modules,
+    ...(opts.legacyBeat ? { presence: { ...DEFAULT_PRESENCE_CONFIG, enabled: true, legacyBeatPaths: [opts.legacyBeat] } } : {}),
     ready: { runtimeVersion: "test", presence: false },
     sink: { send: (text) => { sent.push(text); }, close: () => {} },
     now: () => 1_000_000,
@@ -55,7 +59,8 @@ function fixture() {
   const action = (id: string) => send({ type: "action.call", id, path: "assistant.rewriteText", args: {} });
   const create = (id: string, extra: Record<string, unknown> = { idempotencyKey: `k-${id}` }) => send({ type: "reducer.call", id, path: "tasks.create", args: {}, ...extra });
   const of = (id: string) => calls.filter((c) => (c.frame as { id?: string }).id === id);
-  return { session, sent, calls, tick, types, send, auth, action, create, of };
+  const record = (session as unknown as { record: Record<string, unknown> & { tenant: TenantSession } }).record;
+  return { session, sent, calls, tick, types, send, auth, action, create, of, modules, record };
 }
 
 describe("X17o a Reducer call behind an in-flight Action is forwarded at once", () => {
@@ -155,5 +160,73 @@ describe("X17o a Reducer call behind an in-flight Action is forwarded at once", 
     f.session.close(CLOSE.ended);
     f.of("c1")[0]!.release(); f.of("a1")[0]!.release(); await a; await c;
     expect(f.types().filter((t) => t.startsWith("reducer"))).toEqual([]);
+  });
+
+  // ---- review: one test per guard (each fails without its guard) ----
+  const notForwarded = async (f: ReturnType<typeof fixture>, label: string) => {
+    const a = f.action("a1"); await f.tick();
+    const c = f.create("c1"); await f.tick();
+    expect(f.of("c1"), label).toHaveLength(0);
+    f.of("a1")[0]!.release(); await a; await f.tick(); f.of("c1")[0]?.release(); await c;
+  };
+  it("guard: not forwarded on the public transport", async () => {
+    const f = fixture(); await f.auth(); f.record.publicTransport = true; await notForwarded(f, "public");
+  });
+  it("guard: not forwarded under public admission", async () => {
+    const f = fixture(); await f.auth(); f.record.admission = { checkedAt: 1_000_000, revoked: false }; await notForwarded(f, "admission");
+  });
+  it("guard: not forwarded for an anonymous tenant session", async () => {
+    const f = fixture(); await f.auth(); f.record.tenant = { ...f.record.tenant, anonymous: true }; await notForwarded(f, "anonymous");
+  });
+  it("guard: not forwarded when presence may answer the call in the gateway (legacy beat path)", async () => {
+    const f = fixture({ legacyBeat: "tasks.create" }); await f.auth(); await notForwarded(f, "presence");
+  });
+  it("guard: a forwarded call whose turn finds a client update required sends nothing and closes", async () => {
+    const f = fixture(); await f.auth();
+    const a = f.action("a1"); await f.tick();
+    const c = f.create("c1"); await f.tick();
+    expect(f.of("c1")).toHaveLength(1);
+    f.modules.set("p", { artifactHash: "v2", clientContract: 7 } as ModuleInfo); // a publication changed the contract
+    f.of("c1")[0]!.release(); f.of("a1")[0]!.release(); await a; await c;
+    expect(f.types()).toEqual(["action.result:a1"]);
+    expect(f.sent.some((text) => text.includes('"client.updateRequired"'))).toBe(true);
+  });
+  it("guard: a forward that fails after the socket closed is not dispatched again", async () => {
+    const f = fixture(); await f.auth();
+    const a = f.action("a1"); await f.tick();
+    const c = f.create("c1"); await f.tick();
+    f.of("a1")[0]!.release(); await a; await f.tick(); // c1's turn awaits its forward
+    f.session.close(CLOSE.ended);
+    f.of("c1")[0]!.release(new Error("socket gone")); await c; await f.tick();
+    expect(f.of("c1")).toHaveLength(1);
+  });
+
+  // ---- review item 5: the forwarded call's rows never precede the Action's result ----
+  it("holds the forwarded call's commit rows (delivered first) until the Action's result was sent", async () => {
+    const f = fixture(); await f.auth();
+    const a = f.action("a1"); await f.tick();
+    const c = f.create("c1"); await f.tick();
+    // The tenant ran c1 as soon as a1's dispatch returned; its delivery RPC reaches the holder before a1's reply.
+    const tx = JSON.stringify({ type: "replica.transaction", cursor: { epoch: "e", revision: 9 }, originCommandId: "c1", changes: [] });
+    const watermark = JSON.stringify({ type: "replica.watermark", revision: 9 });
+    const epoch = (f.record.subscriptionEpoch as number | undefined) ?? 0;
+    f.session.replicaDelivery({ v: REPLICA_DELIVERY_VERSION, instance: (f.record.replicaInstance as string | undefined) ?? "i", scopeFence: 1, shared: [], sockets: {} } as never, { ops: [["f", tx], ["f", watermark]], subscriptionEpoch: epoch } as never);
+    // An unrelated earlier frame (the Action's own tool commit) is not held.
+    expect(f.sent.some((text) => text.includes('"originCommandId":"c1"'))).toBe(false);
+    f.of("a1")[0]!.release(); await a;
+    const order = f.sent.map((text) => (text.includes('"originCommandId":"c1"') ? "rows:c1" : text.includes('"replica.watermark"') ? "watermark" : text.includes('"action.result"') ? "action.result" : null)).filter(Boolean);
+    expect(order).toEqual(["action.result", "rows:c1", "watermark"]);
+    f.of("c1")[0]!.release(); await c;
+  });
+
+  it("frames before the forwarded call's commit (the Action's own tool rows) are not held", async () => {
+    const f = fixture(); await f.auth();
+    const a = f.action("a1"); await f.tick();
+    const c = f.create("c1"); await f.tick();
+    const tool = JSON.stringify({ type: "replica.transaction", cursor: { epoch: "e", revision: 8 }, originCommandId: "tool-1", changes: [] });
+    const epoch = (f.record.subscriptionEpoch as number | undefined) ?? 0;
+    f.session.replicaDelivery({ v: REPLICA_DELIVERY_VERSION, instance: (f.record.replicaInstance as string | undefined) ?? "i", scopeFence: 1, shared: [], sockets: {} } as never, { ops: [["f", tool]], subscriptionEpoch: epoch } as never);
+    expect(f.sent.some((text) => text.includes('"tool-1"'))).toBe(true); // sent at once, before the Action's result
+    f.of("a1")[0]!.release(); f.of("c1")[0]!.release(); await a; await c;
   });
 });
