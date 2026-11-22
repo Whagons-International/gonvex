@@ -55,6 +55,7 @@ import { DeliveryAdmissionError, MemberAccessChangedError } from "../delivery/au
 import { retryable } from "../reducer/errors";
 
 
+import { A0LocalHolder, a0Enabled, a0TenantEnv, type A0Cell } from "./a0-local-holder";
 import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } from "./tenant-transfer";
 import { fixtureSpans, setSpanTiming, span, spanTimingFromEnv, spanTimingOn } from "../delivery/spans";
 
@@ -116,6 +117,35 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   private logRetry: number | null = null;
   private queryModule: { hash: string; module: QueryModule } | undefined;
   private fixtureRecoveryFailure=false;
+  /** A0 SPIKE: the embedded holder of this tenant's own application sockets. */
+  private readonly a0: A0Cell;
+  private a0Holder(): A0LocalHolder | undefined {
+    if (!a0Enabled(this.env) || !this.a0.tenantId) return undefined;
+    if (!this.a0.holder) { this.a0.tenant = this; this.a0.holder = A0LocalHolder.create(this.ctx, this.env, this.a0); }
+    return this.a0.holder;
+  }
+  private a0Tick(): void {
+    const holder = this.a0.holder;
+    if (holder && holder.virtualAlarm.at !== null && holder.virtualAlarm.at <= Date.now()) this.ctx.waitUntil(holder.alarmIfDue(this.ctx));
+  }
+  /** A0 SPIKE: the router hands `/ws?a0=1` upgrades of this tenant's subdomain here. */
+  override async fetch(request: Request): Promise<Response> {
+    const holder = request.headers.get("upgrade")?.toLowerCase() === "websocket" ? this.a0Holder() : undefined;
+    if (!holder) return new Response("not found", { status: 404 });
+    return holder.fetch(request);
+  }
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const holder = this.a0Holder();
+    if (!holder) { ws.close(1011, "no holder"); return; }
+    this.a0Tick();
+    await holder.webSocketMessage(ws, message);
+  }
+  override async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    await this.a0Holder()?.webSocketClose(ws, code, reason);
+  }
+  override async webSocketError(ws: WebSocket): Promise<void> {
+    await this.a0Holder()?.webSocketError(ws);
+  }
 
   /**
    * X15: lazy. Reading `exports` evaluates the release's app bundle (several MB) in this isolate; a cold wake
@@ -173,7 +203,11 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
         || captured?.hash !== module?.hash || artifactFormat(captured?.generation) !== artifactFormat(module?.generation))
         throw new Error("topology bridge does not contain the retained active Tenant release");
     }
+    // A0 SPIKE: the tenant's GATEWAY binding answers its embedded holder in-process (kernel/assembly/a0-local-holder.ts).
+    const a0: A0Cell = { tenantId: ctx.id.name ?? "" };
+    env = a0TenantEnv(ctx, env, a0);
     super(ctx, env);
+    this.a0 = a0;
     const restoreMs = Date.now() - constructedAt; // KernelTenant.restore runs synchronously inside super()
     this.queries = new QueryEngine({
       module: () => this.activeQueryModule(),
@@ -308,6 +342,8 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async presenceLeave(id: string, host: string, previous?: ConnectionReport | null): Promise<void> { await this.presence.leave(id, host, previous ?? null); }
   override async connectionReset(id: string, epoch: number): Promise<void> { await super.connectionReset(id, epoch); this.queries.live.clear(id); }
   override async alarm(): Promise<void> {
+    // A0 SPIKE: the embedded holder's virtual alarm shares this one.
+    if (this.a0.holder) await this.a0.holder.alarmIfDue(this.ctx).catch((error) => console.error("a0: holder alarm failed", error));
     await this.setupScheduled();
     if (this.alarms) {
       await this.alarms.fire();

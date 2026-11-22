@@ -169,8 +169,10 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   constructor(ctx: DurableObjectState, rawEnv: E) {
     let wake = () => {};
     const origin = new CallOrigin(() => wake());
+    // A0 SPIKE: a holder embedded in a tenant object (kernel/assembly/a0-local-holder.ts) is not gated.
+    const ungated = (new.target as unknown as { ungated?: boolean }).ungated === true;
     // Every binding this object (and its sessions, ports and subclasses) calls through `this.env` is gated.
-    super(ctx, gatedEnv(rawEnv, origin));
+    super(ctx, ungated ? rawEnv : gatedEnv(rawEnv, origin));
     this.origin = origin;
     const env = this.env;
     // X13e: time-only per-batch send log on dev (GONVEX_DELIVERY_TIMING=1); slow batches are always logged.
@@ -178,7 +180,7 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
     if (spanTimingFromEnv(rawEnv)) setSpanTiming(true);
     setDeliveryTiming((rawEnv as { GONVEX_DELIVERY_TIMING?: string }).GONVEX_DELIVERY_TIMING === "1" || spanTimingFromEnv(rawEnv));
     const proto = new.target.prototype as object;
-    if (!tracked.has(proto)) {
+    if (!ungated && !tracked.has(proto)) {
       tracked.add(proto);
       trackEntries(proto, DurableObject.prototype, INTERNAL_METHODS, (self) => (self as GatewayObjectBase<E>).origin,
         (name, original) => name === "alarm"
