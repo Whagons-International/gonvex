@@ -4888,7 +4888,9 @@ mod tests {
         assert_eq!(impersonation.kind, ControlKind::Reducer);
         assert_eq!(impersonation.authorization, Authorization::Developer);
         assert_eq!(
-            definition("control.support.sendCommand").unwrap().authorization,
+            definition("control.support.sendCommand")
+                .unwrap()
+                .authorization,
             Authorization::ProjectAdmin
         );
     }
