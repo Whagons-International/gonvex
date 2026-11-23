@@ -11,6 +11,7 @@ type Control = {
   fixtureTenantRow(tenant: string, domain: string, status?: string, databaseUrl?: string): Promise<void>;
   prewarmTenant(project: string, selector: string): Promise<'warming' | 'recent' | 'unknown'>;
   fixturePrewarmedSize(): Promise<number>;
+  fixturePrewarmMax(max: number): Promise<void>;
   fixtureNoteCoTenants(result: unknown): Promise<void>;
   fixtureRestart(): Promise<void>;
 };
@@ -112,9 +113,10 @@ describe('SessionControlObject.prewarmTenant', () => {
   it('the per-tenant throttle map is bounded', async () => {
     const control = freshControl();
     await control.devCreateProject({ id: 'pw-project', name: 'prewarm fixture' });
+    await control.fixturePrewarmMax(3);
     const ids = Array.from({ length: 5 }, newTenant);
     for (const id of ids) { await control.fixtureTenant('pw-project', id); expect(await control.prewarmTenant('pw-project', id)).toBe('warming'); }
-    expect(await control.fixturePrewarmedSize()).toBe(3); // TestControl's bound
+    expect(await control.fixturePrewarmedSize()).toBe(3); // the lowered bound
     expect(await control.prewarmTenant('pw-project', ids[0]!)).toBe('warming'); // evicted, so woken again
     expect(await control.prewarmTenant('pw-project', ids[4]!)).toBe('recent');
   });

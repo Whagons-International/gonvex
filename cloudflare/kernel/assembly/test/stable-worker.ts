@@ -10,8 +10,8 @@ import {X13_PROJECT,x13Registry} from './x13-fixture';
 // X13: the Action Worker serves the X13 fixture app (its other fixtures run no Actions here).
 configureActions({registry:(_env,projectId)=>{if(projectId!==X13_PROJECT)throw new Error(`project ${JSON.stringify(projectId)} has no active TypeScript module`);return x13Registry();}});
 export class TestControl extends SessionControlObject {
- /** Prewarm fixture: a small per-tenant throttle bound, so a test can reach it. */
- protected override prewarmMax = 3;
+ /** Prewarm fixture: lower this instance's per-tenant throttle bound, so a test can reach it. */
+ async fixturePrewarmMax(max:number){ this.prewarmMax=max; }
  /** X15 test seam: the stored GATEWAY watchers of a project. */
  /** X17 seam: the watchers a support-scoped change (presence, error sessions) notifies. */
  async fixtureSupportWatchers(project:string){ return (this as unknown as {supportWatchers(p:string):Array<{binding:string;name:string}>}).supportWatchers(project); }
