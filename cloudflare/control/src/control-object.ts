@@ -159,8 +159,8 @@ export class ControlObject extends DurableObject<ControlEnv> implements LiveConn
     return (this.telemetryStore ??= new TelemetryStore(this.sql));
   }
 
-  /** A fresh per-call context. */
-  private context(): Ctx {
+  /** A fresh per-call context (also used by SessionControlObject.prewarmTenant). */
+  protected context(): Ctx {
     const env = this.env;
     return {
       sql: this.sql,

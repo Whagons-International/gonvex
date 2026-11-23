@@ -1,6 +1,6 @@
 // K22: K17 control adapter promoted to the serving runtime.
 // All auth, Control writes and operator routes run K06/K19.
-import { tenantSessionForAccount as resolveActionSession } from "../../control/src/directory";
+import { resolveTenant, tenantSessionForAccount as resolveActionSession } from "../../control/src/directory";
 import { actionSession } from "./action-session";
 import { OperatorControlObject } from "../../control/operator/object";
 import type { AuthOutcome } from "../../control/src/auth";
@@ -75,19 +75,16 @@ export class SessionControlObject extends OperatorControlObject {
    * The router asks this, without waiting, when a page of a tenant's subdomain opens its first socket
    * (kernel/session/prewarm.ts): the tenant object wakes while the Firebase sign-in runs, so the exchange's admission
    * of that tenant does not wait for a cold object. The selector resolves as `resolveTenant` does (exact id, else the
-   * domain, of a provisioned, non-deleted, non-disabled tenant of the project). The tenant only answers `ping()`.
+   * domain, of a provisioned, non-deleted, non-disabled tenant of the project; the same function). The tenant only
+   * answers `ping()`.
    * At most once per tenant per `PREWARM_TENANT_INTERVAL_MS` per Control instance; unknown selectors do nothing.
    */
   async prewarmTenant(projectId: string, selector: string): Promise<"warming" | "recent" | "unknown"> {
     if (typeof projectId !== "string" || typeof selector !== "string" || !projectId || !selector || projectId.length > 128 || selector.length > 63) return "unknown";
-    const tenantId = this.sql.value<string>(
-      `SELECT tenant_id FROM gonvex_runtime_tenants
-       WHERE project_id=$1 AND (tenant_id=$2 OR lower(domain)=lower($2)) AND deleted_at IS NULL
-         AND status NOT IN ('deleted','disabled') AND database_url<>''
-       ORDER BY (tenant_id=$2) DESC LIMIT 1`,
-      projectId, selector,
-    );
-    if (typeof tenantId !== "string" || !tenantId) return "unknown";
+    // The same resolution as every tenant auth (`resolveTenant`): its refusals (unknown, deleted, disabled, no
+    // database) all mean "nothing to wake".
+    let tenantId: string;
+    try { tenantId = resolveTenant(this.context(), projectId, selector).tenantId; } catch { return "unknown"; }
     const now = Date.now(), last = this.prewarmed.get(tenantId);
     if (last !== undefined && now - last < PREWARM_TENANT_INTERVAL_MS) return "recent";
     this.prewarmed.delete(tenantId);

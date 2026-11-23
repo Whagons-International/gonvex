@@ -15,10 +15,10 @@ export class TestControl extends SessionControlObject {
  async fixtureSupportWatchers(project:string){ return (this as unknown as {supportWatchers(p:string):Array<{binding:string;name:string}>}).supportWatchers(project); }
  async fixtureWatchers(project:string){ return this.ctx.storage.kv.get<Array<{binding:string;name:string}>>(`control/watchers/${project}`)??[]; }
  async fixtureTenant(project:string,tenant:string){
-  this.sql.run("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_name,database_url,status,description,provisioned,runtime_created) VALUES ($1,$2,$1,'Fixture','fixture',$3,'active','synthetic',1,1)",tenant,project,'do://tenant/'+tenant);
+  this.sql.run("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_name,database_url,status,description,provisioned,runtime_created) VALUES ($1,$2,$1,'Fixture',$1,$3,'active','synthetic',1,1)",tenant,project,'do://tenant/'+tenant);
  }
  /** Prewarm fixture: a tenant's domain and status. */
- async fixtureTenantRow(tenant:string,domain:string,status='active'){ this.sql.run("UPDATE gonvex_runtime_tenants SET domain=$2,status=$3 WHERE tenant_id=$1",tenant,domain,status); }
+ async fixtureTenantRow(tenant:string,domain:string,status='active',databaseUrl?:string){ this.sql.run("UPDATE gonvex_runtime_tenants SET domain=$2,status=$3,database_url=COALESCE($4,database_url) WHERE tenant_id=$1",tenant,domain,status,databaseUrl??null); }
  async fixturePublication(id:string,summary:ReleaseSummary,version:string,tenants:string[],publicationGeneration:number){
   const owner=this.syncs.deployments.acquire(summary.project,id);
   if(!owner.acquired)throw new Error('publication fixture could not acquire deployment');

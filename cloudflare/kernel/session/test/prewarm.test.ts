@@ -28,7 +28,7 @@ describe("tenantSelectorFromOrigin", () => {
   });
   it("names no tenant for bare hosts, www, IP addresses, opaque or malformed origins", () => {
     for (const origin of [null, "", "null", "https://localhost:3000", "https://whagons", "https://www.whagons.com",
-      "http://127.0.0.1:8080", "not a url", "https://-bad.whagons.com", "https://under_score.whagons.com"]) {
+      "http://127.0.0.1:8080", "http://[::1]:8080", "not a url", "https://-bad.whagons.com", "https://under_score.whagons.com"]) {
       expect(tenantSelectorFromOrigin(origin), String(origin)).toBeUndefined();
     }
   });
