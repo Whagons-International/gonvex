@@ -25,6 +25,8 @@ export const COTENANTS_PER_TENANT = 8;
 export const COTENANT_TTL_MS = 24 * 60 * 60 * 1000;
 const COTENANT_PERSIST_MS = 60 * 60 * 1000;
 const COTENANT_KEY = "control/cotenants/";
+interface CoTenantEntry { readonly others: Map<string, number>; persistedKeys: string; persistedAt: number }
+const setKey = (others: ReadonlyMap<string, number>) => [...others.keys()].sort().join("\u0000");
 
 /** K05's auth branches prefix this to an impersonation failure; K06's text already carries it. */
 const IMPERSONATION_PREFIX = "impersonation grant is invalid, expired, revoked, or already used: ";
@@ -93,7 +95,7 @@ export class SessionControlObject extends OperatorControlObject {
     // database) all mean "nothing to wake".
     let tenantId: string;
     try { tenantId = resolveTenant(this.context(), projectId, selector).tenantId; } catch { return "unknown"; }
-    const now = Date.now();
+    const now = this.clock();
     if (!this.wake(tenantId, now, "page")) return "recent";
     // A multi-tenant account's sign-in also admits its other tenants: wake the ones recent sign-ins brought along.
     for (const other of this.recentCoTenants(tenantId, now)) this.wake(other, now, "co-tenant");
@@ -117,47 +119,65 @@ export class SessionControlObject extends OperatorControlObject {
    * in this object's KV (`control/cotenants/<tenant>`).
    * `prewarmTenant` pings these too: a multi-tenant account's exchange admits every tenant of the account and waits
    * for each cold one, but the page names only the active tenant before the sign-in.
+   * A co-tenant disabled or deleted after it was recorded keeps being pinged until its entry expires (at most
+   * `COTENANT_TTL_MS`): co-tenant wakes skip `resolveTenant`, and a reply that omits it does not prove it is gone
+   * (another account's sign-in lists other tenants). The ping is harmless: `ping()` reads and writes nothing.
    */
-  private readonly coTenants = new Map<string, Map<string, number>>();
+  private readonly coTenants = new Map<string, CoTenantEntry>();
+  /** Time seam (tests move it forward); everything co-tenant and prewarm reads the clock through it. */
+  protected clock(): number { return Date.now(); }
+  /** The KV write (a seam, so a test can make it fail). */
+  protected persistCoTenants(tenantId: string, others: ReadonlyMap<string, number>): void {
+    this.ctx.storage.kv.put(`${COTENANT_KEY}${tenantId}`, [...others]);
+  }
+  /** Best effort: the caller ignores failures (a sign-in reply never depends on this bookkeeping). */
   protected noteCoTenants(result: unknown): void {
     const value = result as { activeTenantId?: unknown; tenants?: unknown } | null;
     const active = typeof value?.activeTenantId === "string" ? value.activeTenantId : "";
     const tenants = Array.isArray(value?.tenants) ? value.tenants : [];
     if (!active || tenants.length < 2) return;
-    const now = Date.now();
-    const others = this.loadCoTenants(active);
-    const before = [...others.keys()].sort().join("\u0000"), oldest = Math.min(...others.values());
-    this.coTenants.delete(active);
+    const now = this.clock();
+    const entry = this.loadCoTenants(active, now);
+    const others = entry.others;
     for (const tenant of tenants) {
       const id = (tenant as { id?: unknown } | null)?.id;
       if (typeof id !== "string" || !id || id === active) continue;
-      others.delete(id);
+      others.delete(id); // re-insert: insertion order is recency, so the bound evicts the least recently seen
       others.set(id, now);
     }
     while (others.size > COTENANTS_PER_TENANT) others.delete(others.keys().next().value!);
-    this.coTenants.set(active, others);
-    if (this.coTenants.size > PREWARM_TENANT_MAX) this.coTenants.delete(this.coTenants.keys().next().value!);
-    // Survives an evicted or restarted Control. Written only when the set changes, or hourly to keep it inside the
-    // TTL, so a sign-in's reply does not routinely wait for a confirmed write.
-    if ([...others.keys()].sort().join("\u0000") !== before || now - oldest > COTENANT_PERSIST_MS) {
-      this.ctx.storage.kv.put(`${COTENANT_KEY}${active}`, [...others]);
+    // Survives an evicted or restarted Control. Written only when the set differs from the last write, or an hour
+    // after the last write (to keep the stored timestamps inside the TTL), so a sign-in's reply does not routinely
+    // wait for a confirmed write.
+    const keys = setKey(others);
+    if (keys !== entry.persistedKeys || now - entry.persistedAt >= COTENANT_PERSIST_MS) {
+      this.persistCoTenants(active, others);
+      entry.persistedKeys = keys;
+      entry.persistedAt = now;
     }
   }
-  private loadCoTenants(tenantId: string): Map<string, number> {
-    let others = this.coTenants.get(tenantId);
-    if (!others) {
-      const stored = this.ctx.storage.kv.get<Array<[string, number]>>(`${COTENANT_KEY}${tenantId}`);
-      others = new Map(Array.isArray(stored) ? stored.filter(([id, at]) => typeof id === "string" && typeof at === "number") : []);
-      this.coTenants.set(tenantId, others);
-      if (this.coTenants.size > PREWARM_TENANT_MAX) this.coTenants.delete(this.coTenants.keys().next().value!);
-    }
-    return others;
+  /** The entry of `tenantId` (from memory, else from KV), with expired co-tenants pruned. */
+  private loadCoTenants(tenantId: string, now: number): CoTenantEntry {
+    let entry = this.coTenants.get(tenantId);
+    if (!entry) {
+      const others = new Map<string, number>();
+      let stored: unknown;
+      try { stored = this.ctx.storage.kv.get(`${COTENANT_KEY}${tenantId}`); } catch { stored = undefined; }
+      // Tolerate anything stored there: only [string, finite number] rows are read back.
+      if (Array.isArray(stored)) for (const row of stored) {
+        if (Array.isArray(row) && typeof row[0] === "string" && row[0] && typeof row[1] === "number" && Number.isFinite(row[1])) others.set(row[0], row[1]);
+      }
+      while (others.size > COTENANTS_PER_TENANT) others.delete(others.keys().next().value!);
+      entry = { others, persistedKeys: setKey(others), persistedAt: Math.max(0, ...others.values()) };
+    } else this.coTenants.delete(tenantId);
+    this.coTenants.set(tenantId, entry); // most recently used last, for the map's bound
+    if (this.coTenants.size > PREWARM_TENANT_MAX) this.coTenants.delete(this.coTenants.keys().next().value!);
+    for (const [id, at] of entry.others) if (now - at > COTENANT_TTL_MS) entry.others.delete(id);
+    return entry;
   }
   /** The live co-tenants of `tenantId`, most recent first. */
   private recentCoTenants(tenantId: string, now: number): string[] {
-    const others = this.loadCoTenants(tenantId);
-    for (const [id, at] of others) if (now - at > COTENANT_TTL_MS) others.delete(id);
-    return [...others.keys()].reverse();
+    return [...this.loadCoTenants(tenantId, now).others.keys()].reverse();
   }
 
   private readonly assemblyInstance = crypto.randomUUID();
@@ -286,7 +306,10 @@ export class SessionControlObject extends OperatorControlObject {
             ? j({ type: "reducer.error", id: frame.id, path: frame.path, error: outcome.error, class: outcome.errorClass, retryable: outcome.errorClass === "transient" || outcome.errorClass === "unauthenticated", ...trace })
             : j({ type: "action.error", id: frame.id, path: frame.path, error: outcome.error, ...trace })];
         }
-        if (frame.path === "control.auth.exchangeExternalToken" || frame.path === "control.auth.refreshSession" || frame.path === "control.auth.passwordLogin") this.noteCoTenants(outcome.value);
+        if (frame.path === "control.auth.exchangeExternalToken" || frame.path === "control.auth.refreshSession" || frame.path === "control.auth.passwordLogin") {
+          // Best effort: the session is committed; a storage error here must never cost the sign-in its reply.
+          try { this.noteCoTenants(outcome.value); } catch (error) { console.error("control: co-tenant bookkeeping failed", String((error as Error)?.message ?? error).slice(0, 120)); }
+        }
         const result = kind === "reducer"
           ? j({ type: "reducer.result", id: frame.id, path: frame.path, result: outcome.value, originCommandId: frame.id, ...trace })
           : j({ type: "action.result", id: frame.id, path: frame.path, result: outcome.value, ...trace });

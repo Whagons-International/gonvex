@@ -14,6 +14,10 @@ type Control = {
   fixturePrewarmMax(max: number): Promise<void>;
   fixtureNoteCoTenants(result: unknown): Promise<void>;
   fixtureRestart(): Promise<void>;
+  fixtureAdvanceClock(ms: number): Promise<void>;
+  fixtureCoTenantWrites(): Promise<number>;
+  fixtureFailCoTenantWrites(on: boolean): Promise<void>;
+  fixturePutRawCoTenants(tenant: string, value: unknown): Promise<void>;
 };
 type Tenant = { fixturePings(): Promise<number> };
 const tenantObject = (id: string) => (env as unknown as { PUB_TENANT: DurableObjectNamespace }).PUB_TENANT.getByName(id) as unknown as Tenant;
@@ -156,12 +160,94 @@ describe('co-tenant prewarm (multi-tenant accounts)', () => {
     for (const other of others.slice(2)) expect(await control.prewarmTenant('pw-project', other)).toBe('recent');
   });
 
-  it('co-tenant wakes share the per-tenant throttle: a recently woken tenant is not woken again', async () => {
+  it('co-tenant wakes share the per-tenant throttle: a recently woken tenant is not pinged again', async () => {
     const { control, active, others } = await tenants(1);
     expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('warming');
+    expect(await pingsOf(others[0]!, 1)).toBe(1);
     await control.fixtureNoteCoTenants(reply(active, others));
     expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    expect(await pingsOf(active, 1)).toBe(1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await tenantObject(others[0]!).fixturePings()).toBe(1); // the co-tenant wake was throttled, not sent
     expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('recent');
+  });
+
+  it('a page wake pings each co-tenant exactly once', async () => {
+    const { control, active, others } = await tenants(2);
+    await control.fixtureNoteCoTenants(reply(active, others));
+    expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    for (const other of others) expect(await pingsOf(other, 1)).toBe(1);
+  });
+
+  it('a co-tenant not seen for longer than the TTL is not woken', async () => {
+    const { control, active, others } = await tenants(2);
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
+    await control.fixtureAdvanceClock(23 * 3_600_000);
+    await control.fixtureNoteCoTenants(reply(active, [others[1]!])); // seen again later
+    await control.fixtureAdvanceClock(2 * 3_600_000); // others[0]: 25 h old, others[1]: 2 h old
+    expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    expect(await pingsOf(others[1]!, 1)).toBe(1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await tenantObject(others[0]!).fixturePings()).toBe(0);
+  });
+
+  it('recency spans replies: an older co-tenant seen again survives the bound', async () => {
+    const { control, active, others } = await tenants(9);
+    await control.fixtureNoteCoTenants(reply(active, others.slice(0, 8)));
+    await control.fixtureAdvanceClock(1_000);
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!])); // others[0] is now the most recent
+    await control.fixtureAdvanceClock(1_000);
+    await control.fixtureNoteCoTenants(reply(active, [others[8]!])); // a 9th: the least recently seen (others[1]) goes
+    expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    expect(await control.prewarmTenant('pw-project', others[1]!)).toBe('warming'); // evicted, so not woken
+    for (const other of [others[0]!, ...others.slice(2)]) expect(await control.prewarmTenant('pw-project', other)).toBe('recent');
+  });
+
+  it('writes KV on a change, not again for an unchanged set within the hour, and once after an hour', async () => {
+    const { control, active, others } = await tenants(2);
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
+    expect(await control.fixtureCoTenantWrites()).toBe(1); // new set
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
+    await control.fixtureAdvanceClock(30 * 60_000);
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
+    expect(await control.fixtureCoTenantWrites()).toBe(1); // unchanged within the hour
+    await control.fixtureAdvanceClock(31 * 60_000);
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
+    expect(await control.fixtureCoTenantWrites()).toBe(2); // an hour after the last write
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
+    expect(await control.fixtureCoTenantWrites()).toBe(2);
+    await control.fixtureNoteCoTenants(reply(active, [others[1]!]));
+    expect(await control.fixtureCoTenantWrites()).toBe(3); // the set changed
+  });
+
+  it('an entry expiring by the TTL changes the set (written), while a stale-but-live entry alone does not force writes', async () => {
+    const { control, active, others } = await tenants(2);
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!])); // write 1
+    await control.fixtureAdvanceClock(2 * 3_600_000);
+    await control.fixtureNoteCoTenants(reply(active, [others[1]!])); // set changed: write 2 ({0, 1})
+    await control.fixtureNoteCoTenants(reply(active, [others[1]!]));
+    await control.fixtureNoteCoTenants(reply(active, [others[1]!]));
+    expect(await control.fixtureCoTenantWrites()).toBe(2); // others[0] is 2 h old, but nothing changed since the write
+    await control.fixtureAdvanceClock(23 * 3_600_000); // others[0] expires (25 h)
+    await control.fixtureNoteCoTenants(reply(active, [others[1]!]));
+    expect(await control.fixtureCoTenantWrites()).toBe(3);
+  });
+
+  it('tolerates malformed stored rows and keeps only valid ones', async () => {
+    const name = 'prewarm-' + crypto.randomUUID();
+    const stub = () => (env as unknown as { PUB_CONTROL: DurableObjectNamespace }).PUB_CONTROL.getByName(name) as unknown as Control;
+    const active = newTenant(), good = newTenant(), malformed = [null, 7, 'x', [], [1, 2], ['', 5], ['only-id'], [good, Date.now()], [newTenant(), 'nan'], { a: 1 }];
+    await stub().devCreateProject({ id: 'pw-project', name: 'prewarm fixture' });
+    for (const t of [active, good]) await stub().fixtureTenant('pw-project', t);
+    await stub().fixturePutRawCoTenants(active, malformed);
+    await stub().fixtureRestart().catch(() => undefined); // a new instance reads the row from KV
+    expect(await stub().prewarmTenant('pw-project', active)).toBe('warming');
+    expect(await pingsOf(good, 1)).toBe(1);
+    await stub().fixturePutRawCoTenants(newTenant(), 'not even a list');
+    await stub().fixtureNoteCoTenants(reply(active, [good])); // a reply after reading malformed rows still records
+    await stub().fixturePutRawCoTenants(active, { broken: true });
+    await stub().fixtureRestart().catch(() => undefined);
+    expect(await stub().prewarmTenant('pw-project', active)).toBe('warming'); // a non-list row: no co-tenants, no error
   });
 
   it('survives a Control restart (KV), without the old in-memory throttle', async () => {
