@@ -1025,27 +1025,38 @@ export class ReplicaDeliveryEngine {
       return;
     }
     // Bootstrap watermark (`bootstrap_watermark_after_sent_snapshots`): once the cohort's snapshots are all out.
+    let bootstrap: SocketOp | undefined;
     if (!connection.pending.length && connection.openingCohort) {
       const revisions = [...connection.subscriptions.values()].map((s) => s.cursor.revision);
       if (revisions.length) {
         const revision = Math.min(...revisions);
         if (revision >= connection.sentRevision) {
-          ops.push(["f", watermarkFrame(revision)]);
+          bootstrap = ["f", watermarkFrame(revision)];
           connection.sentRevision = revision;
           connection.openingCohort = false;
         }
       }
     }
     const initialCompletions = request.initial ? ops.flatMap((op, index) => { const c = initialCompletion(request.initial!, op, index); return c ? [c] : []; }) : [];
+    // X17s: initial-only work may carry a watermark only after its request was accepted (protocol.ts
+    // `initialDeliveryOnly`). When the cohort's last open was refused (`replica.needHashes`, an error), the outlet
+    // refused the whole payload and the engine reset every replica of the socket `change-feed-lagged`. The watermark
+    // certifies the cohort's other subscriptions, not this request: it then follows as ordinary work, in order.
+    const certified = !request.initial || (initialCompletions.length > 0 && initialCompletions.every((c) => c.outcome === "accepted"));
+    if (bootstrap && certified) ops.push(bootstrap);
+    const after: SocketWork | undefined = bootstrap && !certified ? { ops: [bootstrap] } : undefined;
     const last: SocketWork = { ops: ops.splice(0), initialCompletions, ...(request.initial?{initialScope:request.initial}:{}), ...(subscription ? { opened } : { removed: [request.id] }) };
     const outlet = this.options.outlet;
     if (outlet.admits && !this.paused(connection.host) && (this.behind.has(connection.host) || !outlet.admits(connection.host, this.socketPayload(connection, last)))) {
       // BUG-4: no room on this holder's channel. Its commits wait with this work (it was read at `delivered`); the
       // invocation queue is released, so every other holder keeps getting commits.
-      this.queueDeferred(this.defer(connection.host, this.delivered?.revision ?? 0), this.socketPayload(connection, last), 0);
+      const deferred = this.defer(connection.host, this.delivered?.revision ?? 0);
+      this.queueDeferred(deferred, this.socketPayload(connection, last), 0);
+      if (after) this.queueDeferred(deferred, this.socketPayload(connection, after), 0);
       return;
     }
     this.post(connection, last);
+    if (after) this.post(connection, after);
   }
 
   /** Reads and delivers every committed transaction after the delivery's cursor. True when more arrived meanwhile. */
