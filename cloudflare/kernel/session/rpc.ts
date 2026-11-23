@@ -29,7 +29,8 @@ export interface GatewayRpc {
 
 export interface TenantRpc {
   addMember(input: { id: string; accountId: string; displayName: string }): Promise<Member>;
-  admit(accountId: string): Promise<(Member & { admissionRevision: number }) | null>;
+  /** X17r: `prewarm` asks the tenant to evaluate its app bundle once this answer has left (the client is about to open it). */
+  admit(accountId: string, options?: { readonly prewarm?: boolean }): Promise<(Member & { admissionRevision: number }) | null>;
   setRole(memberId: string, role: string): Promise<{ gateways: number; sockets: number }>;
   commit(batch: Omit<DeliveryBatch, "v" | "revision" | "tenantId">): Promise<{ revision: number; gateways: number; sockets: number }>;
   attachGateway(gateway: string): Promise<void>;

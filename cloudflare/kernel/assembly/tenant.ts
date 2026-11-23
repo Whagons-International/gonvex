@@ -8,6 +8,7 @@ import { QueryEngine, moduleFromManifest, snapshotRunner, kernelVisibility, type
 import { MODULE_KEY, storedManifest, type StoredModule } from "../reducer/tenant";
 import { RECEIPT_PRUNE_KEY } from "../reducer/tenant";
 import { RECEIPT_PRUNE_INTERVAL_MS } from "../reducer/receipts";
+import type { AdmitOptions } from "../reducer/object";
 import { pruneChangeLog, PRUNE_INTERVAL_MS } from "../capture/index";
 import type { CommittedCall } from "../reducer/path";
 import { RECEIPT_QUERY } from "../reducer/receipts";
@@ -543,8 +544,8 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   }
 
   // K06 admission returns the same Member plus its snapshot revision for both consumers.
-  override async admit(accountId: string) {
-    const admitted = await super.admit(accountId);
+  override async admit(accountId: string, options?: AdmitOptions) {
+    const admitted = await super.admit(accountId, options);
     if (!admitted) return null;
     const { admissionRevision, ...member } = admitted;
     return { ...admitted, member, revision: admissionRevision };

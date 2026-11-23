@@ -26,6 +26,11 @@ export interface ReducerTenantEnv {
 }
 
 /** `members` row as the session layer reads it. */
+/** X17r: options of `admit`. `prewarm`: the client is about to open this tenant (see `ReducerTenantObject.prewarm`). */
+export interface AdmitOptions {
+  readonly prewarm?: boolean;
+}
+
 function memberOf(row: Record<string, SqlStorageValue>): Member {
   return {
     id: String(row.id), accountId: String(row.account_id), status: String(row.status), displayName: String(row.display_name),
@@ -131,15 +136,37 @@ export abstract class ReducerTenantObject<E extends ReducerTenantEnv = ReducerTe
     return (await this.admit(input.accountId))!;
   }
 
-  /** `admit_member`: the active Member of an account and the revision its read covers. */
-  async admit(accountId: string): Promise<(Member & { admissionRevision: number }) | null> {
+  /**
+   * `admit_member`: the active Member of an account and the revision its read covers. X17r: `prewarm` (Control's
+   * sign-in admission of the tenant the client opens, and the gateway's tenant auth) also starts the app bundle's
+   * evaluation once this answer has left (`prewarm`).
+   */
+  async admit(accountId: string, options?: AdmitOptions): Promise<(Member & { admissionRevision: number }) | null> {
     const row = this.ctx.storage.sql.exec<Record<string, SqlStorageValue>>(
       `SELECT m.id, m.account_id, m.status, m.display_name, m.avatar_url, m.role, m.permissions, m.membership_revision,
               (SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1) AS revision
        FROM members m WHERE m.account_id = ? AND m.status = 'active' LIMIT 1`, accountId,
     ).toArray()[0];
     if (!row) return null;
+    if (options?.prewarm === true) this.prewarm();
     return { ...memberOf(row), admissionRevision: Number(row.revision ?? 0) };
+  }
+
+  private prewarming = false;
+
+  /**
+   * X17r: evaluates the app bundle in the background, a macrotask after the current event, so the answer that
+   * triggered it is not delayed. Requests while one is pending collapse into it; once evaluated, a prewarm costs a
+   * flag check (`KernelTenant.prewarmModule`). Also an RPC, for a wake that knows which tenant the client is about
+   * to open.
+   */
+  prewarm(): void {
+    if (this.prewarming) return;
+    this.prewarming = true;
+    this.ctx.waitUntil(new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() => {
+      this.prewarming = false;
+      this.kernel.prewarmModule();
+    }));
   }
 
   async attachGateway(gateway: string): Promise<void> { await this.gateways.attach(gateway); }

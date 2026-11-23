@@ -104,10 +104,11 @@ async function tenantCall<T>(ctx: Ctx, route: TenantRoute, call: (port: ReturnTy
 }
 
 /** `ControlPlane::admit_member`: the only admission gate (C.4 item 4). */
-export async function admitMember(ctx: Ctx, projectId: string, tenantId: string, accountId: string): Promise<{ route: TenantRoute; member: Member; revision: number }> {
+export async function admitMember(ctx: Ctx, projectId: string, tenantId: string, accountId: string, options?: { readonly prewarm?: boolean }): Promise<{ route: TenantRoute; member: Member; revision: number }> {
   const account = required(accountId, db.missingAccount);
   const route = resolveTenant(ctx, projectId, tenantId);
-  const admission: Admission | null = await tenantCall(ctx, route, (port) => port.admit(account));
+  // X17r: `prewarm` only for the tenant the client is about to open (never a fan-out over the account's tenants).
+  const admission: Admission | null = await tenantCall(ctx, route, (port) => (options?.prewarm ? port.admit(account, { prewarm: true }) : port.admit(account)));
   if (!admission) throw db.memberNotFound(account);
   return { route, member: admission.member, revision: admission.revision };
 }

@@ -31,8 +31,8 @@ function memberOf(row: Record<string, SqlStorageValue>): Member {
 export abstract class PrincipalsTenant extends HarnessTenant {
   protected abstract override bundle(artifactHash: string): ModuleExports | undefined;
 
-  override async admit(accountId: string): Promise<DualAdmission | null> {
-    const admitted = await super.admit(accountId);
+  override async admit(accountId: string, options?: { readonly prewarm?: boolean }): Promise<DualAdmission | null> {
+    const admitted = await super.admit(accountId, options);
     if (!admitted) return null;
     const { admissionRevision, ...member } = admitted;
     return { ...admitted, member, revision: admissionRevision };
