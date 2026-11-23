@@ -12,6 +12,7 @@ type Control = {
   prewarmTenant(project: string, selector: string): Promise<'warming' | 'recent' | 'unknown'>;
   fixturePrewarmedSize(): Promise<number>;
   fixtureNoteCoTenants(result: unknown): Promise<void>;
+  fixtureRestart(): Promise<void>;
 };
 type Tenant = { fixturePings(): Promise<number> };
 const tenantObject = (id: string) => (env as unknown as { PUB_TENANT: DurableObjectNamespace }).PUB_TENANT.getByName(id) as unknown as Tenant;
@@ -159,5 +160,17 @@ describe('co-tenant prewarm (multi-tenant accounts)', () => {
     await control.fixtureNoteCoTenants(reply(active, others));
     expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
     expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('recent');
+  });
+
+  it('survives a Control restart (KV), without the old in-memory throttle', async () => {
+    const name = 'prewarm-' + crypto.randomUUID();
+    const stub = () => (env as unknown as { PUB_CONTROL: DurableObjectNamespace }).PUB_CONTROL.getByName(name) as unknown as Control;
+    const active = newTenant(), other = newTenant();
+    await stub().devCreateProject({ id: 'pw-project', name: 'prewarm fixture' });
+    for (const t of [active, other]) await stub().fixtureTenant('pw-project', t);
+    await stub().fixtureNoteCoTenants(reply(active, [other]));
+    await stub().fixtureRestart().catch(() => undefined);
+    expect(await stub().prewarmTenant('pw-project', active)).toBe('warming'); // a new instance: no throttle state
+    expect(await stub().prewarmTenant('pw-project', other)).toBe('recent');   // co-tenant read back from KV and woken
   });
 });

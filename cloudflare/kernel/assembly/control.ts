@@ -23,6 +23,8 @@ export const PREWARM_TENANT_MAX = 4_096;
 /** Co-tenant memory (`noteCoTenants`): at most this many other tenants per tenant, each for at most a day. */
 export const COTENANTS_PER_TENANT = 8;
 export const COTENANT_TTL_MS = 24 * 60 * 60 * 1000;
+const COTENANT_PERSIST_MS = 60 * 60 * 1000;
+const COTENANT_KEY = "control/cotenants/";
 
 /** K05's auth branches prefix this to an impersonation failure; K06's text already carries it. */
 const IMPERSONATION_PREFIX = "impersonation grant is invalid, expired, revoked, or already used: ";
@@ -111,7 +113,8 @@ export class SessionControlObject extends OperatorControlObject {
 
   /**
    * Tenant id -> the other tenants recent sign-ins admitted together with it as the active tenant, and when.
-   * Memory only, tenant ids only (no account), bounded: `COTENANTS_PER_TENANT` per tenant, `COTENANT_TTL_MS`.
+   * Tenant ids only (no account), bounded: `COTENANTS_PER_TENANT` per tenant, `COTENANT_TTL_MS`; kept in memory and
+   * in this object's KV (`control/cotenants/<tenant>`).
    * `prewarmTenant` pings these too: a multi-tenant account's exchange admits every tenant of the account and waits
    * for each cold one, but the page names only the active tenant before the sign-in.
    */
@@ -122,8 +125,9 @@ export class SessionControlObject extends OperatorControlObject {
     const tenants = Array.isArray(value?.tenants) ? value.tenants : [];
     if (!active || tenants.length < 2) return;
     const now = Date.now();
-    let others = this.coTenants.get(active);
-    if (others) this.coTenants.delete(active); else others = new Map();
+    const others = this.loadCoTenants(active);
+    const before = [...others.keys()].sort().join("\u0000"), oldest = Math.min(...others.values());
+    this.coTenants.delete(active);
     for (const tenant of tenants) {
       const id = (tenant as { id?: unknown } | null)?.id;
       if (typeof id !== "string" || !id || id === active) continue;
@@ -133,11 +137,25 @@ export class SessionControlObject extends OperatorControlObject {
     while (others.size > COTENANTS_PER_TENANT) others.delete(others.keys().next().value!);
     this.coTenants.set(active, others);
     if (this.coTenants.size > PREWARM_TENANT_MAX) this.coTenants.delete(this.coTenants.keys().next().value!);
+    // Survives an evicted or restarted Control. Written only when the set changes, or hourly to keep it inside the
+    // TTL, so a sign-in's reply does not routinely wait for a confirmed write.
+    if ([...others.keys()].sort().join("\u0000") !== before || now - oldest > COTENANT_PERSIST_MS) {
+      this.ctx.storage.kv.put(`${COTENANT_KEY}${active}`, [...others]);
+    }
+  }
+  private loadCoTenants(tenantId: string): Map<string, number> {
+    let others = this.coTenants.get(tenantId);
+    if (!others) {
+      const stored = this.ctx.storage.kv.get<Array<[string, number]>>(`${COTENANT_KEY}${tenantId}`);
+      others = new Map(Array.isArray(stored) ? stored.filter(([id, at]) => typeof id === "string" && typeof at === "number") : []);
+      this.coTenants.set(tenantId, others);
+      if (this.coTenants.size > PREWARM_TENANT_MAX) this.coTenants.delete(this.coTenants.keys().next().value!);
+    }
+    return others;
   }
   /** The live co-tenants of `tenantId`, most recent first. */
   private recentCoTenants(tenantId: string, now: number): string[] {
-    const others = this.coTenants.get(tenantId);
-    if (!others) return [];
+    const others = this.loadCoTenants(tenantId);
     for (const [id, at] of others) if (now - at > COTENANT_TTL_MS) others.delete(id);
     return [...others.keys()].reverse();
   }
