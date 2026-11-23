@@ -151,13 +151,20 @@ describe('co-tenant prewarm (multi-tenant accounts)', () => {
     expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('warming'); // not woken by the page of `active`
   });
 
-  it('keeps at most 8 co-tenants per tenant, the most recent', async () => {
+  it('records at most 9 tenants of one reply (each keeps at most 8 others)', async () => {
     const { control, active, others } = await tenants(10);
-    await control.fixtureNoteCoTenants(reply(active, others));
+    await control.fixtureNoteCoTenants(reply(active, others)); // 11 tenants: the first 9 are recorded
     expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
-    expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('warming'); // dropped by the bound
+    for (const other of others.slice(0, 8)) expect(await control.prewarmTenant('pw-project', other)).toBe('recent');
+    for (const other of others.slice(8)) expect(await control.prewarmTenant('pw-project', other)).toBe('warming'); // not recorded
+  });
+
+  it("a page of the reply's non-active tenant also wakes the active one (records are symmetric)", async () => {
+    const { control, active, others } = await tenants(2);
+    await control.fixtureNoteCoTenants(reply(active, others)); // e.g. a sign-in without a requested tenant: active = first by name
     expect(await control.prewarmTenant('pw-project', others[1]!)).toBe('warming');
-    for (const other of others.slice(2)) expect(await control.prewarmTenant('pw-project', other)).toBe('recent');
+    expect(await pingsOf(active, 1)).toBe(1);
+    expect(await pingsOf(others[0]!, 1)).toBe(1);
   });
 
   it('co-tenant wakes share the per-tenant throttle: a recently woken tenant is not pinged again', async () => {
@@ -205,32 +212,33 @@ describe('co-tenant prewarm (multi-tenant accounts)', () => {
 
   it('writes KV on a change, not again for an unchanged set within the hour, and once after an hour', async () => {
     const { control, active, others } = await tenants(2);
+    // Each reply records both directions: active -> {others}, and each other -> {active}.
     await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
-    expect(await control.fixtureCoTenantWrites()).toBe(1); // new set
+    expect(await control.fixtureCoTenantWrites()).toBe(2); // two new sets
     await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
     await control.fixtureAdvanceClock(30 * 60_000);
     await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
-    expect(await control.fixtureCoTenantWrites()).toBe(1); // unchanged within the hour
+    expect(await control.fixtureCoTenantWrites()).toBe(2); // unchanged within the hour
     await control.fixtureAdvanceClock(31 * 60_000);
     await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
-    expect(await control.fixtureCoTenantWrites()).toBe(2); // an hour after the last write
+    expect(await control.fixtureCoTenantWrites()).toBe(4); // an hour after the last writes
     await control.fixtureNoteCoTenants(reply(active, [others[0]!]));
-    expect(await control.fixtureCoTenantWrites()).toBe(2);
+    expect(await control.fixtureCoTenantWrites()).toBe(4);
     await control.fixtureNoteCoTenants(reply(active, [others[1]!]));
-    expect(await control.fixtureCoTenantWrites()).toBe(3); // the set changed
+    expect(await control.fixtureCoTenantWrites()).toBe(6); // active's set changed; others[1]'s is new; others[0] untouched
   });
 
   it('an entry expiring by the TTL changes the set (written), while a stale-but-live entry alone does not force writes', async () => {
     const { control, active, others } = await tenants(2);
-    await control.fixtureNoteCoTenants(reply(active, [others[0]!])); // write 1
+    await control.fixtureNoteCoTenants(reply(active, [others[0]!])); // writes 1-2 (active, others[0])
     await control.fixtureAdvanceClock(2 * 3_600_000);
-    await control.fixtureNoteCoTenants(reply(active, [others[1]!])); // set changed: write 2 ({0, 1})
+    await control.fixtureNoteCoTenants(reply(active, [others[1]!])); // active's set changed ({0, 1}) and others[1] is new: 3-4
     await control.fixtureNoteCoTenants(reply(active, [others[1]!]));
     await control.fixtureNoteCoTenants(reply(active, [others[1]!]));
-    expect(await control.fixtureCoTenantWrites()).toBe(2); // others[0] is 2 h old, but nothing changed since the write
-    await control.fixtureAdvanceClock(23 * 3_600_000); // others[0] expires (25 h)
+    expect(await control.fixtureCoTenantWrites()).toBe(4); // others[0] is 2 h old in active's set, but nothing changed since the write
+    await control.fixtureAdvanceClock(23 * 3_600_000); // others[0] expires (25 h) from active's set
     await control.fixtureNoteCoTenants(reply(active, [others[1]!]));
-    expect(await control.fixtureCoTenantWrites()).toBe(3);
+    expect(await control.fixtureCoTenantWrites()).toBe(6); // active's set changed; others[1]'s last write is 23 h old
   });
 
   it('tolerates malformed stored rows and keeps only valid ones', async () => {
