@@ -1340,7 +1340,8 @@ describe("GonvexClient", () => {
     expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(1);
     expect(onAuthError).not.toHaveBeenCalled();
     expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
-    await vi.advanceTimersByTimeAsync(250);
+    // Auth retries jitter the 250 ms base delay by ±25%, so wait past the upper bound.
+    await vi.advanceTimersByTimeAsync(400);
     expect(latestSocket()).not.toBe(socket);
     // Tenant reads stay fail-closed until a valid authenticated scope exists.
     expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
