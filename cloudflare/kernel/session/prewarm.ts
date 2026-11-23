@@ -17,7 +17,9 @@
  * upgrade is admitted (the K16 address limiter has run), is capped per isolate independent of the selector, and is
  * throttled per (project, selector) here and per tenant in Control. Residual cost: an anonymous client can keep a
  * known tenant resident with one admitted upgrade per 10 s (DO duration billing for a tenant that would otherwise be
- * evicted).
+ * evicted). With co-tenant prewarm (#565) one admitted upgrade wakes up to 9 objects: the page's tenant and up to
+ * `COTENANTS_PER_TENANT` (8) tenants recent sign-ins admitted with it, each still at most once per 10 s per Control
+ * instance.
  */
 import { rpc } from "./rpc";
 
