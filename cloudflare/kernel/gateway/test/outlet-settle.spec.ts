@@ -12,6 +12,11 @@ function lateHolder() {
   const rpc: ReplicaHolderRpc = { async deliverReplica(_t, p) { received.push(p.instance); await new Promise<void>((r) => gates.push(r)); return { v: 1, sockets: 0 }; } };
   return { rpc, received, release: () => { for (const g of gates.splice(0)) g(); } };
 }
+/** Waits (real time, bounded) until `condition` holds; fails with `what` instead of hanging into the test timeout. */
+async function until(condition: () => boolean, what: string, ms = 5_000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!condition()) { if (Date.now() > end) throw new Error(`timed out waiting for ${what}`); await sleep(2); }
+}
 const quick: ReplicaHolderRpc = { async deliverReplica() { return { v: 1, sockets: 0 }; } };
 const totals = () => { const p = deliveryPressure(); return { running: p.running, count: p.count, normal: p.normal, recovery: p.recovery }; };
 
@@ -162,6 +167,7 @@ it("a lost wake timer is replaced on the outlet's next own call once overdue (#5
 
 it("dead waiters ahead in line (objects reset while waiting) do not block a live tenant", async () => {
   const previous = setRpcSlotStaleMs(300);
+  const runningBefore = deliveryPressure().running;
   try {
     const dead = new GatewayOutlet("dw-holder", () => never, async () => []);
     for (let i = 0; i < MAX_RPCS; i++) void dead.send(`h${i}`, payload(`d${i}`));
@@ -174,7 +180,16 @@ it("dead waiters ahead in line (objects reset while waiting) do not block a live
     dropWakeTimersForTests(false);
     const live = new GatewayOutlet("dw-live", () => quick, async () => []);
     expect(await within(live.send("l", payload("l")), 2_000)).toBe("delivered");
-  } finally { dropWakeTimersForTests(false); setRpcSlotStaleMs(previous); }
+  } finally {
+    dropWakeTimersForTests(false);
+    // Leave no slot behind: `dead`'s RPCs never settle, so their slots come back only through the 300 ms stale rule.
+    // The live send needed one, and on a slow runner one sweep can find only the oldest stale (CI run 45124327662:
+    // "stale RPC slots returned { slots: 1, running: 7 }"). Restoring the 60 s bound then would leave 7 slots held for
+    // the next test. Keep calling schedule() until every slot is back, then restore it.
+    const sweep = new GatewayOutlet("dw-sweep", () => quick, async () => []);
+    await until(() => { void sweep.send("s", payload("s")); return deliveryPressure().running <= runningBefore; }, "dead RPC slots to be reclaimed");
+    setRpcSlotStaleMs(previous);
+  }
 });
 
 it("dead waiters ahead in line are skipped by a live pump within WAITER_LIVE_MS, not only by the 60 s sweep", async () => {
@@ -183,7 +198,10 @@ it("dead waiters ahead in line are skipped by a live pump within WAITER_LIVE_MS,
   const h = lateHolder();
   const holder = new GatewayOutlet("dw2-holder", () => h.rpc, async () => []);
   const held = Array.from({ length: MAX_RPCS }, (_, i) => holder.send(`h${i}`, payload(`d${i}`)));
-  await sleep(10);
+  // Every held RPC must be in flight (holding a slot) before the ghosts queue. One still waiting for a slot would have
+  // its wake timer dropped with the ghosts', never start, and `Promise.all(held)` would hang into the 30 s test timeout
+  // (CI run 45124327662, where the previous test had left 7 of the MAX_RPCS slots held). Fail fast and clearly instead.
+  await until(() => h.received.length === MAX_RPCS, "all held RPCs to start");
   dropWakeTimersForTests(true);
   try {
     const ghosts = Array.from({ length: MAX_RPCS }, (_, i) => new GatewayOutlet(`dw2-ghost${i}`, () => never, async () => []));
