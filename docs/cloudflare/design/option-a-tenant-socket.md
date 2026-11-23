@@ -1,6 +1,8 @@
 # Option A: the tenant object holds the client's tenant socket
 
-Status: design and feasibility only (2026-11-20). Nothing here is implemented. It is written so Gabriel can choose
+Status: design and feasibility (2026-11-20). **M0 measured 2026-11-23: no-go** (A was 1.8–5.8 s *slower* on cold
+loads, not ≥250 ms faster; see [§8](#8-m0-results-2026-11-23-no-go)). Only the M0 spike exists, on the branch
+`cf/a0-tenant-socket-spike`, and it is not for merge. It is written so Gabriel can choose
 between option A, option D (the frontend sends fewer waves) and option E (re-baseline the rule) from
 [X17 §4](../verification/X17-durable-object-latency/README.md#options-that-would-remove-the-floor-decision-for-gabriel).
 Base: `cloudflare/integration` at `7c5dd4b6` (#545).
@@ -339,3 +341,123 @@ per step). X17's upper-bound A/B with every X02 deferral removed did not make th
 | **A-lite** | ≈250–500 ms on the measured cells | ≈4–5 wk | as A, minus live shedding |
 | D: fewer frontend waves (send the first-screen opens and `presence.subscribe` in 1–2 frames, earlier) | ≈150–300 ms (3–6 steps × 45–55 ms) | days, but changes the frozen frontend `678bdc80` | changes the measured client |
 | E: re-baseline (Rust_RTT + 300 ms + the measured per-step floor) | closes by definition | none | product decision |
+
+## 8. M0 results (2026-11-23): no-go
+
+**A does not save ≥250 ms on the -12 cold load. It made every measured cold load slower:** -12 by +3.3 s (current
+staging build) to +5.6 s (b30 build), and -11 by +1.8 s. The few hundred milliseconds A removes before the cohort are
+real but small (≈0–60 ms net). Moving the gateway's delivery work onto the tenant's single thread costs far more in
+the cohort phase.
+
+### 8.1 Setup
+
+- **Separate composition** `gonvex-cf-dev-a0` (kernel, runtime, Actions, sandbox and builder Workers; own Control,
+  project, R2 buckets and queue). The integration Workers (x18y) and the dev lane lock were not touched; x18y was
+  read only, for its grants and teams. The app module came from the b30 client source export
+  (`gonvex dev --once`, module `33c42c92`). `devcopy-stg1117-12` and `-11` were P03-imported from the a01 images
+  (398 tables each, 0 checksum mismatches). The vault test account was linked to its Firebase identity, with x18y's
+  role, permissions and team rows copied. Kernel, runtime and Actions ran the spike branch on integration `c196668f`
+  plus the spike (`e92105a8`, then `48c3369a`). `GONVEX_SPAN_TIMING=1`, runtime `cpu_ms` 30000, presence on.
+- **Spike** (`kernel/assembly/a0-local-holder.ts`): `AssemblyTenant` embeds an `AssemblyGateway` that shares its
+  `ctx`. The holder's `TENANT.getByName(<own tenant>)` returns the tenant object, and the tenant's
+  `GATEWAY.getByName(<holder>)` returns the holder. Dispatch, admit, attach, replica deliveries, presence and Action
+  replies are therefore in-process calls; Control and everything else use the real bindings. Shortcuts that are off
+  the measured path: own tenant only, no cap or shedding, no K16 slot at the upgrade, X02 gating off for the holder,
+  and a virtual holder alarm on the tenant's alarm. The router sends `/ws?a0=1` to `TENANT.getByName(<Origin
+  subdomain>)` for listed tenants. The control socket is unchanged.
+- **Probe:** F01's `capture.mjs` (sign-in click → task rows; same row detector as `wsload.js`), with an init script
+  that adds `?a0=1` to the page's first `/ws` socket only. That socket is the application client's; the control
+  client's opens after the Firebase sign-in. A and B run on the same deployment, alternated (ABBA…), n = 6 each
+  after one discarded warm-up load (the snapshot-cache miss), so every counted load is a cache hit. All loads were
+  served from SJC, one window at a time, under `/home/gabriel/work/gonvex-a0-cf-measure.lock` (02:16:30–02:35:06Z),
+  with X17's lane idle.
+- Frontends: the **b30 build** (staging `06afa9eb`) and the **current staging build** (`625f7a29`, with
+  whagons5-client #2072). Both are X17's CF dists with only the baked backend URL and project id rewritten.
+- `m1`: the spike as described. `m2` and `s2`: plus one macrotask yield before each in-process tenant → holder call
+  (`GONVEX_A0_YIELD=1`), to give back the turn boundary an RPC provides. It changed nothing.
+
+Raw captures: `/home/gabriel/work/gonvex-a0/cap/{m1,m2,s2}-T{12,11}-{A,B,W}-*.json`; analysis:
+`/home/gabriel/work/gonvex-a0/bin/analyze.py <tag> <tenant>`.
+
+### 8.2 Cold load, sign-in click → rows (ms, n = 6 each, cache hit, SJC)
+
+| Tenant / build | Variant | A (tenant holds the app socket) | B (gateway, today) | A − B (median) |
+|---|---|---|---|---|
+| -12, staging `625f7a29` (#2072) | yield | 7111–7573, **median 7237** | 3578–4131, **median 3903** | **+3334** |
+| -12, b30 `06afa9eb` | no yield | 9209–9889, **median 9490** | 3792–5034, **median 3920** | **+5570** |
+| -12, b30 `06afa9eb` | yield | 8842–10451, **median 9782** | 3921–4701, **median 4033** | **+5749** |
+| -11, b30 `06afa9eb` | yield | 5565–5692, **median 5670** | 3451–5093, **median 3885** | **+1785** |
+
+The B medians agree with b30's integration numbers for the same build (-12 3801, -11 4839; b30 n = 3 including one
+cache miss).
+
+### 8.3 Where the time went (medians of the milestones, ms from the click)
+
+| Segment | Socket | -12 #2072 A / B | -12 b30 (m1) A / B | -11 b30 A / B |
+|---|---|---|---|---|
+| click → app socket's tenant `auth` answered | mostly control | 1985 / 1754 | 1982 / 1773 | 1618 / 1649 |
+| → cohort `presence.subscribe` sent (6–7 dependent tenant steps + `developer.status`) | app | 1150 / 1208 (**−58**) | 1221 / 1228 (**−7**) | 1372 / 1224 (+148) |
+| → task rows (cohort opens, `listWindow`, `getFileUrls`, `recentWorkspaceTasks`) | app | **4102 / 941** | **6287 / 919** | **2680 / 1012** |
+
+The first segment does not depend on A; its A − B difference (+150 to +230 on -12, −31 on -11) is Control and
+exchange noise. Under A, the app socket's own connect finished 215–270 ms sooner (no controller or limiter hop), but
+it is off the critical path: the control socket's exchange ends later.
+
+**Dependent pre-cohort steps, answer latency A / B (ms, medians):**
+
+| Step | -12 #2072 | -12 b30 (m1) |
+|---|---|---|
+| tenant `auth` (app socket) | 60 / 62 | 63 / 64 |
+| `openMany` (2) | 99 / 153 (−54) | 107 / 166 (−59) |
+| `openMany` (4) | 165 / 158 | 157 / 179 (−22) |
+| `subscribeMany control.developer.status` (Control) | 160 / 151 | 184 / 151 |
+| `openMany` (1) `__local.userPresence` | 149 / 177 (−28) | 180 / 179 |
+| `reducer.callMany presence.transition` | 178 / 232 (−54) | 199 / 234 (−35) |
+| `openMany` (4) `properties.properties` | 144 / 109 | 123 / 118 |
+
+Some steps got 20–60 ms cheaper, others did not. The segment as a whole moved by only −58 / −7 ms, because the
+client's own work between waves sets most of it. A node probe on the same deployment (one frame at a time) gave the
+same picture for small opens: 32–36 ms on A against 42–51 ms on B. The tenant event's wall time was ≈32 ms for 9–14 ms
+of CPU, so A saves roughly the gateway hop (≈10–15 ms per step), not the ≈35 ms floor §1.3 assumed.
+
+**The cohort phase is where A loses.**
+- Runtime spans of one A and one B load (`wrangler tail`, `GONVEX_SPAN_TIMING=1`), both mostly snapshot-cache hits:
+  - A: the WebSocket event that ran the 55-open cohort used **1497 ms of CPU** (1577 ms wall) in the tenant.
+  - B: the tenant's `dispatch` of the 44-open cohort used 332 ms. The rest ran in the gateway's isolate: applying
+    deliveries, building and encoding per-socket frames, and permessage-deflate.
+  - Under A that work runs on the tenant's single thread, serialized with the opens (§4.2 estimated +20–50 % of tenant
+    CPU per cold load; measured, it is ≈4×, for the cohort).
+- Nothing reaches the client from the cohort send until the cohort's CPU is done. On A, the first cohort frame
+  arrived 1.7–2.3 s after the send, against ≈0.3 s on B. Then everything arrived in one burst. `tasks.listWindow`, queued behind the cohort, was
+  answered at 1.0–2.8 s instead of 0.2–0.3 s.
+- The client then spends ≈2.5 s processing the burst before it sends `files.getFileUrls` and the last opens. On B,
+  the frames trickle in while the server is still working, so the browser's processing overlaps the server's.
+- A macrotask yield before each in-process delivery (`m2`/`s2`) did not change this. The cost is CPU on one thread,
+  not a missing turn boundary.
+
+### 8.4 Share of the remaining gap on the control socket
+
+On B (today's path), click → the app socket's tenant `auth` answered takes 1754–1799 ms on -12 and 1649 on -11. That
+is ≈45 % of the cold load, and A does not touch it. The same span was 499–865 ms on Rust_0 (§1.2; x17ref profile).
+After that point, B's -12 load takes 2149 ms (#2072 build) against ≈1640–2005 on Rust_0.
+
+So of B's remaining gap over Rust (-12 cold, #2072 build: 3903 against b30's Rust_RTT 3082, +821, or +521 over the
+rule), **about 900–1250 ms sits before the app socket's tenant auth, which is the control-socket path** (connect,
+token exchange, control-only auths, `tenants.mine`). After it, only ≈150–500 ms remain. The control-socket path holds
+roughly two thirds or more of today's gap, and at least the whole of the part over the rule. A can only reach the
+rest. The Rust_0 split is from a different day and profile, so treat these as order-of-magnitude shares.
+
+### 8.5 Decision input
+
+- **Go/no-go: no-go.** A in this form adds 1.8–5.8 s to cold loads instead of removing ≥250 ms. Its best-case gain
+  before the cohort is ≈0–60 ms, about the step-overhead floor. §1.3's ≈350 ms central estimate does not hold:
+  - the per-step saving is ≈10–15 ms, not ≈35;
+  - the client's gaps between waves dominate the pre-cohort segment;
+  - the cohort phase depends on the gateway running in parallel with the tenant.
+- Recovering the cohort phase would need the delivery work moved off the tenant's thread again: a holder per socket
+  in another object, which is today's gateway. So the cheapest variant that keeps A's few gains is not A.
+- The remaining cold-load gap is mostly on the control path (§8.4). The cuts that act there (X17 option C, or D when
+  the frontend unfreezes) are the better next steps. The M0 items not measured here (publication with 100 local
+  sockets, the frames/s ceiling with deflate, staging peak sockets) are moot after this result.
+- The spike stays on `cf/a0-tenant-socket-spike`, not for merge. Teardown of `gonvex-cf-dev-a0` (`deleteAssembly`)
+  waits for the lead's word.
