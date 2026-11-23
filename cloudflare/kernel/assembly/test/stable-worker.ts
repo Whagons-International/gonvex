@@ -10,13 +10,19 @@ import {X13_PROJECT,x13Registry} from './x13-fixture';
 // X13: the Action Worker serves the X13 fixture app (its other fixtures run no Actions here).
 configureActions({registry:(_env,projectId)=>{if(projectId!==X13_PROJECT)throw new Error(`project ${JSON.stringify(projectId)} has no active TypeScript module`);return x13Registry();}});
 export class TestControl extends SessionControlObject {
+ /** Prewarm fixture: a small per-tenant throttle bound, so a test can reach it. */
+ protected override prewarmMax = 3;
  /** X15 test seam: the stored GATEWAY watchers of a project. */
  /** X17 seam: the watchers a support-scoped change (presence, error sessions) notifies. */
  async fixtureSupportWatchers(project:string){ return (this as unknown as {supportWatchers(p:string):Array<{binding:string;name:string}>}).supportWatchers(project); }
  async fixtureWatchers(project:string){ return this.ctx.storage.kv.get<Array<{binding:string;name:string}>>(`control/watchers/${project}`)??[]; }
  async fixtureTenant(project:string,tenant:string){
-  this.sql.run("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_name,database_url,status,description,provisioned,runtime_created) VALUES ($1,$2,$1,'Fixture','fixture',$3,'active','synthetic',1,1)",tenant,project,'do://tenant/'+tenant);
+  this.sql.run("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_name,database_url,status,description,provisioned,runtime_created) VALUES ($1,$2,$1,'Fixture',$1,$3,'active','synthetic',1,1)",tenant,project,'do://tenant/'+tenant);
  }
+ /** Prewarm fixture: a tenant's domain and status. */
+ /** Prewarm fixture: how many tenants the per-tenant throttle remembers (its bound). */
+ async fixturePrewarmedSize(){ return (this as unknown as {prewarmed:Map<string,number>}).prewarmed.size; }
+ async fixtureTenantRow(tenant:string,domain:string,status='active',databaseUrl?:string){ this.sql.run("UPDATE gonvex_runtime_tenants SET domain=$2,status=$3,database_url=COALESCE($4,database_url) WHERE tenant_id=$1",tenant,domain,status,databaseUrl??null); }
  async fixturePublication(id:string,summary:ReleaseSummary,version:string,tenants:string[],publicationGeneration:number){
   const owner=this.syncs.deployments.acquire(summary.project,id);
   if(!owner.acquired)throw new Error('publication fixture could not acquire deployment');
