@@ -16,8 +16,9 @@ import { setSpanTiming, span, spanTimingFromEnv } from "../delivery/spans";
 import { ADMISSION_REASON_HEADER, DIRECT_REFUSAL_PREFIX, gatewayFor, type GatewayEnv, UPGRADE_HEADERS } from "./placement/gateway";
 import { clientAddress, FIXTURE_ADDRESS_HEADERS, UNKNOWN_ADDRESS } from "../public/address";
 import { admitUpgrade, type PublicGuardEnv, publicGuard } from "../public/guard";
+import { prewarmTenantForUpgrade, type PrewarmEnv } from "./prewarm";
 
-export interface WebSocketRouteEnv extends GatewayEnv, PublicGuardEnv {
+export interface WebSocketRouteEnv extends GatewayEnv, PublicGuardEnv, PrewarmEnv {
   GATEWAY: DurableObjectNamespace;
   /** Dev/test only: enables the fixture client-address override (public/address.ts). */
   GONVEX_ASSEMBLY_FIXTURE_KEY?: string;
@@ -224,6 +225,8 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   // X17g: connect in one hop. The isolate's last admitted holder takes the upgrade itself (one controller call and the
   // limiter, in parallel); a `direct-*` refusal or a failed hop falls back to the controller path below.
   const waitUntil = ctx ? (work: Promise<unknown>) => ctx.waitUntil(work) : undefined;
+  // The page's tenant, from its Origin: wake it now so the sign-in's admission finds it warm (./prewarm.ts).
+  prewarmTenantForUpgrade(request, url, env, waitUntil);
   const id = sharedId(url, address);
   let shared: SharedRead | "refused" | undefined;
   let sharedMs: number | undefined;

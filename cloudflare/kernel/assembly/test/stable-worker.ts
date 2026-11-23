@@ -17,6 +17,8 @@ export class TestControl extends SessionControlObject {
  async fixtureTenant(project:string,tenant:string){
   this.sql.run("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_name,database_url,status,description,provisioned,runtime_created) VALUES ($1,$2,$1,'Fixture','fixture',$3,'active','synthetic',1,1)",tenant,project,'do://tenant/'+tenant);
  }
+ /** Prewarm fixture: a tenant's domain and status. */
+ async fixtureTenantRow(tenant:string,domain:string,status='active'){ this.sql.run("UPDATE gonvex_runtime_tenants SET domain=$2,status=$3 WHERE tenant_id=$1",tenant,domain,status); }
  async fixturePublication(id:string,summary:ReleaseSummary,version:string,tenants:string[],publicationGeneration:number){
   const owner=this.syncs.deployments.acquire(summary.project,id);
   if(!owner.acquired)throw new Error('publication fixture could not acquire deployment');
