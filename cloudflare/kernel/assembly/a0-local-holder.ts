@@ -96,16 +96,19 @@ function holderCtx(ctx: DurableObjectState, alarm: { at: number | null }): Durab
 export class A0LocalHolder extends AssemblyGateway {
   /** Read by GatewayObjectBase: no X02 gating, no entry tracking. */
   static ungated = true;
+  /** Read by GatewayObjectBase: the SocketHost's ctx (virtual alarm). */
+  static hostCtx(ctx: DurableObjectState): DurableObjectState { return holderCtx(ctx, pendingAlarm!); }
   readonly virtualAlarm: { at: number | null };
   private readonly holderName: string;
   private alarmRunning = false;
+  protected override holderId(): string { return (this.env.GATEWAY as DurableObjectNamespace).idFromName(this.gatewayName).toString(); }
   override get gatewayName(): string { return this.holderName ?? pendingName!; }
 
   static create(ctx: DurableObjectState, env: AssemblyGatewayEnv, cell: A0Cell): A0LocalHolder {
     const alarm = { at: null as number | null };
     pendingName = a0HolderName(cell.tenantId);
     pendingAlarm = alarm;
-    try { return new A0LocalHolder(holderCtx(ctx, alarm), holderEnv(env, cell)); }
+    try { return new A0LocalHolder(ctx, holderEnv(env, cell)); }
     finally { pendingName = undefined; pendingAlarm = undefined; }
   }
 

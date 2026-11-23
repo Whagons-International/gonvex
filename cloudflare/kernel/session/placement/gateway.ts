@@ -44,7 +44,7 @@ import { setSpanTiming, span, spanTimingFromEnv } from "../../delivery/spans";
  */
 const INTERNAL_METHODS: ReadonlySet<string> = new Set([
   "accept", "applyReplica", "applyReplicaNow", "applyRecovery", "receiveReplica", "replicaGate", "loadPlacement", "drainTick", "reportCapacity", "index", "tenantChanged", "link",
-  "bindings", "alarmEntry", "refreshControlWatches",
+  "bindings", "alarmEntry", "refreshControlWatches", "holderId",
 ]);
 const tracked = new WeakSet<object>();
 
@@ -165,12 +165,16 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
   private alarmBody: Promise<void> | undefined;
 
   protected abstract bindings(): GatewayBindings;
+  /** The id Control's notices address (`watch(project, "GATEWAY", id)`). A0 SPIKE: overridden by the embedded holder. */
+  protected holderId(): string { return this.ctx.id.toString(); }
 
   constructor(ctx: DurableObjectState, rawEnv: E) {
     let wake = () => {};
     const origin = new CallOrigin(() => wake());
     // A0 SPIKE: a holder embedded in a tenant object (kernel/assembly/a0-local-holder.ts) is not gated.
     const ungated = (new.target as unknown as { ungated?: boolean }).ungated === true;
+    // A0 SPIKE: the embedded holder gives its SocketHost a ctx whose alarm is virtual (the tenant owns the alarm).
+    const hostCtx = (new.target as unknown as { hostCtx?(c: DurableObjectState): DurableObjectState }).hostCtx?.(ctx) ?? ctx;
     // Every binding this object (and its sessions, ports and subclasses) calls through `this.env` is gated.
     super(ctx, ungated ? rawEnv : gatedEnv(rawEnv, origin));
     this.origin = origin;
@@ -197,16 +201,16 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       sent: (text) => this.metrics.sent(text),
       placementWake: () => this.draining?.nextAt ?? null,
       telemetry: telemetryHostFromEnv(env, presence.enabled),
-      ctx,
+      ctx: hostCtx,
       ports: this.bindings().ports(env),
       // A fresh ID-only holder learns its name only after the controller claim,
       // before creating a Session. Restored sessions use the validated durable name.
       get name() { return gateway.gatewayName; },
       ready: { runtimeVersion: env.GONVEX_RUNTIME_VERSION || "development", presence: presence.enabled },
       tenantChanged: (ws, previous, next) => this.tenantChanged(ws, previous, next),
-      projectAuthenticated: (project) => this.bindings().projectAuthenticated?.(env, project, ctx.id.toString()) ?? Promise.resolve(),
+      projectAuthenticated: (project) => this.bindings().projectAuthenticated?.(env, project, this.holderId()) ?? Promise.resolve(),
       ...(this.bindings().projectAuthenticatedModule
-        ? { projectAuthenticatedModule: (project: string) => this.bindings().projectAuthenticatedModule!(env, project, ctx.id.toString()) } : {}),
+        ? { projectAuthenticatedModule: (project: string) => this.bindings().projectAuthenticatedModule!(env, project, this.holderId()) } : {}),
     });
     // Restored sockets: rebuild the tenant index only (the tenant already has this gateway registered).
     for (const [ws, session] of this.host.sessions) {

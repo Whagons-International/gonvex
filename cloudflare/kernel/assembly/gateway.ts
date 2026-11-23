@@ -189,7 +189,7 @@ export class AssemblyGateway extends GatewayObjectBase<AssemblyGatewayEnv> {
     const restarted = this.controlInstance !== instance;
     this.controlInstance = instance;
     for (const project of projects) {
-      await control.watch(project, "GATEWAY", this.ctx.id.toString());
+      await control.watch(project, "GATEWAY", this.holderId());
       // A Control restart loses its in-memory watcher set. Refresh also covers
       // changes in the interval before this gateway registered again.
       // X17j + X17l (#542 re-review): leases and cached reads go first, so the refresh that recovers lost notices reads
