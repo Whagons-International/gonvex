@@ -225,8 +225,9 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
   // X17g: connect in one hop. The isolate's last admitted holder takes the upgrade itself (one controller call and the
   // limiter, in parallel); a `direct-*` refusal or a failed hop falls back to the controller path below.
   const waitUntil = ctx ? (work: Promise<unknown>) => ctx.waitUntil(work) : undefined;
-  // The page's tenant, from its Origin: wake it now so the sign-in's admission finds it warm (./prewarm.ts).
-  prewarmTenantForUpgrade(request, url, env, waitUntil);
+  // The page's tenant, from its Origin: woken once the upgrade is admitted, so the sign-in's admission finds it warm
+  // (./prewarm.ts). Never for a refused upgrade: those must not reach Control (#562 review).
+  const prewarm = () => { prewarmTenantForUpgrade(request, url, env, waitUntil); };
   const id = sharedId(url, address);
   let shared: SharedRead | "refused" | undefined;
   let sharedMs: number | undefined;
@@ -252,6 +253,7 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
       if (response.status === 101) {
         warmCell.admitted(direct.cell, { gateway: direct.gateway, epoch: direct.epoch });
         writeShared(id, direct, waitUntil);
+        prewarm();
         return response;
       }
       warmCell.refused();
@@ -292,6 +294,7 @@ export async function handleWebSocketUpgrade(request: Request, env: WebSocketRou
       expiresAt: Date.now() + admissionMs }), admissionMs);
     times.admitMs = Date.now() - admitStarted;
     if (refused) return refused;
+    prewarm();
     stage = "gateway";
     const headers = forwarded(connectionId, slots);
     if (assignment) headers.set(ASSIGNMENT_HEADER, JSON.stringify(assignment));

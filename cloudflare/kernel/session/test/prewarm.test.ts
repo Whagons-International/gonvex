@@ -1,8 +1,8 @@
 // Tenant prewarm on the page's first socket (kernel/session/prewarm.ts): the Origin selects which tenant object to
 // wake, the upgrade never waits for it, and it is throttled, skippable and fail-safe.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearPrewarmThrottle, prewarmTenantForUpgrade, PREWARM_ISOLATE_INTERVAL_MS, tenantSelectorFromOrigin } from "../prewarm";
-import { handleWebSocketUpgrade, resetWarmCell, type WebSocketRouteEnv } from "../router";
+import { clearPrewarmThrottle, prewarmThrottleSize, prewarmTenantForUpgrade, rememberBounded, PREWARM_ISOLATE_INTERVAL_MS, PREWARM_ISOLATE_MAX, PREWARM_ISOLATE_PER_SECOND, tenantSelectorFromOrigin } from "../prewarm";
+import { handleWebSocketUpgrade, resetWarmCell, WarmCell, type WebSocketRouteEnv } from "../router";
 
 const PROJECT = "691d7a9d-948a-4ac2-894a-f7ff250e7ad8";
 const upgrade = (origin: string | null, query = `project=${PROJECT}`) =>
@@ -80,7 +80,87 @@ describe("prewarmTenantForUpgrade", () => {
   });
 });
 
+describe("caps that no client-chosen value can spread", () => {
+  it(`asks at most ${PREWARM_ISOLATE_PER_SECOND} times per second per isolate, whatever the selectors`, async () => {
+    const c = control();
+    const env = { CONTROL: c.namespace };
+    const started = Array.from({ length: PREWARM_ISOLATE_PER_SECOND + 5 }, (_, i) => run(upgrade(`https://r${i}.whagons.com`), env, 5_000 + i).started);
+    expect(started.filter(Boolean)).toHaveLength(PREWARM_ISOLATE_PER_SECOND);
+    expect(started.slice(PREWARM_ISOLATE_PER_SECOND).every((s) => !s)).toBe(true);
+    expect(run(upgrade("https://next-second.whagons.com"), env, 6_000).started).toBe(true); // a new second
+    await Promise.resolve();
+    expect(c.prewarmTenant).toHaveBeenCalledTimes(PREWARM_ISOLATE_PER_SECOND + 1);
+  });
+
+  it(`remembers at most ${PREWARM_ISOLATE_MAX} (project, selector) pairs`, () => {
+    const env = { CONTROL: control().namespace };
+    for (let i = 0; i < PREWARM_ISOLATE_MAX + 50; i++) run(upgrade(`https://t${i}.whagons.com`), env, i * 1_000);
+    expect(prewarmThrottleSize()).toBe(PREWARM_ISOLATE_MAX);
+  });
+
+  it("rememberBounded keeps the newest entries within the bound", () => {
+    const map = new Map<string, number>();
+    for (let i = 0; i < 6; i++) rememberBounded(map, `k${i}`, i, 4);
+    rememberBounded(map, "k3", 9, 4); // a refresh moves the key to the newest position
+    expect([...map]).toEqual([["k2", 2], ["k4", 4], ["k5", 5], ["k3", 9]]);
+  });
+});
+
 describe("router wiring", () => {
+  it("never prewarms for an upgrade the address limiter refuses (429)", async () => {
+    const c = control();
+    const admit = vi.fn(async () => ({ ok: false, error: "too many connections from this address" }));
+    const gateway = { fetch: vi.fn(async () => new Response(null, { status: 200 })) };
+    const env = {
+      GATEWAY: { getByName: () => gateway, idFromName: () => ({}), get: () => gateway },
+      PUBLIC_LIMITER: { getByName: () => ({ admit, release: vi.fn(async () => undefined) }) },
+      CONTROL: c.namespace,
+    } as unknown as WebSocketRouteEnv;
+    const pending: Promise<unknown>[] = [];
+    const response = await handleWebSocketUpgrade(upgrade("https://el-rey2.whagons.com"), env, { waitUntil: (work) => { pending.push(work); } });
+    expect(response.status).toBe(429);
+    expect(admit).toHaveBeenCalledOnce();
+    await Promise.all(pending);
+    expect(c.getByName).not.toHaveBeenCalled();
+    expect(gateway.fetch).not.toHaveBeenCalled();
+  });
+
+  it("prewarms only after the limiter admitted the upgrade", async () => {
+    const order: string[] = [];
+    const c = control(vi.fn(async () => { order.push("prewarm"); return "warming"; }));
+    const admit = vi.fn(async () => { order.push("admit"); return { ok: true }; });
+    const gateway = { fetch: vi.fn(async () => new Response(null, { status: 200 })) };
+    const env = {
+      GATEWAY: { getByName: () => gateway, idFromName: () => ({}), get: () => gateway },
+      PUBLIC_LIMITER: { getByName: () => ({ admit, release: vi.fn(async () => undefined) }) },
+      CONTROL: c.namespace,
+    } as unknown as WebSocketRouteEnv;
+    const pending: Promise<unknown>[] = [];
+    await handleWebSocketUpgrade(upgrade("https://el-rey2.whagons.com"), env, { waitUntil: (work) => { pending.push(work); } });
+    await Promise.all(pending);
+    expect(order).toEqual(["admit", "prewarm"]);
+  });
+
+  it.each([[101, true], [429, false], [503, false]] as const)("direct path: a %i from the remembered holder prewarms: %s", async (status, expected) => {
+    class RememberedHolder extends WarmCell {
+      override get hasHolder() { return true; }
+      override direct() { return { v: 1 as const, cell: 0, gateway: "gw-direct", epoch: 1, connectionId: crypto.randomUUID() }; }
+    }
+    resetWarmCell(new RememberedHolder());
+    const c = control();
+    const holder = { fetch: vi.fn(async () => ({ status, headers: new Headers(status === 503 ? { "x-gonvex-admission-reason": "limiter-unavailable" } : {}) }) as unknown as Response) };
+    const env = {
+      GATEWAY: { getByName: () => holder, idFromName: () => ({}), get: () => holder },
+      GATEWAY_CONTROLLER: { getByName: () => ({ acquire: vi.fn(async () => { throw new Error("not reached"); }), release: vi.fn(async () => undefined) }) },
+      CONTROL: c.namespace,
+    } as unknown as WebSocketRouteEnv;
+    const pending: Promise<unknown>[] = [];
+    const response = await handleWebSocketUpgrade(upgrade("https://el-rey2.whagons.com"), env, { waitUntil: (work) => { pending.push(work); } });
+    expect(response.status).toBe(status);
+    await Promise.allSettled(pending);
+    expect(c.prewarmTenant).toHaveBeenCalledTimes(expected ? 1 : 0);
+  });
+
   it("starts the prewarm on the upgrade and does not wait for it", async () => {
     let release!: () => void;
     const prewarmTenant = vi.fn(() => new Promise<string>((resolve) => { release = () => resolve("warming"); }));

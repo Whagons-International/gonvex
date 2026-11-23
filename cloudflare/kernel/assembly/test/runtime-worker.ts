@@ -1,7 +1,12 @@
 import {RuntimeCatalog} from '../runtime';
 import {install,clear} from './runtime-catalog';
-import {AssemblyTenant} from '../tenant';
-export {AssemblyTenant};
+import {AssemblyTenant as ServingTenant} from '../tenant';
+/** The serving tenant class, plus a counter of `ping()` calls (the tenant prewarm's wake, #562 review). */
+export class AssemblyTenant extends ServingTenant {
+ private pings=0;
+ override async ping(){ this.pings++; return super.ping(); }
+ async fixturePings(){ return this.pings; }
+}
 export class WrongTenant extends AssemblyTenant {}
 let wrongNamespace=false;
 export class TestRuntimeCatalog extends RuntimeCatalog {

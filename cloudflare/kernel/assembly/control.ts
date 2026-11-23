@@ -13,12 +13,13 @@ import { replicaEpoch } from "../session/directive";
 import { deployedManifest, derivedOf } from "../../control/src/manifest-cache";
 import type { Failure, FailureKind, Impersonation, ModuleInfo, Outcome, RevalidationItem, ServiceAuthOutcome, SessionIdentity, SocketView, TenantRoute, TenantSession } from "../session/ports";
 import { type GatewayRpc, rpc } from "../session/rpc";
+import { rememberBounded } from "../session/prewarm";
 import type { ServiceControlOutcome } from "../principals/frames";
 import type { ServiceGrant } from "../principals/grant";
 
 /** `prewarmTenant`: one wake per tenant per interval per Control instance, a bounded map. */
 export const PREWARM_TENANT_INTERVAL_MS = 10_000;
-const PREWARM_TENANT_MAX = 4_096;
+export const PREWARM_TENANT_MAX = 4_096;
 
 /** K05's auth branches prefix this to an impersonation failure; K06's text already carries it. */
 const IMPERSONATION_PREFIX = "impersonation grant is invalid, expired, revoked, or already used: ";
@@ -71,6 +72,8 @@ export class SessionControlObject extends OperatorControlObject {
   }
   /** Tenant id -> when this instance last woke it for a page (`prewarmTenant`). */
   private readonly prewarmed = new Map<string, number>();
+  /** The bound of `prewarmed` (a field so a test can lower it). */
+  protected prewarmMax = PREWARM_TENANT_MAX;
   /**
    * The router asks this, without waiting, when a page of a tenant's subdomain opens its first socket
    * (kernel/session/prewarm.ts): the tenant object wakes while the Firebase sign-in runs, so the exchange's admission
@@ -87,9 +90,7 @@ export class SessionControlObject extends OperatorControlObject {
     try { tenantId = resolveTenant(this.context(), projectId, selector).tenantId; } catch { return "unknown"; }
     const now = Date.now(), last = this.prewarmed.get(tenantId);
     if (last !== undefined && now - last < PREWARM_TENANT_INTERVAL_MS) return "recent";
-    this.prewarmed.delete(tenantId);
-    this.prewarmed.set(tenantId, now);
-    if (this.prewarmed.size > PREWARM_TENANT_MAX) this.prewarmed.delete(this.prewarmed.keys().next().value!);
+    rememberBounded(this.prewarmed, tenantId, now, this.prewarmMax);
     const started = Date.now();
     this.ctx.waitUntil(rpc<{ ping(): Promise<number> }>(this.env.TENANT, tenantId).ping()
       .then(() => span("control.prewarm", { ms: Date.now() - started }), () => span("control.prewarm", { ms: Date.now() - started, failed: true })));

@@ -13,9 +13,11 @@
  *
  * The `Origin` is a hint, never authority: it selects which object to wake and nothing else. Control resolves the
  * selector exactly as `resolveTenant` does (id or domain of an active tenant of that project); an unknown one is a
- * no-op. The tenant only answers `ping()`: no read of tenant data, no write, no session. Throttled per isolate here
- * and per tenant in Control, so a page that reconnects, or a client that sends forged Origins, wakes a given tenant
- * at most once per interval per Control instance.
+ * no-op. The tenant only answers `ping()`: no read of tenant data, no write, no session. It starts only after the
+ * upgrade is admitted (the K16 address limiter has run), is capped per isolate independent of the selector, and is
+ * throttled per (project, selector) here and per tenant in Control. Residual cost: an anonymous client can keep a
+ * known tenant resident with one admitted upgrade per 10 s (DO duration billing for a tenant that would otherwise be
+ * evicted).
  */
 import { rpc } from "./rpc";
 
@@ -29,10 +31,27 @@ export interface PrewarmEnv {
 
 /** Upgrades of one (project, selector) in this isolate within this interval ask Control once. */
 export const PREWARM_ISOLATE_INTERVAL_MS = 10_000;
-const PREWARM_ISOLATE_MAX = 1_024;
+export const PREWARM_ISOLATE_MAX = 1_024;
+/**
+ * #562 review: a cap per isolate that no client-chosen value can spread: at most this many `prewarmTenant` calls per
+ * second, whatever the selectors. One call is one real page load of a tenant (each (project, selector) at most once
+ * per 10 s here), and 20 page loads/s of distinct tenants through one router isolate is far above dev and staging
+ * traffic. An upgrade over the cap is still served; it only skips the wake. At 20/s an isolate adds at most 20
+ * one-row SQL reads per second to Control, the object every sign-in waits on.
+ */
+export const PREWARM_ISOLATE_PER_SECOND = 20;
 const recent = new Map<string, number>();
-/** Test seam. */
-export function clearPrewarmThrottle(): void { recent.clear(); }
+let windowStart = 0, windowCalls = 0;
+/** Test seams. */
+export function clearPrewarmThrottle(): void { recent.clear(); windowStart = 0; windowCalls = 0; }
+export function prewarmThrottleSize(): number { return recent.size; }
+
+/** Insert `key` as the newest entry of an insertion-ordered map, dropping the oldest entries above `max`. */
+export function rememberBounded<V>(map: Map<string, V>, key: string, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) map.delete(map.keys().next().value!);
+}
 
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const PROJECT = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -61,9 +80,10 @@ export function prewarmTenantForUpgrade(request: Request, url: URL, env: Prewarm
   const key = `${project}\u0000${selector}`;
   const last = recent.get(key);
   if (last !== undefined && now - last < PREWARM_ISOLATE_INTERVAL_MS) return false;
-  recent.delete(key);
-  recent.set(key, now);
-  if (recent.size > PREWARM_ISOLATE_MAX) recent.delete(recent.keys().next().value!);
+  if (now - windowStart >= 1_000) { windowStart = now; windowCalls = 0; }
+  if (windowCalls >= PREWARM_ISOLATE_PER_SECOND) return false;
+  windowCalls++;
+  rememberBounded(recent, key, now, PREWARM_ISOLATE_MAX);
   try {
     const control = rpc<{ prewarmTenant(project: string, selector: string): Promise<unknown> }>(env.CONTROL, "control");
     waitUntil(Promise.resolve().then(() => control.prewarmTenant(project, selector)).catch(() => undefined));
