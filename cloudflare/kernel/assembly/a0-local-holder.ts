@@ -56,10 +56,28 @@ function copying(object: object): object {
 }
 
 /** The tenant's env with GATEWAY short-circuited to its embedded holder (when A0 is on). */
+/**
+ * Tenant -> holder calls (replica deliveries, presence, action replies). An RPC is an I/O boundary: the tenant's
+ * event loop turns between deliveries, so socket frames flush and other queued work (a `listWindow` subscribe) runs
+ * between a cohort's batches. A direct call has no such boundary, so a 55-open cohort ran to its end before any of
+ * its frames left (A0 m1: first cohort frame +1.7 s vs +0.3 s on the gateway). With GONVEX_A0_YIELD=1 each call
+ * waits one macrotask first.
+ */
+function yielding(object: object): object {
+  return new Proxy(object, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      return async (...args: unknown[]) => { await new Promise((resolve) => setTimeout(resolve, 0)); return (value as (...a: unknown[]) => unknown).apply(target, args); };
+    },
+  });
+}
+
 export function a0TenantEnv<E extends object>(ctx: DurableObjectState, env: E, cell: A0Cell): E {
   if (!a0Enabled(env)) return env;
   const e = env as unknown as AssemblyGatewayEnv;
-  return { ...env, GATEWAY: shortCircuit(e.GATEWAY, a0HolderName(cell.tenantId), () => cell.holder) } as E;
+  const yieldEach = (env as { GONVEX_A0_YIELD?: string }).GONVEX_A0_YIELD === "1";
+  return { ...env, GATEWAY: shortCircuit(e.GATEWAY, a0HolderName(cell.tenantId), () => cell.holder && (yieldEach ? yielding(cell.holder) : cell.holder)) } as E;
 }
 
 /** The holder's env: TENANT short-circuited to the tenant, no controller (plain `accept`). */
