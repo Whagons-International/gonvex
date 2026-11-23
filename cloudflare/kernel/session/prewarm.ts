@@ -13,13 +13,23 @@
  *
  * The `Origin` is a hint, never authority: it selects which object to wake and nothing else. Control resolves the
  * selector exactly as `resolveTenant` does (id or domain of an active tenant of that project); an unknown one is a
- * no-op. The tenant only answers `ping()`: no read of tenant data, no write, no session. It starts only after the
+ * no-op. The page's tenant gets `prewarm()` (#568: wake it and start the app bundle's evaluation in the background);
+ * co-tenants (#565) get `ping()`. Neither reads tenant data, writes, or creates a session. It starts only after the
  * upgrade is admitted (the K16 address limiter has run), is capped per isolate independent of the selector, and is
- * throttled per (project, selector) here and per tenant in Control. Residual cost: an anonymous client can keep a
- * known tenant resident with one admitted upgrade per 10 s (DO duration billing for a tenant that would otherwise be
- * evicted). With co-tenant prewarm (#565) one admitted upgrade wakes up to 9 objects: the page's tenant and up to
- * `COTENANTS_PER_TENANT` (8) tenants recent sign-ins admitted with it, each still at most once per 10 s per Control
- * instance.
+ * throttled per (project, selector) here and per tenant in Control.
+ *
+ * Residual cost, all reachable by an anonymous client with admitted upgrades and a forged `Origin`:
+ * - Residency (#562): one admitted upgrade per 10 s keeps a known tenant resident (DO duration billing for a tenant
+ *   that would otherwise be evicted). With co-tenant prewarm (#565) one upgrade wakes up to 9 objects: the page's
+ *   tenant and up to `COTENANTS_PER_TENANT` (8) tenants recent sign-ins admitted with it, each still at most once per
+ *   10 s per Control instance.
+ * - Bundle evaluation (#568): `prewarm()` can force at most one app-bundle evaluation per (isolate, release) cold
+ *   cycle on a resolvable tenant. Concurrent and repeated calls collapse (`prewarming`, `engine.loaded`), and the
+ *   evaluation is cached per isolate per release, so the bound is the eviction cycle (~95 s idle): about 38
+ *   evaluations per tenant per hour, 0.5-0.8 s CPU each, about $0.00005 per tenant per hour (#568 review). On a
+ *   tenant that is serving, the bundle is already loaded and a forced `prewarm()` is a flag check. This replaces the
+ *   #563 review's "an unknown or inactive account never triggers an evaluation", which no longer holds for this
+ *   path.
  */
 import { rpc } from "./rpc";
 

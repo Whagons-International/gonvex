@@ -85,8 +85,9 @@ export class SessionControlObject extends OperatorControlObject {
    * The router asks this, without waiting, when a page of a tenant's subdomain opens its first socket
    * (kernel/session/prewarm.ts): the tenant object wakes while the Firebase sign-in runs, so the exchange's admission
    * of that tenant does not wait for a cold object. The selector resolves as `resolveTenant` does (exact id, else the
-   * domain, of a provisioned, non-deleted, non-disabled tenant of the project; the same function). The tenant only
-   * answers `ping()`.
+   * domain, of a provisioned, non-deleted, non-disabled tenant of the project; the same function). The page's tenant
+   * gets `prewarm()` (wake plus a background app-bundle evaluation), its co-tenants `ping()` (`wakeCall`); the bounds
+   * and residual cost are in kernel/session/prewarm.ts.
    * At most once per tenant per `PREWARM_TENANT_INTERVAL_MS` per Control instance; unknown selectors do nothing.
    */
   async prewarmTenant(projectId: string, selector: string): Promise<"warming" | "recent" | "unknown"> {
@@ -102,7 +103,10 @@ export class SessionControlObject extends OperatorControlObject {
     return "warming";
   }
 
-  /** One background `ping()` of `tenantId`, unless this instance woke it within `PREWARM_TENANT_INTERVAL_MS`. */
+  /**
+   * One background wake of `tenantId` (`prewarm()` for the page's tenant, `ping()` for a co-tenant: `wakeCall`), unless
+   * this instance woke it within `PREWARM_TENANT_INTERVAL_MS`.
+   */
   private wake(tenantId: string, now: number, reason: "page" | "co-tenant"): boolean {
     const last = this.prewarmed.get(tenantId);
     if (last !== undefined && now - last < PREWARM_TENANT_INTERVAL_MS) return false;
