@@ -208,6 +208,20 @@ export class KernelTenant {
     this.active = module;
   }
 
+  /**
+   * X17r: evaluates the active generation's app bundle now, outside any call. X15 made it lazy, so on a cold tenant
+   * the first call that runs module code (the client's first Reducer, `presence.transition`) paid the evaluation:
+   * 0.6–1.8 s on dev, with every open queued behind it on the single-threaded object. Prewarming moves that to a point
+   * where the client is still in its control phase. Idempotent; false when nothing was evaluated. An evaluation error
+   * is left for the first call that needs the bundle, which reports it exactly as before.
+   */
+  prewarmModule(): boolean {
+    const engine = this.registry?.activeGeneration?.engine;
+    if (!engine || engine.loaded) return false;
+    try { engine.load(); } catch { /* reported by the first call that needs the bundle */ }
+    return true;
+  }
+
   recordOverrun(commandId: string, path?: string): void { this.requireHost().quarantine.add(commandId, path, this.active?.artifactHash); }
 
   private async runHost(call: TenantCall) {

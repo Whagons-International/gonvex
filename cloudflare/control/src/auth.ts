@@ -213,7 +213,7 @@ export async function authenticate(ctx: Ctx, request: AuthRequest): Promise<Auth
       // #540 re-review: a live admission that refuses the member, or admits a different one, ends the reuse for every
       // later auth (not only this `liveOnly` call).
       try {
-        const admitted = await admitMember(c, projectId, tenantId, accountId);
+        const admitted = await admitMember(c, projectId, tenantId, accountId, { prewarm: true });
         if (!sameAdmittedMember(projectId, route.tenantId, accountId, admitted.member)) forgetAdmission(projectId, route.tenantId, accountId);
         return admitted;
       } catch (error) {

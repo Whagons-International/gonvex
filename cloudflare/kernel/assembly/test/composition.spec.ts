@@ -465,6 +465,76 @@ it('X15 a woken tenant answers admit without evaluating the app bundle; the firs
   });
  } finally { delete releases[project]; }
 });
+it('X17r admit({prewarm}) evaluates the lazy bundle once, after answering; plain admits and unknown accounts do not; a throwing bundle stays the first call\'s error',async()=>{
+ const {releases}=await import('../releases');
+ const {exports}=await import('./catalog');
+ const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
+ const {AssemblyTenant}=await import('../tenant');
+ const real=(AssemblyTenant.prototype as unknown as {bundle(hash:string):unknown}).bundle;
+ const wake=async(project:string,state:DurableObjectState,object:unknown)=>{
+  const Ctor=(object as object).constructor as new(ctx:DurableObjectState,env:unknown)=>CompositionTenant;
+  class Woken extends Ctor { protected override bundle(hash?:string){ return real.call(this,hash!) as never; } }
+  const woken=new Woken(state,(object as unknown as {env:unknown}).env);await sleep(50);return woken as CompositionTenant&{prewarm():void};
+ };
+ const setup=async(object:unknown,state:DurableObjectState,project:string)=>{
+  const release=await buildReleasePlan(await migrationsFromFiles(files)); plans.add(release);
+  await (object as CompositionTenant).activate(project,manifest,release.id);
+  state.storage.kv.put('assembly/project',project);
+  state.storage.sql.exec("INSERT INTO members(id,account_id,status,role,membership_revision) VALUES('m-x17r','acct-x17r','active','admin',1)");
+ };
+ // 1. Only an admitted, prewarm-flagged admit evaluates, after its answer, and only once.
+ {
+  const project=`prewarm-${crypto.randomUUID()}`;let evaluated=0;
+  releases[project]={project,hash:(manifest as {module:{hash:string}}).module.hash,generation:1,manifest,get exports(){evaluated++;return exports;}};
+  const stub=bindings.TENANT.getByName(`assembly-prewarm-${crypto.randomUUID()}`);
+  try {
+   await runInDurableObject(stub,async(object,state)=>{
+    await setup(object,state,project);
+    evaluated=0;
+    const woken=await wake(project,state,object);
+    expect(await woken.admit('acct-x17r')).toMatchObject({member:{id:'m-x17r'}});
+    await sleep(20);expect(evaluated,'a plain admit (Control fan-out) evaluates nothing').toBe(0);
+    expect(await (woken.admit as (a:string,o:object)=>Promise<unknown>)('no-such-account',{prewarm:true})).toBeNull();
+    await sleep(20);expect(evaluated,'no member: no prewarm').toBe(0);
+    const answered=await (woken.admit as (a:string,o:object)=>Promise<unknown>)('acct-x17r',{prewarm:true});
+    expect(answered).toMatchObject({member:{id:'m-x17r'}});
+    expect(evaluated,'the answer leaves before the evaluation').toBe(0);
+    await sleep(20);expect(evaluated).toBe(1);
+    await (woken.admit as (a:string,o:object)=>Promise<unknown>)('acct-x17r',{prewarm:true});woken.prewarm();await sleep(20);
+    expect(evaluated,'once per object').toBe(1);
+    const session=systemSession(project,state.id.name!);
+    expect(await woken.call({v:1,function:'probe.write',kind:'reducer',args:{id:'x17r-after'},session,provenance:directProvenance(session,'agent','x17r-after',manifest.module.hash),allowInternal:true})).toMatchObject({ok:true});
+    expect(evaluated,'the first reducer finds the bundle evaluated').toBe(1);
+    // The RPC alone (a wake that knows the tenant the client opens) does the same on a fresh object.
+    const again=await wake(project,state,object);evaluated=0;
+    again.prewarm();again.prewarm();expect(evaluated).toBe(0);await sleep(20);expect(evaluated).toBe(1);
+   });
+  } finally { delete releases[project]; }
+ }
+ // 2. A bundle that throws on evaluation: the prewarm swallows it, and the first call reports it as without a prewarm.
+ {
+  const project=`prewarm-throw-${crypto.randomUUID()}`;let thrown=0;
+  const hash=(manifest as {module:{hash:string}}).module.hash;
+  const good={project,hash,generation:1,manifest,get exports(){return exports;}};
+  const bad={project,hash,generation:1,manifest,get exports():typeof exports{thrown++;throw new Error('bundle evaluation failed (x17r)');}};
+  releases[project]=good;
+  const stub=bindings.TENANT.getByName(`assembly-prewarm-throw-${crypto.randomUUID()}`);
+  try {
+   await runInDurableObject(stub,async(object,state)=>{
+    // Activate with a working release, then wake with a release whose bundle throws on evaluation.
+    await setup(object,state,project);
+    releases[project]=bad;
+    const woken=await wake(project,state,object);thrown=0;
+    expect(await (woken.admit as (a:string,o:object)=>Promise<unknown>)('acct-x17r',{prewarm:true})).toMatchObject({member:{id:'m-x17r'}});
+    await sleep(20);expect(thrown,'the prewarm tried once').toBe(1);
+    const session=systemSession(project,state.id.name!);
+    const report=await woken.call({v:1,function:'probe.write',kind:'reducer',args:{id:'x17r-throw'},session,provenance:directProvenance(session,'agent','x17r-throw',manifest.module.hash),allowInternal:true}) as {ok:boolean;error?:{message?:string}};
+    expect(report.ok).toBe(false);
+    expect(JSON.stringify(report)).toContain('bundle evaluation failed (x17r)');
+   });
+  } finally { delete releases[project]; }
+ }
+});
 it('X17f the membership projection ack keeps a write committed while the push was in flight (#530 re-review)',async()=>fixture(async(object,state)=>{
  const sql=state.storage.sql;
  sql.exec("INSERT INTO members(id,account_id,status,role,membership_revision) VALUES('m-x17f','acct-x17f','active','admin',1)");

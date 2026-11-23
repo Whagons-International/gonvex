@@ -295,7 +295,8 @@ export function prefetchAdmissions(ctx: Ctx, projectId: string, accountId: strin
     const tenantId = str(row.tenant_id);
     slots.take();
     const startedAt = Date.now();
-    const admitting = admitMember(ctx, projectId, tenantId, accountId);
+    // X17r: the preferred tenant is the one the client opens next: start its app bundle's evaluation now.
+    const admitting = admitMember(ctx, projectId, tenantId, accountId, row === first ? { prewarm: true } : undefined);
     const member = admitting.then((admitted) => admitted.member, () => null);
     const admissionRevision = admitting.then((admitted) => admitted.revision, () => undefined);
     void member.finally(() => slots.release());

@@ -75,7 +75,7 @@ export class TenantStubObject extends DurableObject<TenantStubEnv> implements Te
   }
 
   /** `admit_member`: the active Member of an account, read with the revision it covers. */
-  async admit(accountId: string): Promise<(Member & { admissionRevision: number }) | null> {
+  async admit(accountId: string, _options?: { readonly prewarm?: boolean }): Promise<(Member & { admissionRevision: number }) | null> {
     const row = this.sql.exec<Record<string, string | number>>(
       "SELECT m.*, c.revision FROM members m, clock c WHERE m.account_id = ? AND m.status = 'active' LIMIT 1", accountId,
     ).toArray()[0];

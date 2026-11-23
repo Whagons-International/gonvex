@@ -92,7 +92,8 @@ export interface MembershipOutboxRow {
 
 export interface TenantPort {
   /** `admit_member`: the active Member of an account and the change-feed revision, one snapshot. */
-  admit(accountId: string): Promise<Admission | null>;
+  /** X17r: `prewarm` asks the tenant to evaluate its app bundle once this answer has left (the client is about to open it). */
+  admit(accountId: string, options?: { readonly prewarm?: boolean }): Promise<Admission | null>;
   /** `active_member_accounts`: the subset of accounts with an active Member. */
   activeMemberAccounts(accountIds: string[]): Promise<string[]>;
   /** `member_by_id`: the current row, whatever its status. */

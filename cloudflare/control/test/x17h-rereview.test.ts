@@ -38,3 +38,20 @@ describe("#537 re-review: prefetch bound", () => {
     });
   }, 120_000);
 });
+describe("X17r: the sign-in prefetch prewarms only the tenant the client opens", () => {
+  it("passes { prewarm: true } with the preferred tenant's admit and nothing with the others", async () => {
+    const sessions = await import("../src/sessions"); sessions.clearAdmissionCache();
+    const seeded = await seed({ ta: ["sid"], tb: ["sid"], tc: ["sid"] });
+    const sid = seeded.members.sid!.accountId, wanted = seeded.tenants.tc!;
+    await runInDurableObject(control(), async (instance: ControlObject) => {
+      const base = (instance as unknown as Internals).context();
+      const seen: Array<[string, unknown]> = [];
+      const ctx: Ctx = { ...base, tenant: (route) => { const port = base.tenant(route); return { admit: async (a: string, o?: unknown) => {
+        seen.push([route.tenantId, o]); return o === undefined ? port.admit(a) : (port.admit as (a: string, o: unknown) => ReturnType<typeof port.admit>)(a, o); } } as unknown as ReturnType<Ctx["tenant"]>; } };
+      const p = sessions.prefetchAdmissions(ctx, seeded.project, sid, wanted);
+      await Promise.all([...p.admissions.values()].map((e) => e.member));
+      expect(seen.length).toBe(3);
+      expect(seen.filter(([, o]) => o !== undefined)).toEqual([[wanted, { prewarm: true }]]);
+    });
+  }, 120_000);
+});

@@ -45,7 +45,7 @@ export function assemblyPorts(env: AssemblyGatewayEnv): Ports {
         const leased = id ? leases.session(token, project, id) : undefined;
         if (leased) {
           try {
-            const admitted = admittedMember(await tenant(leased.route.tenantId).admit(leased.identity.account.id));
+            const admitted = admittedMember(await tenant(leased.route.tenantId).admit(leased.identity.account.id, { prewarm: true }));
             if (admitted) return { ok: true, value: { ...leased, member: admitted.member, admissionRevision: admitted.admissionRevision } };
           } catch { /* Control answers below */ }
           leases.drop(token, project, id!);
