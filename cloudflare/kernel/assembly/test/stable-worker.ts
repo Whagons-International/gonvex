@@ -23,6 +23,8 @@ export class TestControl extends SessionControlObject {
  /** Prewarm fixture: how many tenants the per-tenant throttle remembers (its bound). */
  async fixturePrewarmedSize(){ return (this as unknown as {prewarmed:Map<string,number>}).prewarmed.size; }
  async fixtureTenantRow(tenant:string,domain:string,status='active',databaseUrl?:string){ this.sql.run("UPDATE gonvex_runtime_tenants SET domain=$2,status=$3,database_url=COALESCE($4,database_url) WHERE tenant_id=$1",tenant,domain,status,databaseUrl??null); }
+ /** Co-tenant prewarm fixture: what an exchange reply records (`noteCoTenants`). */
+ async fixtureNoteCoTenants(result:unknown){ this.noteCoTenants(result); }
  async fixturePublication(id:string,summary:ReleaseSummary,version:string,tenants:string[],publicationGeneration:number){
   const owner=this.syncs.deployments.acquire(summary.project,id);
   if(!owner.acquired)throw new Error('publication fixture could not acquire deployment');

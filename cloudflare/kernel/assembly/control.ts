@@ -20,6 +20,9 @@ import type { ServiceGrant } from "../principals/grant";
 /** `prewarmTenant`: one wake per tenant per interval per Control instance, a bounded map. */
 export const PREWARM_TENANT_INTERVAL_MS = 10_000;
 export const PREWARM_TENANT_MAX = 4_096;
+/** Co-tenant memory (`noteCoTenants`): at most this many other tenants per tenant, each for at most a day. */
+export const COTENANTS_PER_TENANT = 8;
+export const COTENANT_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** K05's auth branches prefix this to an impersonation failure; K06's text already carries it. */
 const IMPERSONATION_PREFIX = "impersonation grant is invalid, expired, revoked, or already used: ";
@@ -88,13 +91,55 @@ export class SessionControlObject extends OperatorControlObject {
     // database) all mean "nothing to wake".
     let tenantId: string;
     try { tenantId = resolveTenant(this.context(), projectId, selector).tenantId; } catch { return "unknown"; }
-    const now = Date.now(), last = this.prewarmed.get(tenantId);
-    if (last !== undefined && now - last < PREWARM_TENANT_INTERVAL_MS) return "recent";
+    const now = Date.now();
+    if (!this.wake(tenantId, now, "page")) return "recent";
+    // A multi-tenant account's sign-in also admits its other tenants: wake the ones recent sign-ins brought along.
+    for (const other of this.recentCoTenants(tenantId, now)) this.wake(other, now, "co-tenant");
+    return "warming";
+  }
+
+  /** One background `ping()` of `tenantId`, unless this instance woke it within `PREWARM_TENANT_INTERVAL_MS`. */
+  private wake(tenantId: string, now: number, reason: "page" | "co-tenant"): boolean {
+    const last = this.prewarmed.get(tenantId);
+    if (last !== undefined && now - last < PREWARM_TENANT_INTERVAL_MS) return false;
     rememberBounded(this.prewarmed, tenantId, now, this.prewarmMax);
     const started = Date.now();
     this.ctx.waitUntil(rpc<{ ping(): Promise<number> }>(this.env.TENANT, tenantId).ping()
-      .then(() => span("control.prewarm", { ms: Date.now() - started }), () => span("control.prewarm", { ms: Date.now() - started, failed: true })));
-    return "warming";
+      .then(() => span("control.prewarm", { reason, ms: Date.now() - started }), () => span("control.prewarm", { reason, ms: Date.now() - started, failed: true })));
+    return true;
+  }
+
+  /**
+   * Tenant id -> the other tenants recent sign-ins admitted together with it as the active tenant, and when.
+   * Memory only, tenant ids only (no account), bounded: `COTENANTS_PER_TENANT` per tenant, `COTENANT_TTL_MS`.
+   * `prewarmTenant` pings these too: a multi-tenant account's exchange admits every tenant of the account and waits
+   * for each cold one, but the page names only the active tenant before the sign-in.
+   */
+  private readonly coTenants = new Map<string, Map<string, number>>();
+  protected noteCoTenants(result: unknown): void {
+    const value = result as { activeTenantId?: unknown; tenants?: unknown } | null;
+    const active = typeof value?.activeTenantId === "string" ? value.activeTenantId : "";
+    const tenants = Array.isArray(value?.tenants) ? value.tenants : [];
+    if (!active || tenants.length < 2) return;
+    const now = Date.now();
+    let others = this.coTenants.get(active);
+    if (others) this.coTenants.delete(active); else others = new Map();
+    for (const tenant of tenants) {
+      const id = (tenant as { id?: unknown } | null)?.id;
+      if (typeof id !== "string" || !id || id === active) continue;
+      others.delete(id);
+      others.set(id, now);
+    }
+    while (others.size > COTENANTS_PER_TENANT) others.delete(others.keys().next().value!);
+    this.coTenants.set(active, others);
+    if (this.coTenants.size > PREWARM_TENANT_MAX) this.coTenants.delete(this.coTenants.keys().next().value!);
+  }
+  /** The live co-tenants of `tenantId`, most recent first. */
+  private recentCoTenants(tenantId: string, now: number): string[] {
+    const others = this.coTenants.get(tenantId);
+    if (!others) return [];
+    for (const [id, at] of others) if (now - at > COTENANT_TTL_MS) others.delete(id);
+    return [...others.keys()].reverse();
   }
 
   private readonly assemblyInstance = crypto.randomUUID();
@@ -223,6 +268,7 @@ export class SessionControlObject extends OperatorControlObject {
             ? j({ type: "reducer.error", id: frame.id, path: frame.path, error: outcome.error, class: outcome.errorClass, retryable: outcome.errorClass === "transient" || outcome.errorClass === "unauthenticated", ...trace })
             : j({ type: "action.error", id: frame.id, path: frame.path, error: outcome.error, ...trace })];
         }
+        if (frame.path === "control.auth.exchangeExternalToken" || frame.path === "control.auth.refreshSession" || frame.path === "control.auth.passwordLogin") this.noteCoTenants(outcome.value);
         const result = kind === "reducer"
           ? j({ type: "reducer.result", id: frame.id, path: frame.path, result: outcome.value, originCommandId: frame.id, ...trace })
           : j({ type: "action.result", id: frame.id, path: frame.path, result: outcome.value, ...trace });

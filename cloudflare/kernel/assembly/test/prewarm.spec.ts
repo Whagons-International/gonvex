@@ -11,6 +11,7 @@ type Control = {
   fixtureTenantRow(tenant: string, domain: string, status?: string, databaseUrl?: string): Promise<void>;
   prewarmTenant(project: string, selector: string): Promise<'warming' | 'recent' | 'unknown'>;
   fixturePrewarmedSize(): Promise<number>;
+  fixtureNoteCoTenants(result: unknown): Promise<void>;
 };
 type Tenant = { fixturePings(): Promise<number> };
 const tenantObject = (id: string) => (env as unknown as { PUB_TENANT: DurableObjectNamespace }).PUB_TENANT.getByName(id) as unknown as Tenant;
@@ -115,5 +116,48 @@ describe('SessionControlObject.prewarmTenant', () => {
     expect(await control.fixturePrewarmedSize()).toBe(3); // TestControl's bound
     expect(await control.prewarmTenant('pw-project', ids[0]!)).toBe('warming'); // evicted, so woken again
     expect(await control.prewarmTenant('pw-project', ids[4]!)).toBe('recent');
+  });
+});
+
+describe('co-tenant prewarm (multi-tenant accounts)', () => {
+  async function tenants(n: number) {
+    const { control, tenant } = await world();
+    const others: string[] = [];
+    for (let i = 0; i < n; i++) { const t = newTenant(); others.push(t); await control.fixtureTenant('pw-project', t); }
+    return { control, active: tenant, others };
+  }
+  const reply = (active: string, ids: string[]) => ({ accessToken: 'x', activeTenantId: active, tenants: [active, ...ids].map((id) => ({ id, name: id })) });
+
+  it('a page of the active tenant also wakes the tenants a recent sign-in admitted with it', async () => {
+    const { control, active, others } = await tenants(2);
+    await control.fixtureNoteCoTenants(reply(active, others));
+    expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    for (const other of others) expect(await control.prewarmTenant('pw-project', other)).toBe('recent'); // already woken
+  });
+
+  it('records nothing for a single-tenant sign-in or a malformed reply', async () => {
+    const { control, active, others } = await tenants(1);
+    await control.fixtureNoteCoTenants(reply(active, []));
+    await control.fixtureNoteCoTenants({ activeTenantId: active, tenants: 'not a list' });
+    await control.fixtureNoteCoTenants(null);
+    expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('warming'); // not woken by the page of `active`
+  });
+
+  it('keeps at most 8 co-tenants per tenant, the most recent', async () => {
+    const { control, active, others } = await tenants(10);
+    await control.fixtureNoteCoTenants(reply(active, others));
+    expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('warming'); // dropped by the bound
+    expect(await control.prewarmTenant('pw-project', others[1]!)).toBe('warming');
+    for (const other of others.slice(2)) expect(await control.prewarmTenant('pw-project', other)).toBe('recent');
+  });
+
+  it('co-tenant wakes share the per-tenant throttle: a recently woken tenant is not woken again', async () => {
+    const { control, active, others } = await tenants(1);
+    expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('warming');
+    await control.fixtureNoteCoTenants(reply(active, others));
+    expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('recent');
   });
 });
