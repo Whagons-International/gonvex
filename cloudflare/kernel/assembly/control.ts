@@ -114,7 +114,7 @@ export class SessionControlObject extends OperatorControlObject {
   }
 
   /**
-   * Tenant id -> the other tenants recent sign-ins admitted together with it as the active tenant, and when.
+   * Tenant id -> the other tenants recent sign-ins admitted together with it (in either direction), and when.
    * Tenant ids only (no account), bounded: `COTENANTS_PER_TENANT` per tenant, `COTENANT_TTL_MS`; kept in memory and
    * in this object's KV (`control/cotenants/<tenant>`).
    * `prewarmTenant` pings these too: a multi-tenant account's exchange admits every tenant of the account and waits
@@ -130,18 +130,30 @@ export class SessionControlObject extends OperatorControlObject {
   protected persistCoTenants(tenantId: string, others: ReadonlyMap<string, number>): void {
     this.ctx.storage.kv.put(`${COTENANT_KEY}${tenantId}`, [...others]);
   }
-  /** Best effort: the caller ignores failures (a sign-in reply never depends on this bookkeeping). */
+  /**
+   * Best effort: the caller ignores failures (a sign-in reply never depends on this bookkeeping).
+   * Symmetric: every tenant of the reply gets the reply's other tenants as co-tenants. The page names its own tenant,
+   * which need not be the reply's `activeTenantId`: a sign-in without a requested tenant answers with the first
+   * admitted one by name (dev a0, 2026-11-23: the -12 page's sign-in recorded under -11, so its prewarm found none).
+   */
   protected noteCoTenants(result: unknown): void {
-    const value = result as { activeTenantId?: unknown; tenants?: unknown } | null;
-    const active = typeof value?.activeTenantId === "string" ? value.activeTenantId : "";
+    const value = result as { tenants?: unknown } | null;
     const tenants = Array.isArray(value?.tenants) ? value.tenants : [];
-    if (!active || tenants.length < 2) return;
-    const now = this.clock();
-    const entry = this.loadCoTenants(active, now);
-    const others = entry.others;
+    const ids: string[] = [];
     for (const tenant of tenants) {
       const id = (tenant as { id?: unknown } | null)?.id;
-      if (typeof id !== "string" || !id || id === active) continue;
+      if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
+      if (ids.length > COTENANTS_PER_TENANT) break; // a tenant keeps at most COTENANTS_PER_TENANT others
+    }
+    if (ids.length < 2) return;
+    const now = this.clock();
+    for (const tenantId of ids) this.noteCoTenantsOf(tenantId, ids, now);
+  }
+  private noteCoTenantsOf(tenantId: string, ids: readonly string[], now: number): void {
+    const entry = this.loadCoTenants(tenantId, now);
+    const others = entry.others;
+    for (const id of ids) {
+      if (id === tenantId) continue;
       others.delete(id); // re-insert: insertion order is recency, so the bound evicts the least recently seen
       others.set(id, now);
     }
@@ -151,7 +163,7 @@ export class SessionControlObject extends OperatorControlObject {
     // wait for a confirmed write.
     const keys = setKey(others);
     if (keys !== entry.persistedKeys || now - entry.persistedAt >= COTENANT_PERSIST_MS) {
-      this.persistCoTenants(active, others);
+      this.persistCoTenants(tenantId, others);
       entry.persistedKeys = keys;
       entry.persistedAt = now;
     }
