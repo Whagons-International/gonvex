@@ -10,8 +10,8 @@ import {X13_PROJECT,x13Registry} from './x13-fixture';
 // X13: the Action Worker serves the X13 fixture app (its other fixtures run no Actions here).
 configureActions({registry:(_env,projectId)=>{if(projectId!==X13_PROJECT)throw new Error(`project ${JSON.stringify(projectId)} has no active TypeScript module`);return x13Registry();}});
 export class TestControl extends SessionControlObject {
- /** Prewarm fixture: lower this instance's per-tenant throttle bound, so a test can reach it. */
- async fixturePrewarmMax(max:number){ this.prewarmMax=max; }
+ /** Prewarm fixture: a small per-tenant throttle bound, so a test can reach it. */
+ protected override prewarmMax = 3;
  /** X15 test seam: the stored GATEWAY watchers of a project. */
  /** X17 seam: the watchers a support-scoped change (presence, error sessions) notifies. */
  async fixtureSupportWatchers(project:string){ return (this as unknown as {supportWatchers(p:string):Array<{binding:string;name:string}>}).supportWatchers(project); }
@@ -23,16 +23,6 @@ export class TestControl extends SessionControlObject {
  /** Prewarm fixture: how many tenants the per-tenant throttle remembers (its bound). */
  async fixturePrewarmedSize(){ return (this as unknown as {prewarmed:Map<string,number>}).prewarmed.size; }
  async fixtureTenantRow(tenant:string,domain:string,status='active',databaseUrl?:string){ this.sql.run("UPDATE gonvex_runtime_tenants SET domain=$2,status=$3,database_url=COALESCE($4,database_url) WHERE tenant_id=$1",tenant,domain,status,databaseUrl??null); }
- /** Co-tenant prewarm fixture: what an exchange reply records (`noteCoTenants`). */
- async fixtureNoteCoTenants(result:unknown){ this.noteCoTenants(result); }
- /** Co-tenant fixtures: a clock offset, the KV write count, a failing KV write, raw stored rows. */
- private clockOffset=0; private coTenantWrites=0; private failCoTenantWrites=false;
- protected override clock(){ return Date.now()+this.clockOffset; }
- protected override persistCoTenants(tenantId:string,others:ReadonlyMap<string,number>){ if(this.failCoTenantWrites)throw new Error('fixture: storage unavailable'); this.coTenantWrites++; super.persistCoTenants(tenantId,others); }
- async fixtureAdvanceClock(ms:number){ this.clockOffset+=ms; }
- async fixtureCoTenantWrites(){ return this.coTenantWrites; }
- async fixtureFailCoTenantWrites(on:boolean){ this.failCoTenantWrites=on; }
- async fixturePutRawCoTenants(tenant:string,value:unknown){ this.ctx.storage.kv.put(`control/cotenants/${tenant}`,value); }
  async fixturePublication(id:string,summary:ReleaseSummary,version:string,tenants:string[],publicationGeneration:number){
   const owner=this.syncs.deployments.acquire(summary.project,id);
   if(!owner.acquired)throw new Error('publication fixture could not acquire deployment');
