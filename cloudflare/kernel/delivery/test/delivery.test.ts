@@ -16,7 +16,7 @@ import { Aggregate, stableJson } from "../canonical.ts";
 import { parseDefinition, type ReplicaModule } from "../definition.ts";
 import { ReplicaDeliveryEngine, STALL_TICKS, type DeliveryClock } from "../engine.ts";
 import { LocalOutlet } from "../outlet.ts";
-import type { ReplicaDelivery, ReplicaReceipt } from "../protocol.ts";
+import type { InitialRequestRef, ReplicaDelivery, ReplicaReceipt } from "../protocol.ts";
 import type { ScopedSocketWork } from "../recovery.ts";
 import { SocketDelivery, type TrackedReplicas } from "../socket.ts";
 import { LiveQueries, snapshotRunner, kernelVisibility, moduleFromManifest } from "../../query/index";
@@ -70,7 +70,9 @@ interface Harness {
   schemaChanged(): void;
   live: LiveQueries;
   payloads: Array<[string, ReplicaDelivery]>;
-  receiver: { deliver?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt> };
+  receiver: { deliver?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt>;
+    /** X17t: the holder's `deliverInitialFailures`; unset, the outlet refuses initial failures (an old holder). */
+    failures?: (host: string, payload: ReplicaDelivery) => ReplicaReceipt | Promise<ReplicaReceipt> };
   delivered: number[];
   /**
    * Tenant invocations that overlapped another (`an invocation is already running`) and engine reads outside the
@@ -138,7 +140,10 @@ async function withEngine<T>(body: (harness: Harness) => Promise<T>, module: Rep
         return r.value;
       },
       module: () => current,
-      outlet: new LocalOutlet(receive, () => hosts, undefined, receive),
+      outlet: new LocalOutlet(receive, () => hosts, (host, payload) => {
+        if (!receiver.failures) throw new Error("GONVEX_DELIVERY_INITIAL_FAILURE_UNSUPPORTED");
+        payloads.push([host, payload]); return receiver.failures(host, payload);
+      }, receive),
       ...(activity ? { activity } : {}),
       ...(stallMs !== undefined ? { stallMs } : {}),
       ...(clock ? { clock } : {}),
@@ -288,6 +293,50 @@ describe("X17s: a cohort's last open answered needHashes", () => {
       expect(withWatermark[0]!.initialScope).toBeUndefined();
       expect(engine.subscriptions("s2").has("fresh")).toBe(true);
       expect(engine.subscriptions("s2").has("stale")).toBe(false);
+    });
+  });
+});
+
+describe("X17t: initial work the engine's own check refuses", () => {
+  // #569 review: an `invalid initial-only delivery` is a deterministic local invariant failure. It must fail only the
+  // initial requests that work answers, never reset the whole holder `change-feed-lagged`.
+  it("fails only that work's initial requests and keeps every other replica of the holder", async () => {
+    await withEngine(async ({ engine, payloads, commit, receiver }) => {
+      receiver.failures = () => ({ v: 1, sockets: 1, initialFailureAck: 1 }) as ReplicaReceipt;
+      receiver.deliver = (_host, payload) => {
+        const initialCompletions = Object.fromEntries(Object.entries(payload.sockets).filter(([, work]) => work.initialCompletions?.length)
+          .map(([id, work]) => [id, work.initialCompletions!.map((c) => ({ generation: c.request.generation, status: "enqueued" as const }))]));
+        return { v: 1, sockets: Object.keys(payload.sockets).length, ...(Object.keys(initialCompletions).length ? { initialCompletions } : {}), ...(payload.recovery ? { recoveryAck: 1 } : {}) } as ReplicaReceipt;
+      };
+      await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []]]);
+      const view = { ...socket("s3"), initialRequests: [{ kind: "replica" as const, id: "keep", path: "items.all", epoch: 0, generation: 1 }] };
+      engine.dispatch(view, { type: "replica.openMany", opens: [
+        { id: "keep", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false },
+        { id: "doomed", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false },
+      ] } as never);
+      await engine.settled();
+      expect([...engine.subscriptions("s3").keys()].sort()).toEqual(["doomed", "keep"]);
+      payloads.length = 0;
+      // Initial work the protocol refuses: a watermark without an accepted completion, naming `doomed` as opened.
+      const internals = engine as unknown as { connections: Map<string, { initials: Map<number, InitialRequestRef> }>; post(connection: unknown, work: unknown): void };
+      const connection = internals.connections.get("s3")!;
+      const ref: InitialRequestRef = { kind: "replica", id: "doomed", path: "items.top", epoch: 0, generation: 7 };
+      connection.initials.set(ref.generation, ref);
+      internals.post(connection, { ops: [["f", '{"type":"replica.watermark","revision":1}']], initialScope: ref, initialCompletions: [], opened: { doomed: "items.top" } });
+      await engine.settled();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(payloads.some(([, p]) => p.recovery), "no whole-holder reset").toBe(false);
+      const failures = payloads.filter(([, p]) => p.initialFailure).map(([, p]) => p.initialFailure!.requests);
+      expect(failures).toEqual([{ s3: [ref] }]);
+      expect(payloads.some(([, p]) => p.sockets.s3?.initialScope?.generation === 7), "the refused work never left").toBe(false);
+      expect(engine.subscriptions("s3").has("keep")).toBe(true);
+      expect(engine.subscriptions("s3").has("doomed")).toBe(false);
+      expect(connection.initials.has(7)).toBe(false);
+      expect(engine.stats.initialInvariantFailures).toBe(1);
+      // The holder is not paused: the next commit reaches the kept replica.
+      payloads.length = 0;
+      await commit([["UPDATE items SET label = 'b' WHERE id = 'a'", []]]);
+      expect(frames(payloads, "s3").map((f) => f.type)).toContain("replica.transaction");
     });
   });
 });

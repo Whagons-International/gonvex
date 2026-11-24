@@ -29,7 +29,7 @@ import type { ReplicaModule } from "./definition.ts";
 import { applyTransaction, EventShare, TransactionReads, type FeedFrame } from "./feed.ts";
 import { compactTransaction, deltaBody, deltaFrame, deltaTail, errorFrame, needHashesFrame, readyFrame, resetFrame, transactionFrame, watermarkFrame } from "./frames.ts";
 import { CollapsedChanges, readClock, readTransactions, type FeedTransaction } from "./log.ts";
-import { BUSY_FRAME_TYPE, type BusyReply, REPLICA_DELIVERY_VERSION, initialCompletion, type InitialCompletion, type ReplicaDelivery, type ReplicaReceipt, type InitialRequestRef, type SocketOp, type SocketWork } from "./protocol.ts";
+import { BUSY_FRAME_TYPE, type BusyReply, REPLICA_DELIVERY_VERSION, initialCompletion, initialDeliveryOnly, type InitialCompletion, type ReplicaDelivery, type ReplicaReceipt, type InitialRequestRef, type SocketOp, type SocketWork } from "./protocol.ts";
 import type { ScanProgress } from "./scan.ts";
 import { openReplica, sqlOf, type OpenRequest, type Subscription } from "./subscription.ts";
 
@@ -245,6 +245,11 @@ export interface DeliveryStats {
   recoveryInitialsOmitted: number;
   recoveryInitialFactsRejected: number;
   recoveryInitialsCleared: number;
+  /**
+   * X17t: initial-only work the engine built that its own protocol check refuses (`initialDeliveryOnly`). Only
+   * that work's initial requests are failed; the holder is not reset.
+   */
+  initialInvariantFailures: number;
 }
 
 const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -270,7 +275,7 @@ export function streamIdentity(path: string, argsText: string): string {
 export class ReplicaDeliveryEngine {
   readonly instance = crypto.randomUUID();
   readonly registry: VisibilityRegistry;
-  readonly stats: DeliveryStats = { opens: 0, commits: 0, payloads: 0, statements: 0, rowsRead: 0, resets: 0, commitStatements: 0, commitRowsRead: 0, recoveryInitialsOffered:0, recoveryInitialsOmitted:0, recoveryInitialFactsRejected:0, recoveryInitialsCleared:0 };
+  readonly stats: DeliveryStats = { opens: 0, commits: 0, payloads: 0, statements: 0, rowsRead: 0, resets: 0, commitStatements: 0, commitRowsRead: 0, recoveryInitialsOffered:0, recoveryInitialsOmitted:0, recoveryInitialFactsRejected:0, recoveryInitialsCleared:0, initialInvariantFailures:0 };
   private readonly connections = new Map<string, Connection>();
   /** Reset fences also cover a request already in flight when its connection was dropped. */
   private readonly epochs = new Map<string, number>();
@@ -1295,9 +1300,11 @@ export class ReplicaDeliveryEngine {
     else this.requestScopeFence(host);
   }
 
-  private failInitials(host: string): Promise<void> {
+  /** Fails `only` (connection id -> its initial requests), else every pending initial request of `host`'s sockets. */
+  private failInitials(host: string, only?: Readonly<Record<string, InitialRequestRef[]>>): Promise<void> {
     const requests: Record<string, InitialRequestRef[]> = Object.create(null);
-    for (const connection of this.connections.values()) if (connection.host === host && connection.initials.size) requests[connection.id] = [...connection.initials.values()];
+    if (only) Object.assign(requests, only);
+    else for (const connection of this.connections.values()) if (connection.host === host && connection.initials.size) requests[connection.id] = [...connection.initials.values()];
     if (!Object.keys(requests).length) return Promise.resolve();
     // Normal admission only. A recovery-required/capacity/old-holder failure
     // stays explicitly undeliverable; it cannot bypass the shared byte fence.
@@ -1309,6 +1316,37 @@ export class ReplicaDeliveryEngine {
         const connection = this.connections.get(id), current = connection?.initials.get(ref.generation);
         if (current?.epoch === ref.epoch && current.kind === ref.kind && current.id === ref.id && current.path === ref.path) connection!.initials.delete(ref.generation);
       }
+    });
+  }
+
+  /**
+   * X17t: `payload` is initial-only work this engine built and its own protocol check refuses (`initialDeliveryOnly`;
+   * the outlet would refuse it too). That is a local invariant failure, not a lagging change feed: only the requests
+   * this work answers are failed (`deliverInitialFailures`: the client gets their refusal and may open them again),
+   * a subscription the work installed is uninstalled (its frames never reach the socket), and the holder keeps every
+   * other replica. Holder recovery stays for transport and capacity failures, including of this marker.
+   */
+  private failInvalidInitial(host: string, payload: ReplicaDelivery): Promise<void> {
+    const requests: Record<string, InitialRequestRef[]> = Object.create(null);
+    for (const [id, work] of Object.entries(payload.sockets)) {
+      const connection = this.connections.get(id);
+      if (!connection || (work as ScopedSocketWork).subscriptionEpoch !== connection.epoch) continue;
+      for (const subscription of Object.keys(work.opened ?? {})) this.remove(connection, subscription);
+      const refs = new Map<number, InitialRequestRef>();
+      for (const ref of [work.initialScope, ...(work.initialCompletions ?? []).map((c) => c.request)]) {
+        const current = ref && connection.initials.get(ref.generation);
+        if (current && current.epoch === ref.epoch && current.kind === ref.kind && current.id === ref.id && current.path === ref.path) refs.set(ref.generation, current);
+      }
+      if (refs.size) requests[id] = [...refs.values()];
+    }
+    const count = Object.values(requests).reduce((n, refs) => n + refs.length, 0);
+    this.stats.initialInvariantFailures += 1;
+    console.error(`delivery: invalid initial work for ${host} (initial-invariant): failing ${count} initial request(s), not the holder`);
+    span("tenant.initialInvalid", { reason: "initial-invariant", requests: count });
+    if (!count) return Promise.resolve();
+    return this.failInitials(host, requests).catch((error) => {
+      console.error(`delivery: initial failures for ${host} were not delivered`, error);
+      this.requestRecovery(host);
     });
   }
 
@@ -1460,6 +1498,7 @@ export class ReplicaDeliveryEngine {
 
   private sendOne(host: string, payload: ReplicaDelivery, revision: number, membershipOnly = false, first = false): Promise<void> {
     if (!membershipOnly && this.paused(host)) return Promise.resolve();
+    if (invalidInitialWork(payload)) return this.failInvalidInitial(host, payload);
     this.stats.payloads += 1;
     const owners = new Map(Object.keys(payload.sockets).map(id => [id, this.connections.get(id)]));
     const outlet = this.options.outlet;
@@ -1507,6 +1546,16 @@ export class ReplicaDeliveryEngine {
   }
 
 
+}
+
+/**
+ * X17t: `payload` carries initial work (an origin scope or initial completions) that the initial-only check refuses.
+ * Marker payloads (initial failures, recovery) have their own checks and paths.
+ */
+function invalidInitialWork(payload: ReplicaDelivery): boolean {
+  if (payload.initialFailure || payload.recovery) return false;
+  if (!Object.values(payload.sockets).some((work) => work.initialScope || work.initialCompletions?.length)) return false;
+  return !initialDeliveryOnly(payload);
 }
 
 /** lib.rs `membership_affects`: a `members` change in the access columns, by Member id and account id. */
