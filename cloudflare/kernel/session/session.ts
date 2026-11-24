@@ -1257,7 +1257,10 @@ export class Session {
       delete response.result.replica;
       delete response.result.localIdentity;
     }
-    record.negotiated = negotiate(frame.capabilities, this.ready.presence);
+    record.negotiated = negotiate(frame.capabilities, this.ready.presence, {
+      packedPages: this.ready.packedPages,
+      edgeSessionToken: this.ready.edgeSessionToken,
+    });
     this.delivery.authenticated(record.negotiated.batchFrames);
     // lib.rs:2932 `telemetry_device = device.clone()` (K15), kept only while it fits the attachment comfortably.
     record.telemetryDevice = frame.device !== undefined && JSON.stringify(frame.device).length <= 2048 ? (frame.device as unknown as Json) : null;
