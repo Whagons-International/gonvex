@@ -6,6 +6,10 @@ export class AssemblyTenant extends ServingTenant {
  private pings=0;
  override async ping(){ this.pings++; return super.ping(); }
  async fixturePings(){ return this.pings; }
+ /** C2: `prewarm()` calls (the page wake), counted apart from pings. */
+ private prewarms=0;
+ override prewarm(){ this.prewarms++; super.prewarm(); }
+ async fixturePrewarms(){ return this.prewarms; }
 }
 export class WrongTenant extends AssemblyTenant {}
 let wrongNamespace=false;

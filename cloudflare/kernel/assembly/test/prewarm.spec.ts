@@ -19,12 +19,18 @@ type Control = {
   fixtureFailCoTenantWrites(on: boolean): Promise<void>;
   fixturePutRawCoTenants(tenant: string, value: unknown): Promise<void>;
 };
-type Tenant = { fixturePings(): Promise<number> };
+type Tenant = { fixturePings(): Promise<number>; fixturePrewarms(): Promise<number> };
 const tenantObject = (id: string) => (env as unknown as { PUB_TENANT: DurableObjectNamespace }).PUB_TENANT.getByName(id) as unknown as Tenant;
 /** The tenant's ping count once the background wake has had time to land. */
 async function pingsOf(id: string, expected: number): Promise<number> {
   for (let i = 0; i < 100; i++) { const n = await tenantObject(id).fixturePings(); if (n >= expected) return n; await new Promise((r) => setTimeout(r, 10)); }
   return tenantObject(id).fixturePings();
+}
+/** Wakes of any kind (C2: the page tenant gets `prewarm()`, a co-tenant gets `ping()`). */
+const wakes = async (id: string) => (await tenantObject(id).fixturePings()) + (await tenantObject(id).fixturePrewarms());
+async function wakesOf(id: string, expected: number): Promise<number> {
+  for (let i = 0; i < 100; i++) { const n = await wakes(id); if (n >= expected) return n; await new Promise((r) => setTimeout(r, 10)); }
+  return wakes(id);
 }
 const freshControl = () => (env as unknown as { PUB_CONTROL: DurableObjectNamespace }).PUB_CONTROL.getByName('prewarm-' + crypto.randomUUID()) as unknown as Control;
 const newTenant = () => 'pw-' + crypto.randomUUID().slice(0, 8);
@@ -87,10 +93,10 @@ describe('SessionControlObject.prewarmTenant', () => {
     const { control, tenant } = await world();
     await control.fixtureTenantRow(tenant, 'pinged-domain');
     expect(await control.prewarmTenant('pw-project', 'pinged-domain')).toBe('warming');
-    expect(await pingsOf(tenant, 1)).toBe(1); // TENANT.getByName(<canonical id>), not the selector's name
+    expect(await wakesOf(tenant, 1)).toBe(1); // TENANT.getByName(<canonical id>), not the selector's name
     expect(await control.prewarmTenant('pw-project', tenant)).toBe('recent');
     await new Promise((r) => setTimeout(r, 50));
-    expect(await tenantObject(tenant).fixturePings()).toBe(1);
+    expect(await wakes(tenant)).toBe(1);
   });
 
   it('pings nothing when the selector does not resolve', async () => {
@@ -99,8 +105,8 @@ describe('SessionControlObject.prewarmTenant', () => {
     expect(await control.prewarmTenant('pw-project', tenant)).toBe('unknown');
     expect(await control.prewarmTenant('pw-project', 'pinged-nowhere')).toBe('unknown');
     await new Promise((r) => setTimeout(r, 50));
-    expect(await tenantObject(tenant).fixturePings()).toBe(0);
-    expect(await tenantObject('pinged-nowhere').fixturePings()).toBe(0);
+    expect(await wakes(tenant)).toBe(0);
+    expect(await wakes('pinged-nowhere')).toBe(0);
   });
 
   it('refuses a selector longer than a DNS label even when resolveTenant would accept it', async () => {
@@ -170,12 +176,12 @@ describe('co-tenant prewarm (multi-tenant accounts)', () => {
   it('co-tenant wakes share the per-tenant throttle: a recently woken tenant is not pinged again', async () => {
     const { control, active, others } = await tenants(1);
     expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('warming');
-    expect(await pingsOf(others[0]!, 1)).toBe(1);
+    expect(await wakesOf(others[0]!, 1)).toBe(1);
     await control.fixtureNoteCoTenants(reply(active, others));
     expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
-    expect(await pingsOf(active, 1)).toBe(1);
+    expect(await wakesOf(active, 1)).toBe(1);
     await new Promise((r) => setTimeout(r, 50));
-    expect(await tenantObject(others[0]!).fixturePings()).toBe(1); // the co-tenant wake was throttled, not sent
+    expect(await wakes(others[0]!)).toBe(1); // the co-tenant wake was throttled, not sent
     expect(await control.prewarmTenant('pw-project', others[0]!)).toBe('recent');
   });
 
@@ -268,5 +274,18 @@ describe('co-tenant prewarm (multi-tenant accounts)', () => {
     await stub().fixtureRestart().catch(() => undefined);
     expect(await stub().prewarmTenant('pw-project', active)).toBe('warming'); // a new instance: no throttle state
     expect(await stub().prewarmTenant('pw-project', other)).toBe('recent');   // co-tenant read back from KV and woken
+  });
+
+  it('C2: the page tenant gets prewarm() (the bundle starts), each co-tenant only ping()', async () => {
+    const { control, active, others } = await tenants(2);
+    await control.fixtureNoteCoTenants(reply(active, others));
+    expect(await control.prewarmTenant('pw-project', active)).toBe('warming');
+    for (let i = 0; i < 100 && (await tenantObject(active).fixturePrewarms()) < 1; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(await tenantObject(active).fixturePrewarms()).toBe(1);
+    expect(await tenantObject(active).fixturePings()).toBe(0);
+    for (const other of others) {
+      expect(await pingsOf(other, 1)).toBe(1);
+      expect(await tenantObject(other).fixturePrewarms()).toBe(0);
+    }
   });
 });

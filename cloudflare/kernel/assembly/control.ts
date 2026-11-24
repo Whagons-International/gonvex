@@ -108,9 +108,25 @@ export class SessionControlObject extends OperatorControlObject {
     if (last !== undefined && now - last < PREWARM_TENANT_INTERVAL_MS) return false;
     rememberBounded(this.prewarmed, tenantId, now, this.prewarmMax);
     const started = Date.now();
-    this.ctx.waitUntil(rpc<{ ping(): Promise<number> }>(this.env.TENANT, tenantId).ping()
+    this.ctx.waitUntil(this.wakeCall(tenantId, reason)
       .then(() => span("control.prewarm", { reason, ms: Date.now() - started }), () => span("control.prewarm", { reason, ms: Date.now() - started, failed: true })));
     return true;
+  }
+  /**
+   * The page's tenant gets `prewarm()` (#563): wake it and start the app bundle's evaluation in the background, so the
+   * client's first opens do not pay it (C2: 509-805 ms CPU on dev). A co-tenant only gets `ping()`: the client is not
+   * about to open it, and its admission (the reason it is woken) runs no module code. A tenant of an older Worker
+   * version without `prewarm` (deploy skew) is pinged instead.
+   */
+  private async wakeCall(tenantId: string, reason: "page" | "co-tenant"): Promise<void> {
+    const tenant = rpc<{ ping(): Promise<number>; prewarm(): Promise<void> }>(this.env.TENANT, tenantId);
+    if (reason === "co-tenant") { await tenant.ping(); return; }
+    try { await tenant.prewarm(); }
+    catch (error) {
+      const message = String((error as Error | undefined)?.message ?? error);
+      if (!(message.includes("does not implement") && message.includes('"prewarm"'))) throw error;
+      await tenant.ping();
+    }
   }
 
   /**
