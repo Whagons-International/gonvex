@@ -202,8 +202,9 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     this.operator = new TenantOperator({ storage: ctx.storage, tenantStorage: this.kernel.storage, capture: this.kernel.capture.state, wake: this.kernel.capture.wake, migrator: this.kernel.migrator });
     this.memberships = new TenantMemberships(this.kernel, ctx.storage);
     this.kernel.capture.wake.subscribe(() => {
-      this.membershipRetry = Date.now();
-      ctx.waitUntil(this.setupScheduled().then(() => this.scheduler?.notify()));
+      // Clear any backoff delay so pending outbox rows are picked up immediately without arming an alarm when empty.
+      this.membershipRetry = null;
+      this.notifyScheduled();
     });
     ctx.blockConcurrencyWhile(async () => {
       const project = ctx.storage.kv.get<string>(PROJECT_KEY);
@@ -226,6 +227,20 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     });
   }
 
+  private scheduledNotifyQueued = false;
+  private notifyScheduled(): void {
+    if (this.scheduledNotifyQueued) return;
+    this.scheduledNotifyQueued = true;
+    this.ctx.waitUntil(
+      Promise.resolve()
+        .then(() => {
+          this.scheduledNotifyQueued = false;
+          return this.setupScheduled();
+        })
+        .then(() => this.scheduler?.notify()),
+    );
+  }
+
   private syncInfrastructureInstalled(): boolean {
     return this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='_gonvex_action_outbox'").toArray().length > 0;
   }
@@ -233,8 +248,8 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
     const existing = await this.ctx.storage.getAlarm();
     const set = existing === null || at < existing;
     if (set) await this.ctx.storage.setAlarm(at);
-    // 505 presence diagnostics: times only.
-    console.log(JSON.stringify({ diag: "presence", event: "armEarlier", tenant: this.ctx.id.name ?? "", now: Date.now(), at, existing, set }));
+    // 505 presence diagnostics: times only (opt-in via span timing).
+    if (spanTimingOn()) console.log(JSON.stringify({ diag: "presence", event: "armEarlier", tenant: this.ctx.id.name ?? "", now: Date.now(), at, existing, set }));
   }
   private activeQueryModule(): QueryModule | null {
     const active = this.kernel.module;
@@ -523,7 +538,7 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async schedule(request: ScheduleRequest) { await this.setupScheduled(); return this.scheduler!.enqueue({ function: request.function, args: request.args, runAtUnixMs: request.runAtUnixMs, provenance: request.provenance, coalesce: request.coalesce, jobId: request.id }); }
   protected override committed(call: CommittedCall): void {
     super.committed(call);
-    this.ctx.waitUntil(this.setupScheduled().then(() => this.scheduler?.notify()));
+    this.notifyScheduled();
   }
   override async serviceCall(grant: ServiceGrant, call: ServiceTenantCall): Promise<ServiceTenantOutcome> {
     if (call.kind === "reducer") return super.serviceCall(grant, call);

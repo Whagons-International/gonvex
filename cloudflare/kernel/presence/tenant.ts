@@ -36,6 +36,7 @@ import {
   mergePublications, parseState, scopeKey,
 } from "./hub";
 import { presenceEligible, type PresenceSocketView } from "./socket";
+import { spanTimingOn } from "../delivery/spans";
 
 export const PRESENCE_PROTOCOL_VERSION = 1;
 
@@ -131,6 +132,7 @@ export class TenantPresence {
    * times (ms) and ids only (connection, Member, gateway). No names, tokens or row data.
    */
   private diag(event: string, fields: Record<string, unknown>): void {
+    if (!spanTimingOn()) return;
     try { console.log(JSON.stringify({ diag: "presence", event, tenant: this.options.tenantId, now: this.now(), ...fields })); } catch { /* never let logging fail presence */ }
   }
 

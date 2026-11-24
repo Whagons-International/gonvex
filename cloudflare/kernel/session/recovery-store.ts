@@ -85,6 +85,8 @@ export class HolderRecoveryStore {
   }
   private remember(key: string): void { this.undo?.push([key, this.storage.kv.get(key)]); }
   private put(key: string, value: unknown): void { this.remember(key); this.storage.put(key, value, UNCONFIRMED).catch(ignore); }
+  /** Fresh-UUID generation keys never existed before; skip the wasted kv.get(). */
+  private putNew(key: string, value: unknown): void { this.undo?.push([key, undefined]); this.storage.put(key, value, UNCONFIRMED).catch(ignore); }
   private del(key: string): void { this.remember(key); this.storage.delete(key, UNCONFIRMED).catch(ignore); }
 
   write(record: SessionRecord, previous?: RecoveryReference, socketOwner = previous?.socketOwner ?? crypto.randomUUID()): RecoveryReference {
@@ -95,12 +97,31 @@ export class HolderRecoveryStore {
     this.atomic(() => {
       const owner = this.storage.kv.get<Owner>(ownerKey(socketOwner));
       if (owner && (owner.connectionId !== record.connectionId || !previous || (owner.current !== previous.generation && owner.pending !== previous.generation))) throw new Error("holder recovery publication ownership changed");
-      const append = (text: string) => {
+      const emit = (text: string) => {
         for (let offset = 0; offset < text.length; offset += CHARS) {
           const chunk = { text: text.slice(offset, offset + CHARS), end: offset + CHARS >= text.length };
-          this.put(key(generation, chunks++), chunk);
+          this.putNew(key(generation, chunks++), chunk);
           hash = sha256Hex(hash + JSON.stringify(chunk));
         }
+      };
+      // Pack multiple small entries into a single `["batch","", [...]]` envelope up to CHARS so a socket
+      // with 50-100 subscriptions writes/hashes/restores 1-2 chunks instead of 50-100 separate KV entries.
+      let batchText = "";
+      const flushBatch = () => {
+        if (!batchText) return;
+        emit(`["batch","",[${batchText}]]`);
+        batchText = "";
+      };
+      const append = (entryJson: string) => {
+        const wrapperLen = 14; // `["batch","",[` + `]]`
+        if (wrapperLen + entryJson.length > CHARS) {
+          flushBatch();
+          emit(entryJson);
+          return;
+        }
+        const sep = batchText ? 1 : 0;
+        if (wrapperLen + batchText.length + sep + entryJson.length > CHARS) flushBatch();
+        batchText = batchText ? `${batchText},${entryJson}` : entryJson;
       };
       append(JSON.stringify(["identity", "", { connection: record.connection, tenant: record.tenant, service: record.service ?? null }]));
       for (const group of GROUPS) for (const [id, value] of Object.entries(record[group] ?? {})) {
@@ -115,7 +136,8 @@ export class HolderRecoveryStore {
         }
         append(JSON.stringify([group, id, semantic]));
       }
-      this.put(manifestKey(generation), { v: 2, socketOwner, owner: record.connectionId, generation, scope, chunks, hash, initialSequence: record.initialSequence ?? 0, createdAt: Date.now() } satisfies Manifest);
+      flushBatch();
+      this.putNew(manifestKey(generation), { v: 2, socketOwner, owner: record.connectionId, generation, scope, chunks, hash, initialSequence: record.initialSequence ?? 0, createdAt: Date.now() } satisfies Manifest);
       // Protect both the old published generation and this uncertain transition
       // BEFORE a socket attachment can reference the new one.
       this.put(ownerKey(socketOwner), { v: 2, connectionId: record.connectionId, ...(previous ? { current: previous.generation } : {}), pending: generation } satisfies Owner);
@@ -152,6 +174,12 @@ export class HolderRecoveryStore {
     const maps: Record<Group, Record<string, unknown>> = { liveQueries: Object.create(null), pendingLiveQueries: Object.create(null), controlQueries: Object.create(null), replicas: Object.create(null), pendingActions: Object.create(null), initialRequests: Object.create(null), actionGenerations: Object.create(null) };
     let text = "", hash = "";
     let identity: Pick<SessionRecord, "connection" | "tenant" | "service"> | undefined;
+    const applyEntry = (entry: unknown) => {
+      if (!Array.isArray(entry) || entry.length !== 3 || typeof entry[1] !== "string") throw new Error("holder recovery metadata entry corrupt");
+      if (entry[0] === "identity" && entry[1] === "" && !identity) identity = entry[2];
+      else if (GROUPS.includes(entry[0])) maps[entry[0] as Group][entry[1]] = entry[2];
+      else throw new Error("holder recovery metadata entry corrupt");
+    };
     for (let i = 0; i < ref.chunks; i++) {
       const chunk = this.storage.kv.get<Chunk>(key(ref.generation, i));
       if (!chunk || typeof chunk.text !== "string" || typeof chunk.end !== "boolean" || chunk.text.length > CHARS) throw new Error("holder recovery metadata chunk missing/corrupt");
@@ -159,10 +187,11 @@ export class HolderRecoveryStore {
       text += chunk.text;
       if (chunk.end) {
         const entry: unknown = JSON.parse(text);
-        if (!Array.isArray(entry) || entry.length !== 3 || typeof entry[1] !== "string") throw new Error("holder recovery metadata entry corrupt");
-        if (entry[0] === "identity" && entry[1] === "" && !identity) identity = entry[2];
-        else if (GROUPS.includes(entry[0])) maps[entry[0] as Group][entry[1]] = entry[2];
-        else throw new Error("holder recovery metadata entry corrupt");
+        if (Array.isArray(entry) && entry.length === 3 && entry[0] === "batch" && entry[1] === "" && Array.isArray(entry[2])) {
+          for (const item of entry[2]) applyEntry(item);
+        } else {
+          applyEntry(entry);
+        }
         text = "";
       }
     }

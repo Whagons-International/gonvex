@@ -243,18 +243,25 @@ describe("TenantPresence", () => {
     expect(types(gw("gw-b").frames("s"))).toEqual(["snapshot[]", "m1:active", "m1:offline"]);
   });
 
-  it("logs presence-diag lines with times and ids only (505 investigation)", async () => {
+  it("logs presence-diag lines with times and ids only when span timing is enabled (505 investigation)", async () => {
+    const { setSpanTiming } = await import("../../delivery/spans");
     const lines: Record<string, any>[] = [];
     const log = console.log;
     console.log = (line?: unknown) => { if (typeof line === "string" && line.includes('"diag":"presence"')) lines.push(JSON.parse(line)); };
     try {
+      // Quiet by default on hot paths when span timing is disabled.
+      const quiet = setup();
+      await quiet.presence.frame(socket("q1", "viewer"), { type: "presence.subscribe", id: "sq" });
+      expect(lines).toHaveLength(0);
+
+      setSpanTiming(true);
       const { presence } = setup();
       await presence.frame(socket("v", "viewer"), { type: "presence.subscribe", id: "s1" });
       await presence.frame(socket("c1", "m1", "gw-b"), { type: "presence.set", state: "active" });
       await presence.leave("c1", "gw-b");
       await sleep(400);
       await presence.flushed();
-    } finally { console.log = log; }
+    } finally { setSpanTiming(false); console.log = log; }
     const leave = lines.find(l => l.event === "leave")!;
     expect(leave).toMatchObject({ tenant: TENANT, connection: "c1", gateway: "gw-b", registered: true, member: "m1", after: { connections: [], published: "active", dirty: true } });
     expect(leave.after.graceUntil - leave.now).toBe(300);

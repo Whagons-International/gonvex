@@ -198,11 +198,11 @@ function requestedSumDigest(request: OpenRequest, negotiated: boolean): boolean 
   return sum;
 }
 
-export function resolveCollection(db: StorageSession, context: Pick<OpenContext, "module" | "registry" | "session">, definition: ReplicaDefinition, plan: VisibilityPlan, revision: number): ResolvedVisibility {
+export function resolveCollection(db: StorageSession, context: Pick<OpenContext, "module" | "registry" | "session">, definition: ReplicaDefinition, plan: VisibilityPlan, revision: number, knownClock?: ReturnType<typeof readClock>): ResolvedVisibility {
   const module = context.module!;
   if (plan.version === 2) {
     const acl = context.registry.acl.ensure(db, module.visibility, [plan]);
-    const clock = readClock(sqlOf(db));
+    const clock = knownClock ?? readClock(sqlOf(db));
     return resolveWithParents(db, context.session, plan, revision, module.visibility, acl, undefined, {
       cache: context.registry.principals, clock: { epoch: clock.epoch, revision: clock.revision, retained: clock.retained },
     });
@@ -218,7 +218,21 @@ export function sqlOf(db: StorageSession): LogSql {
       let n = 0;
       const text = sql.replace(/\?/g, () => `$${++n}`);
       const result = db.run(text, bindings);
-      return { toArray: () => result.rows.map((row) => Object.fromEntries(result.columnNames.map((name, index) => [name, row[index] ?? null]))) };
+      return {
+        toArray: () => {
+          const names = result.columnNames;
+          const colCount = names.length;
+          const rows = result.rows;
+          const out = new Array<Record<string, SqlStorageValue>>(rows.length);
+          for (let r = 0; r < rows.length; r++) {
+            const row = rows[r]!;
+            const obj: Record<string, SqlStorageValue> = {};
+            for (let c = 0; c < colCount; c++) obj[names[c]!] = row[c] ?? null;
+            out[r] = obj;
+          }
+          return out;
+        },
+      };
     },
   };
 }
@@ -241,6 +255,54 @@ export async function openReplica(request: OpenRequest, context: OpenContext): P
   }
 }
 
+async function probeSnapshotCache(
+  request: OpenRequest,
+  context: OpenContext,
+  definition: ReplicaDefinition,
+  plan: VisibilityPlan,
+  resolved: ResolvedVisibility,
+  clock: ReturnType<typeof readClock>,
+  readOnly: boolean,
+): Promise<{ key: string | undefined; fingerprint: string; schema: number; cached: CachedSnapshot | undefined; why: string }> {
+  let key = cacheableVisibility(plan) ? snapshotKey(request, context) : undefined;
+  if (key === undefined) return { key: undefined, fingerprint: "", schema: -1, cached: undefined, why: "uncacheable" };
+  let cached = snapshotCache.get(context.registry, key);
+  // Warm/resumable opens do not populate the cache (we don't retain full row payloads on digest-only scans);
+  // bail out early before any SQL probe when nothing is cached.
+  if (readOnly && !cached) return { key, fingerprint: "", schema: -1, cached: undefined, why: "absent" };
+  const fingerprint = visibilityFingerprintOf(resolved);
+  let why = cached ? "" : "absent";
+  if (cached && cached.fingerprint !== fingerprint) { cached = undefined; why = "fingerprint"; }
+  if (cached && (cached.epoch !== clock.epoch || cached.revision < clock.retained || cached.revision > clock.revision)) { cached = undefined; why = "history"; }
+  if (readOnly && !cached) return { key, fingerprint, schema: -1, cached: undefined, why };
+  const tables = [...new Set([...resolvedDependencyColumns(plan, resolved).tables(), definition.table, "members"])].sort();
+  let schema = -1;
+  // #528 re-review: the change-log probe only sees tables the log records under their own name. A table with
+  // capture `metadata`/`derived`, `owned` storage or logical-record storage changes without a row under its name
+  // (a legacy bounded plan keeps its sets in SQL, so the fingerprint cannot see them either): such a collection is
+  // neither stored nor served, as the principal cache refuses the same inputs (principal-cache.ts `store`).
+  const since = cached?.revision;
+  const verdict = await context.read((db) => {
+    // #528 re-review 3: a release's migrations (capture changes, rebuilds) run while the previous module stays
+    // active, so the registry's cached captured set can be stale. The tenant's schema generation moves on every
+    // committed schema change (the migrator's `schemaChanged`, module DDL): a change forgets the registry's
+    // schema-derived caches (principal cache included), and an entry from another generation is a miss.
+    schema = db.schemaGeneration;
+    noteSchema(context.registry, schema);
+    const captured = context.registry.principals.capturedTables(db);
+    if (!tables.every((table) => captured.has(table))) return "uncaptured";
+    if (cached && cached.schema !== schema) return "schema";
+    if (since === undefined || since >= clock.revision) return "ok";
+    // Re-read the retention bound in the probe's own read: a prune since the first read may have removed rows.
+    if (since < readClock(sqlOf(db)).retained) return "history";
+    return tablesChanged(db, since, clock.revision, tables) ? "changed" : "ok";
+  });
+  if (verdict === "uncaptured") { key = undefined; cached = undefined; }
+  else if (verdict === "schema") { cached = undefined; why = "schema"; }
+  else if (verdict !== "ok" && cached) { cached = undefined; why = verdict; }
+  return { key, fingerprint, schema, cached, why };
+}
+
 async function open(request: OpenRequest, context: OpenContext): Promise<Subscription | undefined> {
   const sum = requestedSumDigest(request, context.sumNegotiated);
   if (context.session.anonymous) throw new ReplicaError("authenticate with an active tenant before opening a Replica Collection");
@@ -259,7 +321,7 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
     // are left to `activate`: poisoning them here would turn live `inherits` subscriptions' deltas into resyncs.
     noteSchema(context.registry, db.schemaGeneration);
     const clock = readClock(sqlOf(db));
-    const resolved = resolveCollection(db, context, definition, plan, clock.revision);
+    const resolved = resolveCollection(db, context, definition, plan, clock.revision, clock);
     const scan = scanPlan(definition, plan, resolved, request.args, db.catalogOf(definition.table).columns);
     return { clock, resolved, scan };
   });
@@ -278,39 +340,7 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
 
   if (!resumable) {
     // X17d: the same member's last cold snapshot of this collection, if nothing it reads has changed since.
-    let key = cacheableVisibility(plan) ? snapshotKey(request, context) : undefined;
-    const fingerprint = key === undefined ? "" : visibilityFingerprintOf(resolved);
-    const tables = [...new Set([...resolvedDependencyColumns(plan, resolved).tables(), definition.table, "members"])].sort();
-    let cached = key === undefined ? undefined : snapshotCache.get(context.registry, key);
-    let why = cached ? "" : "absent";
-    if (cached && cached.fingerprint !== fingerprint) { cached = undefined; why = "fingerprint"; }
-    if (cached && (cached.epoch !== clock.epoch || cached.revision < clock.retained || cached.revision > clock.revision)) { cached = undefined; why = "history"; }
-    let schema = -1;
-    if (key !== undefined) {
-      // #528 re-review: the change-log probe only sees tables the log records under their own name. A table with
-      // capture `metadata`/`derived`, `owned` storage or logical-record storage changes without a row under its name
-      // (a legacy bounded plan keeps its sets in SQL, so the fingerprint cannot see them either): such a collection is
-      // neither stored nor served, as the principal cache refuses the same inputs (principal-cache.ts `store`).
-      const since = cached?.revision;
-      const verdict = await context.read((db) => {
-        // #528 re-review 3: a release's migrations (capture changes, rebuilds) run while the previous module stays
-        // active, so the registry's cached captured set can be stale. The tenant's schema generation moves on every
-        // committed schema change (the migrator's `schemaChanged`, module DDL): a change forgets the registry's
-        // schema-derived caches (principal cache included), and an entry from another generation is a miss.
-        schema = db.schemaGeneration;
-        noteSchema(context.registry, schema);
-        const captured = context.registry.principals.capturedTables(db);
-        if (!tables.every((table) => captured.has(table))) return "uncaptured";
-        if (cached && cached.schema !== schema) return "schema";
-        if (since === undefined || since >= clock.revision) return "ok";
-        // Re-read the retention bound in the probe's own read: a prune since the first read may have removed rows.
-        if (since < readClock(sqlOf(db)).retained) return "history";
-        return tablesChanged(db, since, clock.revision, tables) ? "changed" : "ok";
-      });
-      if (verdict === "uncaptured") { key = undefined; cached = undefined; }
-      else if (verdict === "schema") { cached = undefined; why = "schema"; }
-      else if (verdict !== "ok" && cached) { cached = undefined; why = verdict; }
-    }
+    const { key, fingerprint, schema, cached, why } = await probeSnapshotCache(request, context, definition, plan, resolved, clock, false);
     if (cached) snapshotCache.stats.hits++; else if (key !== undefined) snapshotCache.stats.misses++;
     span("tenant.snapshotCache", { path: request.path, result: cached ? "hit" : key === undefined ? "uncacheable" : `miss:${why}` });
     window = await coldSnapshot(request, context, scanAll, digest, cursor, meta, cached,
@@ -328,7 +358,14 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
       context.emit([needHashesFrame(request.id, request.path)]);
       return undefined;
     }
-    window = await scanAll((row) => { digest.add(row.hash); });
+    const { cached } = await probeSnapshotCache(request, context, definition, plan, resolved, clock, true);
+    if (cached) {
+      snapshotCache.stats.hits++;
+      for (const row of cached.rows) digest.add(row.hash);
+      window = cached.window;
+    } else {
+      window = await scanAll((row) => { digest.add(row.hash); });
+    }
     const prior = digest.clone();
     const upserts = new Map<string, JsonObject>();
     const deleted = new Set<string>();
@@ -356,7 +393,14 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
     }
   } else if (requested === "wholeSet") {
     const hashes = new Map<string, string>();
-    window = await scanAll((row) => { digest.add(row.hash); hashes.set(row.key, row.hash); });
+    const { cached } = await probeSnapshotCache(request, context, definition, plan, resolved, clock, true);
+    if (cached) {
+      snapshotCache.stats.hits++;
+      for (const row of cached.rows) { digest.add(row.hash); hashes.set(row.key, row.hash); }
+      window = cached.window;
+    } else {
+      window = await scanAll((row) => { digest.add(row.hash); hashes.set(row.key, row.hash); });
+    }
     if (request.digest !== hashesDigest(hashes)) {
       context.emit([needHashesFrame(request.id, request.path)]);
       return undefined;
@@ -366,15 +410,30 @@ async function open(request: OpenRequest, context: OpenContext): Promise<Subscri
     const upserts: JsonObject[] = [];
     const seen = new Set<string>();
     let retained = 0;
-    window = await scanAll((row) => {
-      digest.add(row.hash);
-      if (request.hashes[row.key] !== row.hash) {
-        upserts.push(row.value);
-        retained += row.text.length;
+    const { cached } = await probeSnapshotCache(request, context, definition, plan, resolved, clock, true);
+    if (cached) {
+      snapshotCache.stats.hits++;
+      for (const row of cached.rows) {
+        digest.add(row.hash);
+        if (request.hashes[row.key] !== row.hash) {
+          upserts.push(JSON.parse(row.text) as JsonObject);
+          retained += row.text.length;
+        }
+        seen.add(row.key);
+        if (retained > MAX_SNAPSHOT_FRAME_BYTES) throw new ReplicaError("replica reconcile delta exceeds the outbound frame limit");
       }
-      seen.add(row.key);
-      if (retained > MAX_SNAPSHOT_FRAME_BYTES) throw new ReplicaError("replica reconcile delta exceeds the outbound frame limit");
-    });
+      window = cached.window;
+    } else {
+      window = await scanAll((row) => {
+        digest.add(row.hash);
+        if (request.hashes[row.key] !== row.hash) {
+          upserts.push(row.value);
+          retained += row.text.length;
+        }
+        seen.add(row.key);
+        if (retained > MAX_SNAPSHOT_FRAME_BYTES) throw new ReplicaError("replica reconcile delta exceeds the outbound frame limit");
+      });
+    }
     const deleted = request.keys.filter((key) => !seen.has(key));
     if (upserts.length || deleted.length || !sameCursor(request.cursor, cursor)) {
       context.emit([deltaFrame(request.id, { path: request.path, cursor, upserts, deleted, digest: digest.digest(), truncated: window.truncated })]);

@@ -36,7 +36,9 @@ describe("holder recovery metadata", () => {
       r.pendingActions = { action: "agent.run" };
       const ref = store.write(r), attachment = { session: withoutRecovery(r), recovery: ref };
       expect(new TextEncoder().encode(JSON.stringify(attachment)).length).toBeLessThan(16_384);
-      expect(ref.chunks).toBeGreaterThan(100);
+      // Large Unicode live-query args still split across >40 <=64KiB chunks while the 256 small replicas pack into batch chunks.
+      expect(ref.chunks).toBeGreaterThan(40);
+      expect(ref.chunks).toBeLessThan(60);
       for (const [name, chunk] of storage.kv.list<{ text: string }>({ prefix: `session-recovery/${ref.generation}/c/` })) {
         expect(name).toContain(ref.generation);
         expect(new TextEncoder().encode(chunk.text).length).toBeLessThanOrEqual(65_536);
@@ -212,6 +214,38 @@ describe("holder recovery metadata", () => {
       expect([...storage.kv.list({ prefix: "session-recovery-orphan/" })]).toEqual([]);
       expect(store.restore(withoutRecovery(r), next).pendingActions).toEqual(r.pendingActions);
       store.abandon(next.socketOwner);
+    });
+  });
+
+  it("packs many small recovery entries into batched chunks and skips redundant kv.get on fresh generation keys", async () => {
+    await withStore((storage) => {
+      let chunkGets = 0;
+      const spy: RecoveryStorage = {
+        transactionSync: (fn) => storage.transactionSync(fn),
+        kv: new Proxy(storage.kv, {
+          get: (target, name) => name === "get"
+            ? (key: string) => {
+                if (key.includes("/c/") || key.endsWith("/manifest")) chunkGets++;
+                return target.get(key);
+              }
+            : (target as unknown as Record<string | symbol, unknown>)[name] instanceof Function
+              ? ((target as unknown as Record<string | symbol, (...a: unknown[]) => unknown>)[name]!).bind(target)
+              : (target as unknown as Record<string | symbol, unknown>)[name],
+        }),
+        put: ((key: string, value: unknown, opts?: unknown) => storage.put(key, value, opts as DurableObjectPutOptions)) as DurableObjectStorage["put"],
+        delete: ((key: string, opts?: unknown) => storage.delete(key, opts as DurableObjectPutOptions)) as DurableObjectStorage["delete"],
+      };
+      const store = new HolderRecoveryStore(spy);
+      const r = record();
+      r.replicas = Object.fromEntries(Array.from({ length: 128 }, (_, i) => [`r${i}`, `items.list${i}`]));
+      r.pendingActions = { a1: "agent.one", a2: "agent.two" };
+      const ref = store.write(r);
+      expect(ref.chunks).toBeLessThanOrEqual(2);
+      expect(chunkGets).toBe(0);
+      const restored = store.restore(withoutRecovery(r), ref);
+      expect(restored.replicas).toEqual(r.replicas);
+      expect(restored.pendingActions).toEqual(r.pendingActions);
+      store.abandon(ref.socketOwner);
     });
   });
 });
