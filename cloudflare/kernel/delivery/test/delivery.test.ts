@@ -251,6 +251,47 @@ describe("snapshots", () => {
   });
 });
 
+describe("X17s: a cohort's last open answered needHashes", () => {
+  // forms-fields -11 (b31, 2026-11-23 08:03:34Z and 20:34:46Z): an openMany whose last open resumed with a digest the
+  // tenant no longer matched (`documents.list`) got `replica.needHashes`, a refused initial completion. The cohort's
+  // bootstrap watermark went into that same initial-only work; the outlet refused the payload ("invalid initial-only
+  // delivery"), and the engine reset every replica of the socket `change-feed-lagged` (87-90 on -11).
+  it("delivers the needHashes and the bootstrap watermark without resetting the holder", async () => {
+    await withEngine(async ({ engine, payloads, commit, receiver }) => {
+      // The gateway's receipt: every offered initial completion enqueued.
+      receiver.deliver = (_host, payload) => {
+        const initialCompletions = Object.fromEntries(Object.entries(payload.sockets).filter(([, work]) => work.initialCompletions?.length)
+          .map(([id, work]) => [id, work.initialCompletions!.map((c) => ({ generation: c.request.generation, status: "enqueued" as const }))]));
+        return { v: 1, sockets: Object.keys(payload.sockets).length, ...(Object.keys(initialCompletions).length ? { initialCompletions } : {}), ...(payload.recovery ? { recoveryAck: 1 } : {}) } as ReplicaReceipt;
+      };
+      await commit([["INSERT INTO items VALUES ('a', 1, 'a')", []], ["INSERT INTO items VALUES ('b', 2, 'b')", []]]);
+      engine.dispatch(socket("probe"), { type: "replica.open", id: "p", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false });
+      await engine.settled();
+      const cursor = frames(payloads, "probe").find((f) => f.type === "replica.ready").cursor;
+      payloads.length = 0;
+      const view = { ...socket("s2"), initialRequests: [
+        { kind: "replica" as const, id: "fresh", path: "items.all", epoch: 0, generation: 1 },
+        { kind: "replica" as const, id: "stale", path: "items.top", epoch: 0, generation: 2 },
+      ] };
+      engine.dispatch(view, { type: "replica.openMany", opens: [
+        { id: "fresh", path: "items.all", args: {}, keys: [], hashes: {}, fullIntegrity: false },
+        { id: "stale", path: "items.top", args: {}, keys: [], hashes: {}, fullIntegrity: false, cursor, digest: "not-the-digest" },
+      ] } as never);
+      await engine.settled();
+      const got = frames(payloads, "s2").map((f) => f.type);
+      expect(payloads.some(([, p]) => p.recovery), "no change-feed-lagged reset of the holder").toBe(false);
+      expect(got).toContain("replica.needHashes");
+      expect(got.indexOf("replica.watermark")).toBeGreaterThan(got.indexOf("replica.needHashes"));
+      // The refused request's initial-only work carries no watermark; the watermark follows as ordinary work.
+      const withWatermark = payloads.map(([, p]) => p.sockets.s2).filter((w) => w?.ops.some((op) => op[0] === "f" && String(op[1]).includes("replica.watermark")));
+      expect(withWatermark).toHaveLength(1);
+      expect(withWatermark[0]!.initialScope).toBeUndefined();
+      expect(engine.subscriptions("s2").has("fresh")).toBe(true);
+      expect(engine.subscriptions("s2").has("stale")).toBe(false);
+    });
+  });
+});
+
 describe("feed", () => {
   it("encodes each shared text once for sockets of one class and gives each socket its own tail", async () => {
     await withEngine(async ({ engine, payloads, commit }) => {
