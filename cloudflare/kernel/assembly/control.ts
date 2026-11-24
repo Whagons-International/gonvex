@@ -20,13 +20,6 @@ import type { ServiceGrant } from "../principals/grant";
 /** `prewarmTenant`: one wake per tenant per interval per Control instance, a bounded map. */
 export const PREWARM_TENANT_INTERVAL_MS = 10_000;
 export const PREWARM_TENANT_MAX = 4_096;
-/** Co-tenant memory (`noteCoTenants`): at most this many other tenants per tenant, each for at most a day. */
-export const COTENANTS_PER_TENANT = 8;
-export const COTENANT_TTL_MS = 24 * 60 * 60 * 1000;
-const COTENANT_PERSIST_MS = 60 * 60 * 1000;
-const COTENANT_KEY = "control/cotenants/";
-interface CoTenantEntry { readonly others: Map<string, number>; persistedKeys: string; persistedAt: number }
-const setKey = (others: ReadonlyMap<string, number>) => [...others.keys()].sort().join("\u0000");
 
 /** K05's auth branches prefix this to an impersonation failure; K06's text already carries it. */
 const IMPERSONATION_PREFIX = "impersonation grant is invalid, expired, revoked, or already used: ";
@@ -85,9 +78,8 @@ export class SessionControlObject extends OperatorControlObject {
    * The router asks this, without waiting, when a page of a tenant's subdomain opens its first socket
    * (kernel/session/prewarm.ts): the tenant object wakes while the Firebase sign-in runs, so the exchange's admission
    * of that tenant does not wait for a cold object. The selector resolves as `resolveTenant` does (exact id, else the
-   * domain, of a provisioned, non-deleted, non-disabled tenant of the project; the same function). The page's tenant
-   * gets `prewarm()` (wake plus a background app-bundle evaluation), its co-tenants `ping()` (`wakeCall`); the bounds
-   * and residual cost are in kernel/session/prewarm.ts.
+   * domain, of a provisioned, non-deleted, non-disabled tenant of the project; the same function). The tenant only
+   * answers `ping()`.
    * At most once per tenant per `PREWARM_TENANT_INTERVAL_MS` per Control instance; unknown selectors do nothing.
    */
   async prewarmTenant(projectId: string, selector: string): Promise<"warming" | "recent" | "unknown"> {
@@ -96,120 +88,13 @@ export class SessionControlObject extends OperatorControlObject {
     // database) all mean "nothing to wake".
     let tenantId: string;
     try { tenantId = resolveTenant(this.context(), projectId, selector).tenantId; } catch { return "unknown"; }
-    const now = this.clock();
-    if (!this.wake(tenantId, now, "page")) return "recent";
-    // A multi-tenant account's sign-in also admits its other tenants: wake the ones recent sign-ins brought along.
-    for (const other of this.recentCoTenants(tenantId, now)) this.wake(other, now, "co-tenant");
-    return "warming";
-  }
-
-  /**
-   * One background wake of `tenantId` (`prewarm()` for the page's tenant, `ping()` for a co-tenant: `wakeCall`), unless
-   * this instance woke it within `PREWARM_TENANT_INTERVAL_MS`.
-   */
-  private wake(tenantId: string, now: number, reason: "page" | "co-tenant"): boolean {
-    const last = this.prewarmed.get(tenantId);
-    if (last !== undefined && now - last < PREWARM_TENANT_INTERVAL_MS) return false;
+    const now = Date.now(), last = this.prewarmed.get(tenantId);
+    if (last !== undefined && now - last < PREWARM_TENANT_INTERVAL_MS) return "recent";
     rememberBounded(this.prewarmed, tenantId, now, this.prewarmMax);
     const started = Date.now();
-    this.ctx.waitUntil(this.wakeCall(tenantId, reason)
-      .then(() => span("control.prewarm", { reason, ms: Date.now() - started }), () => span("control.prewarm", { reason, ms: Date.now() - started, failed: true })));
-    return true;
-  }
-  /**
-   * The page's tenant gets `prewarm()` (#563): wake it and start the app bundle's evaluation in the background, so the
-   * client's first opens do not pay it (C2: 509-805 ms CPU on dev). A co-tenant only gets `ping()`: the client is not
-   * about to open it, and its admission (the reason it is woken) runs no module code. A tenant of an older Worker
-   * version without `prewarm` (deploy skew) is pinged instead.
-   */
-  private async wakeCall(tenantId: string, reason: "page" | "co-tenant"): Promise<void> {
-    const tenant = rpc<{ ping(): Promise<number>; prewarm(): Promise<void> }>(this.env.TENANT, tenantId);
-    if (reason === "co-tenant") { await tenant.ping(); return; }
-    try { await tenant.prewarm(); }
-    catch (error) {
-      const message = String((error as Error | undefined)?.message ?? error);
-      if (!(message.includes("does not implement") && message.includes('"prewarm"'))) throw error;
-      await tenant.ping();
-    }
-  }
-
-  /**
-   * Tenant id -> the other tenants recent sign-ins admitted together with it (in either direction), and when.
-   * Tenant ids only (no account), bounded: `COTENANTS_PER_TENANT` per tenant, `COTENANT_TTL_MS`; kept in memory and
-   * in this object's KV (`control/cotenants/<tenant>`).
-   * `prewarmTenant` pings these too: a multi-tenant account's exchange admits every tenant of the account and waits
-   * for each cold one, but the page names only the active tenant before the sign-in.
-   * A co-tenant disabled or deleted after it was recorded keeps being pinged until its entry expires (at most
-   * `COTENANT_TTL_MS`): co-tenant wakes skip `resolveTenant`, and a reply that omits it does not prove it is gone
-   * (another account's sign-in lists other tenants). The ping is harmless: `ping()` reads and writes nothing.
-   */
-  private readonly coTenants = new Map<string, CoTenantEntry>();
-  /** Time seam (tests move it forward); everything co-tenant and prewarm reads the clock through it. */
-  protected clock(): number { return Date.now(); }
-  /** The KV write (a seam, so a test can make it fail). */
-  protected persistCoTenants(tenantId: string, others: ReadonlyMap<string, number>): void {
-    this.ctx.storage.kv.put(`${COTENANT_KEY}${tenantId}`, [...others]);
-  }
-  /**
-   * Best effort: the caller ignores failures (a sign-in reply never depends on this bookkeeping).
-   * Symmetric: every tenant of the reply gets the reply's other tenants as co-tenants. The page names its own tenant,
-   * which need not be the reply's `activeTenantId`: a sign-in without a requested tenant answers with the first
-   * admitted one by name (dev a0, 2026-11-23: the -12 page's sign-in recorded under -11, so its prewarm found none).
-   */
-  protected noteCoTenants(result: unknown): void {
-    const value = result as { tenants?: unknown } | null;
-    const tenants = Array.isArray(value?.tenants) ? value.tenants : [];
-    const ids: string[] = [];
-    for (const tenant of tenants) {
-      const id = (tenant as { id?: unknown } | null)?.id;
-      if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
-      if (ids.length > COTENANTS_PER_TENANT) break; // a tenant keeps at most COTENANTS_PER_TENANT others
-    }
-    if (ids.length < 2) return;
-    const now = this.clock();
-    for (const tenantId of ids) this.noteCoTenantsOf(tenantId, ids, now);
-  }
-  private noteCoTenantsOf(tenantId: string, ids: readonly string[], now: number): void {
-    const entry = this.loadCoTenants(tenantId, now);
-    const others = entry.others;
-    for (const id of ids) {
-      if (id === tenantId) continue;
-      others.delete(id); // re-insert: insertion order is recency, so the bound evicts the least recently seen
-      others.set(id, now);
-    }
-    while (others.size > COTENANTS_PER_TENANT) others.delete(others.keys().next().value!);
-    // Survives an evicted or restarted Control. Written only when the set differs from the last write, or an hour
-    // after the last write (to keep the stored timestamps inside the TTL), so a sign-in's reply does not routinely
-    // wait for a confirmed write.
-    const keys = setKey(others);
-    if (keys !== entry.persistedKeys || now - entry.persistedAt >= COTENANT_PERSIST_MS) {
-      this.persistCoTenants(tenantId, others);
-      entry.persistedKeys = keys;
-      entry.persistedAt = now;
-    }
-  }
-  /** The entry of `tenantId` (from memory, else from KV), with expired co-tenants pruned. */
-  private loadCoTenants(tenantId: string, now: number): CoTenantEntry {
-    let entry = this.coTenants.get(tenantId);
-    if (!entry) {
-      const others = new Map<string, number>();
-      let stored: unknown;
-      try { stored = this.ctx.storage.kv.get(`${COTENANT_KEY}${tenantId}`); } catch { stored = undefined; }
-      // Tolerate anything stored there: only [string, finite number] rows are read back.
-      if (Array.isArray(stored)) for (const row of stored) {
-        if (Array.isArray(row) && typeof row[0] === "string" && row[0] && typeof row[1] === "number" && Number.isFinite(row[1])) others.set(row[0], row[1]);
-      }
-      while (others.size > COTENANTS_PER_TENANT) others.delete(others.keys().next().value!);
-      entry = { others, persistedKeys: setKey(others), persistedAt: Math.max(0, ...others.values()) };
-    } else this.coTenants.delete(tenantId);
-    this.coTenants.set(tenantId, entry); // most recently used last, for the map's bound
-    if (this.coTenants.size > PREWARM_TENANT_MAX) this.coTenants.delete(this.coTenants.keys().next().value!);
-    for (const [id, at] of entry.others) if (now - at > COTENANT_TTL_MS) entry.others.delete(id);
-    return entry;
-  }
-  /** The live co-tenants of `tenantId`, most recent first. */
-  private recentCoTenants(tenantId: string, now: number): string[] {
-    return [...this.loadCoTenants(tenantId, now).others.keys()].reverse();
+    this.ctx.waitUntil(rpc<{ ping(): Promise<number> }>(this.env.TENANT, tenantId).ping()
+      .then(() => span("control.prewarm", { ms: Date.now() - started }), () => span("control.prewarm", { ms: Date.now() - started, failed: true })));
+    return "warming";
   }
 
   private readonly assemblyInstance = crypto.randomUUID();
@@ -337,10 +222,6 @@ export class SessionControlObject extends OperatorControlObject {
           return [kind === "reducer"
             ? j({ type: "reducer.error", id: frame.id, path: frame.path, error: outcome.error, class: outcome.errorClass, retryable: outcome.errorClass === "transient" || outcome.errorClass === "unauthenticated", ...trace })
             : j({ type: "action.error", id: frame.id, path: frame.path, error: outcome.error, ...trace })];
-        }
-        if (frame.path === "control.auth.exchangeExternalToken" || frame.path === "control.auth.refreshSession" || frame.path === "control.auth.passwordLogin") {
-          // Best effort: the session is committed; a storage error here must never cost the sign-in its reply.
-          try { this.noteCoTenants(outcome.value); } catch (error) { console.error("control: co-tenant bookkeeping failed", String((error as Error)?.message ?? error).slice(0, 120)); }
         }
         const result = kind === "reducer"
           ? j({ type: "reducer.result", id: frame.id, path: frame.path, result: outcome.value, originCommandId: frame.id, ...trace })
