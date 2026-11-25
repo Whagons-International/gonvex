@@ -157,6 +157,141 @@ describe("dev-only file remap (X11b)", () => {
   });
 });
 
+describe("dev-only account transfer import", () => {
+  const path = "/dev/internal/transfer/import-accounts";
+
+  it("needs the admin key, validates fields, and refuses on a non-dev deployment", async () => {
+    const body = { projectId: project.id, tenantId: "devcopy-am-demo", domain: "am-demo", accounts: [] };
+    expect(await call("POST", path, { token: project.key, body })).toMatchObject({ status: 403, body: { error: "runtime admin key is required" } });
+    expect(await call("POST", path, { token: null, body })).toMatchObject({ status: 403 });
+    expect((await call("GET", path)).status).toBe(405);
+    expect(await call("POST", path, { body: { projectId: project.id } })).toMatchObject({ status: 400 });
+    expect(await call("POST", path, { body: { ...body, dryRun: "yes" } })).toMatchObject({ status: 400, body: { error: "dryRun must be a boolean" } });
+    expect(await call("POST", path, { body: { ...body, domain: "BAD_DOMAIN!" } })).toMatchObject({ status: 400 });
+    expect(await call("POST", path, { body })).toMatchObject({ status: 404, body: { error: "account transfer import is not available on this deployment" } });
+  });
+
+  it("preserves exact account IDs, pbkdf2 hashes, memberships, and tenant domain when dev-transfer gated", async () => {
+    const devTenant = "devcopy-am-demo";
+    const otherTenant = "devcopy-am-other";
+    expect((await call("POST", "/dev/tenants", { body: { projectId: project.id, id: devTenant, name: "AM Demo" } })).status).toBe(201);
+    expect((await call("POST", "/dev/tenants", { body: { projectId: project.id, id: otherTenant, name: "AM Other" } })).status).toBe(201);
+
+    const { handleOperatorRoute } = await import("../../../control/operator/routes.ts");
+    const { hashPassword, verifyPassword } = await import("../../../control/src/password.ts");
+    const password = "am-demo-secret-pw-123";
+    const passwordHash = hashPassword(password);
+    const preservedAccountId = "acct_christian_exact_001";
+    const loginAccountId = "acct_christian_login_002";
+    const preservedMemberId = "mem_christian_exact_001";
+
+    const result = await runInDurableObject(control(), async (instance: OperatorControlObject) => {
+      const op = instance.operatorContext();
+      op.config = {
+        ...op.config,
+        devTransferTarget: "gonvex-cf-dev-am-demo",
+        devTransferTenants: `${devTenant},${otherTenant}`,
+      };
+      const invoke = async (payload: Record<string, unknown>) => {
+        const res = await handleOperatorRoute(
+          op,
+          new Request(`http://kernel.test${path}`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${ADMIN}`, "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          }),
+        );
+        return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      };
+
+      // Rejects invalid password hash format
+      const badHash = await invoke({
+        projectId: project.id,
+        tenantId: devTenant,
+        passwords: [{ accountId: preservedAccountId, passwordHash: "not-a-valid-hash" }],
+      });
+
+      const payload = {
+        projectId: project.id,
+        tenantId: devTenant,
+        domain: "am-demo",
+        accounts: [
+          { id: preservedAccountId, email: "Christian@AM-Demo.Test", name: "Christian" },
+          { id: loginAccountId, email: "Login@AM-Demo.Test", name: "Login User" },
+        ],
+        identities: [
+          { accountId: preservedAccountId, provider: "password", subject: "christian@am-demo.test", email: "christian@am-demo.test", verifiedEmail: true },
+          { accountId: loginAccountId, provider: "password", subject: "login@am-demo.test", email: "login@am-demo.test", verifiedEmail: true },
+        ],
+        passwords: [
+          { accountId: preservedAccountId, passwordHash },
+          { accountId: loginAccountId, passwordHash },
+        ],
+        demoAccounts: [{ accountId: preservedAccountId, label: "AM Demo Admin" }],
+        memberships: [{ accountId: preservedAccountId, memberId: preservedMemberId, status: "active", tenantMembershipRevision: 3 }],
+      };
+
+      // dryRun writes nothing
+      const dry = await invoke({ ...payload, dryRun: true });
+      const acctAfterDry = instance.sql.get("SELECT id FROM accounts WHERE id=$1", preservedAccountId);
+
+      // Real import + idempotent retry
+      const imported = await invoke(payload);
+      const retried = await invoke(payload);
+
+      // Domain conflict with another tenant -> 409
+      const conflict = await invoke({ projectId: project.id, tenantId: otherTenant, domain: "am-demo" });
+
+      // Verify getByDomain + real passwordLogin against the preserved pbkdf2 hash & account ID
+      const domainLookup = await instance.query(
+        { connectionId: "c1", projectId: project.id, authToken: "", identity: null, tenant: null, impersonationId: "" },
+        "control.tenants.getByDomain",
+        { domain: "am-demo" },
+      );
+      const loginOutcome = await instance.write(
+        { connectionId: "c1", projectId: project.id, authToken: "", identity: null, tenant: null, impersonationId: "" },
+        "control.auth.passwordLogin",
+        { email: "login@am-demo.test", password },
+        "idem-am-demo-login-1",
+        "action",
+      );
+
+      const storedHash = instance.sql.value<string>(
+        "SELECT password_hash FROM gonvex_account_passwords WHERE project_id=$1 AND account_id=$2",
+        project.id,
+        preservedAccountId,
+      );
+      const demoRow = instance.sql.get(
+        "SELECT tenant_id, label FROM gonvex_demo_accounts WHERE project_id=$1 AND account_id=$2",
+        project.id,
+        preservedAccountId,
+      );
+      const indexRow = instance.sql.get(
+        "SELECT member_id, status, tenant_membership_revision FROM account_tenant_index WHERE account_id=$1 AND tenant_id=$2",
+        preservedAccountId,
+        devTenant,
+      );
+
+      return { badHash, dry, acctAfterDry, imported, retried, conflict, domainLookup, loginOutcome, storedHash, demoRow, indexRow };
+    });
+
+    expect(result.badHash.status).toBe(400);
+    expect(result.dry).toMatchObject({ status: 200, body: { ok: true, dryRun: true, counts: { accounts: 2, identities: 2, passwords: 2, demoAccounts: 1, memberships: 1 } } });
+    expect(result.acctAfterDry).toBeUndefined();
+    expect(result.imported).toMatchObject({ status: 200, body: { ok: true, dryRun: false, domain: "am-demo" } });
+    expect(result.retried).toMatchObject({ status: 200, body: { ok: true, dryRun: false, domain: "am-demo" } });
+    expect(result.conflict.status).toBe(409);
+    expect(result.domainLookup).toMatchObject({ ok: true, value: { id: devTenant, domain: "am-demo" } });
+    expect(result.loginOutcome).toMatchObject({
+      ok: true,
+      value: { account: { id: loginAccountId, email: "login@am-demo.test", name: "Login User" } },
+    });
+    expect(result.storedHash && verifyPassword(password, result.storedHash)).toBe(true);
+    expect(result.demoRow).toMatchObject({ tenant_id: devTenant, label: "AM Demo Admin" });
+    expect(result.indexRow).toMatchObject({ member_id: preservedMemberId, status: "active", tenant_membership_revision: 3 });
+  });
+});
+
 describe("operator sockets", () => {
   it("dashboard: session.ready, auth, subscribe, change on a /dev write, errors", async () => {
     const { ws, next } = await socket("/dev/dashboard/ws");

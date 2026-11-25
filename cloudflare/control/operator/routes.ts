@@ -9,7 +9,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Ctx } from "../src/context";
 import { encryptControlSecret } from "../src/secrets";
-import { hashPassword, verifyPassword } from "../src/password";
+import { hashPassword, isValidPasswordHash, verifyPassword } from "../src/password";
 import { normalizeRedirect } from "../src/native-auth";
 import { bool, num, optNum, str, type Row } from "../src/sql";
 import { base64url, sha256Hex } from "../src/util";
@@ -1251,6 +1251,279 @@ const remapTenantFiles: Handler = async (op, request) => {
   return json(unwrap(await op.tenant(tenantId).operatorRemapFiles(projectId, fromTenantId, p.dryRun === true)));
 };
 
+const TRANSFER_ACCOUNT_BATCH_MAX = 1000;
+const DOMAIN_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function boundedText(value: unknown, label: string, required: boolean, maxBytes = 256): string {
+  if (value === undefined || value === null) {
+    if (required) throw new HttpError(400, `${label} is required`);
+    return "";
+  }
+  if (typeof value !== "string") throw new HttpError(400, `${label} must be a string`);
+  const trimmed = value.trim();
+  if (required && trimmed === "") throw new HttpError(400, `${label} is required`);
+  if (byteLength(trimmed) > maxBytes) throw new HttpError(400, `${label} exceeds ${maxBytes} bytes`);
+  return trimmed;
+}
+
+function optionalTimestamp(value: unknown, label: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new HttpError(400, `${label} must be a non-negative integer timestamp`);
+  }
+  return value;
+}
+
+function readObjectArray(raw: unknown, label: string): Record<string, unknown>[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new HttpError(400, `${label} must be an array`);
+  if (raw.length > TRANSFER_ACCOUNT_BATCH_MAX) throw new HttpError(400, `${label} cannot exceed ${TRANSFER_ACCOUNT_BATCH_MAX} items`);
+  const out: Record<string, unknown>[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new HttpError(400, `${label}[${i}] must be an object`);
+    }
+    out.push(item as Record<string, unknown>);
+  }
+  return out;
+}
+
+/**
+ * `POST /dev/internal/transfer/import-accounts` (P03 dev-transfer gated).
+ * Preserves exact account IDs, `account_identities`, `pbkdf2_sha256` password hashes,
+ * `gonvex_demo_accounts`, `account_tenant_index` memberships, and optional tenant `domain`
+ * when migrating an existing tenant into Cloudflare Control.
+ * Protected by both the runtime admin key and `devTransferAllowed` (404 when gate is off).
+ */
+const importTransferAccounts: Handler = async (op, request) => {
+  if (!op.auth.adminKeyMatches(request.headers)) return error(403, "runtime admin key is required");
+  const body = await Body.read(request);
+  const p = body.object();
+  const projectId = boundedText(p.projectId, "projectId", true);
+  const tenantId = boundedText(p.tenantId, "tenantId", true);
+  if (p.dryRun !== undefined && typeof p.dryRun !== "boolean") return error(400, "dryRun must be a boolean");
+  const dryRun = p.dryRun === true;
+
+  let domain: string | null = null;
+  if (p.domain !== undefined && p.domain !== null) {
+    const rawDomain = boundedText(p.domain, "domain", false, 63).toLowerCase();
+    if (rawDomain !== "" && !DOMAIN_SLUG_RE.test(rawDomain)) {
+      return error(400, "domain must be a lowercase hostname label (a-z, 0-9, hyphens)");
+    }
+    domain = rawDomain;
+  }
+
+  if (!devTransferAllowed({ target: op.config.devTransferTarget, tenants: op.config.devTransferTenants }, tenantId)) {
+    return error(404, "account transfer import is not available on this deployment");
+  }
+
+  const rawAccounts = readObjectArray(p.accounts, "accounts");
+  const rawIdentities = readObjectArray(p.identities, "identities");
+  const rawPasswords = readObjectArray(p.passwords, "passwords");
+  const rawDemoAccounts = readObjectArray(p.demoAccounts, "demoAccounts");
+  const rawMemberships = readObjectArray(p.memberships, "memberships");
+
+  const accounts = rawAccounts.map((item, i) => {
+    const id = boundedText(item.id, `accounts[${i}].id`, true);
+    const emailRaw = boundedText(item.email, `accounts[${i}].email`, false, 320);
+    const email = emailRaw === "" ? "" : normalizeEmail(emailRaw);
+    if (emailRaw !== "" && email === "") throw new HttpError(400, `accounts[${i}].email is invalid`);
+    return {
+      id,
+      email,
+      name: boundedText(item.name, `accounts[${i}].name`, false, 256),
+      avatarUrl: boundedText(item.avatarUrl, `accounts[${i}].avatarUrl`, false, 2048),
+      disabledAt: optionalTimestamp(item.disabledAt, `accounts[${i}].disabledAt`),
+      createdAt: optionalTimestamp(item.createdAt, `accounts[${i}].createdAt`),
+      updatedAt: optionalTimestamp(item.updatedAt, `accounts[${i}].updatedAt`),
+    };
+  });
+
+  const identities = rawIdentities.map((item, i) => {
+    const accountId = boundedText(item.accountId, `identities[${i}].accountId`, true);
+    const provider = boundedText(item.provider, `identities[${i}].provider`, true, 64);
+    const issuerRaw = boundedText(item.issuer, `identities[${i}].issuer`, false, 256);
+    const issuer = issuerRaw === "" && provider === "password" ? projectId : issuerRaw;
+    const subject = boundedText(item.subject, `identities[${i}].subject`, true, 320);
+    const emailRaw = boundedText(item.email, `identities[${i}].email`, false, 320);
+    const email = emailRaw === "" ? "" : normalizeEmail(emailRaw);
+    const verifiedEmail = item.verifiedEmail === true || item.verifiedEmail === 1 ? 1 : 0;
+    const signInProvider = boundedText(item.signInProvider, `identities[${i}].signInProvider`, false, 64);
+    return { accountId, provider, issuer, subject, email, verifiedEmail, signInProvider };
+  });
+
+  const passwords = rawPasswords.map((item, i) => {
+    const accountId = boundedText(item.accountId, `passwords[${i}].accountId`, true);
+    const passwordHash = boundedText(item.passwordHash, `passwords[${i}].passwordHash`, true, 512);
+    if (!isValidPasswordHash(passwordHash)) {
+      throw new HttpError(400, `passwords[${i}].passwordHash must be a valid pbkdf2_sha256 hash`);
+    }
+    return { accountId, passwordHash };
+  });
+
+  const demoAccounts = rawDemoAccounts.map((item, i) => ({
+    accountId: boundedText(item.accountId, `demoAccounts[${i}].accountId`, true),
+    label: boundedText(item.label, `demoAccounts[${i}].label`, false, 128),
+  }));
+
+  const memberships = rawMemberships.map((item, i) => {
+    const accountId = boundedText(item.accountId, `memberships[${i}].accountId`, true);
+    const memberId = boundedText(item.memberId, `memberships[${i}].memberId`, true);
+    const statusRaw = boundedText(item.status, `memberships[${i}].status`, false, 32) || "active";
+    if (!["active", "invited", "suspended", "revoked", "removed"].includes(statusRaw)) {
+      throw new HttpError(400, `memberships[${i}].status is invalid`);
+    }
+    const rev = optionalTimestamp(item.tenantMembershipRevision, `memberships[${i}].tenantMembershipRevision`) ?? 0;
+    return { accountId, memberId, status: statusRaw, tenantMembershipRevision: rev };
+  });
+
+  const resolved = resolveTenant(op, projectId, tenantId);
+  if (resolved !== tenantId) return error(404, "tenant database was not found");
+
+  if (domain !== null && domain !== "") {
+    const conflict = op.ctx.sql.get(
+      `SELECT tenant_id FROM gonvex_runtime_tenants
+       WHERE project_id=$1 AND lower(domain)=lower($2) AND tenant_id<>$3
+         AND deleted_at IS NULL AND status NOT IN ('deleted','disabled')`,
+      projectId,
+      domain,
+      tenantId,
+    );
+    if (conflict) return error(409, `domain ${JSON.stringify(domain)} is already assigned to another tenant`);
+  }
+
+  if (!dryRun) {
+    op.ctx.sql.tx(() => {
+      if (accounts.length > 0) {
+        op.ctx.sql.run(
+          `INSERT INTO accounts (id, auth_realm_id, email, name, avatar_url, disabled_at, created_at, updated_at)
+           SELECT
+             json_extract(value, '$.id'),
+             $1,
+             json_extract(value, '$.email'),
+             json_extract(value, '$.name'),
+             json_extract(value, '$.avatarUrl'),
+             json_extract(value, '$.disabledAt'),
+             COALESCE(json_extract(value, '$.createdAt'), ${NOW}),
+             COALESCE(json_extract(value, '$.updatedAt'), ${NOW})
+           FROM json_each($2) WHERE true
+           ON CONFLICT(id) DO UPDATE SET
+             auth_realm_id=EXCLUDED.auth_realm_id,
+             email=EXCLUDED.email,
+             name=EXCLUDED.name,
+             avatar_url=EXCLUDED.avatar_url,
+             disabled_at=EXCLUDED.disabled_at,
+             updated_at=EXCLUDED.updated_at`,
+          projectId,
+          JSON.stringify(accounts),
+        );
+      }
+      if (identities.length > 0) {
+        op.ctx.sql.run(
+          `INSERT INTO account_identities (account_id, project_id, provider, issuer, subject, email, verified_email, sign_in_provider, updated_at)
+           SELECT
+             json_extract(value, '$.accountId'),
+             $1,
+             json_extract(value, '$.provider'),
+             json_extract(value, '$.issuer'),
+             json_extract(value, '$.subject'),
+             json_extract(value, '$.email'),
+             json_extract(value, '$.verifiedEmail'),
+             json_extract(value, '$.signInProvider'),
+             ${NOW}
+           FROM json_each($2) WHERE true
+           ON CONFLICT(project_id, provider, issuer, subject) DO UPDATE SET
+             account_id=EXCLUDED.account_id,
+             email=EXCLUDED.email,
+             verified_email=EXCLUDED.verified_email,
+             sign_in_provider=EXCLUDED.sign_in_provider,
+             updated_at=${NOW}`,
+          projectId,
+          JSON.stringify(identities),
+        );
+      }
+      if (passwords.length > 0) {
+        op.ctx.sql.run(
+          `INSERT INTO gonvex_account_passwords (project_id, account_id, password_hash, updated_at)
+           SELECT
+             $1,
+             json_extract(value, '$.accountId'),
+             json_extract(value, '$.passwordHash'),
+             ${NOW}
+           FROM json_each($2) WHERE true
+           ON CONFLICT(project_id, account_id) DO UPDATE SET
+             password_hash=EXCLUDED.password_hash,
+             updated_at=${NOW}`,
+          projectId,
+          JSON.stringify(passwords),
+        );
+      }
+      if (demoAccounts.length > 0) {
+        op.ctx.sql.run(
+          `INSERT INTO gonvex_demo_accounts (project_id, account_id, tenant_id, label)
+           SELECT
+             $1,
+             json_extract(value, '$.accountId'),
+             $2,
+             json_extract(value, '$.label')
+           FROM json_each($3) WHERE true
+           ON CONFLICT(project_id, account_id) DO UPDATE SET
+             tenant_id=EXCLUDED.tenant_id,
+             label=EXCLUDED.label`,
+          projectId,
+          tenantId,
+          JSON.stringify(demoAccounts),
+        );
+      }
+      if (memberships.length > 0) {
+        op.ctx.sql.run(
+          `INSERT INTO account_tenant_index (account_id, tenant_id, member_id, status, tenant_membership_revision, updated_at)
+           SELECT
+             json_extract(value, '$.accountId'),
+             $1,
+             json_extract(value, '$.memberId'),
+             json_extract(value, '$.status'),
+             json_extract(value, '$.tenantMembershipRevision'),
+             ${NOW}
+           FROM json_each($2) WHERE true
+           ON CONFLICT(account_id, tenant_id) DO UPDATE SET
+             member_id=EXCLUDED.member_id,
+             status=EXCLUDED.status,
+             tenant_membership_revision=max(account_tenant_index.tenant_membership_revision, EXCLUDED.tenant_membership_revision),
+             updated_at=${NOW}`,
+          tenantId,
+          JSON.stringify(memberships),
+        );
+      }
+      if (domain !== null) {
+        op.ctx.sql.run(
+          `UPDATE gonvex_runtime_tenants SET domain=$3, updated_at=${NOW} WHERE project_id=$1 AND tenant_id=$2`,
+          projectId,
+          tenantId,
+          domain,
+        );
+      }
+    });
+    op.controlChanged(projectId);
+  }
+
+  return json({
+    ok: true,
+    dryRun,
+    projectId,
+    tenantId,
+    ...(domain !== null ? { domain } : {}),
+    counts: {
+      accounts: accounts.length,
+      identities: identities.length,
+      passwords: passwords.length,
+      demoAccounts: demoAccounts.length,
+      memberships: memberships.length,
+    },
+  });
+};
+
 /**
  * DEV only (contract change 0090): one tenant Member's role and permissions, read-only, behind the same runtime
  * admin key as the seed. `?project=&tenant=` and exactly one of `accountId`, `email` or `memberId`.
@@ -1647,6 +1920,7 @@ export const ROUTES: Route[] = [
   { pattern: new RegExp(`^/dev/tenants/${SEG}$`), methods: { DELETE: deleteTenantShard } },
   { pattern: /^\/dev\/internal\/e2e\/members$/, methods: { GET: e2eMemberRead, POST: e2eMember } },
   { pattern: /^\/dev\/internal\/files\/remap-tenant$/, methods: { POST: remapTenantFiles } },
+  { pattern: /^\/dev\/internal\/transfer\/import-accounts$/, methods: { POST: importTransferAccounts } },
   { pattern: /^\/dev\/errors\/status$/, methods: { GET: errorStatus } },
   { pattern: /^\/dev\/errors\/groups$/, methods: { GET: errorGroups } },
   { pattern: new RegExp(`^/dev/errors/groups/${SEG}$`), methods: { GET: errorGroup, PATCH: updateErrorGroup } },

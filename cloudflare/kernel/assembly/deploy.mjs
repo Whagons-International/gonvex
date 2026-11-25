@@ -73,6 +73,18 @@ export async function servingConfigs(name, directory, { kernelUrl, images = {} }
   const bootstrap = { ...configs.kernel.config, services: [], workflows: [], durable_objects: {...configs.kernel.config.durable_objects,bindings:configs.kernel.config.durable_objects.bindings.filter(b=>b.name!=='TENANT')} };
   configs.bootstrap = { config: bootstrap, path: join(directory, 'bootstrap.json') };
   await writeFile(configs.bootstrap.path, JSON.stringify(bootstrap), { mode: 0o600 });
+  // Fresh deploy bootstrap for -runtime must omit ActionHost (which binds -actions before -actions exists; CF 10061).
+  const runtimeBootstrap = {
+    ...configs.runtime.config,
+    services: [],
+    workflows: [],
+    durable_objects: {
+      ...configs.runtime.config.durable_objects,
+      bindings: (configs.runtime.config.durable_objects?.bindings ?? []).filter((b) => b.class_name !== 'ActionHost'),
+    },
+  };
+  configs.runtimeBootstrap = { config: runtimeBootstrap, path: join(directory, 'runtime-bootstrap.json') };
+  await writeFile(configs.runtimeBootstrap.path, JSON.stringify(runtimeBootstrap), { mode: 0o600 });
   return configs;
 }
 
@@ -160,7 +172,7 @@ export async function deployAssembly({ name, directory, images, secrets = {}, pu
   const storageSecret = secrets.GONVEX_STORAGE_SECRET??randomBytes(32).toString('hex');
   const rootSecrets = { GONVEX_STORAGE_SECRET: storageSecret, ...secrets, GONVEX_RELEASE_BUILDER_TOKEN: token };
   for (const [key, value] of Object.entries(rootSecrets)) await api(`/workers/scripts/${name}/secrets`, { method: 'PUT', body: { name: key, text: value, type: 'secret_text' } });
-  if(!existing){const runtimeBootstrap={...configs.runtime.config,services:[],workflows:[]};const path=join(directory,'runtime-bootstrap.json');await writeFile(path,JSON.stringify(runtimeBootstrap),{mode:0o600});await deployConfig(['deploy','--config',path],credentials,directory);}
+  if (!existing) await deployConfig(['deploy', '--config', configs.runtimeBootstrap.path], credentials, directory);
   // X13g (0094 B): the Actions script (which defines ActionHost) deploys before the runtime that binds it.
   // Deploying it resets every tenant's ActionHost and fails in-flight interactive agent Actions (each at most
   // once, via the X13b sweep); see 0094 "Operational consequences".
