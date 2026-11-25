@@ -58,6 +58,7 @@ fn never_copied(table: &str) -> bool {
             | "_gonvex_sync_clock"
             | "gonvex_runtime_manifests"
     ) || table.starts_with("_gonvex_reference_")
+        || table.starts_with("_gonvex_writer_schema")
         || table.starts_with(KERNEL_TRANSFORM_PREFIX)
 }
 
@@ -79,6 +80,9 @@ fn skip_reason(table: &str) -> &'static str {
         }
         "_gonvex_sync_bootstrap" => "installer receipts of this file's provisioning",
         "gonvex_runtime_manifests" => "module artifacts are redeployed, not copied",
+        _ if table.starts_with("_gonvex_writer_schema") => {
+            "runtime writer-schema metadata is rebuilt on open"
+        }
         _ if table.starts_with(KERNEL_TRANSFORM_PREFIX) => {
             "kernel schema-transform object (A01); a Rust file never has it"
         }

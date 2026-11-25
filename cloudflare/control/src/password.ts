@@ -63,16 +63,27 @@ export function hashPassword(password: string): string {
   return `pbkdf2_sha256$${PASSWORD_ROUNDS}$${base64url(salt)}$${base64url(hash)}`;
 }
 
-export function verifyPassword(password: string, encoded: string): boolean {
+function parsePasswordHash(encoded: string): { rounds: number; salt: Uint8Array; expected: Uint8Array } | null {
   const parts = encoded.split("$");
-  if (parts.length !== 4 || parts[0] !== "pbkdf2_sha256") return false;
+  if (parts.length !== 4 || parts[0] !== "pbkdf2_sha256") return null;
   // Rust `str::parse::<u32>`: decimal digits with an optional leading '+'.
-  if (!/^\+?\d+$/.test(parts[1]!)) return false;
+  if (!/^\+?\d+$/.test(parts[1]!)) return null;
   const rounds = Number(parts[1]);
-  if (!Number.isSafeInteger(rounds) || rounds > 0xffffffff) return false;
+  if (!Number.isSafeInteger(rounds) || rounds <= 0 || rounds > 0xffffffff) return null;
   const salt = fromBase64url(parts[2]!);
   const expected = fromBase64url(parts[3]!);
-  if (!salt || !expected || rounds === 0 || expected.length === 0) return false;
-  const actual = derive(utf8(password), salt, rounds, expected.length);
-  return timingSafeEqual(actual, expected);
+  if (!salt || !expected || salt.length === 0 || expected.length === 0) return null;
+  return { rounds, salt, expected };
+}
+
+/** Validates that `encoded` is a well-formed `pbkdf2_sha256$<rounds>$<salt>$<hash>` string. */
+export function isValidPasswordHash(encoded: string): boolean {
+  return parsePasswordHash(encoded) !== null;
+}
+
+export function verifyPassword(password: string, encoded: string): boolean {
+  const parsed = parsePasswordHash(encoded);
+  if (!parsed) return false;
+  const actual = derive(utf8(password), parsed.salt, parsed.rounds, parsed.expected.length);
+  return timingSafeEqual(actual, parsed.expected);
 }
