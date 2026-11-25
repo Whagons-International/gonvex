@@ -832,3 +832,125 @@ async fn rejected_socket_auth_preserves_project_for_external_exchange() {
     socket.close(None).await.unwrap();
     server.abort();
 }
+
+async fn seed_password_account(fixture: &SqlitePool) {
+    for statement in [
+        "INSERT INTO gonvex_runtime_projects(id,name,status,auth_mode) VALUES('project','Project','active','gonvex-native')",
+        "INSERT INTO accounts(id,auth_realm_id,email,name) VALUES('account','project','person@example.test','Person')",
+        "INSERT INTO account_identities(account_id,project_id,provider,issuer,subject,email,verified_email) VALUES('account','project','password','gonvex-native','person@example.test','person@example.test',TRUE)",
+    ] {
+        sqlx::query(statement).execute(fixture).await.unwrap();
+    }
+    let mut password_hash = [0_u8; 32];
+    pbkdf2_hmac::<Sha256>(
+        b"correct horse battery staple",
+        b"fixed-test-salt",
+        1,
+        &mut password_hash,
+    );
+    sqlx::query(
+        "INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash) VALUES('project','account',$1)",
+    )
+    .bind(format!(
+        "pbkdf2_sha256$1${}${}",
+        URL_SAFE_NO_PAD.encode(b"fixed-test-salt"),
+        URL_SAFE_NO_PAD.encode(password_hash)
+    ))
+    .execute(fixture)
+    .await
+    .unwrap();
+}
+
+/// A refresh whose reply was lost is retried with the same idempotency key.
+/// The retry must receive the rotated session instead of revoking the login,
+/// but only while that session is still the live head of its family.
+#[tokio::test]
+async fn retried_refresh_replays_the_rotated_session() {
+    let (data, database_url, fixture_pools, fixture) = sqlite_fixture("control").await;
+    let runtime = Runtime::new(test_config(database_url.clone()));
+    runtime.start().await.unwrap();
+    seed_password_account(&fixture).await;
+    let connection = ControlConnection {
+        project_id: "project".to_owned(),
+        ..ControlConnection::default()
+    };
+    let refresh = |token: String, key: &'static str| {
+        let runtime = &runtime;
+        let connection = &connection;
+        async move {
+            runtime
+                .execute_control_action(
+                    connection,
+                    "control.auth.refreshSession",
+                    &serde_json::json!({ "refreshToken": token }),
+                    key,
+                )
+                .await
+        }
+    };
+    let error_text = |result: Result<Value, ControlError>| result.unwrap_err().to_string();
+    let login = runtime
+        .execute_control_action(
+            &connection,
+            "control.auth.passwordLogin",
+            &serde_json::json!({"email":"person@example.test","password":"correct horse battery staple"}),
+            "login",
+        )
+        .await
+        .unwrap();
+    let original = login["refreshToken"].as_str().unwrap().to_owned();
+    let rotated = refresh(original.clone(), "attempt-1").await.unwrap();
+    // The reply was lost; the client retries well past the 5-second grace.
+    sqlx::query(&format!(
+        "UPDATE gonvex_auth_refresh_tokens SET used_at={NOW_MS}-60000 WHERE token_hash=$1"
+    ))
+    .bind(token_hash(&original))
+    .execute(&fixture)
+    .await
+    .unwrap();
+    let replayed = refresh(original.clone(), "attempt-1").await.unwrap();
+    assert_eq!(replayed["refreshToken"], rotated["refreshToken"]);
+    assert_eq!(replayed["accessToken"], rotated["accessToken"]);
+
+    // Too late: the stored result is no longer handed out.
+    sqlx::query(&format!(
+        "UPDATE gonvex_control_idempotency SET updated_at={NOW_MS}-660000 WHERE idempotency_key='attempt-1'"
+    ))
+    .execute(&fixture)
+    .await
+    .unwrap();
+    assert!(error_text(refresh(original.clone(), "attempt-1").await)
+        .contains("invalid or expired refresh token"));
+    sqlx::query(&format!(
+        "UPDATE gonvex_control_idempotency SET updated_at={NOW_MS} WHERE idempotency_key='attempt-1'"
+    ))
+    .execute(&fixture)
+    .await
+    .unwrap();
+
+    // Once the rotated session is itself used, the old retry is refused
+    // without revoking the healthy family.
+    let next = refresh(
+        rotated["refreshToken"].as_str().unwrap().to_owned(),
+        "attempt-2",
+    )
+    .await
+    .unwrap();
+    assert!(error_text(refresh(original.clone(), "attempt-1").await).contains("already rotated"));
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT revoked_at IS NULL FROM gonvex_auth_refresh_tokens WHERE token_hash=$1"
+    )
+    .bind(token_hash(next["refreshToken"].as_str().unwrap()))
+    .fetch_one(&fixture)
+    .await
+    .unwrap());
+
+    // A stale copy under a new key is still reuse and revokes the family.
+    assert!(error_text(refresh(original.clone(), "attempt-3").await).contains("reuse detected"));
+    assert!(error_text(refresh(original, "attempt-1").await)
+        .contains("invalid or expired refresh token"));
+
+    runtime.shutdown().await;
+    fixture_pools.close().await;
+    drop(data);
+}

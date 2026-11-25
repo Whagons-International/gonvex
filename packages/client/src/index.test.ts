@@ -1321,6 +1321,21 @@ describe("GonvexClient", () => {
     expect(auths[1]).toMatchObject({ token: "fresh-token", tenant: "tenant-a" });
   });
 
+  it("sends a caller's stable idempotency key on retried Control Plane actions", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "shop" });
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    await vi.advanceTimersByTimeAsync(0);
+    void client.action(control.auth.refreshSession, { refreshToken: "refresh-token" }, { idempotencyKey: "refresh-attempt" }).catch(() => undefined);
+    void client.action(control.auth.refreshSession, { refreshToken: "refresh-token" }, { idempotencyKey: "refresh-attempt" }).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    const calls = sentMessages(socket).filter((message) => message.type === "action.call");
+    expect(calls.map((call) => call.idempotencyKey)).toEqual(["refresh-attempt", "refresh-attempt"]);
+    expect(calls[0].id).not.toBe(calls[1].id);
+    client.close();
+  });
+
   it("reconnects without signing out when forced refresh returns the rejected token", async () => {
     const fetchToken = vi.fn(async () => "always-bad");
     const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
