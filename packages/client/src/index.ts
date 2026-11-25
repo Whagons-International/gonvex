@@ -505,6 +505,9 @@ export type CallOptions = {
   optimistic?: OptimisticPatch[];
   /** Queue transport failures durably instead of rejecting. Default `reject`. */
   offline?: "queue" | "reject";
+  /** Control Plane writes only: reuse one key across retries of the same
+   * intent so a retry after a lost reply receives the stored result. */
+  idempotencyKey?: string;
 };
 
 /** Returned when an offline reducer has been accepted by the local outbox. */
@@ -4957,7 +4960,7 @@ export class GonvexClient {
   }
 
   action<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options: CallOptions = {}): Promise<T> {
-    return this.call<T>("action", ref, args, options.timeoutMs ?? this.timeouts.actionTimeoutMs);
+    return this.call<T>("action", ref, args, options.timeoutMs ?? this.timeouts.actionTimeoutMs, undefined, ref.scope === "control" ? options.idempotencyKey : undefined);
   }
 
   query<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options: CallOptions = {}): Promise<T> {

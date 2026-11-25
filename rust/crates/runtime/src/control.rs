@@ -414,6 +414,16 @@ impl Runtime {
         )
         .await?
         {
+            if path == "control.auth.refreshSession" {
+                verify_refresh_replay(
+                    &mut transaction,
+                    &connection.project_id,
+                    &subject,
+                    idempotency_key,
+                    &result,
+                )
+                .await?;
+            }
             transaction.commit().await?;
             return session_result_from_directory(control, &connection.project_id, result).await;
         }
@@ -3982,6 +3992,61 @@ pub(crate) async fn refresh_session(
         account,
         String::new(),
     ))))
+}
+
+/// How long a client may retry a refresh whose reply it lost and receive the
+/// same rotated session. Shorter than the 15-minute access token lifetime.
+const REFRESH_REPLAY_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+/// A retried refresh (same refresh token, same idempotency key) receives the
+/// stored rotated session instead of tripping reuse detection, but only while
+/// that session is still the live, unused head of an unrevoked family. A token
+/// replayed after the family moved on, was revoked, or after the window still
+/// fails exactly like an unretried reuse.
+async fn verify_refresh_replay(
+    transaction: &mut TenantTransaction,
+    project: &str,
+    subject: &str,
+    key: &str,
+    result: &Value,
+) -> Result<(), ControlError> {
+    let completed_at: i64 = sqlx::query_scalar(
+        r#"SELECT updated_at FROM gonvex_control_idempotency
+           WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3"#,
+    )
+    .bind(project)
+    .bind(subject)
+    .bind(key)
+    .fetch_one(&mut **transaction.transaction())
+    .await?;
+    let issued = result["refreshToken"].as_str().unwrap_or("");
+    let head = sqlx::query(
+        r#"SELECT expires_at,used_at,revoked_at FROM gonvex_auth_refresh_tokens
+           WHERE project_id=$1 AND token_hash=$2"#,
+    )
+    .bind(project)
+    .bind(sha256_hex(issued.as_bytes()))
+    .fetch_optional(&mut **transaction.transaction())
+    .await?;
+    let Some(head) = head else {
+        return Err(ControlError::InvalidArguments(
+            "invalid or expired refresh token".to_owned(),
+        ));
+    };
+    if row_optional_time(&head, "revoked_at").is_some()
+        || row_time(&head, "expires_at") <= Utc::now()
+        || Utc::now().timestamp_millis() - completed_at > REFRESH_REPLAY_WINDOW_MS
+    {
+        return Err(ControlError::InvalidArguments(
+            "invalid or expired refresh token".to_owned(),
+        ));
+    }
+    if row_optional_time(&head, "used_at").is_some() {
+        return Err(ControlError::InvalidArguments(
+            "refresh token was already rotated; use the latest session".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn revoke_family(
