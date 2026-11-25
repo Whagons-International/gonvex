@@ -11,6 +11,10 @@ export interface ReadyOptions {
   runtimeVersion: string;
   /** Presence v2 is advertised as Rust does by default (`GONVEX_PRESENCE_V2`). */
   presence: boolean;
+  /** Serverless DOD Phase 2b: advertise WLP1 binary PackedPage support (opt-in). */
+  packedPages?: boolean;
+  /** Serverless DOD Phase 2b: advertise stateless Ed25519 edge session tokens (opt-in). */
+  edgeSessionToken?: boolean;
 }
 
 /**
@@ -18,7 +22,7 @@ export interface ReadyOptions {
  * `ServerCapabilities` order. `replicaFieldPatches`, `replicaSetDigest` and
  * `replicaNativeRows` are not advertised (0012 R20, A.1.3 "replace").
  */
-export function sessionReadyFrame({ runtimeVersion, presence }: ReadyOptions): string {
+export function sessionReadyFrame({ runtimeVersion, presence, packedPages, edgeSessionToken }: ReadyOptions): string {
   return JSON.stringify({
     type: "session.ready",
     capabilities: {
@@ -40,6 +44,8 @@ export function sessionReadyFrame({ runtimeVersion, presence }: ReadyOptions): s
       controlWatermark: 1,
       replicaBatchFrames: 1,
       ...(presence ? { presence: 1 } : {}),
+      ...(packedPages ? { replicaPackedPages: 1 } : {}),
+      ...(edgeSessionToken ? { edgeSessionToken: 1 } : {}),
     },
   });
 }
@@ -54,6 +60,10 @@ export interface Negotiated {
   setDigest: boolean;
   telemetryBatch: boolean;
   presence: boolean;
+  /** Present and true only when both server and client negotiated `replicaPackedPages: 1`. */
+  packedPages?: boolean;
+  /** Present and true only when both server and client negotiated `edgeSessionToken: 1`. */
+  edgeSessionToken?: boolean;
 }
 
 export const NOTHING_NEGOTIATED: Negotiated = {
@@ -61,8 +71,17 @@ export const NOTHING_NEGOTIATED: Negotiated = {
   nativeRows: false, setDigest: false, telemetryBatch: false, presence: false,
 };
 
-/** lib.rs:2899-2920. `presence` also needs the server to have presence on. */
-export function negotiate(capabilities: ClientCapabilities | undefined, serverPresence: boolean): Negotiated {
+export interface ServerDodCapabilities {
+  readonly packedPages?: boolean | undefined;
+  readonly edgeSessionToken?: boolean | undefined;
+}
+
+/** lib.rs:2899-2920. `presence`, `packedPages`, and `edgeSessionToken` also need the server flag on. */
+export function negotiate(
+  capabilities: ClientCapabilities | undefined,
+  serverPresence: boolean,
+  serverDod?: ServerDodCapabilities,
+): Negotiated {
   const one = (value: number | undefined) => value === 1;
   const c = capabilities ?? {};
   const snapshotPages = one(c.replicaSnapshotPages);
@@ -77,5 +96,7 @@ export function negotiate(capabilities: ClientCapabilities | undefined, serverPr
     setDigest,
     telemetryBatch: one(c.telemetryBatch),
     presence: serverPresence && one(c.presence),
+    ...(serverDod?.packedPages && one(c.replicaPackedPages) ? { packedPages: true } : {}),
+    ...(serverDod?.edgeSessionToken && one(c.edgeSessionToken) ? { edgeSessionToken: true } : {}),
   };
 }

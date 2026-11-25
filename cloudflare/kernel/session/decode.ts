@@ -60,6 +60,7 @@ const CLIENT_CAPABILITIES: Struct = [
   o("replicaWatermark", "u8"), o("queryPagePatch", "u8"), o("queryObjectPatch", "u8"),
   o("queryOrderDelta", "u8"), o("queryFanout", "u8"), o("queryResultBatch", "u8"),
   o("replicaBatchFrames", "u8"), o("presence", "u8"),
+  o("replicaPackedPages", "u8"), o("edgeSessionToken", "u8"),
 ];
 
 const MESSAGE_TRACE: Struct = [
@@ -138,6 +139,7 @@ export interface ClientCapabilities {
   tenantControl?: number; telemetryBatch?: number; replicaReadyMany?: number; replicaWatermark?: number;
   queryPagePatch?: number; queryObjectPatch?: number; queryOrderDelta?: number; queryFanout?: number;
   queryResultBatch?: number; replicaBatchFrames?: number; presence?: number;
+  replicaPackedPages?: number; edgeSessionToken?: number;
 }
 export type BrowserTelemetryInfo = Record<string, string | number | undefined>;
 export type MessageTrace = Record<string, Json | undefined>;
