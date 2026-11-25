@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { reconcileBrowserLabels, reconcileUiMergeStatus } = require('./pr-ui-policy.cjs');
+const { classifyGonvexDiff, reconcileBrowserLabels, reconcileUiMergeStatus } = require('./pr-ui-policy.cjs');
 function fixture(files, changes = {}) {
   const pr = { number: 7, state: 'open', draft: false, base: { ref: 'staging', sha: 'base' }, head: { sha: 'head' }, body: 'Browser-tested: no', user: { login: 'agent' }, changed_files: files.length, labels: ['needs-review', 'needs-browser-test'].map(name => ({name})), ...changes };
   const removed = [], added = [], comments = [], statuses = [];
@@ -19,7 +19,7 @@ test('backend diff removes false UI labels with provenance and passes UI policy'
   assert.equal(f.statuses[0].state,'success'); assert.equal(f.statuses[0].context,'UI merge policy / staging');
 });
 test('UI is pending even when review labels are absent and declarations say tested', async () => {
-  const f = fixture([{filename:'src/pages/Task.tsx'}], {labels:[]});
+  const f = fixture([{filename:'apps/dashboard/src/pages/Task.tsx'}], {labels:[]});
   f.validate = () => ({needsBrowser:false});
   await reconcileBrowserLabels(f); await reconcileUiMergeStatus(f);
   assert.deepEqual(f.removed,[]); assert.deepEqual(f.added,[]); assert.equal(f.statuses[0].state,'pending');
@@ -44,4 +44,17 @@ test('existing structured product flags and review-app blockers survive non-UI c
     f.github.paginate = async endpoint => endpoint === 'files' ? [{filename:'backend/api.ts'}] : endpoint === 'pulls' ? [f.pr] : endpoint === 'comments' && signal === 'flag' ? [{user:{login:'whagons-ai-review-codex[bot]'},body:'<!-- whagons-product-fit-flag v1 id=purpose state=open -->'}] : endpoint === 'reviews' && signal === 'review' ? [{user:{login:'desarso'},state:'CHANGES_REQUESTED'}] : endpoint === 'statuses' && signal === 'app' ? [{context:'UI merge policy / staging',state:'pending',target_url:'https://review.whagons.com/?pr=7',description:'Open product-fit flag'}] : [];
     await reconcileUiMergeStatus(f); assert.equal(f.statuses[0].state,'pending',signal);
   }
+});
+
+test('only the dashboard is rendered UI; SDK packages, runtime and docs are not', () => {
+  for (const filename of ['apps/dashboard/src/App.tsx', 'apps/dashboard/src/styles/main.css']) assert.equal(classifyGonvexDiff([filename]).isUi, true, filename);
+  for (const filename of ['packages/react/src/index.tsx', 'packages/client/src/components/Thing.tsx', 'apps/docs/src/app/page.tsx', 'apps/query-cache-test/src/App.tsx', 'rust/crates/runtime/src/control.rs'])
+    assert.equal(classifyGonvexDiff([filename]).isUi, false, filename);
+  assert.equal(classifyGonvexDiff({ files: ['packages/react/src/index.tsx'], expectedCount: 2 }).classification, 'unknown');
+});
+
+test('an SDK-only diff passes the UI merge policy', async () => {
+  const f = fixture([{filename:'packages/react/src/index.tsx'}, {filename:'rust/crates/runtime/src/control.rs'}]);
+  await reconcileBrowserLabels(f); await reconcileUiMergeStatus(f);
+  assert.equal(f.statuses[0].state, 'success');
 });
