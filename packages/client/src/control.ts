@@ -35,6 +35,8 @@ const settingSchema = objectSchema({ kind: stringSchema, scopeId: stringSchema, 
 const supportSessionSchema = objectSchema({
   id: stringSchema, tenantId: stringSchema, accountId: stringSchema,
   release: stringSchema, environment: stringSchema, lastSeenAt: stringSchema,
+  userName: optionalStringSchema, userEmail: optionalStringSchema,
+  tenantName: optionalStringSchema, tenantDomain: optionalStringSchema,
 });
 const supportTenantSchema = objectSchema({
   id: stringSchema, name: stringSchema, domain: stringSchema, status: stringSchema,
@@ -157,6 +159,7 @@ export type ControlSetting = JSONObject & { kind: string; scopeId: string; value
 export type ControlSupportSession = JSONObject & {
   id: string; tenantId: string; accountId: string; release: string;
   environment: string; lastSeenAt: string;
+  userName?: string; userEmail?: string; tenantName?: string; tenantDomain?: string;
 };
 export type ControlSupportTenant = JSONObject & {
   id: string; name: string; domain: string; status: string; timezone: string;

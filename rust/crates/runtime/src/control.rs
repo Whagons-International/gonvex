@@ -2384,9 +2384,16 @@ impl Runtime {
             "control.support.listSessions" => {
                 empty_args(args)?;
                 let rows = sqlx::query(
-                    r#"SELECT id,tenant_id,account_id,release,environment,last_seen_at
-                       FROM gonvex_support_sessions WHERE project_id=$1
-                       ORDER BY last_seen_at DESC LIMIT 1000"#,
+                    r#"SELECT session.id,session.tenant_id,session.account_id,session.release,
+                              session.environment,session.last_seen_at,
+                              account.name AS account_name,account.email AS account_email,
+                              tenant.name AS tenant_name,tenant.domain AS tenant_domain
+                       FROM gonvex_support_sessions session
+                       LEFT JOIN accounts account ON account.id=session.account_id
+                       LEFT JOIN gonvex_runtime_tenants tenant
+                         ON tenant.project_id=session.project_id AND tenant.tenant_id=session.tenant_id
+                       WHERE session.project_id=$1
+                       ORDER BY session.last_seen_at DESC LIMIT 1000"#,
                 )
                 .bind(&connection.project_id)
                 .fetch_all(&mut **transaction.transaction())
@@ -2404,16 +2411,15 @@ impl Runtime {
                         } else {
                             row_time(&row, "last_seen_at")
                         };
-                        (
-                            seen,
-                            serde_json::json!({
-                                "id":id,"tenantId":row.get::<String,_>("tenant_id"),
-                                "accountId":row.get::<String,_>("account_id"),
-                                "release":row.get::<String,_>("release"),
-                                "environment":row.get::<String,_>("environment"),
-                                "lastSeenAt":timestamp(seen),
-                            }),
-                        )
+                        let mut session = serde_json::json!({
+                            "id":id,"tenantId":row.get::<String,_>("tenant_id"),
+                            "accountId":row.get::<String,_>("account_id"),
+                            "release":row.get::<String,_>("release"),
+                            "environment":row.get::<String,_>("environment"),
+                            "lastSeenAt":timestamp(seen),
+                        });
+                        support_session_labels(&mut session, &row);
+                        (seen, session)
                     })
                     .collect();
                 sessions.sort_by(|a, b| b.0.cmp(&a.0));
@@ -2426,8 +2432,15 @@ impl Runtime {
                 let object = exact_object(args, &["id"])?;
                 let id = required_string(object, "id")?;
                 let row = sqlx::query(
-                    r#"SELECT id,tenant_id,account_id,connection_id,release,environment,last_seen_at,created_at
-                       FROM gonvex_support_sessions WHERE project_id=$1 AND id=$2"#,
+                    r#"SELECT session.id,session.tenant_id,session.account_id,session.connection_id,
+                              session.release,session.environment,session.last_seen_at,session.created_at,
+                              account.name AS account_name,account.email AS account_email,
+                              tenant.name AS tenant_name,tenant.domain AS tenant_domain
+                       FROM gonvex_support_sessions session
+                       LEFT JOIN accounts account ON account.id=session.account_id
+                       LEFT JOIN gonvex_runtime_tenants tenant
+                         ON tenant.project_id=session.project_id AND tenant.tenant_id=session.tenant_id
+                       WHERE session.project_id=$1 AND session.id=$2"#,
                 )
                 .bind(&connection.project_id)
                 .bind(id)
@@ -2444,14 +2457,16 @@ impl Runtime {
                 } else {
                     row_time(&row, "last_seen_at")
                 };
-                Ok(serde_json::json!({
+                let mut session = serde_json::json!({
                     "id":row.get::<String,_>("id"),"tenantId":row.get::<String,_>("tenant_id"),
                     "accountId":row.get::<String,_>("account_id"),
                     "connectionId":row.get::<String,_>("connection_id"),
                     "release":row.get::<String,_>("release"),"environment":row.get::<String,_>("environment"),
                     "lastSeenAt":timestamp(seen),
                     "createdAt":timestamp(row_time(&row, "created_at")),
-                }))
+                });
+                support_session_labels(&mut session, &row);
+                Ok(session)
             }
             "control.support.getTenant" => {
                 let object = exact_object(args, &["tenantId"])?;
@@ -4887,6 +4902,27 @@ fn invalid_invitation() -> ControlError {
     ControlError::InvalidArguments(
         "invitation is invalid, expired, revoked, or already accepted".to_owned(),
     )
+}
+
+/// Adds the account and tenant labels a support console shows in place of raw
+/// ids. Missing or blank labels (deleted accounts or tenants) are omitted.
+fn support_session_labels(session: &mut Value, row: &SqliteRow) {
+    let Some(object) = session.as_object_mut() else {
+        return;
+    };
+    for (column, key) in [
+        ("account_name", "userName"),
+        ("account_email", "userEmail"),
+        ("tenant_name", "tenantName"),
+        ("tenant_domain", "tenantDomain"),
+    ] {
+        if let Some(label) = row
+            .get::<Option<String>, _>(column)
+            .filter(|label| !label.trim().is_empty())
+        {
+            object.insert(key.to_owned(), Value::String(label));
+        }
+    }
 }
 
 fn error_group_json(row: SqliteRow) -> Value {
