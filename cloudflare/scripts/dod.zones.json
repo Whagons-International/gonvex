@@ -1,0 +1,7 @@
+{
+  "codec": ["kernel/codec/"],
+  "edge-auth": ["kernel/edge-auth/"],
+  "tx-log": ["kernel/tx-log/"],
+  "delivery": ["kernel/delivery/subscription.ts", "kernel/delivery/engine.ts", "kernel/delivery/scan.ts"],
+  "capture": ["kernel/capture/finalize.ts"]
+}
