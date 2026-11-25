@@ -30,6 +30,8 @@ export const F_END = 11;
 export const F_ERROR = 12;
 export const F_ACK = 13;
 export const F_MEMBERS = 14;
+export const FRAME_KINDS = 14;
+export const FRAMES_MIME = "application/x-wl-frames";
 
 export const PAGE_DETAIL = 1;
 export const COMMIT_PARTIAL = 1;
