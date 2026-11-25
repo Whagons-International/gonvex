@@ -324,6 +324,7 @@ CREATE TABLE IF NOT EXISTS gonvex_error_events (
   PRIMARY KEY(project_id,event_id)
 );
 CREATE INDEX IF NOT EXISTS gonvex_error_events_group ON gonvex_error_events(project_id,fingerprint,occurred_at DESC);
+CREATE INDEX IF NOT EXISTS gonvex_error_events_age ON gonvex_error_events(occurred_at);
 CREATE TABLE IF NOT EXISTS gonvex_error_groups (
   project_id TEXT NOT NULL, fingerprint TEXT NOT NULL, title TEXT NOT NULL, culprit TEXT NOT NULL DEFAULT '',
   level TEXT NOT NULL DEFAULT 'error', status TEXT NOT NULL DEFAULT 'unresolved', priority TEXT NOT NULL DEFAULT 'medium',
@@ -332,6 +333,7 @@ CREATE TABLE IF NOT EXISTS gonvex_error_groups (
   releases JSON NOT NULL DEFAULT '{}', environments JSON NOT NULL DEFAULT '{}',
   accounts JSON NOT NULL DEFAULT '{}', devices JSON NOT NULL DEFAULT '{}',
   latest_event JSON NOT NULL, regression BOOLEAN NOT NULL DEFAULT 0,
+  resolved_release TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(project_id,fingerprint)
 );
 CREATE INDEX IF NOT EXISTS gonvex_error_groups_inbox ON gonvex_error_groups(project_id,status,last_seen DESC);

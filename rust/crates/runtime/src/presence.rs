@@ -723,6 +723,18 @@ impl PresenceHub {
         }
     }
 
+    /// The release and environment the client on `connection` registered for
+    /// error reporting, when it registered any (runtime error attribution).
+    pub fn support_attribution(&self, connection: &str) -> Option<(String, String)> {
+        let hub = self.lock();
+        hub.support_by_connection
+            .get(connection)?
+            .iter()
+            .filter_map(|id| hub.support.get(id))
+            .map(|live| (live.key.release.clone(), live.key.environment.clone()))
+            .find(|(release, environment)| !release.is_empty() || !environment.is_empty())
+    }
+
     /// Session ids whose connection is open on this runtime: they are seen
     /// "now" even though their durable `last_seen_at` is not refreshed.
     pub fn support_live_ids(&self, project: &str) -> HashSet<String> {

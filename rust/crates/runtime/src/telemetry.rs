@@ -306,16 +306,112 @@ async fn persist_event(
     fingerprint: &str,
     occurred_at: DateTime<Utc>,
 ) -> Result<bool, gonvex_store::DatabaseError> {
-    let project = string_field(event, "project");
-    let tenant = string_field(event, "tenant");
-    let release = string_field(event, "release");
-    let environment = string_field(event, "environment");
-    let account = event
+    let occurrences = Occurrences::single(event, occurred_at);
+    let mut transaction = control.begin_control_transaction(false).await?;
+    let applied = apply_event(
+        transaction.transaction(),
+        event,
+        event_id,
+        fingerprint,
+        occurred_at,
+        &occurrences,
+    )
+    .await?;
+    if applied {
+        transaction.commit().await?;
+    } else {
+        transaction.rollback().await?;
+    }
+    Ok(applied)
+}
+
+/// What one stored event stands for: one browser report, or a window of
+/// coalesced runtime failures of the same group (`runtime_errors.rs`).
+#[derive(Clone, Debug)]
+pub(crate) struct Occurrences {
+    pub count: u64,
+    pub last_seen: DateTime<Utc>,
+    pub tenants: BTreeMap<String, u64>,
+    pub releases: BTreeMap<String, u64>,
+    pub environments: BTreeMap<String, u64>,
+    pub accounts: BTreeMap<String, u64>,
+    pub devices: BTreeMap<String, u64>,
+}
+
+impl Occurrences {
+    pub(crate) fn empty(at: DateTime<Utc>) -> Self {
+        Self {
+            count: 0,
+            last_seen: at,
+            tenants: BTreeMap::new(),
+            releases: BTreeMap::new(),
+            environments: BTreeMap::new(),
+            accounts: BTreeMap::new(),
+            devices: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn single(event: &Value, at: DateTime<Utc>) -> Self {
+        let mut occurrences = Self::empty(at);
+        occurrences.add(event, at);
+        occurrences
+    }
+
+    /// Counts one occurrence attributed like `event`.
+    pub(crate) fn add(&mut self, event: &Value, at: DateTime<Utc>) {
+        self.count += 1;
+        self.last_seen = self.last_seen.max(at);
+        bump(&mut self.tenants, string_field(event, "tenant"));
+        bump(&mut self.releases, string_field(event, "release"));
+        bump(&mut self.environments, string_field(event, "environment"));
+        bump(&mut self.accounts, event_account(event));
+        bump(&mut self.devices, string_field(event, "deviceId"));
+    }
+
+    /// True when every occurrence carries a release older than `resolved`:
+    /// stale clients that predate the fix, which must not reopen the group.
+    fn all_older_than(&self, resolved: &str) -> bool {
+        let versioned: u64 = self.releases.values().sum();
+        !resolved.is_empty()
+            && self.count > 0
+            && versioned == self.count
+            && self
+                .releases
+                .keys()
+                .all(|release| crate::runtime_errors::release_is_older(release, resolved))
+    }
+}
+
+fn bump(counts: &mut BTreeMap<String, u64>, key: &str) {
+    if !key.is_empty() {
+        *counts.entry(key.to_owned()).or_default() += 1;
+    }
+}
+
+fn event_account(event: &Value) -> &str {
+    event
         .get("account")
         .and_then(Value::as_object)
         .and_then(|value| value.get("id"))
         .and_then(Value::as_str)
-        .unwrap_or("");
+        .unwrap_or("")
+}
+
+/// Stores `event` as the representative of `occurrences` and folds them into
+/// its group, inside the caller's Control Plane transaction. Returns false
+/// when the event id was already stored (nothing changed).
+pub(crate) async fn apply_event(
+    transaction: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    event: &Value,
+    event_id: &str,
+    fingerprint: &str,
+    occurred_at: DateTime<Utc>,
+    occurrences: &Occurrences,
+) -> Result<bool, gonvex_store::DatabaseError> {
+    let project = string_field(event, "project");
+    let tenant = string_field(event, "tenant");
+    let release = string_field(event, "release");
+    let account = event_account(event);
     let device = string_field(event, "deviceId");
     let level = match string_field(event, "level") {
         "warning" => "warning",
@@ -324,7 +420,6 @@ async fn persist_event(
     let title = bounded_text(string_field(event, "message"), 500);
     let culprit = bounded_text(string_field(event, "culprit"), 500);
 
-    let mut transaction = control.begin_control_transaction(false).await?;
     let inserted = sqlx::query(
         r#"INSERT INTO gonvex_error_events
            (project_id,event_id,fingerprint,occurred_at,tenant_id,release,level,account_id,device_id,payload)
@@ -341,59 +436,72 @@ async fn persist_event(
     .bind(account)
     .bind(device)
     .bind(Json(event.clone()))
-    .execute(&mut **transaction.transaction())
+    .execute(&mut **transaction)
     .await?;
     if inserted.rows_affected() == 0 {
-        transaction.rollback().await?;
         return Ok(false);
     }
     // The group read-modify-write below runs on the database's single writer
     // connection, so no other transaction can interleave with it.
     let existing = sqlx::query(
-        r#"SELECT tenants,releases,environments,accounts,devices
+        r#"SELECT tenants,releases,environments,accounts,devices,status,regression,resolved_release
            FROM gonvex_error_groups WHERE project_id=$1 AND fingerprint=$2"#,
     )
     .bind(project)
     .bind(fingerprint)
-    .fetch_optional(&mut **transaction.transaction())
+    .fetch_optional(&mut **transaction)
     .await?;
-    let mut tenants = existing
+    let counter = |name: &str| {
+        existing
+            .as_ref()
+            .map(|row| row.get::<Json<Value>, _>(name).0)
+            .unwrap_or_else(|| Value::Object(Map::new()))
+    };
+    let mut tenants = counter("tenants");
+    let mut releases = counter("releases");
+    let mut environments = counter("environments");
+    let mut accounts = counter("accounts");
+    let mut devices = counter("devices");
+    increment_by(&mut tenants, &occurrences.tenants);
+    increment_by(&mut releases, &occurrences.releases);
+    increment_by(&mut environments, &occurrences.environments);
+    increment_by(&mut accounts, &occurrences.accounts);
+    increment_by(&mut devices, &occurrences.devices);
+    let status = existing
         .as_ref()
-        .map(|row| row.get::<Json<Value>, _>("tenants").0)
-        .unwrap_or_else(|| Value::Object(Map::new()));
-    let mut releases = existing
+        .map(|row| row.get::<String, _>("status"))
+        .unwrap_or_else(|| "unresolved".to_owned());
+    let regression = existing
         .as_ref()
-        .map(|row| row.get::<Json<Value>, _>("releases").0)
-        .unwrap_or_else(|| Value::Object(Map::new()));
-    let mut environments = existing
+        .is_some_and(|row| row.get::<bool, _>("regression"));
+    let resolved_release = existing
         .as_ref()
-        .map(|row| row.get::<Json<Value>, _>("environments").0)
-        .unwrap_or_else(|| Value::Object(Map::new()));
-    let mut accounts = existing
-        .as_ref()
-        .map(|row| row.get::<Json<Value>, _>("accounts").0)
-        .unwrap_or_else(|| Value::Object(Map::new()));
-    let mut devices = existing
-        .as_ref()
-        .map(|row| row.get::<Json<Value>, _>("devices").0)
-        .unwrap_or_else(|| Value::Object(Map::new()));
-    increment(&mut tenants, tenant);
-    increment(&mut releases, release);
-    increment(&mut environments, environment);
-    increment(&mut accounts, account);
-    increment(&mut devices, device);
+        .map(|row| row.get::<String, _>("resolved_release"))
+        .unwrap_or_default();
+    // A new occurrence reopens a resolved group as a regression, unless every
+    // occurrence comes from a release older than the one the fix shipped in:
+    // a stale client still running the broken build is counted but cannot
+    // resurrect a fixed error. Ignored groups stay ignored.
+    let (status, regression, resolved_release) =
+        if status == "resolved" && !occurrences.all_older_than(&resolved_release) {
+            ("unresolved".to_owned(), true, String::new())
+        } else {
+            (status, regression, resolved_release)
+        };
     sqlx::query(
         r#"INSERT INTO gonvex_error_groups
            (project_id,fingerprint,title,culprit,level,first_seen,last_seen,event_count,
-            tenants,releases,environments,accounts,devices,latest_event)
-           VALUES($1,$2,$3,$4,$5,$6,$6,1,$7,$8,$9,$10,$11,$12)
+            tenants,releases,environments,accounts,devices,latest_event,status,regression,resolved_release)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
            ON CONFLICT(project_id,fingerprint) DO UPDATE SET
              title=EXCLUDED.title,culprit=EXCLUDED.culprit,level=EXCLUDED.level,
-             last_seen=EXCLUDED.last_seen,event_count=gonvex_error_groups.event_count+1,
+             last_seen=max(gonvex_error_groups.last_seen,EXCLUDED.last_seen),
+             event_count=gonvex_error_groups.event_count+EXCLUDED.event_count,
              tenants=EXCLUDED.tenants,releases=EXCLUDED.releases,
              environments=EXCLUDED.environments,accounts=EXCLUDED.accounts,
              devices=EXCLUDED.devices,latest_event=EXCLUDED.latest_event,
-             regression=(gonvex_error_groups.status='resolved')"#,
+             status=EXCLUDED.status,regression=EXCLUDED.regression,
+             resolved_release=EXCLUDED.resolved_release"#,
     )
     .bind(project)
     .bind(fingerprint)
@@ -401,15 +509,19 @@ async fn persist_event(
     .bind(culprit)
     .bind(level)
     .bind(occurred_at.timestamp_millis())
+    .bind(occurrences.last_seen.max(occurred_at).timestamp_millis())
+    .bind(i64::try_from(occurrences.count.max(1)).unwrap_or(i64::MAX))
     .bind(Json(tenants))
     .bind(Json(releases))
     .bind(Json(environments))
     .bind(Json(accounts))
     .bind(Json(devices))
     .bind(Json(event.clone()))
-    .execute(&mut **transaction.transaction())
+    .bind(status)
+    .bind(regression)
+    .bind(resolved_release)
+    .execute(&mut **transaction)
     .await?;
-    transaction.commit().await?;
     Ok(true)
 }
 
@@ -454,7 +566,7 @@ fn authoritative_event(connection: &ControlConnection, value: Value) -> Option<V
     Some(Value::Object(object))
 }
 
-fn scrub_object(object: &mut Map<String, Value>, depth: usize) {
+pub(crate) fn scrub_object(object: &mut Map<String, Value>, depth: usize) {
     object.retain(|key, _| !is_secret_key(key));
     for value in object.values_mut() {
         scrub_value(value, depth + 1);
@@ -522,24 +634,26 @@ fn generated_event_id(event: &Value) -> String {
     format!("generated-{}", hex(&Sha256::digest(input.as_bytes())[..12]))
 }
 
-fn increment(value: &mut Value, key: &str) {
-    if key.is_empty() {
-        return;
+fn increment_by(value: &mut Value, counts: &BTreeMap<String, u64>) {
+    if !value.is_object() {
+        *value = Value::Object(Map::new());
     }
     let object = value.as_object_mut().expect("counter map");
-    let current = object.get(key).and_then(Value::as_u64).unwrap_or(0);
-    object.insert(key.to_owned(), Value::from(current.saturating_add(1)));
+    for (key, count) in counts {
+        let current = object.get(key).and_then(Value::as_u64).unwrap_or(0);
+        object.insert(key.clone(), Value::from(current.saturating_add(*count)));
+    }
 }
 
-fn string_field<'a>(event: &'a Value, key: &str) -> &'a str {
+pub(crate) fn string_field<'a>(event: &'a Value, key: &str) -> &'a str {
     event.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn bounded_text(value: &str, max: usize) -> String {
+pub(crate) fn bounded_text(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut result = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

@@ -124,6 +124,7 @@ pub fn router() -> Router<Runtime> {
             "/dev/errors/groups/{fingerprint}/bug-report",
             get(error_bug_report),
         )
+        .route("/dev/errors/prune", post(prune_errors))
 }
 
 #[derive(Clone, Debug)]
@@ -2915,6 +2916,10 @@ struct ErrorGroupUpdate {
     #[serde(default)]
     priority: String,
     assignee: Option<String>,
+    /// With `status: "resolved"`: the release the fix shipped in. Defaults to
+    /// the newest release recorded on the group.
+    #[serde(default, rename = "resolvedInRelease")]
+    resolved_in_release: Option<String>,
 }
 async fn update_error_group(
     State(runtime): State<Runtime>,
@@ -2950,6 +2955,17 @@ async fn update_error_group(
     {
         return error(StatusCode::BAD_REQUEST, "priority is invalid");
     }
+    if let Some(release) = update.resolved_in_release.as_deref() {
+        if update.status != "resolved" {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "resolvedInRelease requires status \"resolved\"",
+            );
+        }
+        if release.trim().is_empty() || release.len() > 200 {
+            return error(StatusCode::BAD_REQUEST, "resolvedInRelease is invalid");
+        }
+    }
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2962,13 +2978,70 @@ async fn update_error_group(
             "error store is unavailable",
         );
     };
-    let row=sqlx::query("UPDATE gonvex_error_groups SET status=CASE WHEN $3='' THEN status ELSE $3 END,priority=CASE WHEN $4='' THEN priority ELSE $4 END,assignee=COALESCE($5,assignee) WHERE project_id=$1 AND fingerprint=$2 RETURNING *").bind(&project).bind(&fingerprint).bind(update.status).bind(update.priority).bind(update.assignee.map(|value|value.trim().to_owned())).fetch_optional(&mut **transaction.transaction()).await;
+    let row = crate::runtime_errors::update_error_group(
+        transaction.transaction(),
+        &project,
+        &fingerprint,
+        &update.status,
+        &update.priority,
+        update.assignee,
+        update.resolved_in_release.as_deref(),
+    )
+    .await;
     match row {
         Ok(Some(row)) if transaction.commit().await.is_ok() => {
             Json(error_group_json(row)).into_response()
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "error group not found"),
         _ => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "error store is unavailable",
+        ),
+    }
+}
+#[derive(Deserialize)]
+struct ErrorPruneRequest {
+    #[serde(rename = "beforeRelease")]
+    before_release: String,
+}
+/// `POST /dev/errors/prune {"beforeRelease":"5.4.80"}`: deletes events from
+/// releases older than `beforeRelease` and groups seen only in such releases.
+async fn prune_errors(
+    State(runtime): State<Runtime>,
+    headers: HeaderMap,
+    Query(query): Query<ErrorQuery>,
+    Json(request): Json<ErrorPruneRequest>,
+) -> Response {
+    let project = project_header_or_query(&headers, &query.project);
+    let actor = match authorize(&runtime, &headers, "projects:update").await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    if !can_manage_project(&runtime, &actor, &project).await {
+        return error(
+            StatusCode::FORBIDDEN,
+            "project owner or admin access is required",
+        );
+    }
+    let before = request.before_release.trim();
+    if before.len() > 200 || crate::runtime_errors::parse_release(before).is_none() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "beforeRelease must be a numeric version such as 5.4.80",
+        );
+    }
+    let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "error store is unavailable",
+        );
+    };
+    match crate::runtime_errors::prune_errors_before_release(&control, &project, before).await {
+        Ok(report) => {
+            runtime.notify_control_changed(&project);
+            Json(json!({"project":project,"beforeRelease":before,"deletedEvents":report.deleted_events,"deletedGroups":report.deleted_groups,"updatedGroups":report.updated_groups,"releases":report.releases})).into_response()
+        }
+        Err(_) => error(
             StatusCode::SERVICE_UNAVAILABLE,
             "error store is unavailable",
         ),
@@ -3028,7 +3101,7 @@ async fn load_error_group(
         .map_err(|_| ())
 }
 fn error_group_json(row: sqlx::sqlite::SqliteRow) -> Value {
-    json!({"fingerprint":row.get::<String,_>("fingerprint"),"project":row.get::<String,_>("project_id"),"title":row.get::<String,_>("title"),"culprit":row.get::<String,_>("culprit"),"level":row.get::<String,_>("level"),"status":row.get::<String,_>("status"),"priority":row.get::<String,_>("priority"),"assignee":row.get::<String,_>("assignee"),"firstSeen":row_time(&row,"first_seen"),"lastSeen":row_time(&row,"last_seen"),"count":row.get::<i64,_>("event_count"),"tenants":row.get::<SqlJson<Value>,_>("tenants").0,"releases":row.get::<SqlJson<Value>,_>("releases").0,"environments":row.get::<SqlJson<Value>,_>("environments").0,"accounts":row.get::<SqlJson<Value>,_>("accounts").0,"devices":row.get::<SqlJson<Value>,_>("devices").0,"latest":row.get::<SqlJson<Value>,_>("latest_event").0,"regression":row.get::<bool,_>("regression")})
+    json!({"fingerprint":row.get::<String,_>("fingerprint"),"project":row.get::<String,_>("project_id"),"title":row.get::<String,_>("title"),"culprit":row.get::<String,_>("culprit"),"level":row.get::<String,_>("level"),"status":row.get::<String,_>("status"),"priority":row.get::<String,_>("priority"),"assignee":row.get::<String,_>("assignee"),"firstSeen":row_time(&row,"first_seen"),"lastSeen":row_time(&row,"last_seen"),"count":row.get::<i64,_>("event_count"),"tenants":row.get::<SqlJson<Value>,_>("tenants").0,"releases":row.get::<SqlJson<Value>,_>("releases").0,"environments":row.get::<SqlJson<Value>,_>("environments").0,"accounts":row.get::<SqlJson<Value>,_>("accounts").0,"devices":row.get::<SqlJson<Value>,_>("devices").0,"latest":row.get::<SqlJson<Value>,_>("latest_event").0,"regression":row.get::<bool,_>("regression"),"resolvedRelease":row.try_get::<String,_>("resolved_release").unwrap_or_default()})
 }
 fn project_header_or_query(headers: &HeaderMap, query: &str) -> String {
     if query.trim().is_empty() {
