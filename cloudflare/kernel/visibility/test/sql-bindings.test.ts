@@ -186,4 +186,14 @@ describe("visibility parameter reuse on Durable Object SQLite", () => {
     });
     if (!result.ok) throw result.error;
   });
+
+  it("emits deterministic SQL aliases across repeated compilePredicate calls for SQLite plan caching", () => {
+    const resolved = principal("alice");
+    const params1: JsonValue[] = [];
+    const params2: JsonValue[] = [];
+    const sql1 = compilePredicate(plan, resolved, "r", params1);
+    const sql2 = compilePredicate(plan, resolved, "r", params2);
+    expect(sql1).toBe(sql2);
+    expect(params1).toEqual(params2);
+  });
 });

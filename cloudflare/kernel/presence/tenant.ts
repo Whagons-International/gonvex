@@ -36,6 +36,7 @@ import {
   mergePublications, parseState, scopeKey,
 } from "./hub";
 import { presenceEligible, type PresenceSocketView } from "./socket";
+import { spanTimingOn } from "../delivery/spans";
 
 export const PRESENCE_PROTOCOL_VERSION = 1;
 
@@ -130,8 +131,9 @@ export class TenantPresence {
    * Diagnostics for the 505 presence investigation: one `presence-diag` line per scheduling step, with
    * times (ms) and ids only (connection, Member, gateway). No names, tokens or row data.
    */
-  private diag(event: string, fields: Record<string, unknown>): void {
-    try { console.log(JSON.stringify({ diag: "presence", event, tenant: this.options.tenantId, now: this.now(), ...fields })); } catch { /* never let logging fail presence */ }
+  private diag(event: string, fields: Record<string, unknown>, now = this.now()): void {
+    if (!spanTimingOn()) return;
+    try { console.log(JSON.stringify({ diag: "presence", event, tenant: this.options.tenantId, now, ...fields })); } catch { /* never let logging fail presence */ }
   }
 
   private memberOf(connection: string): { key: string; member: string } | null {
@@ -190,8 +192,9 @@ export class TenantPresence {
     if (!this.enabled) return;
     await this.load(connectionId, false, host, previous);
     const who = this.memberOf(connectionId);
-    this.hub.disconnect(connectionId, this.now());
-    this.diag("leave", { connection: connectionId, gateway: host, registered: who !== null, member: who?.member, after: who ? this.hub.memberDiag(who.key, who.member) : null });
+    const now = this.now();
+    this.hub.disconnect(connectionId, now);
+    this.diag("leave", { connection: connectionId, gateway: host, registered: who !== null, member: who?.member, after: who ? this.hub.memberDiag(who.key, who.member) : null }, now);
     this.afterChange();
   }
 

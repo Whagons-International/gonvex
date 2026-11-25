@@ -8,6 +8,7 @@ import { buildReleasePlan, migrationsFromFiles } from '../../migrate';
 import { manifest, files } from './catalog';
 import { plans, type CompositionTenant } from './worker';
 import type { TenantSession } from '../../session/ports';
+import { setSpanTiming } from '../../delivery/spans';
 
 type Stub = { dispatch(s: unknown, f: unknown): Promise<string[]>; presenceLeave(id: string, host: string, previous: unknown): Promise<void> };
 type Diag = Record<string, unknown> & { event: string; t: number };
@@ -34,12 +35,13 @@ let lines: Diag[] = [];
 const log = console.log;
 beforeEach(() => {
  lines = [];
+ setSpanTiming(true);
  console.log = (...args: unknown[]) => {
   try { const m = JSON.parse(String(args[0])); if (m?.diag === 'presence') { lines.push({ ...m, t: Date.now() }); return; } } catch { /* not a diag line */ }
   log(...args);
  };
 });
-afterEach(() => { console.log = log; });
+afterEach(() => { setSpanTiming(false); console.log = log; });
 
 const published = (member: string) => lines.find((l) => l.event === 'publish' && JSON.stringify(l.changes).includes(`${member}:offline`));
 

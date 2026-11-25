@@ -325,24 +325,31 @@ export abstract class GatewayObjectBase<E extends GatewayEnv> extends DurableObj
       const deadline = Date.now() + budget;
       // X17g follow-up (#533 re-review): releases never wait on this holder's admission queue; idempotent, bounded.
       const release = () => { if (kinds.length) this.ctx.waitUntil(withDeadline(publicGuard(this.env).release(address, connectionId, kinds)).catch(() => undefined)); };
-      const limited = await withDeadline(admitUpgrade(this.env, { address, connectionId, gateway: direct.gateway, publicTransport, expiresAt: deadline }), budget)
-        .catch(() => {
-          // The limiter may still admit after this deadline: free what it may have reserved.
-          release();
-          return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [ADMISSION_REASON_HEADER]: "limiter-unavailable" } });
-        });
-      if (limited) return limited;
-      const left = deadline - Date.now();
       let timedOut = false;
-      const answer = left < 100 ? null : await withDeadline(controller(this.env, direct.cell).admitDirect({ ...direct, wantReason: true }, this.host.sessions.size), left).catch((error: unknown) => {
-        timedOut = String((error as Error)?.message ?? error) === "gateway RPC deadline";
-        console.error("gateway: direct admission failed", { cause: String((error as Error)?.message ?? error).slice(0, 120) });
-        return null;
-      });
+      // Run address limiter and controller direct admission concurrently to save a full DO RPC round-trip.
+      // If the limiter refuses after the controller granted a lease, cancel the lease before replying so no
+      // refused upgrade ever retains a claimed lease (#533 invariant).
+      const [limited, answer] = await Promise.all([
+        withDeadline(admitUpgrade(this.env, { address, connectionId, gateway: direct.gateway, publicTransport, expiresAt: deadline }), budget)
+          .catch(() => {
+            // The limiter may still admit after this deadline: free what it may have reserved.
+            release();
+            return new Response(LIMITER_UNAVAILABLE, { status: 503, headers: { "content-type": "text/plain; charset=utf-8", [ADMISSION_REASON_HEADER]: "limiter-unavailable" } });
+          }),
+        withDeadline(controller(this.env, direct.cell).admitDirect({ ...direct, wantReason: true }, this.host.sessions.size), budget).catch((error: unknown) => {
+          timedOut = String((error as Error)?.message ?? error) === "gateway RPC deadline";
+          console.error("gateway: direct admission failed", { cause: String((error as Error)?.message ?? error).slice(0, 120) });
+          return null;
+        }),
+      ]);
       // #538 re-review: the controller names why it refused (an older controller answers null).
       const granted = answer && !isDirectRefusal(answer) ? answer : null;
+      if (limited) {
+        if (granted || timedOut) await withDeadline(controller(this.env, direct.cell).cancelDirect(direct)).catch(() => undefined);
+        return limited;
+      }
       if (!granted) {
-        span("gateway.admitDirect", { refused: isDirectRefusal(answer) ? answer.refused : left < 100 ? "budget" : timedOut ? "deadline" : "unknown", totalMs: Date.now() - queued });
+        span("gateway.admitDirect", { refused: isDirectRefusal(answer) ? answer.refused : timedOut ? "deadline" : "unknown", totalMs: Date.now() - queued });
         release();
         // A grant the controller writes after this deadline would stay a claimed lease for LEASE_MS while the router
         // falls back to `acquire` (#533 re-review): cancel it. The controller serializes calls, so the cancel runs

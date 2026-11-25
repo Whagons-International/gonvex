@@ -11,12 +11,14 @@ import { matchExpression } from "./mask.ts";
 import { contextKey, quote, roleOnlyValue, visibilityLiteral, VisibilityError, type VisibilitySet, type VisibilityExpression, type VisibilityPlan } from "./plan.ts";
 import type { DirectContext, ResolvedVisibility } from "./resolved.ts";
 
-let parentAliases = 0;
-let viaAliases = 0;
+interface AliasCounters {
+  parent: number;
+  via: number;
+}
 
 /** A boolean SQL predicate over `rowAlias` that admits exactly the rows `plan` shows `resolved`. Appends its parameters. */
 export function compilePredicate(plan: VisibilityPlan, resolved: ResolvedVisibility, rowAlias: string, parameters: JsonValue[]): string {
-  return compileExpression(plan.predicate, plan, resolved, rowAlias, new SqlParameters(parameters), { slot: undefined });
+  return compileExpression(plan.predicate, plan, resolved, rowAlias, new SqlParameters(parameters), { slot: undefined }, { parent: 0, via: 0 });
 }
 
 /**
@@ -48,7 +50,7 @@ interface AccountSlot {
   slot: string | undefined;
 }
 
-function compileExpression(expression: VisibilityExpression, plan: VisibilityPlan, resolved: ResolvedVisibility, rowAlias: string, parameters: SqlParameters, account: AccountSlot): string {
+function compileExpression(expression: VisibilityExpression, plan: VisibilityPlan, resolved: ResolvedVisibility, rowAlias: string, parameters: SqlParameters, account: AccountSlot, aliases: AliasCounters): string {
   if (plan.version === 2) {
     const value = roleOnlyValue(expression, resolved.role);
     if (value !== undefined) return value ? "TRUE" : "FALSE";
@@ -63,7 +65,7 @@ function compileExpression(expression: VisibilityExpression, plan: VisibilityPla
     return parameters.argument(value);
   };
   const recurse = (child: VisibilityExpression, alias = rowAlias, childPlan = plan, childResolved = resolved) =>
-    compileExpression(child, childPlan, childResolved, alias, parameters, account);
+    compileExpression(child, childPlan, childResolved, alias, parameters, account, aliases);
 
   switch (expression.operator) {
     case "public":
@@ -71,7 +73,7 @@ function compileExpression(expression: VisibilityExpression, plan: VisibilityPla
     case "inherits": {
       const parent = resolved.inherited.get(expression.table);
       if (!parent) throw VisibilityError.invalid(`inherited parent ${debugString(expression.table)} was not resolved`);
-      const alias = `_gonvex_parent_${parentAliases++}`;
+      const alias = `_gonvex_parent_${aliases.parent++}`;
       const column = quote(expression.column);
       const key = quote(expression.key);
       const table = quote(expression.table);
@@ -82,7 +84,7 @@ function compileExpression(expression: VisibilityExpression, plan: VisibilityPla
       }
       const visible = `EXISTS (SELECT 1 FROM ${table} AS ${alias} WHERE ${alias}.${key} = ${rowAlias}.${column}${parentFilters} AND (${parentPredicate}))`;
       if (!expression.onMissing) return visible;
-      const missing = `_gonvex_parent_${parentAliases++}`;
+      const missing = `_gonvex_parent_${aliases.parent++}`;
       const fallback = recurse(expression.onMissing);
       return `(${visible} OR (${rowAlias}.${column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${table} AS ${missing} WHERE ${missing}.${key} = ${rowAlias}.${column}) AND (${fallback})))`;
     }
@@ -91,7 +93,7 @@ function compileExpression(expression: VisibilityExpression, plan: VisibilityPla
       if (!via) throw VisibilityError.invalid("inheritsAny requires via");
       const parent = resolved.inherited.get(expression.table);
       if (!parent) throw VisibilityError.invalid(`inherited parent ${debugString(expression.table)} was not resolved`);
-      const suffix = viaAliases++;
+      const suffix = aliases.via++;
       const link = `_gonvex_via_${suffix}`;
       const alias = `_gonvex_any_parent_${suffix}`;
       const parentPredicate = expression.predicate ? recurse(expression.predicate, alias) : recurse(parent.plan.predicate, alias, parent.plan, parent.resolved);

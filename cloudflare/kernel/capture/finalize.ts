@@ -160,7 +160,9 @@ function reportRows(sql: CaptureSql, state: CaptureState, reporter: RowReporter,
     const byOp = new Map<"insert" | "update", number[]>();
     for (const [operation, rowid] of written.rows) {
       const op = operation === "insert" ? "insert" : "update";
-      byOp.set(op, [...(byOp.get(op) ?? []), Number(rowid)]);
+      let list = byOp.get(op);
+      if (!list) { list = []; byOp.set(op, list); }
+      list.push(Number(rowid));
     }
     for (const [op, rowids] of byOp) reporter.noteRows(table, op, rowids);
   }

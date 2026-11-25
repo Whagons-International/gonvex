@@ -1149,13 +1149,6 @@ export class ReplicaDeliveryEngine {
       })),
     }, undefined, undefined, deferred.size ? deferred : undefined); // BUG-4: a deferred holder's are re-run in its catch-up
     const collapsed = new CollapsedChanges(transaction.changes);
-    const shared: string[] = [];
-    const index = new Map<string, number>();
-    const share = (text: string) => {
-      let at = index.get(text);
-      if (at === undefined) { at = shared.length; shared.push(text); index.set(text, at); }
-      return at;
-    };
     const membership = membershipChanges(transaction);
     // One set of reads per transaction, shared by every subscription of every connection (no SQL per subscriber).
     const reads = new TransactionReads({
@@ -1164,7 +1157,15 @@ export class ReplicaDeliveryEngine {
       clock: () => { const c = readClock(sqlOf(db)); return { revision: c.revision, retained: c.retained }; },
     });
     const eventShare = new EventShare(new EvalMemo());
-    const byHost = new Map<string, Record<string, SocketWork>>();
+    const byHost = new Map<string, { sockets: Record<string, SocketWork>; shared: string[]; index: Map<string, number> }>();
+    const hostPool = (host: string) => {
+      let entry = byHost.get(host);
+      if (!entry) {
+        entry = { sockets: {}, shared: [], index: new Map() };
+        byHost.set(host, entry);
+      }
+      return entry;
+    };
     for (const connection of [...this.connections.values()].sort((a, b) => byId(a.id, b.id))) {
       if (only !== undefined && connection.host !== only) continue;
       const session = connection.session;
@@ -1184,19 +1185,23 @@ export class ReplicaDeliveryEngine {
         connection.tokens.delete(subscription.id);
       }
       connection.sentRevision = Math.max(connection.sentRevision, transaction.revision);
+      const pool = hostPool(connection.host);
+      const share = (text: string) => {
+        let at = pool.index.get(text);
+        if (at === undefined) { at = pool.shared.length; pool.shared.push(text); pool.index.set(text, at); }
+        return at;
+      };
       const ops: SocketOp[] = [...queryFrames.map((text): SocketOp => ["f", text]), ...frames.map((frame) => this.op(connection, frame, share))];
-      let sockets = byHost.get(connection.host);
-      if (!sockets) byHost.set(connection.host, (sockets = {}));
       const watermark = Math.min(transaction.revision, ...(this.options.live?.computedRevisions(connection.id) ?? []));
-      sockets[connection.id] = { ops, watermark, subscriptionEpoch: connection.epoch, ...(removed.length ? { removed: removed.map((s) => s.id) } : {}) } as ScopedSocketWork;
+      pool.sockets[connection.id] = { ops, watermark, subscriptionEpoch: connection.epoch, ...(removed.length ? { removed: removed.map((s) => s.id) } : {}) } as ScopedSocketWork;
     }
 
     // A commit's watermark reaches every holder, including those with no work this time; each gets only its texts.
     const out: Array<[string, ReplicaDelivery, number]> = [];
     const hosts = only !== undefined ? new Set([only]) : new Set([...byHost.keys(), ...this.knownHosts].filter((host) => !this.behind.has(host)));
     for (const host of hosts) {
-      const sockets = byHost.get(host) ?? {};
-      out.push([host, this.payload(Object.keys(sockets).length ? shared : [], sockets, transaction.revision, membership && { revision: transaction.revision, ...membership }), transaction.revision]);
+      const entry = byHost.get(host);
+      out.push([host, this.payload(entry ? entry.shared : [], entry ? entry.sockets : {}, transaction.revision, membership && { revision: transaction.revision, ...membership }), transaction.revision]);
     }
     return out;
   }

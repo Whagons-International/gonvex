@@ -72,6 +72,23 @@ import {
 /** X17 (dev spans): every statement any storage session of this isolate ran, and the rows they read. */
 export const sqlTotals = { statements: 0, rowsRead: 0 };
 
+const TOKEN_CACHE_MAX = 512;
+const TOKEN_CACHE_MAX_SQL_LEN = 4096;
+const tokenCache = new Map<string, readonly Token[]>();
+
+function cachedTokenize(sql: string): readonly Token[] {
+  if (sql.length > TOKEN_CACHE_MAX_SQL_LEN) return tokenize(sql);
+  const hit = tokenCache.get(sql);
+  if (hit !== undefined) return hit;
+  const tokens = tokenize(sql);
+  if (tokenCache.size >= TOKEN_CACHE_MAX) {
+    const oldest = tokenCache.keys().next().value;
+    if (oldest !== undefined) tokenCache.delete(oldest);
+  }
+  tokenCache.set(sql, tokens);
+  return tokens;
+}
+
 export const CLOSED = "the invocation transaction is closed";
 
 /** What the session needs from `ctx.storage`. */
@@ -490,7 +507,7 @@ export class StorageSession {
   /** `run` with parameters already typed, e.g. by `columnParameter` for a known column. */
   runTyped(sql: string, values: readonly Parameter[]): RawResult {
     this.requireNotClosed();
-    const tokens = tokenize(sql);
+    const tokens = cachedTokenize(sql);
     let slots: SlotAssignment;
     try {
       slots = assignSlots(tokens, values);
@@ -551,7 +568,17 @@ export class StorageSession {
   }
 
   private objects(result: RawResult): Record<string, unknown>[] {
-    return result.rows.map((row) => Object.fromEntries(result.columnNames.map((name, index) => [name, row[index]])));
+    const names = result.columnNames;
+    const colCount = names.length;
+    const rows = result.rows;
+    const out = new Array<Record<string, unknown>>(rows.length);
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r]!;
+      const obj: Record<string, unknown> = {};
+      for (let c = 0; c < colCount; c++) obj[names[c]!] = row[c];
+      out[r] = obj;
+    }
+    return out;
   }
 
   private noteStatement(tokens: readonly Token[]): void {
