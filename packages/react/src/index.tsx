@@ -132,7 +132,14 @@ export type GonvexAuthConfig = {
   /** Visible content while the external identity provider initializes. */
   loadingFallback?: ReactNode;
   /** Trusted identity adapter such as createFirebaseAuthAdapter(). */
-  externalAuth?: GonvexExternalAuthAdapter;
+  externalAuth?: GonvexExternalAuthAdapter & {
+    /**
+     * The provider's ID token for this origin even where getIdToken() defers
+     * to the Gonvex session. Used only after the server rejects the refresh
+     * credential; a token for another account is discarded.
+     */
+    getRecoveryIdToken?: () => Promise<string | null>;
+  };
   /** Secure browser-to-browser handoff for apps routed across sibling subdomains. */
   crossOriginHandoff?: {
     allowedOriginSuffix: string;
@@ -725,6 +732,35 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     };
   }, [hasExplicitInitialTenant, initialTenantId, installSession, props.client, props.externalAuth, props.projectId, storageKey]);
 
+  // A rejected refresh credential (reused by a stale copy, or revoked with its
+  // family) does not end a still-signed-in external identity. Re-exchange that
+  // identity, as a reload would, instead of signing the tab out. Runs inside
+  // the refresh lock. Rethrows the original rejection when recovery is
+  // unavailable or resolves elsewhere.
+  const recoverWithExternalIdentity = useCallback(async (current: GonvexAuthSession, cause: unknown) => {
+    const adapter = props.externalAuth;
+    const recover = adapter?.getRecoveryIdToken;
+    if (!adapter || typeof recover !== "function" || !isFatalRefreshError(cause)) throw cause;
+    const latest = readAuthSession(storageKey);
+    // Another tab rotated the shared session first; the caller adopts it.
+    if (latest && latest.refreshToken !== current.refreshToken) throw cause;
+    const token = await recover().catch(() => null);
+    if (!token) throw cause;
+    const grant = await props.client.action(control.auth.exchangeExternalToken, {
+      provider: adapter.provider,
+      token,
+      ...(current.activeTenantId ? { tenantId: current.activeTenantId } : {}),
+      previousRefreshToken: current.refreshToken,
+    });
+    const recovered = sessionFromNativeGrant(grant, current);
+    if (recovered.account.id !== current.account.id) {
+      // This origin's identity is another account: never switch silently.
+      void props.client.reducer(control.auth.logout, { refreshToken: recovered.refreshToken, all: false }).catch(() => undefined);
+      throw cause;
+    }
+    return grant;
+  }, [props.client, props.externalAuth, storageKey]);
+
   const refreshSession = useCallback(async (force = false) => {
     if (authRecoveryPausedRef.current) return null;
     if (refreshRef.current) return refreshRef.current;
@@ -756,7 +792,8 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
             })
           : await props.client.action(control.auth.refreshSession, {
               refreshToken: current.refreshToken,
-            });
+            }, { idempotencyKey: refreshIdempotencyKey(storageKey, current.refreshToken) })
+              .catch((cause: unknown) => recoverWithExternalIdentity(current, cause));
         const refreshed = sessionFromNativeGrant(grant, current);
         const next = scopeSessionForInitialTenant(
           refreshed,
@@ -768,7 +805,9 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         return next;
       }
       attemptedRefreshToken = current.refreshToken;
-      const grant = await props.client.action(control.auth.refreshSession, { refreshToken: current.refreshToken });
+      const grant = await props.client.action(control.auth.refreshSession, { refreshToken: current.refreshToken }, {
+        idempotencyKey: refreshIdempotencyKey(storageKey, current.refreshToken),
+      });
       if (authInvalidationVersion !== authInvalidationVersionRef.current) return null;
       const next = sessionFromNativeGrant(grant, current);
       // Persist the rotated token before releasing the cross-tab lock. The
@@ -820,7 +859,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     });
     refreshRef.current = request;
     return request;
-  }, [hasExplicitInitialTenant, initialTenantId, installSession, props.client, props.externalAuth, storageKey]);
+  }, [hasExplicitInitialTenant, initialTenantId, installSession, props.client, props.externalAuth, recoverWithExternalIdentity, storageKey]);
 
   useEffect(() => {
     if (!canonicalRefreshRequested) return;
@@ -1321,7 +1360,9 @@ async function bootstrapGonvexAuth(options: {
         if (latest.expiresAt > Date.now() + 30_000) return latest;
         if (latest.refreshExpiresAt <= Date.now()) throw new GonvexAuthRequestError("Your session expired. Please sign in again.", 401);
         options.client.setAuth({ project: options.projectId, token: latest.accessToken });
-        const grant = await options.client.action(control.auth.refreshSession, { refreshToken: latest.refreshToken });
+        const grant = await options.client.action(control.auth.refreshSession, { refreshToken: latest.refreshToken }, {
+          idempotencyKey: refreshIdempotencyKey(options.storageKey, latest.refreshToken),
+        });
         if (!options.isCurrent()) return null;
         const next = sessionFromNativeGrant(grant, latest);
         safeLocalStorageSet(options.storageKey, JSON.stringify(next));
@@ -1497,6 +1538,27 @@ async function withLocalStorageAuthLock<T>(name: string, action: () => Promise<T
 
 function safeLocalStorageSet(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch { /* storage can be unavailable in hardened browsers */ }
+}
+
+/**
+ * One idempotency key per refresh token, shared by every retry, tab and reload
+ * that spends it. When a rotation's reply is lost, the retry then receives the
+ * stored rotated session instead of tripping the server's reuse detection and
+ * revoking the login. The key is random so knowing an old refresh token alone
+ * is not enough to replay its result.
+ */
+function refreshIdempotencyKey(storageKey: string, refreshToken: string) {
+  const slot = `${storageKey}:refresh-attempt`;
+  // A suffix identifies the token without storing a second copy of it.
+  const fingerprint = refreshToken.slice(-16);
+  try {
+    const saved = JSON.parse(localStorage.getItem(slot) ?? "null") as { token?: unknown; key?: unknown } | null;
+    if (saved?.token === fingerprint && typeof saved.key === "string" && saved.key) return saved.key;
+  } catch { /* unreadable storage falls through to a fresh key */ }
+  // getRandomValues, unlike randomUUID, also works outside secure contexts.
+  const key = `refresh-${Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  safeLocalStorageSet(slot, JSON.stringify({ token: fingerprint, key }));
+  return key;
 }
 
 function safeLocalStorageRemove(key: string) {
