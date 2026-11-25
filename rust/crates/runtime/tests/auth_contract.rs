@@ -954,3 +954,82 @@ async fn retried_refresh_replays_the_rotated_session() {
     fixture_pools.close().await;
     drop(data);
 }
+
+#[tokio::test]
+async fn support_sessions_carry_account_and_tenant_labels() {
+    let (data, database_url, fixture_pools, fixture) = sqlite_fixture("control").await;
+    let runtime = Runtime::new(test_config(database_url.clone()));
+    runtime.start().await.unwrap();
+    sqlx::query(
+        "INSERT INTO gonvex_runtime_projects(id,name,status,owner_email) VALUES('project','Project','active','owner@example.test'),('other','Other','active','other@example.test')",
+    ).execute(&fixture).await.unwrap();
+    sqlx::query("INSERT INTO accounts(id,email,name) VALUES('ana','ana@example.test','Ana Mora'),('blank','','')")
+        .execute(&fixture)
+        .await
+        .unwrap();
+    // A tenant with the same id in another project must not label this session.
+    sqlx::query(
+        "INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('acme','project','acme','Acme','acme',$1,'active'),('foreign','other','ghost','Foreign','foreign',$1,'active')",
+    ).bind(&database_url).execute(&fixture).await.unwrap();
+    sqlx::query(&format!(
+        "INSERT INTO gonvex_support_sessions(id,project_id,tenant_id,account_id,release,environment,last_seen_at) VALUES
+         ('labeled','project','acme','ana','5.4.90 (288d9aa)','production',{NOW_MS}),
+         ('unknown','project','ghost','blank','5.4.90','production',{NOW_MS}-1000)"
+    ))
+    .execute(&fixture)
+    .await
+    .unwrap();
+    let connection = ControlConnection {
+        project_id: "project".to_owned(),
+        identity: Some(SessionIdentity {
+            project_id: "project".to_owned(),
+            account: Account {
+                id: "owner".to_owned(),
+                email: "owner@example.test".to_owned(),
+                email_verified: true,
+                name: "Owner".to_owned(),
+                avatar_url: String::new(),
+                provider: "password".to_owned(),
+            },
+        }),
+        ..ControlConnection::default()
+    };
+    let sessions = runtime
+        .execute_control_query(
+            &connection,
+            "control.support.listSessions",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("a project owner lists support sessions");
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+    let labeled = &sessions[0];
+    assert_eq!(labeled["id"], "labeled");
+    assert_eq!(labeled["accountId"], "ana");
+    assert_eq!(labeled["userName"], "Ana Mora");
+    assert_eq!(labeled["userEmail"], "ana@example.test");
+    assert_eq!(labeled["tenantName"], "Acme");
+    assert_eq!(labeled["tenantDomain"], "acme");
+    let unknown = sessions[1].as_object().unwrap();
+    assert_eq!(unknown["id"], "unknown");
+    for key in ["userName", "userEmail", "tenantName", "tenantDomain"] {
+        assert!(
+            !unknown.contains_key(key),
+            "{key} must be omitted without a label"
+        );
+    }
+    let detail = runtime
+        .execute_control_query(
+            &connection,
+            "control.support.getSession",
+            &serde_json::json!({"id":"labeled"}),
+        )
+        .await
+        .expect("a project owner reads one support session");
+    assert_eq!(detail["userName"], "Ana Mora");
+    assert_eq!(detail["tenantName"], "Acme");
+    runtime.shutdown().await;
+    fixture_pools.close().await;
+    drop(data);
+}
