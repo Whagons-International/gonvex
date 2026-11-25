@@ -1953,6 +1953,7 @@ describe("GonvexAuthProvider", () => {
     expect(client.action).toHaveBeenCalledWith(
       expect.objectContaining({ path: "control.auth.refreshSession" }),
       { refreshToken: "canonical-refresh" },
+      { idempotencyKey: expect.stringMatching(/^refresh-[0-9a-f]{32}$/) },
     );
     expect(client.action).not.toHaveBeenCalledWith(
       expect.objectContaining({ path: "control.auth.exchangeExternalToken" }),
@@ -2071,11 +2072,111 @@ describe("GonvexAuthProvider", () => {
     expect(client.action).toHaveBeenCalledWith(
       expect.objectContaining({ path: "control.auth.refreshSession" }),
       { refreshToken: "canonical-refresh" },
+      { idempotencyKey: expect.stringMatching(/^refresh-[0-9a-f]{32}$/) },
     );
     expect(rendered.queryByTestId("auth-loading")).toBeNull();
     expect(rendered.queryByTestId("degraded-application")).not.toBeNull();
     expect(auth).toMatchObject({ isAuthenticated: false, isLoading: false, sessionState: "degraded" });
     expect(localStorage.getItem(storageKey)).toContain("canonical-refresh");
+  });
+
+  describe("rejected canonical refresh", () => {
+    const origin = "https://firebase-recovery.test";
+    const storageKey = `gonvex-auth:${encodeURIComponent(origin)}:shop`;
+    const tenants = [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }];
+    const account = { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" };
+    const expired = () => ({
+      accessToken: "expired-access", expiresAt: Date.now() - 1_000,
+      refreshToken: "canonical-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account, tenants, activeTenantId: "tenant-1",
+    });
+    const reuse = () => new GonvexClientError("refresh token reuse detected; this login was revoked", { code: "server", path: "control.auth.refreshSession", operation: "action" });
+
+    async function mount(client: FakeGonvexClient, getRecoveryIdToken?: () => Promise<string | null>) {
+      let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+      const externalAuth = {
+        provider: "firebase" as const,
+        getIdToken: vi.fn(async () => null),
+        onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+        ...(getRecoveryIdToken ? { getRecoveryIdToken } : {}),
+      };
+      const state: { auth?: ReturnType<typeof useGonvexAuth> } = {};
+      function Consumer() { state.auth = useGonvexAuth(); return null; }
+      const rendered = render(
+        <GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl={origin} projectId="shop" externalAuth={externalAuth}>
+          <Consumer />
+        </GonvexAuthProvider>,
+      );
+      await act(async () => {
+        tokenListener?.(null);
+        for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
+      });
+      return { state, rendered };
+    }
+
+    it("retries a refresh after reload with the same idempotency key", async () => {
+      localStorage.setItem(storageKey, JSON.stringify(expired()));
+      const first = new FakeGonvexClient();
+      first.action.mockRejectedValue(new GonvexClientError("Action control.auth.refreshSession timed out", { code: "timeout", path: "control.auth.refreshSession", operation: "action" }));
+      const { rendered } = await mount(first);
+      rendered.unmount();
+      const second = new FakeGonvexClient();
+      second.action.mockRejectedValue(new Error("network unavailable"));
+      await mount(second);
+      const keyOf = (client: FakeGonvexClient) => (client.action.mock.calls[0] as unknown[])[2];
+      expect(keyOf(first)).toEqual({ idempotencyKey: expect.stringMatching(/^refresh-/) });
+      expect(keyOf(second)).toEqual(keyOf(first));
+    });
+
+    it("re-exchanges the signed-in identity instead of signing out", async () => {
+      localStorage.setItem(storageKey, JSON.stringify(expired()));
+      const client = new FakeGonvexClient();
+      const recovered = { ...expired(), accessToken: "recovered-access", expiresAt: Date.now() + 900_000, refreshToken: "recovered-refresh" };
+      client.action.mockImplementation((async (path: FunctionReference) => {
+        if (path.path === "control.auth.refreshSession") throw reuse();
+        return recovered;
+      }) as never);
+      const getRecoveryIdToken = vi.fn(async () => "firebase-id-token");
+      const { state } = await mount(client, getRecoveryIdToken);
+
+      expect(getRecoveryIdToken).toHaveBeenCalledOnce();
+      expect(client.action).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "control.auth.exchangeExternalToken" }),
+        { provider: "firebase", token: "firebase-id-token", tenantId: "tenant-1", previousRefreshToken: "canonical-refresh" },
+      );
+      expect(state.auth).toMatchObject({ isAuthenticated: true, sessionState: "current", error: null });
+      expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({ refreshToken: "recovered-refresh" });
+    });
+
+    it("never switches to another account's identity", async () => {
+      localStorage.setItem(storageKey, JSON.stringify(expired()));
+      const client = new FakeGonvexClient();
+      client.action.mockImplementation((async (path: FunctionReference) => {
+        if (path.path === "control.auth.refreshSession") throw reuse();
+        return { ...expired(), account: { ...account, id: "acct-other" }, expiresAt: Date.now() + 900_000, refreshToken: "other-refresh" };
+      }) as never);
+      const { state } = await mount(client, async () => "other-id-token");
+
+      expect(client.reducer).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "control.auth.logout" }),
+        { refreshToken: "other-refresh", all: false },
+      );
+      expect(state.auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut" });
+      expect(state.auth?.error).toMatch(/reuse detected/);
+      expect(localStorage.getItem(storageKey)).toBeNull();
+    });
+
+    it("signs out as before when the app offers no recovery identity", async () => {
+      localStorage.setItem(storageKey, JSON.stringify(expired()));
+      const client = new FakeGonvexClient();
+      client.action.mockRejectedValue(reuse());
+      const { state } = await mount(client);
+      expect(client.action).not.toHaveBeenCalledWith(
+        expect.objectContaining({ path: "control.auth.exchangeExternalToken" }),
+        expect.anything(),
+      );
+      expect(state.auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut" });
+    });
   });
 
   it("uses canonical refresh when a forced Firebase refresh runs before provider hydration", async () => {
@@ -2124,6 +2225,7 @@ describe("GonvexAuthProvider", () => {
     expect(client.action).toHaveBeenCalledWith(
       expect.objectContaining({ path: "control.auth.refreshSession" }),
       { refreshToken: "canonical-refresh" },
+      { idempotencyKey: expect.stringMatching(/^refresh-[0-9a-f]{32}$/) },
     );
   });
 
