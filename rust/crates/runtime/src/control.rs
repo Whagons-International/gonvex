@@ -2495,7 +2495,7 @@ impl Runtime {
                 let groups = sqlx::query(
                     r#"SELECT fingerprint,project_id,title,culprit,level,status,priority,
                               assignee,first_seen,last_seen,event_count,tenants,releases,
-                              environments,accounts,devices,latest_event,regression
+                              environments,accounts,devices,latest_event,regression,resolved_release
                        FROM gonvex_error_groups WHERE project_id=$1
                        ORDER BY last_seen DESC LIMIT 500"#,
                 )
@@ -2521,7 +2521,7 @@ impl Runtime {
                 let row = sqlx::query(
                     r#"SELECT fingerprint,project_id,title,culprit,level,status,priority,
                               assignee,first_seen,last_seen,event_count,tenants,releases,
-                              environments,accounts,devices,latest_event,regression
+                              environments,accounts,devices,latest_event,regression,resolved_release
                        FROM gonvex_error_groups WHERE project_id=$1 AND fingerprint=$2"#,
                 )
                 .bind(&connection.project_id)
@@ -4945,6 +4945,7 @@ fn error_group_json(row: SqliteRow) -> Value {
         "devices":row.get::<Json<Value>,_>("devices").0,
         "latest":row.get::<Json<Value>,_>("latest_event").0,
         "regression":row.get::<bool,_>("regression"),
+        "resolvedRelease":row.try_get::<String,_>("resolved_release").unwrap_or_default(),
     })
 }
 

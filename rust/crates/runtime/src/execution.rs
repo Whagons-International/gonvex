@@ -116,6 +116,22 @@ pub(crate) struct ExecutionAccess {
     /// A root Action admitted by its caller (the outbox drainer claims a row
     /// only after it holds the permit). Otherwise a root Action takes one.
     pub action_permit: Option<crate::action_gate::ActionPermit>,
+    /// The client connection that made the call, when it came over one: its
+    /// registered release attributes a failure in the error inbox.
+    pub client_connection: Option<String>,
+}
+
+impl ExecutionAccess {
+    fn error_origin(&self) -> crate::runtime_errors::ErrorOrigin {
+        crate::runtime_errors::ErrorOrigin {
+            connection_id: self.client_connection.clone(),
+            channel: self
+                .provenance
+                .as_ref()
+                .map(|provenance| invocation_channel_name(provenance.channel))
+                .or_else(|| crate::cron_profile::active().then_some("scheduler")),
+        }
+    }
 }
 
 pub(crate) struct NestedExecutionAccess {
@@ -135,6 +151,29 @@ impl Runtime {
         }
         self.execute_tenant_query_with_access(session, path, args, ExecutionAccess::default())
             .await
+    }
+
+    /// A Query called over a client connection (failures carry its release).
+    pub(crate) async fn execute_tenant_query_for_connection(
+        &self,
+        session: &TenantSession,
+        path: &str,
+        args: Value,
+        connection_id: &str,
+    ) -> Result<Value, ExecutionError> {
+        if path == REDUCER_RECEIPT_QUERY {
+            return self.reducer_receipt_status(session, args).await;
+        }
+        self.execute_tenant_query_with_access(
+            session,
+            path,
+            args,
+            ExecutionAccess {
+                client_connection: Some(connection_id.to_owned()),
+                ..ExecutionAccess::default()
+            },
+        )
+        .await
     }
 
     async fn reducer_receipt_status(
@@ -250,10 +289,26 @@ impl Runtime {
     ) -> Result<Value, ExecutionError> {
         // Per-function counters (/dev/metrics, /dev/profile `functions`).
         let mut call = gonvex_profiler::function::Call::start();
+        let started = std::time::Instant::now();
+        let origin = access.error_origin();
+        // Kept for the failure's argument shape; the call consumes `args`.
+        let call_args = args.clone();
         let result = self
             .execute_tenant_query_with_access_counted(session, path, args, access, &mut call)
             .await;
         call.finish(result.is_ok());
+        if let Err(error) = &result {
+            self.capture_runtime_error(
+                session,
+                "query",
+                path,
+                None,
+                origin,
+                &call_args,
+                error,
+                started.elapsed(),
+            );
+        }
         result
     }
 
@@ -438,6 +493,10 @@ impl Runtime {
     ) -> Result<ReducerExecution, ExecutionError> {
         // Per-function counters (/dev/metrics, /dev/profile `functions`).
         let mut call = gonvex_profiler::function::Call::start();
+        let started = std::time::Instant::now();
+        let origin = access.error_origin();
+        // Kept for the failure's argument shape; the call consumes `args`.
+        let call_args = args.clone();
         let result = self
             .execute_tenant_reducer_with_access_counted(
                 session,
@@ -450,6 +509,18 @@ impl Runtime {
             )
             .await;
         call.finish(result.is_ok());
+        if let Err(error) = &result {
+            self.capture_runtime_error(
+                session,
+                "reducer",
+                path,
+                Some(command_id),
+                origin,
+                &call_args,
+                error,
+                started.elapsed(),
+            );
+        }
         result
     }
 
@@ -785,6 +856,26 @@ impl Runtime {
             .await
     }
 
+    /// An Action called over a client connection (failures carry its release).
+    pub(crate) async fn execute_tenant_action_for_connection(
+        &self,
+        session: &TenantSession,
+        path: &str,
+        args: Value,
+        connection_id: &str,
+    ) -> Result<ActionExecution, ExecutionError> {
+        self.execute_tenant_action_with_access(
+            session,
+            path,
+            args,
+            ExecutionAccess {
+                client_connection: Some(connection_id.to_owned()),
+                ..ExecutionAccess::default()
+            },
+        )
+        .await
+    }
+
     pub(crate) async fn execute_tenant_action_with_access(
         &self,
         session: &TenantSession,
@@ -794,10 +885,26 @@ impl Runtime {
     ) -> Result<ActionExecution, ExecutionError> {
         // Per-function counters (/dev/metrics, /dev/profile `functions`).
         let mut call = gonvex_profiler::function::Call::start();
+        let started = std::time::Instant::now();
+        let origin = access.error_origin();
+        // Kept for the failure's argument shape; the call consumes `args`.
+        let call_args = args.clone();
         let result = self
             .execute_tenant_action_with_access_counted(session, path, args, access, &mut call)
             .await;
         call.finish(result.is_ok());
+        if let Err(error) = &result {
+            self.capture_runtime_error(
+                session,
+                "action",
+                path,
+                None,
+                origin,
+                &call_args,
+                error,
+                started.elapsed(),
+            );
+        }
         result
     }
 

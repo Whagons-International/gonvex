@@ -46,6 +46,7 @@ pub mod raw_sites;
 pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
+pub(crate) mod runtime_errors;
 pub mod sandbox;
 mod scheduled_lane;
 pub mod scheduler;
@@ -111,6 +112,8 @@ struct RuntimeInner {
     modules: ModuleRegistry,
     change_feeds: change_feed::ChangeFeedHub,
     telemetry: telemetry::TelemetryLimiter,
+    /// Server-side function failures on their way to the error inbox.
+    runtime_errors: runtime_errors::RuntimeErrorCapture,
     scheduler: scheduler::Scheduler,
     runtime_events: broadcast::Sender<RuntimeEvent>,
     /// `PresenceChanged` only (connection count changes). Separate from
@@ -330,6 +333,7 @@ impl Runtime {
                 modules: ModuleRegistry::new(),
                 change_feeds,
                 telemetry: telemetry::TelemetryLimiter::default(),
+                runtime_errors: runtime_errors::RuntimeErrorCapture::default(),
                 scheduler: scheduler::Scheduler::new(),
                 runtime_events,
                 presence_events,
@@ -469,6 +473,7 @@ impl Runtime {
         profiling::start();
         self.start_presence_tasks();
         self.start_auth_revalidation();
+        self.start_error_tasks();
         if self.inner.config.sandbox.enabled {
             let binary = self
                 .inner
@@ -1986,6 +1991,7 @@ async fn websocket(
     // exit from this task) removes the connection's presence after grace.
     let presence_hub = runtime.inner.presence.clone();
     let _presence_guard = presence::ConnectionGuard::new(presence_hub.clone(), &connection_id);
+    let _device_guard = runtime_errors::ConnectionDeviceGuard::new(&runtime, &connection_id);
     let mut presence_slot: Option<Arc<presence::PresenceSlot>> = None;
     let mut presence_negotiated = false;
     let mut last_inbound = tokio::time::Instant::now();
@@ -3212,6 +3218,7 @@ async fn websocket(
                         }
                     }
                     telemetry_device = device.clone();
+                    runtime.register_connection_device(&connection_id, telemetry_device.as_ref());
                     telemetry_batch_enabled =
                         capabilities.as_ref().and_then(|c| c.telemetry_batch) == Some(1);
                     let next_tenant_session =
@@ -3308,7 +3315,14 @@ async fn websocket(
                             },
                         }
                     } else if let Some(session) = tenant_session.as_ref() {
-                        match Box::pin(runtime.execute_tenant_query(session, &path, args)).await {
+                        match Box::pin(runtime.execute_tenant_query_for_connection(
+                            session,
+                            &path,
+                            args,
+                            &connection_id,
+                        ))
+                        .await
+                        {
                             Ok(result) => query_result(id, path, result),
                             Err(error) => ServerMessage::QueryError {
                                 id,
@@ -3798,7 +3812,14 @@ async fn websocket(
                             },
                         }
                     } else if let Some(session) = tenant_session.as_ref() {
-                        match Box::pin(runtime.execute_tenant_action(session, &path, args)).await {
+                        match Box::pin(runtime.execute_tenant_action_for_connection(
+                            session,
+                            &path,
+                            args,
+                            &connection_id,
+                        ))
+                        .await
+                        {
                             Ok(result) => ServerMessage::ActionResult {
                                 id,
                                 path: Some(path),
@@ -5400,6 +5421,7 @@ async fn call_reducer(
                 client_contract,
                 receipt_path,
                 intent_entropy,
+                client_connection: Some(control_connection.connection_id.clone()),
                 ..Default::default()
             },
         )
@@ -6263,6 +6285,141 @@ export async function fail(ctx) { throw new Error("refused"); }
                 std::fs::write(path, serde_json::to_vec(&profile).unwrap()).unwrap();
             }
             runtime.inner.module_host.shutdown().await;
+        });
+    }
+
+    /// A Reducer throw reaches the error inbox through the real execution
+    /// path: one event per execution, the client-visible message, the raw
+    /// host text as the stack, and one group across differing ids.
+    #[test]
+    fn in_process_reducer_throw_is_captured_in_the_error_inbox() {
+        crate::in_process::tests::run(async {
+            use base64::Engine as _;
+            use gonvex_store::{RuntimeManifestRecord, TenantRoute};
+            use sha2::Digest as _;
+            use sqlx::Row as _;
+
+            let data = test_data_dir();
+            let control_url = gonvex_store::database_url(&data.path().join("control.db"));
+            let url = gonvex_store::database_url(&data.path().join("tenant.db"));
+            let mut cfg = config(true);
+            cfg.module_host.in_process = true;
+            cfg.module_host.isolate_pool_size = 1;
+            let runtime = Runtime::new(cfg);
+            let control =
+                ControlPlane::connect(&control_url, runtime.inner.pools.clone(), BTreeMap::new())
+                    .await
+                    .unwrap();
+            let control_fixture = runtime.inner.pools.pool(&control_url).await.unwrap();
+            sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('captured','Captured','multiTenant','active')").execute(&control_fixture).await.unwrap();
+            sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('route','captured','tenant-id','Acme Ops','captured',$1,'active')").bind(&url).execute(&control_fixture).await.unwrap();
+            let route = TenantRoute {
+                project_id: "captured".into(),
+                tenant_id: "tenant-id".into(),
+                database_url: url.clone(),
+            };
+            control
+                .clone()
+                .provision_tenant_database(route.clone(), Vec::new())
+                .await
+                .unwrap();
+            *runtime.inner.control_plane.write().await = Some(control);
+            runtime.inner.module_host.start().await.unwrap();
+            let code = r#"
+function assertWorkspaceVisible(id) { throw new Error("Workspace " + id + " not found"); }
+export async function create(ctx, args) { assertWorkspaceVisible(args.workspaceId); }
+"#;
+            let functions = serde_json::json!({"taskSubtasks.create": {"kind":"reducer","public":true,
+                "internal":false,"interactive":false,"classification":"system","handler":"create",
+                "file":"test.js","delivery":"oneShot","args":{"kind":"any"},"result":{"kind":"any"}}});
+            let mut module = serde_json::json!({"generation":1,"language":"typescript","entrypoint":"test.js",
+                "files":{},"visibility":{},"crons":[],"functions":functions,
+                "javascript":{"path":"test.js","hash":format!("{:x}", Sha256::digest(code.as_bytes())),"code":base64::engine::general_purpose::STANDARD.encode(code)}});
+            let hash =
+                crate::modules::canonical_artifact_hash(module.as_object().unwrap()).unwrap();
+            module["hash"] = serde_json::json!(hash);
+            runtime
+                .inner
+                .modules
+                .install(
+                    &runtime.inner.module_host,
+                    RuntimeManifestRecord {
+                        project_id: "captured".into(),
+                        module_hash: hash,
+                        manifest: serde_json::json!({"module":module}),
+                    },
+                )
+                .await
+                .unwrap();
+            let session = TenantSession::anonymous(route);
+            for (command, workspace) in [("c-1", 4821), ("c-2", 77)] {
+                let error = runtime
+                    .execute_tenant_reducer(
+                        &session,
+                        command,
+                        None,
+                        "taskSubtasks.create",
+                        serde_json::json!({"workspaceId": workspace, "token": "secret"}),
+                    )
+                    .await
+                    .err()
+                    .expect("the Reducer throws");
+                assert!(error.to_string().contains("Workspace"), "{error}");
+            }
+            assert_eq!(runtime.flush_runtime_errors_for_test().await, 2);
+
+            let pool = runtime.inner.pools.pool(&control_url).await.unwrap();
+            let events = sqlx::query("SELECT fingerprint,payload FROM gonvex_error_events WHERE project_id='captured' ORDER BY occurred_at")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(events.len(), 2, "one event per execution");
+            let payload = |index: usize| {
+                events[index]
+                    .get::<sqlx::types::Json<serde_json::Value>, _>("payload")
+                    .0
+            };
+            let first = payload(0);
+            assert_eq!(first["message"], "Workspace 4821 not found", "{first}");
+            let stack = first["stack"].as_str().unwrap();
+            assert!(stack.contains("Workspace 4821 not found"), "{stack}");
+            assert_ne!(stack, "Workspace 4821 not found");
+            assert_eq!(first["culprit"], "reducer taskSubtasks.create");
+            assert_eq!(first["name"], "reducerError");
+            assert_eq!(first["environment"], "server");
+            assert_eq!(first["tenantName"], "Acme Ops");
+            assert_eq!(first["tags"]["source"], "runtime");
+            assert_eq!(first["tags"]["class"], "rejected");
+            assert!(first["tags"]["moduleVersion"]
+                .as_str()
+                .unwrap()
+                .starts_with("g1:"));
+            assert_eq!(first["context"]["commandId"], "c-1");
+            assert_eq!(
+                first["context"]["args"]["shape"],
+                serde_json::json!({"workspaceId":"number"}),
+                "secret keys are scrubbed from the argument shape"
+            );
+            assert_eq!(payload(1)["message"], "Workspace 77 not found");
+            assert_eq!(
+                events[0].get::<String, _>("fingerprint"),
+                events[1].get::<String, _>("fingerprint"),
+                "differing ids share one group"
+            );
+            let group = sqlx::query("SELECT event_count,level,status FROM gonvex_error_groups WHERE project_id='captured'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(group.len(), 1);
+            assert_eq!(group[0].get::<i64, _>("event_count"), 2);
+            assert_eq!(group[0].get::<String, _>("level"), "error");
+            let enabled: bool = sqlx::query_scalar(
+                "SELECT error_tracking_enabled FROM gonvex_runtime_projects WHERE id='captured'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(enabled, "the first server failure enables the Errors view");
         });
     }
 

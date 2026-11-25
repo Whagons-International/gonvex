@@ -42,6 +42,35 @@ before capability registration remain compatible.
 Update tenant context normally with `client.setAuth({ tenant })`; the reporter
 follows the active tenant.
 
+## Server-side function failures
+
+The runtime records every failed Query, Reducer and Action execution itself,
+whatever started it: a client connection, an HTTP or service-principal call, a
+cron job, an outbox Action or a nested agent call. Events carry
+`source: runtime`, environment `server`, name `<kind>Error`, culprit
+`<kind> <path>`, and tags for `kind`, `path`, `class` (`rejected`,
+`transient`, `update_required`, `unauthenticated`), the module version and the
+runtime version. The message is the text the client received; the full host
+error with its stack frames is in `stack`. Context includes the account (id,
+email, name), Member, tenant name, duration, command id, channel, the
+argument shape and encoded size (types only, secret-looking keys removed) and,
+for calls over a connection, its device report. The release is the one the
+calling client registered for error reporting, so events can be pruned by app
+version.
+
+`update_required` and `unauthenticated` are recorded as warnings: the SDK keeps
+the intent, installs the new build or re-authenticates, and replays it. All
+other failures, including application throws such as expected-version
+conflicts, are errors.
+
+Failures are grouped per function and normalized message: numbers, UUIDs,
+hashes and generated ids do not split a group. Capture never delays a call: a
+bounded queue feeds one background writer, which drops (and logs) failures
+only when the queue is full. The writer stores each occurrence as its own
+event and writes at most every 250 ms; in a storm (more than 10 occurrences of
+one group in one write) the extra occurrences are folded into the last stored
+event, and every count stays exact.
+
 ## Manual capture
 
 Applications with an existing logger can use the reporter directly:
@@ -88,7 +117,22 @@ uses `keepalive` during page exit, and caps its local queue.
 Events and aggregates are stored in the project's dedicated Gonvex telemetry
 database. Event IDs are idempotent, and aggregate updates use a transaction lock
 so concurrent runtime replicas cannot lose counts. A resolved group that appears
-in a different release is reopened and marked as a regression.
+is reopened and marked as a regression.
+
+Resolving a group records the release that contains the fix
+(`resolvedInRelease`, or by default the newest release seen on the group).
+Occurrences from older releases are counted but do not reopen the group, so
+clients still running a broken build cannot resurrect a fixed error. An
+occurrence without a parseable release reopens it. Releases compare
+numerically on the part before `+`, so `5.4.90+288d9aa` is newer than
+`5.4.9+abc`.
+
+An hourly retention pass deletes events older than 30 days, keeps the newest
+100 events of each group (counts keep their totals), resolves unresolved
+groups with no event for 14 days, and deletes resolved or ignored groups last
+seen more than 90 days ago. Override these with
+`GONVEX_ERROR_EVENT_RETENTION_DAYS`, `GONVEX_ERROR_EVENTS_PER_GROUP`,
+`GONVEX_ERROR_AUTO_RESOLVE_DAYS` and `GONVEX_ERROR_CLOSED_GROUP_RETENTION_DAYS`.
 
 When the Control Plane database is unavailable in a minimal local runtime, Gonvex
 uses a bounded in-memory inbox. Production runtimes keep a persistent data
@@ -103,7 +147,11 @@ Project operators inspect errors through:
 - `GET /dev/errors/status`
 - `GET /dev/errors/groups`
 - `GET /dev/errors/groups/:fingerprint`
-- `PATCH /dev/errors/groups/:fingerprint`
+- `PATCH /dev/errors/groups/:fingerprint` with `status`, `priority`,
+  `assignee` and, with `status: "resolved"`, an optional `resolvedInRelease`
+- `POST /dev/errors/prune` with `{"beforeRelease":"5.4.80"}`: deletes events
+  from older releases and groups seen only in them, and returns
+  `deletedEvents`, `deletedGroups`, `updatedGroups` and `releases`
 - `GET /dev/errors/groups/:fingerprint/bug-report`
 
 The bug-report response contains Markdown plus structured `agentContext` with

@@ -196,6 +196,11 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
         "JSON NOT NULL DEFAULT '{}'",
     ),
     ("gonvex_runtime_tenants", "seat_limit", "INTEGER"),
+    (
+        "gonvex_error_groups",
+        "resolved_release",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
     ("gonvex_runtime_tenants", "deleted_at", "INTEGER"),
     ("gonvex_runtime_tenants", "deletion_idempotency_key", "TEXT"),
     (
