@@ -1,5 +1,16 @@
 // Trusted base code only. Changed paths are data, never executable PR code.
 const { classifyChangedFiles } = require('../.github/scripts/ui-diff-classifier.cjs');
+// Gonvex is a framework: its SDK packages, runtime and CLI have no screens. The
+// shared classifier counts any packages/*/src .tsx file as UI, which gates SDK
+// logic on browser evidence it cannot have. Only the dashboard renders UI here.
+const RENDERED_UI = /^apps\/dashboard\//;
+function classifyGonvexDiff(input) {
+  const diff = classifyChangedFiles(input);
+  if (!diff.complete) return diff;
+  const uiFiles = diff.uiFiles.filter(path => RENDERED_UI.test(path));
+  return { ...diff, uiFiles, isUi: uiFiles.length > 0, classification: uiFiles.length ? 'ui' : 'non-ui',
+    reason: uiFiles.length ? diff.reason : 'no dashboard UI source changed' };
+}
 const eligible = pr => pr.state === 'open' && !pr.draft && ['main', 'staging'].includes(pr.base?.ref);
 const membership = pulls => JSON.stringify(pulls.map(pr => [pr.number, pr.head.sha, pr.base.sha, pr.body]).sort((a, b) => a[0] - b[0]));
 async function existingBlocker({ github, context }, pr) {
@@ -29,7 +40,7 @@ async function reconcileUiMergeStatus({ github, context }) {
     const pr = (await github.rest.pulls.get({ ...context.repo, pull_number: summary.number })).data;
     if (membership([summary]) !== membership([pr])) throw new Error('PR changed while classifying UI policy.');
     const files = await github.paginate(github.rest.pulls.listFiles, { ...context.repo, pull_number: pr.number, per_page: 100 });
-    const diff = classifyChangedFiles({ files, expectedCount: pr.changed_files });
+    const diff = classifyGonvexDiff({ files, expectedCount: pr.changed_files });
     if (!diff.complete) throw new Error(diff.reason);
     ui ||= diff.isUi;
     blocked ||= await existingBlocker({ github, context }, pr);
@@ -37,7 +48,7 @@ async function reconcileUiMergeStatus({ github, context }) {
   if (membership(pulls) !== membership(await members())) throw new Error('PR membership changed while classifying UI policy.');
   await github.rest.repos.createCommitStatus({ ...context.repo, sha, context: `UI merge policy / ${context.payload.pull_request.base.ref}`,
     state: ui || blocked ? 'pending' : 'success',
-    description: blocked || (ui ? 'UI diff: browser evidence, AI visual review and 24h veto policy pending' : 'Complete diff: no rendered UI source changed'),
+    description: blocked || (ui ? 'UI diff: browser evidence, AI visual review and 24h veto policy pending' : 'Complete diff: no dashboard UI source changed'),
     target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}` });
 }
 async function reconcileBrowserLabels({ github, context, validate, version }) {
@@ -45,7 +56,7 @@ async function reconcileBrowserLabels({ github, context, validate, version }) {
   const labels = new Set((pr.labels || []).map(label => label.name));
   if (pr.draft || [1072, 1406].includes(pr.number) || labels.has('hold')) return;
   const files = await github.paginate(github.rest.pulls.listFiles, { ...context.repo, pull_number: pr.number, per_page: 100 });
-  const diff = classifyChangedFiles({ files, expectedCount: pr.changed_files });
+  const diff = classifyGonvexDiff({ files, expectedCount: pr.changed_files });
   if (!diff.complete) throw new Error(diff.reason);
   const result = validate({ body: pr.body || '', files, expectedCount: pr.changed_files, version, login: pr.user.login, draft: pr.draft });
   const fresh = (await github.rest.pulls.get({ ...context.repo, pull_number: pr.number })).data;
@@ -86,4 +97,4 @@ async function recheckPrFormat({ github, context, validate, version }) {
     description: result.errors.length ? result.errors[0].slice(0, 140) : 'Trusted base validator: declaration and diff-only UI policy valid',
     target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}` });
 }
-module.exports = { reconcileBrowserLabels, reconcileUiMergeStatus, recheckPrFormat };
+module.exports = { classifyGonvexDiff, reconcileBrowserLabels, reconcileUiMergeStatus, recheckPrFormat };
