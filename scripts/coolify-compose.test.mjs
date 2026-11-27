@@ -31,6 +31,7 @@ test("Coolify Compose is a stable data plane only", () => {
   assert.ok(compose.volumes["gonvex-valkey-data"]);
   for (const service of Object.values(compose.services)) {
     assert.equal(service.ports, undefined, "durable dependencies must not publish host ports");
+    assert.match(service.image, /@sha256:[a-f0-9]{64}$/, "durable dependency images must be immutable");
   }
 
   const postgresNetworks = compose.services["gonvex-postgres"].networks;
