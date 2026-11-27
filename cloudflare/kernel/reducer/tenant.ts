@@ -203,7 +203,12 @@ export class KernelTenant {
       this.host = new TenantModuleHost({ storage: this.storage, registry: this.registry, permissions: this.permissions, ...(files ? { files } : {}) });
     }
     const artifact = moduleArtifact(module, ++this.generations, exports);
-    this.registry.install(this.options.tenantOnly ? { ...artifact, functions: artifact.functions.filter((fn) => fn.kind !== "action") } : artifact);
+    // Tenant-only: no Actions run here, but Reducers may still schedule one (the scheduler hands it to the Action host).
+    this.registry.install(this.options.tenantOnly ? {
+      ...artifact,
+      functions: artifact.functions.filter((fn) => fn.kind !== "action"),
+      scheduleTargets: artifact.functions.filter((fn) => fn.kind === "reducer" || fn.kind === "action").map((fn) => fn.path),
+    } : artifact);
     this.permissions.setSource(module.permissionGrants);
     this.active = module;
   }
