@@ -1,7 +1,7 @@
 import {mkdir,writeFile,rename} from 'node:fs/promises';
 import {join,dirname,relative} from 'node:path';
 import {RELEASES_ENTRY,ACTION_RELEASES_ENTRY} from './core.ts';
-import {servingConfigs} from '../../../kernel/assembly/deploy.mjs';
+import {servingConfigs,stackOptionsFromEnv} from '../../../kernel/assembly/deploy.mjs';
 const log=()=>{};
 export class LocalTarget {
   constructor(dir, deferMs, stagingDir = dir) {
@@ -60,7 +60,8 @@ export class WranglerTarget extends LocalTarget {
   if(!/^gonvex-cf-dev-[a-z0-9-]+$/.test(this.script))throw new Error('development script name required');
   await writeFile(join(this.dir,RELEASES_ENTRY),entry.kernel);
   if(entry.actions)await writeFile(join(this.dir,ACTION_RELEASES_ENTRY),entry.actions);
-  const configs=await servingConfigs(this.script,this.dir);
+  // The stack's own settings (jurisdiction, backups, ...): a redeploy never drops them (deploy.mjs stackOptions).
+  const configs=await servingConfigs(this.script,this.dir,stackOptionsFromEnv(process.env.GONVEX_STACK_OPTIONS));
   if(configs.runtime.config.durable_objects.code_update_strategy?.mode!=='immediate'||Object.keys(configs.runtime.config.exports).join(',')!=='AssemblyTenant')throw new Error('runtime isolation configuration differs');
   const targets=[];
   for(const[kind,alias,file]of[['actions','gonvex:action-releases',ACTION_RELEASES_ENTRY],['runtime','gonvex:releases',RELEASES_ENTRY]]){

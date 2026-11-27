@@ -10,11 +10,19 @@ interface Env extends SandboxEnv {
   FILES: R2Bucket;
   [key: string]: unknown;
 }
-export { SandboxContainer, SandboxRegistry } from "../../sandbox/src/index";
-export class SandboxWorker extends WorkerEntrypoint<Env> {
+import { SandboxContainer as Container, SandboxRegistry as Registry } from "../../sandbox/src/index";
+import { resident, residentHandler } from "./residency";
+// Data residency: every export receives namespaces restricted to GONVEX_JURISDICTION (residency.ts).
+export const SandboxContainer = resident(Container);
+export type SandboxContainer = Container;
+export const SandboxRegistry = resident(Registry);
+export type SandboxRegistry = Registry;
+class Sandbox extends WorkerEntrypoint<Env> {
   async call(operation: string, payload: unknown, session: ActionSession, duckdb: boolean) {
     const files = new ActionFiles({ tenant: this.env.TENANT.getByName(session.tenantId) as unknown as FilesTenantRpc, bucket: this.env.FILES, config: filesConfigFromEnv(this.env) });
     return sandboxFromEnv(this.env, { readFile: (caller, id, limit) => files.readFile(caller, id, limit) }).call(operation, payload, session, duckdb);
   }
 }
-export default { fetch: () => Response.json({ ok: true, service: "gonvex-sandbox" }) };
+export const SandboxWorker = resident(Sandbox);
+export type SandboxWorker = Sandbox;
+export default residentHandler({ fetch: () => Response.json({ ok: true, service: "gonvex-sandbox" }) });
