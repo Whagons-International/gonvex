@@ -2,6 +2,7 @@
  * Operator configuration, read from the Worker's vars and secrets with the
  * reference's names (rust/crates/runtime/src/config.rs).
  */
+import { stackRegion } from "./regions";
 
 export interface OperatorEnv {
   GONVEX_ADMIN_KEY?: string;
@@ -30,6 +31,8 @@ export interface OperatorEnv {
   GONVEX_DEV_TRANSFER_TARGET?: string;
   /** P03 dev transfer: comma-separated exact `devcopy-*` tenant object names. */
   GONVEX_DEV_TRANSFER_TENANTS?: string;
+  /** Data residency: the jurisdiction every object of the stack is placed in (regions.ts, kernel/assembly/residency.ts). */
+  GONVEX_JURISDICTION?: string;
   [binding: string]: unknown;
 }
 
@@ -49,6 +52,8 @@ export interface OperatorConfig {
   /** P03 dev-transfer gate (see `devTransferAllowed`). */
   devTransferTarget: string;
   devTransferTenants: string;
+  /** The stack's jurisdiction (`null`: none); new tenants are recorded in it (regions.ts). */
+  jurisdiction?: string | null;
 }
 
 /**
@@ -91,5 +96,6 @@ export function operatorConfig(env: OperatorEnv): OperatorConfig {
     syncDeadlineMs: Number.isFinite(deadline) && deadline > 0 ? deadline : 10 * 60 * 1000,
     devTransferTarget: typeof env.GONVEX_DEV_TRANSFER_TARGET === "string" ? env.GONVEX_DEV_TRANSFER_TARGET : "",
     devTransferTenants: typeof env.GONVEX_DEV_TRANSFER_TENANTS === "string" ? env.GONVEX_DEV_TRANSFER_TENANTS : "",
+    jurisdiction: stackRegion(env),
   };
 }

@@ -27,6 +27,7 @@ import { HttpReleaseBuilder, type DeploymentRef, type DeploymentGrant, type Rele
 import { handleOperatorRoute, type Op } from "./routes";
 import { OPERATOR_SCHEMA, SyncCoordinator, type SyncOutcome, type SyncRequest } from "./sync";
 import { installDeploymentSchema } from "./deployment";
+import { REGION_SCHEMA } from "./regions";
 import { deleteTenantStorage, rustTenantError, waitForRelease, type OperatorTenantPort } from "./tenant/port";
 
 export interface OperatorObjectEnv extends ControlEnv, OperatorEnv {
@@ -57,6 +58,7 @@ export class OperatorControlObject extends ControlObject {
     state.blockConcurrencyWhile(async () => {
       this.sql.script(OPERATOR_SCHEMA);
       installDeploymentSchema(this.sql);
+      this.sql.script(REGION_SCHEMA);
     });
     this.syncs = new SyncCoordinator({
       sql: this.sql,

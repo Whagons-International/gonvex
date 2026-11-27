@@ -57,6 +57,7 @@ import { retryable } from "../reducer/errors";
 
 
 import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } from "./tenant-transfer";
+import { finishRestore, restoreStep, snapshotObject } from "./snapshot";
 import { fixtureSpans, setSpanTiming, span, spanTimingFromEnv, spanTimingOn } from "../delivery/spans";
 
 // Match projectModuleFromManifest: an omitted/null artifact format becomes 0.
@@ -644,6 +645,25 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async operatorModuleReloaded(event: { projectId: string; hash: string; generation: number; clientContract: number | null }): Promise<void> {
     const info = { artifactHash: event.hash, clientContract: event.clientContract };
     await Promise.all((await this.registeredGateways()).map((name) => rpc<GatewayRpc>(this.env.GATEWAY, name).moduleReloaded(event.projectId, info)));
+  }
+  /** Backups (backups.ts): a consistent snapshot of this tenant, serialized after every queued Reducer. */
+  async operatorSnapshot(prefix: string) {
+    const bucket = this.backups();
+    return this.kernel.reducers.serial(() => snapshotObject(this.ctx, bucket, prefix, { kind: "tenant", name: this.ctx.id.name ?? "", source: this.env.GONVEX_RUNTIME_VERSION ?? "" }));
+  }
+  /** One step of filling this (empty) tenant from a snapshot; `operatorRestoreFinish` resets it afterwards. */
+  async operatorRestoreStep(prefix: string) {
+    const bucket = this.backups();
+    return this.kernel.reducers.serial(() => restoreStep(this.ctx, bucket, prefix));
+  }
+  async operatorRestoreFinish() {
+    await finishRestore(this.ctx);
+    this.ctx.abort("tenant restored from a snapshot");
+  }
+  private backups(): R2Bucket {
+    const bucket = (this.env as { BACKUPS?: R2Bucket }).BACKUPS;
+    if (!bucket) throw new Error("no BACKUPS bucket is bound to the runtime");
+    return bucket;
   }
   async operatorDeleteAll() {
     await this.ctx.storage.deleteAlarm();
