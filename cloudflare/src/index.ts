@@ -30,7 +30,7 @@ export type PublicLimiterObject = PublicLimiter;
 export const IngressObject = resident(Ingress);
 export type IngressObject = Ingress;
 
-interface ServingEnv extends Env, TransferEnv { GONVEX_ASSEMBLY_FIXTURE_KEY?: string; GONVEX_STACK_NAME?: string }
+interface ServingEnv extends Env, TransferEnv { GONVEX_ASSEMBLY_FIXTURE_KEY?: string; GONVEX_STACK_NAME?: string; GONVEX_MAINTENANCE?: string }
 
 export default residentHandler({
   async fetch(request, env, ctx): Promise<Response> {
@@ -38,6 +38,9 @@ export default residentHandler({
     if (url.pathname === "/") return Response.json({ ok: true, service: "gonvex-cloudflare" });
     const backups = await handleBackupRequest(request, env as unknown as BackupEnv, env.GONVEX_STACK_NAME ?? null);
     if (backups) return backups;
+    // Maintenance (e.g. while a stack's objects are copied elsewhere): only the admin-key /_gonvex/ routes above answer.
+    // Deploying the flag resets the gateways, so no client socket stays open either.
+    if (env.GONVEX_MAINTENANCE === "1") return Response.json({ error: "maintenance", retryable: true }, { status: 503, headers: { "retry-after": "300", "cache-control": "no-store" } });
     if (url.pathname === "/ws") return handleWebSocketUpgrade(request, env, ctx);
     const transfer = await handleTenantTransfer(request, env);
     if (transfer) return transfer;
