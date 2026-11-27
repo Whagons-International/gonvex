@@ -1,0 +1,14 @@
+[
+  {
+    "path": "capacity-contract.ts",
+    "sourceCommit": "951f53d6516e6a7651b4ff6ad4344b2022451a87",
+    "sourceSha256": "142bb4fe2047b2e0b0d74a3abdb9c95c1d0305345c091983f56898df46fd839b",
+    "relocatedSha256": "0d7041a8fa3f0be598d3a84b9fa26cac2369be3eefb47438dd0e9abb83592b31"
+  },
+  {
+    "path": "capacity.ts",
+    "sourceCommit": "951f53d6516e6a7651b4ff6ad4344b2022451a87",
+    "sourceSha256": "7190b1b8efb252753e1238980dfaef709ce1765509d2b87b1aee433da19719a0",
+    "relocatedSha256": "b5fa9838452a5f10b8437667febb2180ea548ef90b24783b834d660185941868"
+  }
+]
