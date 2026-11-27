@@ -87,7 +87,8 @@ failed. `GONVEX_BACKUP_DRILL=0` turns this off. Run one by hand with `POST /_gon
 
 **Moving a stack into a jurisdiction.** Bind the old stack's `BACKUPS` to a bucket in the target jurisdiction
 (`backups: { bucket, jurisdiction: 'eu', prefix: 'migration' }`). Stop client traffic to the old stack
-(`GONVEX_MAINTENANCE=1` on its kernel: every request but the admin `/_gonvex/` routes gets 503) and run a
+(`GONVEX_MAINTENANCE=1` on its kernel: client traffic gets 503; the admin `/_gonvex/` routes, `/dev/*` and the
+release builder's `/_gonvex/k19/*` still answer, so an app release can migrate tenants meanwhile) and run a
 backup there. Deploy the new stack with `jurisdiction: 'eu'` and the same bucket, then restore Control and each
 tenant. The data goes from the old objects to EU R2 to the new EU objects, and never leaves Cloudflare. Copy the
 releases and files buckets object by object, verifying SHA-256.
