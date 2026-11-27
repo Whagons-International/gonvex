@@ -32,6 +32,11 @@ export interface ModuleArtifact {
   exports: ModuleExportsSource;
   /** Module schema (manifest `schema`) for declared primary keys. */
   schema?: unknown;
+  /**
+   * Every Reducer and Action of the module, when `functions` is a subset of it. A tenant-only runtime serves no
+   * Actions, yet its Reducers may still schedule one (`ctx.scheduler`): the job runs through the Action host.
+   */
+  scheduleTargets?: readonly string[];
 }
 
 export interface ModuleReloaded {
@@ -50,6 +55,7 @@ export class Generation {
   private drained: (() => void) | undefined;
   readonly engine: ModuleEngine;
   readonly declaredKeys: ReadonlyMap<string, string>;
+  private readonly scheduleTargets: ReadonlySet<string> | undefined;
 
   constructor(readonly artifact: ModuleArtifact, config: Partial<EngineConfig>) {
     // Rust validates schemas and duplicates at load and evaluates the bundle
@@ -57,12 +63,14 @@ export class Generation {
     // fails only its own calls, at dispatch (InvalidArtifact).
     this.engine = new ModuleEngine(artifact.functions, artifact.exports, config);
     this.declaredKeys = declaredKeys(artifact.schema);
+    this.scheduleTargets = artifact.scheduleTargets ? new Set(artifact.scheduleTargets) : undefined;
   }
 
   get generation() { return this.artifact.generation; }
 
   /** Registered Reducer or Action (scheduler targets, RT/host_calls.rs schedulable). */
   schedulable(path: string): boolean {
+    if (this.scheduleTargets) return this.scheduleTargets.has(path);
     const kind = this.engine.functions.get(path)?.kind;
     return kind === "reducer" || kind === "action";
   }
