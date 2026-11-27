@@ -6,7 +6,7 @@
 # from restarting Postgres or Valkey.
 services:
   gonvex-postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
     restart: unless-stopped
     environment:
       POSTGRES_USER: gonvex
@@ -27,7 +27,7 @@ services:
       start_period: 10s
 
   gonvex-valkey:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey:8-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
     restart: unless-stopped
     command:
       - valkey-server
