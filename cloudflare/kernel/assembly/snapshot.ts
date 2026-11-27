@@ -9,8 +9,8 @@
 // Every part's SHA-256 is in the manifest (and R2 verifies it on upload); every table's row count and content SHA-256
 // (P03 RowHasher, the same digest `/__tenant-transfer` verifies) is in the manifest and checked after a restore.
 //
-// Consistency: the whole snapshot is taken inside `blockConcurrencyWhile`, so no other event of the object runs (and
-// writes) between its first and last read. Restore refuses an object that holds any row, so it can never overwrite data.
+// Consistency: every read happens inside one `blockConcurrencyWhile`, so no other event of the object runs (and writes)
+// between its first and last read; the compressed parts are uploaded after it, so R2 latency never blocks the object. Restore refuses an object that holds any row, so it can never overwrite data.
 
 import { TenantTransfer } from "../../tools/tenant-transfer/src/transport.mjs";
 import { schemaPhases, readSchema } from "../../tools/tenant-transfer/src/sql.mjs";
@@ -41,6 +41,8 @@ export interface SnapshotManifest {
   kv: { key: string; entries: number; bytes: number; sha256: string };
   parts: Array<{ key: string; bytes: number; sha256: string; rows: number }>;
   totals: { tables: number; rows: number; storedBytes: number; databaseSize: number };
+  /** How long the object accepted no other event (reading, hashing and compressing; not the uploads). */
+  blockedMs: number;
   ms: number;
 }
 
@@ -130,51 +132,55 @@ function stackLocal(key: string): boolean { return key === RESTORE_KEY || STACK_
 export async function snapshotObject(ctx: DurableObjectState, bucket: R2Bucket, prefix: string, info: SnapshotInfo): Promise<SnapshotManifest> {
   if (!/^[A-Za-z0-9._\/-]+$/.test(prefix) || prefix.includes("..") || prefix.endsWith("/")) throw new Error("invalid snapshot prefix");
   if (await bucket.head(manifestKey(prefix))) throw new Error(`a snapshot already exists at ${prefix}`);
-  return ctx.blockConcurrencyWhile(async () => {
-    const started = Date.now();
+  const started = Date.now();
+  // Read, hash and compress inside the block (no other event runs); upload after it, so the object is blocked only for
+  // the local work and never for R2 latency (a bucket in another region adds seconds per part).
+  const taken = await ctx.blockConcurrencyWhile(async () => {
     if (ctx.storage.kv.get(RESTORE_KEY) !== undefined) throw new Error("the object is being restored; no snapshot");
     const transfer = new TenantTransfer(ctx, { budgetMs: Number.MAX_SAFE_INTEGER });
-    const catalog = transfer.op_catalog() as { schema: SchemaRow[]; plans: Array<{ name: string }>; sequences: Record<string, unknown> };
-    const parts: SnapshotManifest["parts"] = [];
+    const catalog = transfer.op_catalog();
+    const parts: Array<{ bytes: Uint8Array; rows: number }> = [];
     let rows = 0;
-    let storedBytes = 0;
     let queue = catalog.plans.map((p) => ({ table: p.name, after: null as unknown }));
     while (queue.length) {
-      const { pages } = transfer.op_read({ tables: queue, maxBytes: PART_BYTES }) as { pages: Array<{ table: string; columns: string[]; rows: unknown[][]; next: unknown }> };
+      const { pages } = transfer.op_read({ tables: queue, maxBytes: PART_BYTES });
       if (!pages.length) throw new Error("snapshot read returned no pages");
       const last = pages.at(-1)!;
       queue = queue.slice(pages.length);
       if (last.next) queue.unshift({ table: last.table, after: last.next });
-      const bytes = await gzip(JSON.stringify({ pages: pages.map(({ table, columns, rows }) => ({ table, columns, rows })) }));
-      const sha256 = await sha256Hex(bytes);
-      const key = partKey(prefix, parts.length + 1);
-      await bucket.put(key, bytes, { sha256, httpMetadata: { contentType: "application/json", contentEncoding: "gzip" } });
       const n = pages.reduce((sum, page) => sum + page.rows.length, 0);
-      parts.push({ key, bytes: bytes.byteLength, sha256, rows: n });
+      parts.push({ bytes: await gzip(JSON.stringify({ pages: pages.map(({ table, columns, rows }) => ({ table, columns, rows })) })), rows: n });
       rows += n;
-      storedBytes += bytes.byteLength;
     }
-    const tables = (await transfer.op_checksum({ tables: null, cursor: null }) as { checksums: Record<string, Checksum> }).checksums;
+    const tables = (await transfer.op_checksum({ tables: null, cursor: null })).checksums;
     if (Object.values(tables).reduce((n, t) => n + t.rows, 0) !== rows) throw new Error("snapshot row count differs from the checksum pass");
     const entries: Array<[string, unknown]> = [];
     for (const [key, value] of ctx.storage.kv.list()) if (key !== RESTORE_KEY) entries.push([key, encodeValue(value, `kv ${key}`)]);
-    const kvText = JSON.stringify({ entries });
-    const kvBytes = await gzip(kvText);
-    const kvSha = await sha256Hex(kvBytes);
-    await bucket.put(kvKey(prefix), kvBytes, { sha256: kvSha, httpMetadata: { contentType: "application/json", contentEncoding: "gzip" } });
-    storedBytes += kvBytes.byteLength;
-    const manifest: SnapshotManifest = {
-      v: 1, format: SNAPSHOT_FORMAT,
-      object: { kind: info.kind, name: info.name, id: ctx.id.toString(), jurisdiction: idJurisdiction(ctx.id) ?? null },
-      source: info.source ?? null, takenAt: new Date(started).toISOString(),
-      schema: catalog.schema, sequences: catalog.sequences, tables,
-      kv: { key: kvKey(prefix), entries: entries.length, bytes: kvBytes.byteLength, sha256: kvSha },
-      parts, totals: { tables: Object.keys(tables).length, rows, storedBytes, databaseSize: ctx.storage.sql.databaseSize }, ms: 0,
-    };
-    manifest.ms = Date.now() - started;
-    await bucket.put(manifestKey(prefix), JSON.stringify(manifest), { httpMetadata: { contentType: "application/json" } });
-    return manifest;
+    return { catalog, parts, rows, tables, entries, kv: await gzip(JSON.stringify({ entries })), databaseSize: ctx.storage.sql.databaseSize, blockedMs: Date.now() - started };
   });
+  const parts: SnapshotManifest["parts"] = [];
+  let storedBytes = 0;
+  for (const [i, part] of taken.parts.entries()) {
+    const sha256 = await sha256Hex(part.bytes), key = partKey(prefix, i + 1);
+    await bucket.put(key, part.bytes, { sha256, httpMetadata: { contentType: "application/json", contentEncoding: "gzip" } });
+    parts.push({ key, bytes: part.bytes.byteLength, sha256, rows: part.rows });
+    storedBytes += part.bytes.byteLength;
+  }
+  const kvSha = await sha256Hex(taken.kv);
+  await bucket.put(kvKey(prefix), taken.kv, { sha256: kvSha, httpMetadata: { contentType: "application/json", contentEncoding: "gzip" } });
+  storedBytes += taken.kv.byteLength;
+  const manifest: SnapshotManifest = {
+    v: 1, format: SNAPSHOT_FORMAT,
+    object: { kind: info.kind, name: info.name, id: ctx.id.toString(), jurisdiction: idJurisdiction(ctx.id) ?? null },
+    source: info.source ?? null, takenAt: new Date(started).toISOString(),
+    schema: taken.catalog.schema, sequences: taken.catalog.sequences, tables: taken.tables,
+    kv: { key: kvKey(prefix), entries: taken.entries.length, bytes: taken.kv.byteLength, sha256: kvSha },
+    parts, totals: { tables: Object.keys(taken.tables).length, rows: taken.rows, storedBytes, databaseSize: taken.databaseSize },
+    blockedMs: taken.blockedMs, ms: 0,
+  };
+  manifest.ms = Date.now() - started;
+  await bucket.put(manifestKey(prefix), JSON.stringify(manifest), { httpMetadata: { contentType: "application/json" } });
+  return manifest;
 }
 
 /** The manifest of a complete snapshot (`null` when there is none at `prefix`). */
