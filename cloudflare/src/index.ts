@@ -38,9 +38,17 @@ export default residentHandler({
     if (url.pathname === "/") return Response.json({ ok: true, service: "gonvex-cloudflare" });
     const backups = await handleBackupRequest(request, env as unknown as BackupEnv, env.GONVEX_STACK_NAME ?? null);
     if (backups) return backups;
-    // Maintenance (e.g. while a stack's objects are copied elsewhere): only the admin-key /_gonvex/ routes above answer.
-    // Deploying the flag resets the gateways, so no client socket stays open either.
-    if (env.GONVEX_MAINTENANCE === "1") return Response.json({ error: "maintenance", retryable: true }, { status: 503, headers: { "retry-after": "300", "cache-control": "no-store" } });
+    // Maintenance (e.g. while a stack's objects are copied elsewhere, or an app release migrates its tenants): client
+    // traffic (sockets, ingress, /auth, storage) gets 503. Deploying the flag resets the gateways, so no client socket
+    // stays open either. Operator routes still answer, each behind its own credential (admin key, project sync key,
+    // builder token): the backup routes above, /dev/* (incl. /dev/sync) and the release builder's /_gonvex/k19/*.
+    if (env.GONVEX_MAINTENANCE === "1") {
+      if (url.pathname.startsWith("/dev/") || url.pathname.startsWith("/_gonvex/k19/")) {
+        const operator = await handleDevRequest(request, env, ctx);
+        if (operator) return operator;
+      }
+      return Response.json({ error: "maintenance", retryable: true }, { status: 503, headers: { "retry-after": "300", "cache-control": "no-store" } });
+    }
     if (url.pathname === "/ws") return handleWebSocketUpgrade(request, env, ctx);
     const transfer = await handleTenantTransfer(request, env);
     if (transfer) return transfer;
