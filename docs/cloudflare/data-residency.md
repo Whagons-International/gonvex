@@ -52,7 +52,9 @@ through the route above.
 `kernel/assembly/snapshot.ts` writes a consistent, checksummed copy of one SQLite Durable Object (its tables and its
 KV) to R2:
 
-- **Consistent.** The whole snapshot runs inside `blockConcurrencyWhile`, after every queued Reducer of a tenant.
+- **Consistent.** Every read of a snapshot runs inside one `blockConcurrencyWhile`, after every queued Reducer of a
+  tenant. The compressed parts are uploaded after the block, so R2 latency never blocks the object. The manifest
+  records `blockedMs`.
 - **Layout.** `manifest.json` is written last, so a snapshot without it is incomplete. The rows are in
   `part-NNNNNN.json.gz` files (P03 wire format, at most 4 MiB of JSON each, SHA-256 of each part in the manifest), and
   `kv.json.gz` holds a tagged JSON that is exact for structured-clone values; anything it cannot represent throws.
@@ -86,6 +88,10 @@ show `mismatches: []` and `quickCheck: "ok"`. Then delete the scratch tenant's s
 backup there. Deploy the new stack with `jurisdiction: 'eu'` and the same bucket, then restore Control and each
 tenant. The data goes from the old objects to EU R2 to the new EU objects, and never leaves Cloudflare. Copy the
 releases and files buckets object by object, verifying SHA-256.
+
+**Deploying this to an existing stack.** The kernel's objects use the default code-update strategy, so a busy
+Control can keep running the previous code (and answer "does not implement the method") until it goes idle.
+Deploy the kernel with `durable_objects.code_update_strategy: { mode: "immediate" }` to restart it at once.
 
 ## What still leaves the jurisdiction
 

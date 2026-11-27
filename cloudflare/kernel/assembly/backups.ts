@@ -43,7 +43,7 @@ function sameText(left: string, right: string): boolean {
 const control = (env: BackupEnv) => (env.CONTROL as { getByName(name: string): unknown }).getByName(CONTROL_NAME) as ControlBackupPort;
 const tenant = (env: BackupEnv, id: string) => (env.TENANT as { getByName(name: string): unknown }).getByName(id) as SnapshotPort;
 
-export interface BackupObjectResult { kind: "control" | "tenant"; name: string; prefix: string; ok: boolean; tables?: number; rows?: number; storedBytes?: number; ms?: number; error?: string }
+export interface BackupObjectResult { kind: "control" | "tenant"; name: string; prefix: string; ok: boolean; tables?: number; rows?: number; storedBytes?: number; blockedMs?: number; ms?: number; error?: string }
 export interface BackupIndex { v: 1; stack: string | null; jurisdiction: string | null; source: string | null; prefix: string; startedAt: string; finishedAt: string; ok: boolean; objects: BackupObjectResult[] }
 
 /** R2 keys of a backup run (structured: root + fixed names). */
@@ -62,7 +62,7 @@ export async function runBackup(env: BackupEnv, options: { prefix?: string; stac
     const t0 = Date.now();
     try {
       const m = await port.operatorSnapshot(at);
-      objects.push({ kind, name, prefix: at, ok: true, tables: m.totals.tables, rows: m.totals.rows, storedBytes: m.totals.storedBytes, ms: Date.now() - t0 });
+      objects.push({ kind, name, prefix: at, ok: true, tables: m.totals.tables, rows: m.totals.rows, storedBytes: m.totals.storedBytes, blockedMs: m.blockedMs, ms: Date.now() - t0 });
     } catch (error) {
       objects.push({ kind, name, prefix: at, ok: false, ms: Date.now() - t0, error: String((error as Error)?.message ?? error).slice(0, 500) });
     }
