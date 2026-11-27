@@ -39,7 +39,17 @@ configureActions<Env>({
   },
   sandbox: (env) => env.SANDBOX,
 });
-export { ActionWorker, ActionWorkflow } from "../../actions/src/worker";
-export { ActionHost } from "../../actions/src/host";
-export {ActionCatalog} from './action-catalog';
-export default { fetch: () => Response.json({ ok: true, service: "gonvex-actions" }) };
+import { ActionWorker as Worker, ActionWorkflow as Workflow } from "../../actions/src/worker";
+import { ActionHost as Host } from "../../actions/src/host";
+import { ActionCatalog as Catalog } from "./action-catalog";
+import { resident, residentHandler } from "./residency";
+// Data residency: every export receives namespaces restricted to GONVEX_JURISDICTION (residency.ts).
+export const ActionWorker = resident(Worker);
+export type ActionWorker = Worker;
+export const ActionWorkflow = resident(Workflow);
+export type ActionWorkflow = Workflow;
+export const ActionHost = resident(Host);
+export type ActionHost = Host;
+export const ActionCatalog = resident(Catalog);
+export type ActionCatalog = Catalog;
+export default residentHandler({ fetch: () => Response.json({ ok: true, service: "gonvex-actions" }) });

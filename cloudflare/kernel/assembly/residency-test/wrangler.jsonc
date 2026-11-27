@@ -1,0 +1,17 @@
+// Data residency tests (kernel/assembly/residency.ts, snapshot.ts, control/operator/regions.ts). Local workerd does not
+// implement jurisdictions ("Jurisdiction restrictions are not implemented in workerd"), so this stack has none: the
+// jurisdiction paths are tested with fake namespaces, and real placement is proven on a deployed stack (/_gonvex/residency).
+{
+  "name": "gonvex-cf-dev-residency-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "PROBE", "class_name": "ResidentProbe" },
+      { "name": "PLAIN", "class_name": "PlainProbe" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ResidentProbe", "PlainProbe"] }],
+  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "gonvex-cf-dev-residency-test-backups" }]
+}

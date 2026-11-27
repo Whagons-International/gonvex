@@ -16,6 +16,7 @@ import { type GatewayRpc, rpc } from "../session/rpc";
 import { rememberBounded } from "../session/prewarm";
 import type { ServiceControlOutcome } from "../principals/frames";
 import type { ServiceGrant } from "../principals/grant";
+import { discardRestore, finishRestore, restoreStep, snapshotObject } from "./snapshot";
 
 /** `prewarmTenant`: one wake per tenant per interval per Control instance, a bounded map. */
 export const PREWARM_TENANT_INTERVAL_MS = 10_000;
@@ -82,6 +83,30 @@ export class SessionControlObject extends OperatorControlObject {
    * answers `ping()`.
    * At most once per tenant per `PREWARM_TENANT_INTERVAL_MS` per Control instance; unknown selectors do nothing.
    */
+  /** Backups (backups.ts): a consistent snapshot of Control (accounts, identities, memberships, projects, catalog). */
+  async operatorSnapshot(prefix: string) {
+    return snapshotObject(this.ctx, this.backups(), prefix, { kind: "control", name: "control", source: (this.env as { GONVEX_RUNTIME_VERSION?: string }).GONVEX_RUNTIME_VERSION ?? "" });
+  }
+  async operatorRestoreStep(prefix: string) { return restoreStep(this.ctx, this.backups(), prefix); }
+  async operatorRestoreFinish() {
+    await finishRestore(this.ctx);
+    this.ctx.abort("control restored from a snapshot");
+  }
+  async operatorRestoreDiscard() {
+    await discardRestore(this.ctx);
+    this.ctx.abort("restore discarded");
+  }
+  /** Every live tenant of every project: what a backup covers. */
+  async operatorBackupTenants(): Promise<Array<{ projectId: string; tenantId: string }>> {
+    return this.sql.all<{ project_id: string; tenant_id: string }>(
+      "SELECT project_id,tenant_id FROM gonvex_runtime_tenants WHERE deleted_at IS NULL AND status NOT IN('deleted','disabled') ORDER BY project_id,tenant_id",
+    ).map((row) => ({ projectId: row.project_id, tenantId: row.tenant_id }));
+  }
+  private backups(): R2Bucket {
+    const bucket = (this.env as unknown as { BACKUPS?: R2Bucket }).BACKUPS;
+    if (!bucket) throw new Error("no BACKUPS bucket is bound to the kernel");
+    return bucket;
+  }
   async prewarmTenant(projectId: string, selector: string): Promise<"warming" | "recent" | "unknown"> {
     if (typeof projectId !== "string" || typeof selector !== "string" || !projectId || !selector || projectId.length > 128 || selector.length > 63) return "unknown";
     // The same resolution as every tenant auth (`resolveTenant`): its refusals (unknown, deleted, disabled, no

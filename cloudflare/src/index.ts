@@ -9,20 +9,38 @@ import { handleStorageRequest, STORAGE_PREFIX } from "../router/storage/index";
 import { filesConfigFromEnv } from "../kernel/files/config";
 import type { FilesTenantRpc } from "../kernel/files/rpc";
 import { handleIngressRequest } from "../router/ingress/routes";
+import { resident, residentHandler } from "../kernel/assembly/residency";
+import { handleBackupRequest, runBackup, type BackupEnv } from "../kernel/assembly/backups";
+import { SessionControlObject as Control } from "../kernel/assembly/control";
+import { AssemblyGateway as Gateway } from "../kernel/assembly/gateway";
+import { GatewayControllerObject as GatewayController } from "../kernel/gateway/controller";
+import { PublicLimiterObject as PublicLimiter } from "../kernel/public";
+import { IngressObject as Ingress } from "../router/ingress/object";
 
-export { SessionControlObject } from "../kernel/assembly/control";
+// Data residency (kernel/assembly/residency.ts): every export receives an env whose Durable Object namespaces are
+// restricted to GONVEX_JURISDICTION when the stack has one.
+export const SessionControlObject = resident(Control);
+export type SessionControlObject = Control;
+export const AssemblyGateway = resident(Gateway);
+export type AssemblyGateway = Gateway;
+export const GatewayControllerObject = resident(GatewayController);
+export type GatewayControllerObject = GatewayController;
+export const PublicLimiterObject = resident(PublicLimiter);
+export type PublicLimiterObject = PublicLimiter;
+export const IngressObject = resident(Ingress);
+export type IngressObject = Ingress;
 
-export { AssemblyGateway } from "../kernel/assembly/gateway";
-export { GatewayControllerObject } from "../kernel/gateway/controller";
-export { PublicLimiterObject } from "../kernel/public";
-export { IngressObject } from "../router/ingress/object";
+interface ServingEnv extends Env, TransferEnv { GONVEX_ASSEMBLY_FIXTURE_KEY?: string; GONVEX_STACK_NAME?: string; GONVEX_MAINTENANCE?: string }
 
-interface ServingEnv extends Env, TransferEnv { GONVEX_ASSEMBLY_FIXTURE_KEY?: string }
-
-export default {
+export default residentHandler({
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/") return Response.json({ ok: true, service: "gonvex-cloudflare" });
+    const backups = await handleBackupRequest(request, env as unknown as BackupEnv, env.GONVEX_STACK_NAME ?? null);
+    if (backups) return backups;
+    // Maintenance (e.g. while a stack's objects are copied elsewhere): only the admin-key /_gonvex/ routes above answer.
+    // Deploying the flag resets the gateways, so no client socket stays open either.
+    if (env.GONVEX_MAINTENANCE === "1") return Response.json({ error: "maintenance", retryable: true }, { status: 503, headers: { "retry-after": "300", "cache-control": "no-store" } });
     if (url.pathname === "/ws") return handleWebSocketUpgrade(request, env, ctx);
     const transfer = await handleTenantTransfer(request, env);
     if (transfer) return transfer;
@@ -38,4 +56,6 @@ export default {
     return ingress ?? Response.json({ error: "not found" }, { status: 404 });
   },
   queue: (batch, env) => handleRolloutBatch(batch as MessageBatch<RolloutMessage>, env),
-} satisfies ExportedHandler<ServingEnv>;
+  // Nightly backups (deploy.mjs `backups`): Control and every tenant into BACKUPS.
+  scheduled: (_controller, env, ctx) => { ctx.waitUntil(runBackup(env as unknown as BackupEnv, { stack: env.GONVEX_STACK_NAME ?? null }).then(() => undefined)); },
+} satisfies ExportedHandler<ServingEnv>);

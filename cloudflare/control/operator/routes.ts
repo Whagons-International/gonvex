@@ -23,6 +23,7 @@ import type { OperatorTenantPort, PortResult, RowsQuery } from "./tenant/port";
 import { internalTable, validIdent } from "./tenant/rows";
 import { findPrincipal } from "../src/auth";
 import { manifestAccess } from "../../kernel/principals/manifest";
+import { admitRegion, recordRegion, regionsOf, tenantRegion } from "./regions";
 
 export interface Op {
   ctx: Ctx;
@@ -1087,11 +1088,18 @@ const listTenants: Handler = async (op, request, url) => {
        AND status NOT IN('deleted','disabled') ORDER BY project_id,name,tenant_id`,
     (project ?? "").trim(),
   );
-  return json({ tenants: rows.map(tenantJson) });
+  const regions = regionsOf(op.ctx.sql, (project ?? "").trim());
+  // `region` only where there is one: a stack without a jurisdiction keeps the reference's exact tenant shape.
+  return json({ tenants: rows.map((row) => {
+    const region = tenantRegion(regions, op.config.jurisdiction ?? null, str(row.project_id), str(row.tenant_id));
+    return region === null ? tenantJson(row) : { ...tenantJson(row), region };
+  }) });
 };
 
 /** lib.rs `provision_runtime_tenant` with store `create_runtime_tenant`. */
-async function provisionRuntimeTenant(op: Op, projectRaw: string, requested: string | undefined, nameRaw: string): Promise<Record<string, unknown>> {
+async function provisionRuntimeTenant(op: Op, projectRaw: string, requested: string | undefined, nameRaw: string, regionRaw?: unknown): Promise<Record<string, unknown>> {
+  const admitted = admitRegion(op.config.jurisdiction ?? null, regionRaw);
+  if ("error" in admitted) throw new Error(dbError.protocol(admitted.error));
   const release = op.sync.activeRelease(projectRaw);
   if (!release) throw new Error("install the TypeScript module before creating the first tenant shard");
   const projectId = projectRaw.trim();
@@ -1129,6 +1137,10 @@ async function provisionRuntimeTenant(op: Op, projectRaw: string, requested: str
     );
     tenant = { id: tenantId, projectId, name, database: databaseName, databaseAlias, status: "active" };
   }
+  // The region is fixed when the tenant is first created; data residency never changes silently.
+  op.ctx.sql.tx(() => recordRegion(op.ctx.sql, projectId, tenantId, admitted.region));
+  const region = tenantRegion(regionsOf(op.ctx.sql, projectId), op.config.jurisdiction ?? null, projectId, tenantId);
+  if (region !== null) tenant.region = region;
   await op.provisionTenant(projectId, tenantId, release.planId);
   op.ctx.sql.tx(() => op.ctx.sql.run(`UPDATE gonvex_runtime_tenants SET provisioned=1,updated_at=${NOW} WHERE project_id=$1 AND tenant_id=$2`, projectId, tenantId));
   return tenant;
@@ -1143,7 +1155,7 @@ const createTenantShard: Handler = async (op, request) => {
   const name = (typeof payload.name === "string" ? payload.name : "").trim();
   await op.auth.authorizeProjectResource(request.headers, projectId, "projects:update", true);
   try {
-    return json(await provisionRuntimeTenant(op, projectId, requested, name), 201);
+    return json(await provisionRuntimeTenant(op, projectId, requested, name, payload.region), 201);
   } catch (cause) {
     return error(422, cause instanceof Error ? cause.message : String(cause));
   }

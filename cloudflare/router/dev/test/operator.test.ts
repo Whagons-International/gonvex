@@ -323,6 +323,16 @@ describe("tenants and memberships", () => {
     await useBuilder();
     expect((await call("POST", "/dev/tenants", { body: { projectId: project.id, name: "x" } })).status).toBe(422);
   });
+
+  it("refuses a tenant region this stack (no jurisdiction) cannot place, before writing anything", async () => {
+    const project = await createProject("region-project");
+    const before = await call("GET", `/dev/tenants?project=${project.id}`);
+    const refused = await call("POST", "/dev/tenants", { body: { projectId: project.id, id: "eu-tenant", name: "EU", region: "eu" } });
+    expect(refused.status).toBe(422);
+    expect(JSON.stringify(refused.body)).toMatch(/GONVEX_JURISDICTION=eu/);
+    expect((await call("POST", "/dev/tenants", { body: { projectId: project.id, id: "mars-tenant", name: "Mars", region: "mars" } })).status).toBe(422);
+    expect((await call("GET", `/dev/tenants?project=${project.id}`)).body).toEqual(before.body);
+  });
 });
 
 describe("errors, logs, metrics, cache, storage", () => {

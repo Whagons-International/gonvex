@@ -19,9 +19,9 @@ export async function cloudflareCredentials() {
   return credential;
 }
 export function accountApi(credentials) {
-  return async (path, { method = 'GET', body, missing = false } = {}) => {
+  return async (path, { method = 'GET', body, missing = false, headers = {} } = {}) => {
     const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${credentials.accountId}${path}`, {
-      method, headers: { authorization: `Bearer ${credentials.apiToken}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      method, headers: { authorization: `Bearer ${credentials.apiToken}`, 'content-type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (missing && response.status === 404) return null;
     const reply = await response.json();
@@ -46,8 +46,48 @@ export function assertTenantCpuLimit(config) {
   return config;
 }
 
-export async function servingConfigs(name, directory, { kernelUrl, images = {} } = {}) {
+/** Jurisdictions a whole stack can use: Durable Objects and R2 both support them (kernel/assembly/residency.ts). */
+export const STACK_JURISDICTIONS = ['eu', 'fedramp'];
+/** Daily, at a quiet hour for Europe (UTC). */
+export const DEFAULT_BACKUP_CRON = '17 2 * * *';
+
+/**
+ * The stack-wide settings beyond names (docs/cloudflare/data-residency.md), normalized and validated:
+ * - `jurisdiction`: every Durable Object namespace and R2 bucket of the stack is restricted to it. Workers Logs,
+ *   Analytics Engine telemetry and the Workers observability store are off unless `observability` / `telemetry` is
+ *   `true`, because their storage is not restricted to the jurisdiction.
+ * - `backups`: `{ bucket?, jurisdiction?, cron?, prefix? }` binds BACKUPS (default `<name>-backups`, in the stack's
+ *   jurisdiction) to the kernel and runtime and schedules the nightly backup (backups.ts).
+ * - `builderResidency`: the builder image passes these settings on when it redeploys the runtime (built from source
+ *   that has GONVEX_STACK_OPTIONS). A jurisdiction stack whose builder image lacks it refuses /dev/sync (builder.ts).
+ */
+export function stackOptions({ jurisdiction = null, backups = null, observability, telemetry, builderResidency = false } = {}) {
+  if (jurisdiction !== null && jurisdiction !== undefined && jurisdiction !== '' && !STACK_JURISDICTIONS.includes(jurisdiction)) {
+    throw new Error(`jurisdiction must be one of ${STACK_JURISDICTIONS.join(', ')}`);
+  }
+  const j = jurisdiction || null;
+  let b = null;
+  if (backups) {
+    const { bucket = null, jurisdiction: bj = j, cron = DEFAULT_BACKUP_CRON, prefix = 'nightly' } = backups === true ? {} : backups;
+    if (bj !== null && !STACK_JURISDICTIONS.includes(bj)) throw new Error(`backup jurisdiction must be one of ${STACK_JURISDICTIONS.join(', ')}`);
+    if (j && bj !== j) throw new Error(`a ${j} stack keeps its backups in ${j}`);
+    if (bucket !== null && !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) throw new Error('backup bucket name is invalid');
+    if (!/^[A-Za-z0-9._-]+$/.test(prefix)) throw new Error('backup prefix is invalid');
+    if (typeof cron !== 'string' || cron.trim().split(/\s+/).length !== 5) throw new Error('backup cron must have five fields');
+    b = { bucket, jurisdiction: bj, cron, prefix };
+  }
+  return { jurisdiction: j, backups: b, observability: observability ?? !j, telemetry: telemetry ?? !j, builderResidency: !!builderResidency };
+}
+
+/** GONVEX_STACK_OPTIONS (builder Container env) → the options its redeploys must keep. Absent: none. */
+export function stackOptionsFromEnv(text) {
+  if (!text) return stackOptions();
+  return stackOptions(JSON.parse(text));
+}
+
+export async function servingConfigs(name, directory, { kernelUrl, images = {}, ...stackSettings } = {}) {
   developmentName(name); await mkdir(directory, { recursive: true, mode: 0o700 });
+  const stack = stackOptions(stackSettings);
   const configs = {};
   for (const [kind, file] of [['kernel', join(root, 'wrangler.jsonc')], ...['runtime', 'actions', 'sandbox', 'builder'].map((kind) => [kind, join(here, `${kind}.wrangler.jsonc`)])]) {
     const config = await load(file), dir = dirname(file);
@@ -66,6 +106,7 @@ export async function servingConfigs(name, directory, { kernelUrl, images = {} }
     }
     config.vars = { ...config.vars, GONVEX_STORAGE_BUCKET: `${name}-files`, ...(kernelUrl ? { GONVEX_PUBLIC_URL: kernelUrl } : {}) };
     if (kind === 'builder') Object.assign(config.vars, { GONVEX_KERNEL_SCRIPT: name, GONVEX_KERNEL_URL: kernelUrl });
+    applyStack(kind, name, config, stack);
     configs[kind] = { config, path: join(directory, `${kind}.json`) };
   }
   assertTenantCpuLimit(configs.runtime.config);
@@ -86,6 +127,29 @@ export async function servingConfigs(name, directory, { kernelUrl, images = {} }
   configs.runtimeBootstrap = { config: runtimeBootstrap, path: join(directory, 'runtime-bootstrap.json') };
   await writeFile(configs.runtimeBootstrap.path, JSON.stringify(runtimeBootstrap), { mode: 0o600 });
   return configs;
+}
+
+/** Applies the stack-wide settings (`stackOptions`) to one component's config. */
+export function applyStack(kind, name, config, stack) {
+  config.vars = { ...config.vars, GONVEX_STACK_NAME: name };
+  if (stack.jurisdiction) {
+    config.vars.GONVEX_JURISDICTION = stack.jurisdiction;
+    for (const bucket of config.r2_buckets ?? []) bucket.jurisdiction = stack.jurisdiction;
+  }
+  if (!stack.observability) config.observability = { enabled: false, logs: { enabled: false, invocation_logs: false } };
+  if (!stack.telemetry) delete config.analytics_engine_datasets;
+  if (stack.backups && (kind === 'kernel' || kind === 'runtime')) {
+    const bucket = stack.backups.bucket ?? `${name}-backups`;
+    config.r2_buckets = [...(config.r2_buckets ?? []).filter((b) => b.binding !== 'BACKUPS'),
+      { binding: 'BACKUPS', bucket_name: bucket, ...(stack.backups.jurisdiction ? { jurisdiction: stack.backups.jurisdiction } : {}) }];
+    config.vars.GONVEX_BACKUP_PREFIX = stack.backups.prefix;
+    if (kind === 'kernel') config.triggers = { crons: [stack.backups.cron] };
+  }
+  if (kind === 'builder') {
+    config.vars.GONVEX_STACK_OPTIONS = JSON.stringify(stack);
+    if (stack.builderResidency) config.vars.GONVEX_BUILDER_RESIDENCY = '1';
+  }
+  return config;
 }
 
 /** Grace between SIGTERM and SIGKILL of a write's process group at its deadline (inside TARGET_ATTEMPT_LEASE_MS's margin). */
@@ -145,7 +209,21 @@ export function publicOrigin(name, workersSubdomain, override) {
   return url.origin;
 }
 
-export async function deployAssembly({ name, directory, images, secrets = {}, publicUrl }) {
+/** R2 REST calls for a bucket in `jurisdiction` must say so (header `cf-r2-jurisdiction`); a default bucket must not. */
+export const r2Headers = (jurisdiction) => (jurisdiction ? { 'cf-r2-jurisdiction': jurisdiction } : {});
+
+/** Creates the bucket in `jurisdiction` unless it exists there; refuses one that exists outside it. */
+export async function ensureBucket(api, bucket, jurisdiction) {
+  const found = await api(`/r2/buckets/${bucket}`, { missing: true, headers: r2Headers(jurisdiction) });
+  if (found) {
+    if ((found.jurisdiction ?? 'default') !== (jurisdiction ?? 'default')) throw new Error(`bucket ${bucket} exists in ${found.jurisdiction ?? 'default'}, not ${jurisdiction ?? 'default'}`);
+    return found;
+  }
+  return api('/r2/buckets', { method: 'POST', body: { name: bucket }, headers: r2Headers(jurisdiction) });
+}
+
+export async function deployAssembly({ name, directory, images, secrets = {}, publicUrl, stack: stackSettings = {} }) {
+  const stack = stackOptions(stackSettings);
   developmentName(name); directory = resolve(directory);
   const credentials = await cloudflareCredentials(), api = accountApi(credentials);
   // Require explicit immutable Container identities. Build is a separate admitted phase.
@@ -155,12 +233,17 @@ export async function deployAssembly({ name, directory, images, secrets = {}, pu
   if(prior&&(!secrets.GONVEX_STORAGE_SECRET||!secrets.GONVEX_RELEASE_BUILDER_TOKEN))throw new Error('existing composition requires retained storage and builder secrets; implicit rotation refused');
   const subdomain = await api('/workers/subdomain');
   const url = publicOrigin(name, subdomain.subdomain, publicUrl);
-  const configs = await servingConfigs(name, directory, { images, kernelUrl: url });
+  const configs = await servingConfigs(name, directory, { images, kernelUrl: url, ...stack });
   const resources = [];
   for (const suffix of ['releases', 'files']) {
     const bucket = `${name}-${suffix}`;
-    if (!await api(`/r2/buckets/${bucket}`, { missing: true })) await api('/r2/buckets', { method: 'POST', body: { name: bucket } });
-    resources.push({ kind: 'r2', name: bucket });
+    await ensureBucket(api, bucket, stack.jurisdiction);
+    resources.push({ kind: 'r2', name: bucket, jurisdiction: stack.jurisdiction });
+  }
+  if (stack.backups) {
+    const bucket = stack.backups.bucket ?? `${name}-backups`;
+    await ensureBucket(api, bucket, stack.backups.jurisdiction);
+    resources.push({ kind: 'r2', name: bucket, jurisdiction: stack.backups.jurisdiction });
   }
   const queueName = `${name}-rollout`;
   const queues = await api(`/queues?name=${encodeURIComponent(queueName)}`);
@@ -190,13 +273,15 @@ export async function deployAssembly({ name, directory, images, secrets = {}, pu
     workers.push({ kind, name: script, deployments, configHash: createHash('sha256').update(await readFile(configs[kind].path)).digest('hex'),
       bindings: settings.bindings?.map(({ name, type, class_name, script_name, service, dataset, bucket_name }) => ({ name, type, class_name, script_name, service, dataset, bucket_name })), limits: settings.limits });
   }
-  const evidence = { name, url, at: new Date().toISOString(), images, resources, workers };
+  const evidence = { name, url, at: new Date().toISOString(), images, stack, resources, workers };
   await writeFile(join(directory, 'deployment.json'), JSON.stringify(evidence, null, 2));
   return evidence;
 }
 
 /** Removes only this exact branch's development composition, including its data buckets. */
-export async function deleteAssembly({ name, directory }) {
+export async function deleteAssembly({ name, directory, jurisdiction = null }) {
+  // Backups buckets are never deleted here: they outlive the stack they protect.
+  const headers = r2Headers(jurisdiction);
   developmentName(name); directory = resolve(directory);
   const credentials = await cloudflareCredentials(), api = accountApi(credentials);
   const removed = [];
@@ -214,16 +299,16 @@ export async function deleteAssembly({ name, directory }) {
   const deadline = Date.now() + 120_000;
   for (const suffix of ['releases', 'files']) {
     const bucket = `${name}-${suffix}`;
-    if (!await api(`/r2/buckets/${bucket}`, { missing: true })) continue;
+    if (!await api(`/r2/buckets/${bucket}`, { missing: true, headers })) continue;
     for (;;) {
       if (Date.now() > deadline) throw new Error('owned development bucket cleanup exceeded its finite budget');
-      const page = await api(`/r2/buckets/${bucket}/objects?limit=1000`);
+      const page = await api(`/r2/buckets/${bucket}/objects?limit=1000`, { headers });
       const objects = Array.isArray(page) ? page : page.objects;
       if (!Array.isArray(objects)) throw new Error('R2 object list shape unsupported; no inferred cleanup');
       if (!objects.length) break;
-      for (const object of objects) await api(`/r2/buckets/${bucket}/objects/${encodeURIComponent(object.key)}`, { method: 'DELETE' });
+      for (const object of objects) await api(`/r2/buckets/${bucket}/objects/${encodeURIComponent(object.key)}`, { method: 'DELETE', headers });
     }
-    await api(`/r2/buckets/${bucket}`, { method: 'DELETE' });
+    await api(`/r2/buckets/${bucket}`, { method: 'DELETE', headers });
     removed.push({ kind: 'r2', name: bucket });
   }
   await writeFile(join(directory, 'cleanup.json'), JSON.stringify({ name, at: new Date().toISOString(), removed }, null, 2));
