@@ -57,7 +57,7 @@ import { retryable } from "../reducer/errors";
 
 
 import { IMPORT_KEY, transferAllowed, transferIntoTenant, type TransferEnv } from "./tenant-transfer";
-import { finishRestore, restoreStep, snapshotObject } from "./snapshot";
+import { discardRestore, finishRestore, restoreStep, snapshotObject } from "./snapshot";
 import { fixtureSpans, setSpanTiming, span, spanTimingFromEnv, spanTimingOn } from "../delivery/spans";
 
 // Match projectModuleFromManifest: an omitted/null artifact format becomes 0.
@@ -659,6 +659,11 @@ export class AssemblyTenant extends ReplicaTenantObject<AssemblyTenantEnv> {
   async operatorRestoreFinish() {
     await finishRestore(this.ctx);
     this.ctx.abort("tenant restored from a snapshot");
+  }
+  /** Restore drills: wipes this scratch object after its restore was verified. */
+  async operatorRestoreDiscard() {
+    await this.kernel.reducers.serial(() => discardRestore(this.ctx));
+    this.ctx.abort("restore drill discarded");
   }
   private backups(): R2Bucket {
     const bucket = (this.env as { BACKUPS?: R2Bucket }).BACKUPS;

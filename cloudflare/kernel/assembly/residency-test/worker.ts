@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { idJurisdiction, resident, residentEnv, residentHandler } from "../residency";
-import { finishRestore, restoreStep, snapshotObject } from "../snapshot";
+import { discardRestore, finishRestore, objectIsEmpty, restoreStep, snapshotObject } from "../snapshot";
 
 export interface ProbeEnv { PROBE: DurableObjectNamespace<Probe>; PLAIN: DurableObjectNamespace<Probe>; BACKUPS: R2Bucket; GONVEX_JURISDICTION?: string }
 
@@ -20,6 +20,7 @@ export class Probe extends DurableObject<ProbeEnv> {
   async trySnapshot(prefix: string) { try { await this.snapshot(prefix); return null; } catch (error) { return String((error as Error).message); } }
   async restore(prefix: string) { return restoreStep(this.ctx, this.env.BACKUPS, prefix); }
   async finish() { await finishRestore(this.ctx); }
+  async discard() { await discardRestore(this.ctx); return { empty: objectIsEmpty(this.ctx), kv: [...this.ctx.storage.kv.list()].length }; }
 }
 export const ResidentProbe = resident(Probe);
 export const PlainProbe = Probe;
