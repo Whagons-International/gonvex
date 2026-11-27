@@ -81,7 +81,8 @@ on the backups bucket.
 show `mismatches: []` and `quickCheck: "ok"`. Then delete the scratch tenant's storage.
 
 **Moving a stack into a jurisdiction.** Bind the old stack's `BACKUPS` to a bucket in the target jurisdiction
-(`backups: { bucket, jurisdiction: 'eu', prefix: 'migration' }`). Stop client traffic to the old stack and run a
+(`backups: { bucket, jurisdiction: 'eu', prefix: 'migration' }`). Stop client traffic to the old stack
+(`GONVEX_MAINTENANCE=1` on its kernel: every request but the admin `/_gonvex/` routes gets 503) and run a
 backup there. Deploy the new stack with `jurisdiction: 'eu'` and the same bucket, then restore Control and each
 tenant. The data goes from the old objects to EU R2 to the new EU objects, and never leaves Cloudflare. Copy the
 releases and files buckets object by object, verifying SHA-256.
