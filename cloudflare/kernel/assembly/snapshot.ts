@@ -330,6 +330,14 @@ export async function restoreStep(ctx: DurableObjectState, bucket: R2Bucket, pre
   }
 }
 
+/** A drill's end (or a failed restore's cleanup): wipes what a restore wrote. Refuses an object with no restore. */
+export async function discardRestore(ctx: DurableObjectState): Promise<void> {
+  if (ctx.storage.kv.get<RestoreState>(RESTORE_KEY) === undefined) throw new Error("no restore to discard");
+  await ctx.storage.deleteAlarm();
+  await ctx.storage.deleteAll();
+  await ctx.storage.sync();
+}
+
 /** After `done`: drops the restore marker, so the object starts as an ordinary restored object on its next wake. */
 export async function finishRestore(ctx: DurableObjectState): Promise<void> {
   const state = ctx.storage.kv.get<RestoreState>(RESTORE_KEY);

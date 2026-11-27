@@ -71,6 +71,7 @@ Kernel routes (admin key; 404 without it):
 POST /_gonvex/backups/run       {"prefix"?}       Control + every live tenant now
 GET  /_gonvex/backups/latest                      the last nightly index
 POST /_gonvex/backups/restore   {"object":"control"|"tenant","tenant"?,"prefix"}
+POST /_gonvex/backups/drill     {"prefix"}          restore into a scratch object, verify, wipe it
 GET  /_gonvex/residency?tenant=<id>
 ```
 
@@ -79,8 +80,10 @@ Nightly backups are enabled with `stack: { backups: true }` (or `{ bucket, juris
 `nightly/<time>/{control,tenants/<id>}` plus `index.json` and `nightly/latest.json`. Retention is an R2 lifecycle rule
 on the backups bucket.
 
-**Restore drill.** Restore one tenant's snapshot into a scratch tenant name with `object: "tenant"`. The report must
-show `mismatches: []` and `quickCheck: "ok"`. Then delete the scratch tenant's storage.
+**Restore drills (tested restores).** After every nightly backup the cron restores the Control snapshot (and on
+Sundays UTC every tenant snapshot) into a fresh scratch object `restore-drill-*`. It verifies checksums, schema,
+`quick_check` and FTS, then wipes the object. The result is in `index.json` → `drills`, and `ok` is false if any drill
+failed. `GONVEX_BACKUP_DRILL=0` turns this off. Run one by hand with `POST /_gonvex/backups/drill`.
 
 **Moving a stack into a jurisdiction.** Bind the old stack's `BACKUPS` to a bucket in the target jurisdiction
 (`backups: { bucket, jurisdiction: 'eu', prefix: 'migration' }`). Stop client traffic to the old stack

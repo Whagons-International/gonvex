@@ -16,7 +16,7 @@ import { type GatewayRpc, rpc } from "../session/rpc";
 import { rememberBounded } from "../session/prewarm";
 import type { ServiceControlOutcome } from "../principals/frames";
 import type { ServiceGrant } from "../principals/grant";
-import { finishRestore, restoreStep, snapshotObject } from "./snapshot";
+import { discardRestore, finishRestore, restoreStep, snapshotObject } from "./snapshot";
 
 /** `prewarmTenant`: one wake per tenant per interval per Control instance, a bounded map. */
 export const PREWARM_TENANT_INTERVAL_MS = 10_000;
@@ -91,6 +91,10 @@ export class SessionControlObject extends OperatorControlObject {
   async operatorRestoreFinish() {
     await finishRestore(this.ctx);
     this.ctx.abort("control restored from a snapshot");
+  }
+  async operatorRestoreDiscard() {
+    await discardRestore(this.ctx);
+    this.ctx.abort("restore discarded");
   }
   /** Every live tenant of every project: what a backup covers. */
   async operatorBackupTenants(): Promise<Array<{ projectId: string; tenantId: string }>> {

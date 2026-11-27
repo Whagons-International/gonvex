@@ -110,6 +110,17 @@ describe("object snapshots", () => {
     expect(await probe("empty").restore("t/none")).toMatchObject({ phase: "failed", error: expect.stringMatching(/no complete snapshot/) });
   });
 
+  it("a drill restores, verifies and leaves nothing behind", async () => {
+    const source = probe("source-drill");
+    await seed(source, 4);
+    await source.snapshot("t/drill");
+    const scratch = probe("restore-drill-1");
+    const { last } = await restoreAll(scratch, "t/drill");
+    expect(last.phase, last.error).toBe("done");
+    expect(await scratch.discard()).toEqual({ empty: true, kv: 0 });
+    expect(await scratch.exec("SELECT count(*) AS n FROM sqlite_schema WHERE name NOT LIKE '\\_cf\\_%' ESCAPE '\\'")).toEqual([{ n: 0 }]);
+  });
+
   it("detects a tampered part and never completes", async () => {
     const source = probe("source-3");
     await seed(source, 5);
