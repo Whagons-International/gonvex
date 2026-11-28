@@ -24,6 +24,26 @@ describe("module generations", () => {
     expect(wire(() => registry.activate(9))).toMatchObject({ code: "unknown_generation", message: "module fixture generation 9 was never loaded" });
   });
 
+  it("a tenant-only generation still lets Reducers schedule the module's Actions (scheduleTargets)", () => {
+    const full = fixtureArtifact(1);
+    const reducer = full.functions.find((fn) => fn.kind === "reducer")!.path;
+    const query = full.functions.find((fn) => fn.kind === "query")!.path;
+    const registry = new ModuleRegistry("fixture");
+    registry.install({ ...full, scheduleTargets: [reducer, "files.collect"] });
+    const lease = registry.lease();
+    expect(lease.generation.schedulable("files.collect")).toBe(true);
+    expect(lease.generation.schedulable(reducer)).toBe(true);
+    expect(lease.generation.schedulable(query)).toBe(false);
+    expect(lease.generation.schedulable("nope.missing")).toBe(false);
+    lease.release();
+    const plain = new ModuleRegistry("fixture");
+    plain.install(fixtureArtifact(1));
+    const own = plain.lease();
+    expect(own.generation.schedulable(reducer)).toBe(true);
+    expect(own.generation.schedulable("files.collect")).toBe(false);
+    own.release();
+  });
+
   it("serves a pinned older generation from the active one and refuses a newer pin", () => {
     const registry = new ModuleRegistry("fixture");
     registry.install(fixtureArtifact(2));
